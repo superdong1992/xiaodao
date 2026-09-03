@@ -124,15 +124,11 @@ class FrozenMethodsWorkspaceInputs:
 
 @dataclass(frozen=True, slots=True)
 class MethodsRoleWorkspaceReceiptV2:
-    """Canonical model-visible Methods V2 inputs published for one role."""
+    """Authoritative Methods V2 source identities and one minimal role Workspace."""
 
     role: Literal["SPECIALIST", "REVIEWER"]
     request_bytes: bytes
-    evidence_graph_bytes: bytes
-    evaluation_plan_bytes: bytes
     request_sha256: str
-    evidence_graph_sha256: str
-    evaluation_plan_sha256: str
     graph_ref: str
     plan_ref: str
     workspace: PreparedWorkspace
@@ -1682,8 +1678,6 @@ class WorkspaceManager:
     ) -> MethodsRoleWorkspaceReceiptV2:
         inputs_root = workspace.root / "inputs"
         request_bytes = _methods_role_request_bytes_v2(job)
-        graph_bytes = canonical_json_bytes(evidence_graph)
-        plan_bytes = canonical_json_bytes(evaluation_plan)
         model_manifest = (
             _methods_specialist_manifest_v2(job)
             if remove_preprocessing
@@ -1727,8 +1721,10 @@ class WorkspaceManager:
                 _atomic_write(manifest_path, model_manifest_bytes)
             elif request_path.read_bytes() != request_bytes:
                 raise ValueError("Methods Reviewer request does not match its own Job")
-            _atomic_write(graph_path, graph_bytes)
-            _atomic_write(plan_path, plan_bytes)
+            # Graph and Plan stay in the server-owned execution records.  Their
+            # lossless compact projection is embedded once in the bounded role
+            # context, so publishing either full record here would give the
+            # model a second, unbudgeted path to load the duplicated log text.
         except (OSError, TypeError, ValueError, _UnsafeWorkspaceError) as exc:
             raise runtime_failure(
                 stage=ExecutionStage.WORKSPACE_PREPARE,
@@ -1752,11 +1748,7 @@ class WorkspaceManager:
         return MethodsRoleWorkspaceReceiptV2(
             role=role,
             request_bytes=request_bytes,
-            evidence_graph_bytes=graph_bytes,
-            evaluation_plan_bytes=plan_bytes,
             request_sha256=bytes_sha256(request_bytes),
-            evidence_graph_sha256=bytes_sha256(graph_bytes),
-            evaluation_plan_sha256=bytes_sha256(plan_bytes),
             graph_ref=evidence_graph.graph_ref,
             plan_ref=evaluation_plan.plan_ref,
             workspace=model_workspace,

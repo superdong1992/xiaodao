@@ -414,9 +414,14 @@ name: {expected['skill_name']}
 description: Test-only Methods package for the generation Gate oracle.
 ---
 
-Read request.json, method-evidence-graph.json, and method-evaluation-plan.json.
-Return evaluation_ref, verdict, supporting_event_refs, and reason for every
-item. Use UNKNOWN when the frozen evidence cannot decide a method.
+Read frozen request.json and the compact evaluation_input from runtime context.
+Its observations catalog deduplicated physical log lines, markers catalog
+declared literals, and ordered evaluations contain the events available to
+each method. Log evidence comes only from evaluation_input; do not rescan
+markers or target logs. Evaluate every evaluation_ref in evaluation_input
+evaluations order and return only evaluation_ref, verdict,
+supporting_event_refs, and reason. Use UNKNOWN when the frozen evidence cannot
+decide a method.
 """,
         encoding="utf-8",
     )

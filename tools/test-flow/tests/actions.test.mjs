@@ -269,8 +269,8 @@ function providerRoleReceipt(provider, role, attempt, ordinal, priorCostUsd = 0)
   const toolPolicy = {
     schema_version: 1,
     tools: ["Read", "Write"],
-    allowed_tools: ["Read(//workspace/inputs/**)", `Read(//workspace/${output})`, `Edit(//workspace/${output})`],
-    readable_scope: "job-workspace-inputs-and-role-draft",
+    allowed_tools: ["Read(//workspace/inputs/request.json)", `Edit(//workspace/${output})`],
+    readable_scope: "job-request-only",
     writable_scope: output,
     network: false,
     shell: false,

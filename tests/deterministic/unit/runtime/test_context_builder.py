@@ -449,8 +449,9 @@ def test_production_output_contract_materializes_the_role_specific_protocol(
     if job_type is JobType.DIAGNOSE:
         assert b"output/method-diagnosis.draft.json" in content
         assert b"inputs/request.json" in content
-        assert b"inputs/method-evidence-graph.json" in content
-        assert b"inputs/method-evaluation-plan.json" in content
+        assert b"evaluation_input" in content
+        assert b"inputs/method-evidence-graph.json" not in content
+        assert b"inputs/method-evaluation-plan.json" not in content
         assert (
             b"Every item has exactly `evaluation_ref`, `verdict`, `supporting_event_refs`, and"
             in content
@@ -461,8 +462,9 @@ def test_production_output_contract_materializes_the_role_specific_protocol(
         assert job_type is JobType.REVIEW
         assert b"output/method-review.draft.json" in content
         assert b"inputs/request.json" in content
-        assert b"inputs/method-evidence-graph.json" in content
-        assert b"inputs/method-evaluation-plan.json" in content
+        assert b"evaluation_input" in content
+        assert b"inputs/method-evidence-graph.json" not in content
+        assert b"inputs/method-evaluation-plan.json" not in content
         assert b"SPECIALIST response, verdicts, reasons" in content
         assert b"not inputs" in content
 

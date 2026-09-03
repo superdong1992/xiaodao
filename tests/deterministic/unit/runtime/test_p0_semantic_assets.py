@@ -100,10 +100,11 @@ def _production_plan() -> MethodEvaluationPlanV2:
 
 def test_methods_v2_asset_versions_match_the_builtin_catalog() -> None:
     expected = {
-        "agent-profile/specialist": "5.0.0",
-        "agent-profile/reviewer": "5.0.0",
-        "output-contract/diagnose": "8.0.0",
-        "output-contract/review": "8.0.0",
+        "agent-profile/specialist": "6.0.0",
+        "agent-profile/reviewer": "6.0.0",
+        "context-policy/review": "2.0.0",
+        "output-contract/diagnose": "9.0.0",
+        "output-contract/review": "9.0.0",
     }
 
     for asset_id, version in expected.items():
@@ -115,19 +116,21 @@ def test_specialist_assets_require_methods_v2_evaluation_output() -> None:
     contract_meta, contract = _asset("output-contracts/diagnose")
     tool_meta, tool_bundle = _asset("tool-bundles/diagnose")
 
-    assert profile_meta["version"] == "5.0.0"
-    assert contract_meta["version"] == "8.0.0"
+    assert profile_meta["version"] == "6.0.0"
+    assert contract_meta["version"] == "9.0.0"
     assert tool_meta["version"] == "4.0.0"
     assert "same configured model identity" in profile
     assert "SPECIALIST" in profile
     assert "inputs/request.json" in profile
     assert "output/method-diagnosis.draft.json" in contract
     assert "inputs/request.json" in contract
-    assert "inputs/method-evidence-graph.json" in contract
-    assert "inputs/method-evaluation-plan.json" in contract
+    assert "evaluation_input" in contract
+    assert "`sources` catalog includes every frozen" in contract
+    assert "inputs/method-evidence-graph.json" not in contract
+    assert "inputs/method-evaluation-plan.json" not in contract
     assert "evaluation_ref" in contract
     assert "supporting_event_refs" in contract
-    assert "evidence_event_refs" in contract
+    assert "evaluation order" in contract
     assert "Do not return hit refs" in contract
     assert "four fields" in profile
     assert "CONFIRMED" in contract
@@ -143,10 +146,12 @@ def test_specialist_assets_require_methods_v2_evaluation_output() -> None:
 def test_reviewer_assets_require_blind_methods_v2_evaluation() -> None:
     profile_meta, profile = _asset("profiles/reviewer")
     contract_meta, contract = _asset("output-contracts/review")
+    policy_meta, policy = _asset("context-policies/review")
     tool_meta, tool_bundle = _asset("tool-bundles/review")
 
-    assert profile_meta["version"] == "5.0.0"
-    assert contract_meta["version"] == "8.0.0"
+    assert profile_meta["version"] == "6.0.0"
+    assert contract_meta["version"] == "9.0.0"
+    assert policy_meta["version"] == "2.0.0"
     assert tool_meta["version"] == "3.0.0"
     assert "same configured model identity" in profile
     assert "REVIEWER" in profile
@@ -154,14 +159,18 @@ def test_reviewer_assets_require_blind_methods_v2_evaluation() -> None:
     assert "SPECIALIST response, verdicts, reasons" in profile
     assert "output/method-review.draft.json" in contract
     assert "inputs/request.json" in contract
-    assert "inputs/method-evidence-graph.json" in contract
-    assert "inputs/method-evaluation-plan.json" in contract
+    assert "evaluation_input" in contract
+    assert "`sources` catalog includes every frozen" in contract
+    assert "inputs/method-evidence-graph.json" not in contract
+    assert "inputs/method-evaluation-plan.json" not in contract
     assert "not inputs" in contract
     assert "Do not use `inputs/method-diagnosis.json`" in contract
     assert "supporting_event_refs" in contract
-    assert "evidence_event_refs" in contract
+    assert "evaluation order" in contract
     assert "Do not return hit refs" in contract
     assert "four fields" in profile
+    assert "compact `evaluation_input`" in policy
+    assert "must not appear in the role Workspace" in policy
     assert "There is no second repair" in contract
     assert "INSUFFICIENT_EVIDENCE" not in contract
     assert "problem-locator-logparse" not in tool_bundle

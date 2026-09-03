@@ -821,8 +821,9 @@ def test_rpc_timeout_methods_v2_is_one_durable_same_job_path(
     for workspace in (specialist_workspace, reviewer_workspace):
         inputs = workspace / "inputs"
         assert (inputs / "request.json").is_file()
-        assert (inputs / "method-evidence-graph.json").is_file()
-        assert (inputs / "method-evaluation-plan.json").is_file()
+        assert not (inputs / "method-evidence-graph.json").exists()
+        assert not (inputs / "method-evaluation-plan.json").exists()
+        assert not (workspace / "runtime/context.txt").exists()
         assert not (inputs / "target_logs.json").exists()
         assert not (inputs / "logparse-receipt.json").exists()
         assert not (inputs / "target-logs").exists()

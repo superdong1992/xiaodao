@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import sys
@@ -88,6 +89,7 @@ from problem_locator.runtime.methods_records_v2 import (
     read_method_prompt_v2,
     read_method_state_v2,
 )
+from problem_locator.runtime.methods_evaluation_input_v2 import MethodEvaluationInputV2
 from problem_locator.runtime.workspace import WorkspaceManager
 from tests.deterministic.contracts.fakes import (
     DeterministicIdGenerator,
@@ -447,43 +449,102 @@ def _close_sinks(kwargs: dict[str, Any]) -> None:
         sink.close()
 
 
+_ROLE_CONTEXT_SECTION = re.compile(
+    r"<<<SECTION \d+ (EVIDENCE|REVIEW_TARGET)>>>\n([^\n]+)\n<<<END SECTION>>>",
+)
+_LEGACY_MODEL_INPUT_PATHS = (
+    "inputs/method-evidence-graph.json",
+    "inputs/method-evaluation-plan.json",
+)
+
+
+def _method_evaluation_input(prompt: str, role: str) -> MethodEvaluationInputV2:
+    if any(path in prompt for path in _LEGACY_MODEL_INPUT_PATHS):
+        _fail(
+            "CLAUDE_DEEPSEEK_LEGACY_MODEL_INPUT_EXPOSED",
+            "The production role prompt exposes legacy Graph/Plan paths",
+        )
+    expected_section = "EVIDENCE" if role == "SPECIALIST" else "REVIEW_TARGET"
+    candidates: list[MethodEvaluationInputV2] = []
+    for section, raw_payload in _ROLE_CONTEXT_SECTION.findall(prompt):
+        if section != expected_section:
+            continue
+        try:
+            payload = json.loads(raw_payload)
+            if (
+                not isinstance(payload, dict)
+                or payload.get("schema_version") != 2
+                or payload.get("role") != role
+                or payload.get("request_path") != "inputs/request.json"
+                or "evaluation_input" not in payload
+            ):
+                continue
+            candidates.append(
+                MethodEvaluationInputV2.model_validate(payload["evaluation_input"])
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+    if len(candidates) != 1:
+        _fail(
+            "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID",
+            "The production role prompt must contain one compact evaluation_input",
+        )
+    return candidates[0]
+
+
+def _assert_model_workspace_hard_cut(workspace_root: Path) -> None:
+    inputs = workspace_root / "inputs"
+    request = inputs / "request.json"
+    if not request.is_file() or request.is_symlink():
+        _fail(
+            "CLAUDE_DEEPSEEK_ROLE_REQUEST_MISSING",
+            "The role Workspace has no frozen request.json",
+        )
+    if any((workspace_root / path).exists() for path in _LEGACY_MODEL_INPUT_PATHS):
+        _fail(
+            "CLAUDE_DEEPSEEK_LEGACY_MODEL_INPUT_EXPOSED",
+            "The role Workspace exposes legacy Graph/Plan model inputs",
+        )
+    if (workspace_root / "runtime/context.txt").exists():
+        _fail(
+            "CLAUDE_DEEPSEEK_DUPLICATE_CONTEXT_EXPOSED",
+            "The role Workspace exposes a duplicate runtime context",
+        )
+
+
 def _valid_role_output(
-    workspace_root: Path,
+    evaluation_input: MethodEvaluationInputV2,
     role: str,
     rejected_method_ids: frozenset[str],
 ) -> list[dict[str, Any]]:
-    plan = parse_canonical_json_bytes(
-        (workspace_root / "inputs/method-evaluation-plan.json").read_bytes()
-    )
-    evaluations = plan["evaluations"]
     return [
         {
-            "evaluation_ref": item["evaluation_ref"],
+            "evaluation_ref": item.evaluation_ref,
             "verdict": (
                 "REJECTED"
-                if item["method_id"] in rejected_method_ids
+                if item.method_id in rejected_method_ids
                 else "CONFIRMED"
             ),
             "supporting_event_refs": (
                 []
-                if item["method_id"] in rejected_method_ids
-                else item["evidence_event_refs"]
+                if item.method_id in rejected_method_ids
+                else [event.event_ref for event in item.events]
             ),
             "reason": (
                 (
-                    "冻结 Evidence Graph 不满足该方法的确认条件。"
+                    "紧凑评估证据不满足该方法的确认条件。"
                     if role == "SPECIALIST"
-                    else "盲评确认冻结 Graph 与 Plan 不满足该方法的确认条件。"
+                    else "盲评确认紧凑评估证据不满足该方法的确认条件。"
                 )
-                if item["method_id"] in rejected_method_ids
+                if item.method_id in rejected_method_ids
                 else (
-                    "冻结 Evidence Graph 满足该方法卡。"
+                    "紧凑评估证据满足该方法卡。"
                     if role == "SPECIALIST"
-                    else "盲评确认冻结 Graph 与 Plan 支持该结论。"
+                    else "盲评确认紧凑评估证据支持该结论。"
                 )
             ),
         }
-        for item in evaluations
+        for item in evaluation_input.evaluations
     ]
 
 
@@ -509,6 +570,9 @@ class _FakeRoleBackend:
     def execute(self, **kwargs: Any) -> BackendExecution:
         self.calls += 1
         workspace_root = Path(kwargs["workspace_root"])
+        prompt = str(kwargs["prompt"])
+        _assert_model_workspace_hard_cut(workspace_root)
+        evaluation_input = _method_evaluation_input(prompt, self.role)
         output = (
             workspace_root / "output/method-diagnosis.draft.json"
             if self.role == "SPECIALIST"
@@ -525,7 +589,7 @@ class _FakeRoleBackend:
             _close_sinks(kwargs)
             raise TypeError("injected backend invariant failure")
         value: Any = {"invalid": True} if self.protocol_exhausted or (self.repair and self.calls == 1) else _valid_role_output(
-            workspace_root,
+            evaluation_input,
             self.role,
             self.rejected_method_ids,
         )

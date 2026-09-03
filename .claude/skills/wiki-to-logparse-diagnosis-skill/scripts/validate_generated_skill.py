@@ -119,28 +119,35 @@ OPTIONAL_PID_SENTENCE = (
 )
 REQUIRED_SKILL_PHRASES = (
     "request.json",
-    "method-evidence-graph.json",
-    "method-evaluation-plan.json",
+    "evaluation_input",
+    "observations",
+    "markers",
+    "evaluations",
+    "events",
     "evaluation_ref",
     "verdict",
     "supporting_event_refs",
     "reason",
     "UNKNOWN",
 )
+FORBIDDEN_SKILL_PHRASES = (
+    "method-evidence-graph.json",
+    "method-evaluation-plan.json",
+)
 REQUIRED_SKILL_SEMANTICS = (
     (
-        "read the frozen request, Evidence Graph, and Evaluation Plan",
+        "read the frozen request and compact evaluation_input from runtime context",
         re.compile(
-            r"(?:读取|消费).*request\.json.*method-evidence-graph\.json.*method-evaluation-plan\.json"
-            r"|(?:read|consume).*request\.json.*method-evidence-graph\.json.*method-evaluation-plan\.json",
+            r"(?:读取|消费).*request\.json.*(?:运行时上下文|runtime context).*evaluation_input"
+            r"|(?:read|consume).*request\.json.*evaluation_input.*(?:运行时上下文|runtime context)",
             re.IGNORECASE | re.DOTALL,
         ),
     ),
     (
-        "use the Evidence Graph and Evaluation Plan as the only log evidence",
+        "use evaluation_input as the only log evidence",
         re.compile(
-            r"(?:日志证据).*(?:只能|仅能).*(?:Evidence Graph|证据图).*(?:Evaluation Plan|评估计划)"
-            r"|(?:log evidence).*(?:only).*(?:Evidence Graph).*(?:Evaluation Plan)",
+            r"(?:日志证据).*(?:只能|仅能).*evaluation_input"
+            r"|(?:log evidence).*(?:only).*evaluation_input",
             re.IGNORECASE | re.DOTALL,
         ),
     ),
@@ -153,10 +160,11 @@ REQUIRED_SKILL_SEMANTICS = (
         ),
     ),
     (
-        "evaluate every plan reference in plan order",
+        "evaluate every reference in evaluation_input evaluations order",
         re.compile(
-            r"(?:按|依照).*Evaluation Plan.*(?:顺序).*(?:全部|所有|每个).*evaluation_ref"
-            r"|(?:in).*Evaluation Plan.*(?:order).*(?:all|every).*evaluation_ref",
+            r"(?:按|依照).*evaluation_input.*evaluations.*(?:顺序).*(?:全部|所有|每个).*evaluation_ref"
+            r"|(?:in).*evaluation_input.*evaluations.*(?:order).*(?:all|every).*evaluation_ref"
+            r"|(?:evaluate).*(?:all|every).*evaluation_ref.*(?:in).*evaluation_input.*evaluations.*order",
             re.IGNORECASE | re.DOTALL,
         ),
     ),
@@ -654,6 +662,9 @@ def _validate_business_skill(
     for phrase in REQUIRED_SKILL_PHRASES:
         if phrase not in text:
             errors.append(f"SKILL.md must mention {phrase}")
+    for phrase in FORBIDDEN_SKILL_PHRASES:
+        if phrase in text:
+            errors.append(f"SKILL.md must not mention {phrase}")
     for label, pattern in REQUIRED_SKILL_SEMANTICS:
         if pattern.search(text) is None:
             errors.append(f"SKILL.md must require {label}")

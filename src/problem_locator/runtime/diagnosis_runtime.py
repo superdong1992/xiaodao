@@ -183,6 +183,31 @@ def _unexpected_failure() -> RuntimeExecutionError:
     )
 
 
+def _context_limit_failure(
+    job: Job,
+    *,
+    observed: int,
+    limit: int,
+) -> RuntimeExecutionError:
+    return runtime_failure(
+        stage=ExecutionStage.CONTEXT_BUILD,
+        code=ErrorCode.CONTEXT_LIMIT,
+        message="Required Agent context exceeds the fixed role budget.",
+        details=[
+            ApplicationErrorDetail(
+                field="context_bytes",
+                resource_type="JOB",
+                resource_id=job.job_id,
+                resource_ref=None,
+                expected=limit,
+                actual=observed,
+                limit=limit,
+                observed=observed,
+            )
+        ],
+    )
+
+
 class _MethodAuditArchiveError(RuntimeError):
     """One fixed Evidence V2 execution record could not be committed."""
 
@@ -464,6 +489,14 @@ def _method_role_prompt_v2(
     role: MethodEvaluationRoleV2,
     attempt: MethodEvaluationAttemptV2,
 ) -> str:
+    return context.body + _method_role_prompt_suffix_v2(role=role, attempt=attempt)
+
+
+def _method_role_prompt_suffix_v2(
+    *,
+    role: MethodEvaluationRoleV2,
+    attempt: MethodEvaluationAttemptV2,
+) -> str:
     output_path = (
         "output/method-diagnosis.draft.json"
         if role == "SPECIALIST"
@@ -481,15 +514,16 @@ def _method_role_prompt_v2(
             "rename any evaluation_ref or invent any event reference."
         )
     return (
-        context.body
-        + "\n\n<<<METHODS_EVIDENCE_V2_ROLE>>>\n"
+        "\n\n<<<METHODS_EVIDENCE_V2_ROLE>>>\n"
         + f"Role: {role_text}. Attempt: {attempt_text}.\n"
-        + "Use only the frozen request, Evidence Graph, Evaluation Plan, and method cards "
-        + "provided in this Job context. Evaluate every evaluation_ref independently and "
-        + "in exact plan order. Write one JSON root array whose items contain only "
+        + "Use only the frozen request, compact evaluation_input, and method cards "
+        + "provided in this Job context. The compact input is the complete model-visible "
+        + "projection of the authoritative Evidence Graph and Evaluation Plan; do not "
+        + "open separate Graph/Plan files. Evaluate every evaluation_ref independently "
+        + "and in exact evaluation order. Write one JSON root array whose items contain only "
         + "evaluation_ref, verdict, supporting_event_refs, and reason. For CONFIRMED, "
         + "supporting_event_refs must be a non-empty subset of the current Evaluation "
-        + "Plan item's evidence_event_refs in plan order. For REJECTED or UNKNOWN, it "
+        + "item's event refs in evaluation order. For REJECTED or UNKNOWN, it "
         + "must be an empty array. Select only those server-issued event refs; do not "
         + "copy or invent markers, log text, line numbers, hashes, identity fields, hit "
         + "refs, or any other evidence fields.\n"
@@ -2033,11 +2067,12 @@ class DiagnosisRuntime:
             role=role,
             attempt=attempt,
         )
+        prompt_bytes = prompt.encode("utf-8")
         self._commit_method_prompt_v2(
             job_id=job.job_id,
             role=role,
             attempt=attempt,
-            prompt_bytes=prompt.encode("utf-8"),
+            prompt_bytes=prompt_bytes,
         )
         self._backend.execute(
             prompt=prompt,
@@ -2203,8 +2238,12 @@ class DiagnosisRuntime:
                     )
                 attempt_name = "REPAIR"
             except RuntimeExecutionError as exc:
-                if exc.failure.code is ErrorCode.BACKEND_CANCELLED:
-                    self._interrupt_methods_state_v2(job=job, state=state)
+                if exc.failure.code in {
+                    ErrorCode.BACKEND_CANCELLED,
+                    ErrorCode.CONTEXT_LIMIT,
+                }:
+                    if exc.failure.code is ErrorCode.BACKEND_CANCELLED:
+                        self._interrupt_methods_state_v2(job=job, state=state)
                     raise
                 state = record_model_execution_failure_v2(
                     state=state,
@@ -2580,6 +2619,8 @@ class DiagnosisRuntime:
                     resolved.materials,
                 )
             except RuntimeExecutionError as exc:
+                if exc.failure.code is ErrorCode.CONTEXT_LIMIT:
+                    raise
                 reason_code = (
                     "AUDIT_ARCHIVE_FAILED"
                     if exc.failure.code is ErrorCode.EXECUTION_RECORD_FAILED
@@ -2765,6 +2806,12 @@ class DiagnosisRuntime:
                     raise
                 except BaseException as exc:
                     attempt_error = exc
+
+                if (
+                    isinstance(attempt_error, RuntimeExecutionError)
+                    and attempt_error.failure.code is ErrorCode.CONTEXT_LIMIT
+                ):
+                    raise attempt_error
 
                 if state is None:
                     # The source state is absent from the model context and is
@@ -3630,22 +3677,10 @@ class DiagnosisRuntime:
         try:
             return self._context_builder.build(job, materials)
         except ContextLimitExceeded as exc:
-            raise runtime_failure(
-                stage=ExecutionStage.CONTEXT_BUILD,
-                code=ErrorCode.CONTEXT_LIMIT,
-                message="Required Agent context exceeds the fixed role budget.",
-                details=[
-                    ApplicationErrorDetail(
-                        field="context_bytes",
-                        resource_type="JOB",
-                        resource_id=job.job_id,
-                        resource_ref=None,
-                        expected=exc.limit,
-                        actual=exc.observed,
-                        limit=exc.limit,
-                        observed=exc.observed,
-                    )
-                ],
+            raise _context_limit_failure(
+                job,
+                observed=exc.observed,
+                limit=exc.limit,
             ) from None
         except RuntimeExecutionError:
             raise
@@ -3664,7 +3699,35 @@ class DiagnosisRuntime:
     ) -> BoundedContext:
         context_building = record_stage_started(ExecutionStage.CONTEXT_BUILD)
         context = self._build_context(job, materials)
-        self._workspace_manager.write_context(workspace, context.body)
+        methods_v2 = _is_methods_v2_job(job)
+        observed_input_bytes = context.utf8_bytes
+        request_bytes = 0
+        role_prompt_reserve_bytes = 0
+        if methods_v2:
+            role: MethodEvaluationRoleV2 = (
+                "SPECIALIST" if job.job_type is JobType.DIAGNOSE else "REVIEWER"
+            )
+            request_bytes = len(
+                (workspace.root / "inputs/request.json").read_bytes()
+            )
+            role_prompt_reserve_bytes = max(
+                len(
+                    _method_role_prompt_suffix_v2(
+                        role=role,
+                        attempt=attempt,
+                    ).encode("utf-8")
+                )
+                for attempt in ("PRIMARY", "REPAIR")
+            )
+            observed_input_bytes += request_bytes + role_prompt_reserve_bytes
+            if observed_input_bytes > job.resource_limits.context_bytes:
+                raise _context_limit_failure(
+                    job,
+                    observed=observed_input_bytes,
+                    limit=job.resource_limits.context_bytes,
+                )
+        if not methods_v2:
+            self._workspace_manager.write_context(workspace, context.body)
         self._publish_audit_bytes(
             job,
             "context.txt",
@@ -3674,8 +3737,11 @@ class DiagnosisRuntime:
             ExecutionStage.CONTEXT_BUILD,
             context_building,
             data={
-                "context_path": workspace.context_path,
-                "utf8_bytes": context.utf8_bytes,
+                "context_path": None if methods_v2 else workspace.context_path,
+                "utf8_bytes": observed_input_bytes,
+                "context_body_utf8_bytes": context.utf8_bytes,
+                "request_utf8_bytes": request_bytes,
+                "role_prompt_reserve_bytes": role_prompt_reserve_bytes,
                 "limit_bytes": context.limit_bytes,
                 "body_sha256": context.body_sha256,
                 "sections": context.sections,

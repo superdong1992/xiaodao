@@ -582,7 +582,9 @@ GET /api/v1/artifacts/40000000-0000-4000-8000-000000000001/content?case_id=10000
 
 `active_job` 只会在 `RUNNING` 或 `REVIEWING` 非空；等待状态、终态和 `INTERRUPTED` 均为 `null`。不能根据 `wait_timed_out` 推断状态，必须读取 `case_view.status`。
 
-Methods V2 终态只会是 `RESOLVED`、`UNRESOLVED` 或 `FAILED`。此路径不创建 Candidate，`final_result` 和 `unresolved_result` 始终为 `null`。评估已经生成 Evidence Graph 和 Evaluation Plan 时，终态读取 `methods_result`。若资源解析、Workspace、Logparse 预处理或 execution-record 在 Graph/Plan 生成前失败，服务端不会伪造这些引用；此时 `methods_result` 缺省，稳定原因和诊断 ID 位于 `failure.reason_code` 与 `failure.diagnostic_id`。全局 `CaseStatus`、`CandidateConclusion` 和 `final_result` 仍服务于其他路径，不能因为 Methods V2 的硬切而从客户端类型中删除。
+Methods V2 终态只会是 `RESOLVED`、`UNRESOLVED` 或 `FAILED`。此路径不创建 Candidate，`final_result` 和 `unresolved_result` 始终为 `null`。服务端完成 Evidence V2 裁决后，客户端从 `methods_result` 读取终态；在此之前发生的执行失败只写入 `failure`，即使内部已经归档 Evidence Graph 和 Evaluation Plan，也不会用这些引用伪造 `methods_result`。Evidence V2 已分类的系统终态会同时给出 `failure.reason_code` 与 `failure.diagnostic_id`；上下文容量失败则保留 `failure.code=CONTEXT_LIMIT`，这两个可选字段缺省。全局 `CaseStatus`、`CandidateConclusion` 和 `final_result` 仍服务于其他路径，不能因为 Methods V2 的硬切而从客户端类型中删除。
+
+紧凑 `evaluation_input` 是服务端内部模型输入，不是 REST 字段。它由权威 Graph/Plan 机械派生，每条物理日志行和每个 marker 字面量各保存一次，同时保留全部 method-qualified 关系、event、identity 和 evaluation 顺序。角色 Workspace 不保存单独的 Graph/Plan 文件或 `runtime/context.txt`；服务端仍用 execution records 中的权威 Graph/Plan 校验角色输出和生成公共引用。投影不截断、不采样，正常路径仍只调用一次 Specialist。
 
 ## 6. 附件端到端流程
 
@@ -1408,8 +1410,9 @@ latestCaseRevision = ready.case_revision;
 
 `diagnostic_id` 在三个终态中都存在。前端应原样保存和展示，不要自行重算。`limitations` 与成功或失败无关：只要证据采集记录了限制，`RESOLVED` 也会保留这些内容。角色输出中的自由文本不会进入此投影，前端只读取 `reasons`。
 
-Graph/Plan 生成前的 `FAILED` 不属于 `MethodsTerminalProjectionV2`，因为它没有合法的 `evaluation_id`、`plan_ref` 或 `evidence_graph_ref`。客户端以 `methods_result` 是否存在区分“评估已开始”和“评估尚未开始”，两种失败都读取外层 `CaseFailure` 的固定公共原因与 `diag-*` ID。
-冻结资源快照失败使用 `RESOURCE_SNAPSHOT_DRIFT`，Workspace、Logparse 预处理和其他服务端约束失败使用 `SERVER_INVARIANT_VIOLATION`，execution-record 失败使用 `AUDIT_ARCHIVE_FAILED`。
+合法 Methods 终态形成前的执行失败不属于 `MethodsTerminalProjectionV2`。客户端以 `methods_result` 是否存在区分“已有完整评估终态”和“执行期间失败”，后一种情况读取外层 `CaseFailure`。即使服务端已生成 Graph/Plan，也不能据此假设存在 `methods_result`。
+
+Evidence V2 自身的冻结资源快照失败使用 `RESOURCE_SNAPSHOT_DRIFT`，机械不变量失败使用 `SERVER_INVARIANT_VIOLATION`，审计归档失败使用 `AUDIT_ARCHIVE_FAILED`。紧凑后的必需上下文仍超过固定字节预算时，`CaseFailure.code` 保持为 `CONTEXT_LIMIT`，`reason_code` 和 `diagnostic_id` 缺省；它不能映射为 `SERVER_INVARIANT_VIOLATION` 或 `OUTCOME_INVALID`。
 
 | `MethodsTerminalReasonCodeV2` | 对应状态 | 含义 |
 | --- | --- | --- |
@@ -1525,10 +1528,10 @@ Graph/Plan 生成前的 `FAILED` 不属于 `MethodsTerminalProjectionV2`，因�
 | `413` | `RESOURCE_LIMIT_EXCEEDED` | `false` | 阻止上传/提交并展示限制。 |
 | `422` | `RESOURCE_HASH_MISMATCH` | `false` | 丢弃结果，重新计算原始字节散列。 |
 | `422` | `RESOURCE_SIZE_MISMATCH` | `false` | 丢弃结果，重新读取实际字节数。 |
-| `422` | `CONTEXT_LIMIT` | `false` | 展示输入/上下文超限。 |
+| `422` | `CONTEXT_LIMIT` | `false` | 紧凑后的必需上下文仍超过固定字节预算；展示容量超限，不要改写为 Evidence V2 不变量失败。 |
 | `422` | `ASSET_VERSION_UNAVAILABLE` | `false` | 服务端版本资源不可用，交给运维。 |
 | `422` | `OUTCOME_MISSING` | `false` | 后台输出缺失，展示失败信息。 |
-| `422` | `OUTCOME_INVALID` | `false` | 后台输出非法，展示失败信息。 |
+| `422` | `OUTCOME_INVALID` | `false` | 后台输出确实非法时展示失败信息；Evidence V2 上下文超限不使用此码。 |
 | `422` | `BACKEND_OUTPUT_LIMIT` | `false` | 后台输出超限。 |
 | `422` | `WORKSPACE_LIMIT` | `false` | 后台工作区超限。 |
 | `422` | `LOGPARSE_FAILED` | `false` | 证据解析失败。 |

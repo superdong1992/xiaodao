@@ -445,12 +445,11 @@ function validRoleToolPolicy(value, role) {
   return value.schema_version === 1
     && canonicalJson(value.tools) === canonicalJson(["Read", "Write"])
     && Array.isArray(value.allowed_tools)
-    && value.allowed_tools.length === 3
+    && value.allowed_tools.length === 2
     && value.allowed_tools.every((item) => typeof item === "string" && item.length > 0)
     && value.allowed_tools[0].startsWith("Read(")
-    && value.allowed_tools[1].startsWith("Read(")
-    && value.allowed_tools[2].startsWith("Edit(")
-    && value.readable_scope === "job-workspace-inputs-and-role-draft"
+    && value.allowed_tools[1].startsWith("Edit(")
+    && value.readable_scope === "job-request-only"
     && value.writable_scope === output
     && value.network === false
     && value.shell === false

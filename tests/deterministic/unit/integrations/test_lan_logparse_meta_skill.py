@@ -86,11 +86,12 @@ description: 从 Server 冻结的双端日志中定位 RPC 超时原因。
 
 # RPC 超时定位
 
-读取冻结 `request.json`、Server 写入的 `method-evidence-graph.json` 和
-`method-evaluation-plan.json`。方法规则需要用户输入时读取 request 中的冻结值。日志证据只能来自
-Evidence Graph 和 Evaluation Plan；不读取目标日志，也不重新扫描 marker。
+读取冻结 `request.json`，并从运行时上下文读取紧凑 `evaluation_input`。方法规则需要用户输入时
+读取 request 中的冻结值。`evaluation_input` 的 `observations` 保存去重物理日志行，`markers` 保存
+去重声明 marker，`evaluations` 是完整有序待判定清单，每项的 `events` 给出 event ref 与
+observation/marker 关联。日志证据只能来自 `evaluation_input`；不读取目标日志，也不重新扫描 marker。
 
-按 Evaluation Plan 顺序逐项评估全部 `evaluation_ref`，不能在第一个确认项后停止。每项只输出
+按 `evaluation_input` 中 `evaluations` 的顺序逐项评估全部 `evaluation_ref`，不能在第一个确认项后停止。每项只输出
 `evaluation_ref`、`verdict`、`supporting_event_refs` 和 `reason`；证据无法决定时使用 `UNKNOWN`，
 并在 reason 中说明观测限制。
 Server 生成的 evidence sources 可能来自 target_logs，并在内部保留 identity_tokens。
@@ -564,10 +565,39 @@ def test_valid_production_registration_passes(tmp_path: Path) -> None:
         "API_COMPLETE service="
     ]
     assert "request.json" in skill_text
+    assert "method-evidence-graph.json" not in skill_text
+    assert "method-evaluation-plan.json" not in skill_text
+    assert all(
+        field in skill_text
+        for field in (
+            "evaluation_input",
+            "observations",
+            "markers",
+            "evaluations",
+            "events",
+        )
+    )
     assert all(
         field in skill_text
         for field in ("evaluation_ref", "verdict", "supporting_event_refs", "reason")
     )
+
+
+def test_validator_rejects_legacy_graph_plan_skill_instructions(
+    tmp_path: Path,
+) -> None:
+    registration, wiki, _ = _write_valid_registration(tmp_path)
+    skill_path = _skill_path(registration)
+    skill_path.write_text(
+        skill_path.read_text(encoding="utf-8")
+        + "\n读取 method-evidence-graph.json 和 method-evaluation-plan.json。\n",
+        encoding="utf-8",
+    )
+
+    rejected = _validate(registration, wiki)
+
+    assert "SKILL.md must not mention method-evidence-graph.json" in rejected["errors"]
+    assert "SKILL.md must not mention method-evaluation-plan.json" in rejected["errors"]
 
 
 def test_valid_production_registration_loads_in_server(tmp_path: Path) -> None:

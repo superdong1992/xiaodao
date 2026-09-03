@@ -152,8 +152,9 @@ Outcome。
 
 ### Evidence Graph 与 Evaluation Plan
 
-服务端对每份冻结目标日志只解码和逐行扫描一次。在这一处完成所有 marker 的
-`casefold` 匹配，同时保留 marker 原文和命中行原文。扫描结束后，只保留至少命中一个自身
+服务端对每份冻结目标日志只解码和逐行扫描一次。在这一处先按 `casefold` 后的 marker 字面量
+去重，每行只匹配一次相同字面量，再展开成各方法的 method-qualified hit，同时保留 marker 原文
+和命中行原文。扫描结束后，只保留至少命中一个自身
 `activation_markers` 的方法；该方法在同一次扫描中得到的全部上下文命中都会保留。结果直接生成
 method-qualified Evidence Graph：
 
@@ -173,6 +174,18 @@ Graph。这个阶段不再读取原始行、不重新匹配 marker，也不全�
 `SkillLoadReceiptV1`；Evidence V2 根本不把这份 V1 receipt 带入评估链路。没有任何
 方法被激活时，服务端直接进入 `UNRESOLVED`，不启动 Specialist。
 
+Graph/Plan 是服务端权威审计记录和后续机械校验依据，不再逐字内嵌到模型上下文。ContextBuilder
+先校验两者，再机械派生紧凑 `evaluation_input`：
+
+- `sources` 列出全部冻结目标，包括已扫描但没有 marker 命中的 source；
+- `observations` 按 source 和行号保存命中的物理日志行，每行恰好一次；
+- `markers` 保存去重后的精确 marker 字面量，每个字面量恰好一次；
+- `evaluations` 按 Plan 顺序保留 method ID、优先级、evaluation ref、event ref、identity token，
+  并用 observation/marker 索引表达全部 method-qualified match。
+
+这份投影不合并跨方法证据关系，也不截断或采样。它不是新的公开合同，不能替代 Graph/Plan
+进行终态校验或审计重放。方法卡只在上下文的必需 `SKILL` 区段出现一次，不再复制到角色输入。
+
 ## Specialist 单评与可选 Reviewer 隔离评估
 
 Specialist 始终先独立评估完整 Plan。默认 `EVIDENCE_V2_REVIEWER_ENABLED=false`，服务端校验
@@ -185,8 +198,13 @@ Specialist 输出后直接形成终态，不创建 REVIEW Job。没有 `UNKNOWN`
 但分别运行在独立 Job、Workspace 和上下文中。实际运行的角色只读取：
 
 - 当前角色自己的 `request.json`；
-- 同一份 `method-evidence-graph.json` 和 `method-evaluation-plan.json`；
-- `loaded_method_ids` 对应的方法卡及其显式共享引用。
+- 上下文中由同一权威 Graph/Plan 派生的紧凑 `evaluation_input`；
+- `loaded_method_ids` 对应的方法卡及其显式共享引用，且只来自 `SKILL` 区段。
+
+角色 Workspace 不再保存 `method-evidence-graph.json` 或 `method-evaluation-plan.json`，因此模型
+无法用完整文件绕过紧凑输入。服务端只在 execution records 中保存并读取权威 Graph/Plan，用于
+身份绑定、结果校验和审计重放。Methods 角色 Workspace 也不保存 `runtime/context.txt`；完整 prompt
+只直接交给 Backend，并在服务端 execution records 留一份审计副本，模型没有第二条重复读取路径。
 
 开启 Reviewer 后，Specialist 结果通过服务端生成的
 `methods_review_target` 只传递 Graph、Plan、Skill 和 evaluation 身份，Coordinator
@@ -216,9 +234,16 @@ hash、identity token、hit ref 或任何证据 receipt。服务端只接受与 
 `evaluation_ref` 完全一致的数组。
 
 每个实际运行的角色第一次出现 JSON 结构或 Plan 覆盖错误时，最多获得一次 repair。repair 仍使用
-同一份 Graph、Plan 和方法卡，只提示重新提交完整数组；第二次仍不合格就进入
+同一份紧凑 `evaluation_input` 和方法卡，只提示重新提交完整数组；第二次仍不合格就进入
 `UNRESOLVED`。已经归档 primary rejection 的重启只运行 repair；primary 和 repair 都已
 归档时直接恢复终态，绝不发起第三次模型调用。
+
+正常路径只构建一次紧凑投影并调用一次 Specialist；开启 Reviewer 后才增加一次隔离调用。用户事实
+只保存在必读 `request.json`，不再复制到 prompt 的 Context Snapshot。`context_bytes` 统计最终角色
+prompt 与 request 的 UTF-8 字节总和，不等同于模型的 token 上下文窗口。若紧凑后的必需输入仍
+超限，Runtime 在模型调用前原样返回 `CONTEXT_LIMIT`，不生成
+`MethodsTerminalProjectionV2`，也不把错误改写为 `SERVER_INVARIANT_VIOLATION` 或
+`OUTCOME_INVALID`。当前版本不实现分批、截断或采样。
 
 ## 单评、共识与状态真值
 
@@ -257,16 +282,16 @@ hash、identity token、hit ref 或任何证据 receipt。服务端只接受与 
 `methods-state-v2.json` 汇总全部公开终态原因，再从归因文件汇总共识子因和规模分布。
 归因字段不得进入 MCP、REST、Case 或 `MethodsTerminalProjectionV2`。
 
-若资源解析、Workspace、Logparse 预处理或 execution-record 在 Graph/Plan 生成前失败，
-服务端没有合法的 plan、graph 或 evaluation identity，因此不得构造
-`MethodsTerminalProjectionV2`。这种 Case 直接以 `FAILED` 收口，`methods_result` 缺省，
-`CaseFailure` 保存同一套 `FAILED` reason code、固定公共原因和稳定 `diag-*` ID。公共接口据此
-明确区分“评估尚未开始”和“已有完整评估终态”，不靠伪造引用填满 DTO。
+若资源解析、Workspace、Logparse 预处理、上下文构建或 execution-record 在形成合法 Methods
+终态前失败，不得构造 `MethodsTerminalProjectionV2`。即使 Graph/Plan 已经生成并归档，Case
+也直接以 `FAILED` 收口，`methods_result` 缺省，公共接口读取 `CaseFailure`，不靠内部引用填满
+DTO。Evidence V2 已分类的系统终态仍携带固定 reason code 和稳定 `diag-*` ID；上下文容量失败
+则保留 `CONTEXT_LIMIT`，不附加 Methods reason code 或 diagnostic ID。
 
 ## limitations、公共投影与重放
 
 `limitations` 是服务端拥有的数据。它从 Logparse authoritative target caveat 进入
-Evidence Graph，同时写入独立 limitations record，并原样传到实际运行的 Reviewer 和最终
+Evidence Graph，同时写入独立 limitations record，经紧凑输入传到实际运行的角色，并原样进入最终
 `MethodsTerminalProjectionV2`。无论诊断最终是确认、不可定论还是系统失败，已记录的
 观测限制都不能在跨 Job、重启或终态映射时丢失。
 
@@ -314,8 +339,8 @@ Test Flow 才在 package 外复制产品 registration，以同一 package 字节
    State、Outcome、Case 和 verdict 必须由生产代码生成；fixture 只手写用户输入、Wiki、日志、
    附件和原始不可信模型响应。
 2. Core 必须从真实 Case 入口覆盖 no-plan preflight、Logparse 冻结、单次扫描、casefold、
-   跨 method 相同 literal、Plan 全覆盖、默认 Specialist 单评、显式开启后的两个隔离角色、每个实际角色一次 repair、两种裁决真值、
-   limitations、公共 MCP/REST 投影、重启恢复和 validation-only replay。
+   跨 method 相同 literal 的单次匹配与完整展开、Plan 全覆盖、紧凑投影的无损去重、默认 Specialist 单评、显式开启后的两个隔离角色、每个实际角色一次 repair、两种裁决真值、
+   limitations、上下文容量错误分类、公共 MCP/REST 投影、重启恢复和 validation-only replay。
 3. 负向用例从生产生成的合法基线开始，每次只修改一个字段。删除关键校验、恢复 receipt
    全量比较、重新匹配 marker 或允许第三次调用时，对应 mutation 必须失败。
 4. Release 先用 `--plan-only` 审查 Proof、Stage、Gate、身份、模型预算、成本与
@@ -343,16 +368,20 @@ ROUTE、LOGPARSE、DIAGNOSE、显式盲评和 `methods_result` 投影。它的 s
 - 材料齐备后只运行一次服务端日志扫描。只有自身 activation marker 命中的 method 才进入 Graph，
   且它的全部上下文 hit 都会保留；Plan 精确覆盖全部 Graph event/hit。后续流程只按 ref 映射，
   不再扫描日志或匹配 marker。
+- Graph/Plan 继续作为服务端权威记录；模型只接收一次无损紧凑投影。每条物理日志行和每个 marker
+  字面量只保存一次，跨方法关系、event、evaluation 和 identity 仍完整；方法卡只在 `SKILL`
+  区段出现一次。模型不得读取单独的 Graph/Plan 文件。
 - 默认只运行 Specialist；无 `UNKNOWN` 且至少确认一个方法时直接 `RESOLVED`，含 `UNKNOWN`
   或全部拒绝时进入 `UNRESOLVED`。
 - 显式开启后，Specialist 与 Reviewer 使用隔离 Job、Workspace 和上下文，Reviewer 在提交盲评前
   看不到 Specialist 结论；两者只提交完整的 `evaluation_ref + verdict + supporting_event_refs + reason` 数组。
 - 每个实际运行的角色最多一次 repair，重启不能增加已开始角色的调用次数；盲评路径只有两次
   评估逐项一致、无 `UNKNOWN` 且至少确认一个方法时才 `RESOLVED`。
-- Methods V2 不生成 Candidate、`DecisionAuditV2` 或 `PARTIALLY_RESOLVED`；只有资源漂移、
-  服务端不变量破坏和审计归档失败进入 `FAILED`，取消则保留 `INTERRUPTED`。
-- Graph/Plan 生成前失败时不得伪造评估引用；Case、MCP 和 REST 必须从 `CaseFailure` 返回稳定
-  V2 reason code 与 diagnostic ID，且 `methods_result` 缺省。
+- Methods V2 不生成 Candidate、`DecisionAuditV2` 或 `PARTIALLY_RESOLVED`；Methods 终态中的
+  `FAILED` reason 只用于资源漂移、服务端不变量破坏和审计归档失败，取消则保留 `INTERRUPTED`。
+- 合法 Methods 终态形成前失败时不得伪造评估引用，`methods_result` 必须缺省。紧凑上下文仍
+  超限时，Case、MCP 和 REST 必须保留 `CONTEXT_LIMIT`，不能显示成 Evidence V2 不变量失败或
+  `OUTCOME_INVALID`。
 - limitations 从预处理一直保留到公共投影；Methods V2 不生成公共审计产物，MCP/REST 不包含
   被拒草稿、角色自由文本 reason 或原始日志，内部拒绝记录可以由 validation-only replay 重放。
 - 发布结论只引用当前源码快照对应的 Test Flow `verdict.json`，未执行、skip 或

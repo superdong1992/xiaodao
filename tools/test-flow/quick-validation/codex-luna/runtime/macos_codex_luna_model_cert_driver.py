@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import sys
@@ -37,14 +38,13 @@ from problem_locator.contracts import (  # noqa: E402
     ExecutionLogSinks,
     ExecutionStage,
     Job,
-    MethodEvaluationPlanV2,
+    MethodsReviewTargetV2,
     ResourceKind,
     ResourceRef,
     ResolvedAsset,
     StateFile,
     VersionedRef,
     canonical_json_bytes,
-    parse_canonical_json_bytes,
 )
 from problem_locator.domain import (  # noqa: E402
     DomainCoordinator,
@@ -57,6 +57,9 @@ from problem_locator.runtime.agent_backend import (  # noqa: E402
 from problem_locator.runtime.catalog import VersionedAssetCatalog  # noqa: E402
 from problem_locator.runtime.diagnosis_runtime import DiagnosisRuntime  # noqa: E402
 from problem_locator.runtime.failures import runtime_failure  # noqa: E402
+from problem_locator.runtime.methods_evaluation_input_v2 import (  # noqa: E402
+    MethodEvaluationInputV2,
+)
 from problem_locator.runtime.methods_records_v2 import (  # noqa: E402
     METHODS_EVALUATION_PLAN_V2_FILENAME,
     METHODS_EVIDENCE_GRAPH_V2_FILENAME,
@@ -350,6 +353,80 @@ def _method_role(prompt: str) -> tuple[Role, Attempt]:
     raise RuntimeError("backend received an unknown Evidence V2 role/attempt")
 
 
+_ROLE_CONTEXT_SECTION = re.compile(
+    r"<<<SECTION \d+ (EVIDENCE|REVIEW_TARGET)>>>\n([^\n]+)\n<<<END SECTION>>>",
+)
+_ROLE_CONTEXT_HEADER = re.compile(r"<<<SECTION \d+ (EVIDENCE|REVIEW_TARGET)>>>")
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
+_FORBIDDEN_MODEL_INPUT_PATHS = (
+    "inputs/method-evidence-graph.json",
+    "inputs/method-evaluation-plan.json",
+    "runtime/context.txt",
+)
+
+
+def _method_evaluation_input(prompt: str, role: Role) -> MethodEvaluationInputV2:
+    if any(path in prompt for path in _FORBIDDEN_MODEL_INPUT_PATHS):
+        raise RuntimeError("Evidence V2 role prompt exposes a duplicate model input path")
+    expected_kind = "EVIDENCE" if role == "SPECIALIST" else "REVIEW_TARGET"
+    headers = _ROLE_CONTEXT_HEADER.findall(prompt)
+    sections = _ROLE_CONTEXT_SECTION.findall(prompt)
+    if (
+        headers != [expected_kind]
+        or len(sections) != 1
+        or sections[0][0] != expected_kind
+    ):
+        raise RuntimeError(
+            "Evidence V2 prompt must contain exactly one matching role data section"
+        )
+    payload = json.loads(sections[0][1])
+    expected_keys = (
+        {
+            "schema_version",
+            "role",
+            "job_id",
+            "case_id",
+            "request_path",
+            "evaluation_input",
+        }
+        if role == "SPECIALIST"
+        else {
+            "schema_version",
+            "role",
+            "target",
+            "request_path",
+            "evaluation_input",
+        }
+    )
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != expected_keys
+        or payload.get("schema_version") != 2
+        or payload.get("role") != role
+        or payload.get("request_path") != "inputs/request.json"
+    ):
+        raise RuntimeError("Evidence V2 role payload has an invalid exact shape")
+    evaluation_input = MethodEvaluationInputV2.model_validate(
+        payload["evaluation_input"]
+    )
+    if role == "SPECIALIST":
+        if (
+            not isinstance(payload["job_id"], str)
+            or _UUID.fullmatch(payload["job_id"]) is None
+            or not isinstance(payload["case_id"], str)
+            or _UUID.fullmatch(payload["case_id"]) is None
+        ):
+            raise RuntimeError("Evidence V2 Specialist role identity is invalid")
+    else:
+        target = MethodsReviewTargetV2.model_validate(payload["target"])
+        if (
+            target.graph_ref != evaluation_input.evidence_graph_ref
+            or target.plan_ref != evaluation_input.plan_ref
+        ):
+            raise RuntimeError("Evidence V2 Reviewer target identity is invalid")
+    return evaluation_input
+
+
 def _close_sinks(sinks: ExecutionLogSinks) -> None:
     unique = {id(sinks.stdout): sinks.stdout, id(sinks.stderr): sinks.stderr}
     for sink in unique.values():
@@ -387,17 +464,24 @@ class FakeModelRoleBackend:
     def execute(self, **kwargs: Any) -> BackendExecution:
         prompt = str(kwargs["prompt"])
         role, attempt = _method_role(prompt)
+        evaluation_input = _method_evaluation_input(prompt, role)
         workspace = Path(kwargs["workspace_root"])
-        plan = parse_canonical_json_bytes(
-            (workspace / "inputs/method-evaluation-plan.json").read_bytes(),
-            MethodEvaluationPlanV2,
-        )
-        graph = parse_canonical_json_bytes(
-            (workspace / "inputs/method-evidence-graph.json").read_bytes()
-        )
-        events_by_ref = {
-            event["event_ref"]: event for event in graph["events"]
-        }
+        if any(
+            (workspace / relative).exists()
+            for relative in _FORBIDDEN_MODEL_INPUT_PATHS
+        ):
+            raise RuntimeError(
+                "Evidence V2 role Workspace exposes a duplicate model input"
+            )
+        if {path.name for path in (workspace / "inputs").iterdir()} != {
+            "manifest.json",
+            "request.json",
+        }:
+            raise RuntimeError("Evidence V2 role inputs are not model-minimal")
+        if {path.name for path in (workspace / "runtime").iterdir()} != {
+            "tool-state"
+        }:
+            raise RuntimeError("Evidence V2 role runtime is not model-minimal")
         self.invocations.append(
             {
                 "ordinal": len(self.invocations) + 1,
@@ -406,6 +490,11 @@ class FakeModelRoleBackend:
                 "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
                 "prompt_size": len(prompt.encode("utf-8")),
                 "workspace": workspace,
+                "evidence_graph_ref": evaluation_input.evidence_graph_ref,
+                "plan_ref": evaluation_input.plan_ref,
+                "evaluation_refs": tuple(
+                    item.evaluation_ref for item in evaluation_input.evaluations
+                ),
             }
         )
         output = (
@@ -440,11 +529,11 @@ class FakeModelRoleBackend:
                         []
                         if item.method_id in self.rejected_method_ids
                         else [
-                            event_ref
-                            for event_ref in item.evidence_event_refs
+                            event.event_ref
+                            for event in item.events
                             if all(
                                 token
-                                in events_by_ref[event_ref]["identity_tokens"]
+                                in event.identity_tokens
                                 for token in self.supporting_identity_tokens_by_method.get(
                                     item.method_id,
                                     (),
@@ -454,24 +543,24 @@ class FakeModelRoleBackend:
                     ),
                     "reason": (
                         (
-                            "冻结 Evidence Graph 不满足该方法的确认条件。"
+                            "紧凑评估输入不满足该方法的确认条件。"
                             if role == "SPECIALIST"
-                            else "盲评确认冻结 Graph 与 Plan 不满足该方法的确认条件。"
+                            else "盲评确认紧凑评估输入不满足该方法的确认条件。"
                         )
                         if item.method_id in self.rejected_method_ids
                         else " ".join(
                             (
                                 (
-                                    "冻结 Evidence Graph 满足该方法卡。"
+                                    "紧凑评估输入满足该方法卡。"
                                     if role == "SPECIALIST"
-                                    else "盲评确认冻结 Graph 与 Plan 支持该结论。"
+                                    else "盲评确认紧凑评估输入支持该结论。"
                                 ),
                                 *self.confirmed_reason_terms,
                             )
                         )
                     ),
                 }
-                for item in plan.evaluations
+                for item in evaluation_input.evaluations
             ]
         output.write_bytes(_canonical_json(response))
         _close_sinks(kwargs["log_sinks"])

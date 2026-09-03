@@ -12,9 +12,9 @@
 | Methods package | `SKILL.md` + `methods.json@1` + `references/*.md` |
 | Product registration | `registration-template.json@1` |
 | Methods evaluation protocol | `Evidence V2` |
-| ROUTE / DIAGNOSE / REVIEW output contract | `3.0.0` / `8.0.0` / `8.0.0` |
+| ROUTE / DIAGNOSE / REVIEW output contract | `3.0.0` / `9.0.0` / `9.0.0` |
 | GENERIC output contract / profile | `2.0.0` / `2.0.0` |
-| Specialist / Reviewer profile | `5.0.0` / `5.0.0` |
+| Specialist / Reviewer profile | `6.0.0` / `6.0.0` |
 | Router / Diagnose / Review tool bundle | `2.0.0` / `4.0.0` / `3.0.0` |
 
 State、Job 和权威 Outcome 已硬切到 V8。Problem Locator 5.0.0 只接受路径尚不存在或目录完全为空的全新 `DATA_ROOT`，首次启动会写入 canonical `data-format.json`；已有非空但无 marker、使用旧 marker 或 marker 被篡改的目录都会启动失败，服务不会迁移、改写或删除其中任何内容。升级前必须先备份旧目录，再使用新的 `DATA_ROOT`；需要保留的 V1/V2/V3/V4/V5/V6/V7 State、Job 或 Outcome 只能作为只读历史材料另行处理。
@@ -24,9 +24,13 @@ State、Job 和权威 Outcome 已硬切到 V8。Problem Locator 5.0.0 只接受�
 - 产品注册只声明路由、必需用户输入/附件、Logparse 产品与 anchor，以及 DIAGNOSE/REVIEW 的内置运行时绑定。
 - `.agents` 下的 Wiki 元 Skill 只生成闭合的 Methods package；`.claude` 下的局域网部署元 Skill 生成完整的生产 registration root，并在其 `package/` 中放置同一 Methods package。两者都不生成 GenerationSpec、`diagnosis-skill.json` 或验证合同。
 - 产品拥有的 Logparse 预处理在独立 Workspace 中加载一次现装 `logparse-diagnose`，由 Helper 完成唯一一次 broker parse/reuse。服务端读取冻结目标日志，并且只扫描一次。
-- 服务端从单次扫描结果生成 method-qualified Evidence Graph 和完整 Evaluation Plan。默认只运行 Specialist；显式开启 Reviewer 后，两个角色分别读取请求、Graph、Plan 和精确方法卡，并提交 `evaluation_ref + verdict + supporting_event_refs + reason`。最终状态始终由服务端裁决。
+- 服务端从单次扫描结果生成 method-qualified Evidence Graph 和完整 Evaluation Plan，并将它们作为权威审计记录保存和校验。模型 prompt 只内嵌由两者机械派生的紧凑 `evaluation_input`：每条物理日志行和每个 marker 字面量各保存一次，同时完整保留方法归属、event 和 evaluation 关系；角色 Workspace 不再保存完整 Graph/Plan 或 prompt 副本。默认只运行 Specialist；显式开启 Reviewer 后，两个角色分别读取请求、紧凑输入和精确方法卡，并提交 `evaluation_ref + verdict + supporting_event_refs + reason`。最终状态始终由服务端裁决。
 
 `.agents/skills/wiki-to-diagnosis-skill` 直接从一份已评审 Wiki 生成 `SKILL.md`、`methods.json` 和独立可加载的 `references/*.md` 方法卡。`methods.json` 固定声明源 Wiki SHA-256、必需用户输入、必需附件、日志派生字段、共享参考和有序方法索引；`shared_references[0]` 固定绑定逐项逐序保留源 Wiki 机械日志模板的 `references/source-log-templates.md`。每个方法用 `evidence_markers` 收齐判断所需日志，并用其保序子集 `activation_markers` 声明何时值得创建 evaluation。该入口仍由产品在包外提供 registration，供 Evidence V2 定位链路使用。
+
+这是一次不兼容的模型输入合同升级。仍要求读取 `method-evidence-graph.json` 或
+`method-evaluation-plan.json` 的旧 Methods package 不会继续加载；部署新版本前，必须用当前元 Skill
+从原 Wiki 重新生成 package，并在新目录中完成校验后再切换 `SKILL_DIR`，不要原地混用新旧包。
 
 仓库另提供 [`.claude/skills/wiki-to-logparse-diagnosis-skill`](.claude/skills/wiki-to-logparse-diagnosis-skill)，用于在局域网 Claude Code 中从 Wiki 生成可直接部署到 Linux Server `SKILL_DIR` 的完整 registration root。生成物包含 `registration-template.json` 与闭合 Methods package，固定要求 `client_slot`、`client_process_name`、`server_slot`、`server_process_name`，双端共用作者确认的 module，PID 仅在用户主动提供时使用。客户端不会加载这个业务 Skill，也不会在本地调用 Logparse；它只使用 `$problem-locator-client` 经 HTTP MCP 提交 Case。Server 完成 ROUTE、Helper 驱动的 Logparse 预处理、Methods 诊断、可选 Review 和权威结果打包。
 
@@ -56,7 +60,7 @@ Evidence V2 contract digest 和 Core verdict digest；旧 Methods V1 Fast E2E �
 Evidence V2 认证复用。任何 standalone verdict 只证明它声明的短路径，不代表完整 Test Flow、
 Release 或物理局域网部署验收。
 
-Problem Locator 是一个单实例故障诊断服务。它接收结构化问题，收集事实与附件，执行固定版本的路由和诊断任务；盲评 Reviewer 默认关闭。Methods V2 评估终态发布为 Case 的 `methods_result`，Graph/Plan 生成前的失败发布为 `failure`；Generic V2 终态发布 Markdown 结果。
+Problem Locator 是一个单实例故障诊断服务。它接收结构化问题，收集事实与附件，执行固定版本的路由和诊断任务；盲评 Reviewer 默认关闭。Methods V2 完成服务端裁决后才发布 `methods_result`；在此之前发生的执行失败只发布 `failure`，即使 Graph/Plan 已经归档也不会伪造 Methods 终态。Generic V2 终态发布 Markdown 结果。
 
 Problem Locator 5.0.0 使用本地 JSON 状态文件和文件系统资源实现持久化；所有业务写操作都通过应用服务及其仓储端口完成。
 
@@ -360,17 +364,27 @@ SPECIALIZED 定位使用 Evidence V2。服务端负责证据提取、引用和�
    `(method_id, marker)` 收集 method-qualified hit。只有命中当前方法自己的 `activation_markers`
    才加载该方法；加载后保留它的全部上下文 hit，并一次性生成完整且有序的 Evaluation Plan。
    后续映射只使用稳定 ref，不再重新匹配 marker。
-3. Specialist 在独立 Job、Workspace 和上下文中读取 `request.json`、Evidence Graph、
-   Evaluation Plan 与精确固定的方法卡。它只能提交根 JSON 数组；每项只有
+3. Specialist 在独立 Job、Workspace 和上下文中读取 `request.json`、紧凑 `evaluation_input`
+   与精确固定的方法卡。`evaluation_input` 由权威 Graph/Plan 机械派生：物理日志行和 marker
+   字面量各出现一次，method-qualified hit 关系、event、identity token 和 evaluation 顺序完整保留。
+   Graph/Plan 仍由服务端保存和校验；模型不得打开单独的 Graph/Plan 文件。方法卡只在必需
+   `SKILL` 区段出现一次，不在角色输入中重复。模型只能提交根 JSON 数组；每项只有
    `evaluation_ref`、`verdict`、`supporting_event_refs` 和 `reason`。确认时只能选择当前计划项中的
    有序 event ref 子集，不回抄 marker、日志原文、行号、哈希、identity 或 hit ref。
 4. 默认配置在 Specialist 结果通过服务端校验后直接终结；没有 `UNKNOWN` 且至少一项
    `CONFIRMED` 时解决，含 `UNKNOWN` 或全部 `REJECTED` 时不可定论。
 5. 设置 `EVIDENCE_V2_REVIEWER_ENABLED=true` 后，Reviewer 使用同一模型身份，但运行在另一个
-   完全隔离的 Job、Workspace 和上下文中。它读取同一份 Graph、Plan 和方法卡，盲评全部
-   evaluation；模型调用完成前看不到 Specialist 的 verdict、reason 或状态。
+   完全隔离的 Job、Workspace 和上下文中。它读取由同一权威 Graph/Plan 派生的紧凑输入和同一组
+   方法卡，盲评全部 evaluation；模型调用完成前看不到 Specialist 的 verdict、reason 或状态。
 6. 每个实际运行的角色首次出现结构或覆盖错误时，最多再调用一次受限 repair。每次被拒绝的响应和精确
    prompt 都追加写入 execution records；重启会从已持久化阶段继续，绝不会产生第三次调用。
+
+紧凑投影不截断、不采样，也不改变 Graph/Plan 的证据闭包。正常路径仍只调用一次 Specialist；
+开启 Reviewer 后才增加一次隔离盲评。冻结用户事实只保存在 `request.json`，不再同时复制进 prompt。
+框架的 `context_bytes` 统计最终角色 prompt 与必读 request 的 UTF-8 字节总和，与模型的 token
+上下文窗口不是同一个量。紧凑后的必需输入若仍超过固定角色字节预算，服务端会在调用模型前
+以 `CONTEXT_LIMIT` 失败，`methods_result` 缺省；该错误不会改写成
+`SERVER_INVARIANT_VIOLATION` 或 `OUTCOME_INVALID`。当前版本不分批，也不靠截断或采样绕过限制。
 
 开启 Reviewer 后，服务端逐项比较两次评估。全部 evaluation 精确覆盖、两者 verdict 与
 supporting event refs 一致，并且至少有一个 `CONFIRMED` 时，Case 才进入 `RESOLVED`；分歧、
@@ -378,7 +392,7 @@ supporting event refs 一致，并且至少有一个 `CONFIRMED` 时，Case 才�
 `INTERRUPTED`。Methods V2 不产生 `PARTIALLY_RESOLVED`，也不创建 Candidate 或旧版
 `DecisionAuditV2`。
 
-Evidence Graph 同时保存扫描时发现的 limitations。它们会贯穿 Specialist、实际运行的 Reviewer、终态
+Evidence Graph 同时保存扫描时发现的 limitations。它们会经紧凑投影传给 Specialist 和实际运行的 Reviewer，并贯穿终态
 Outcome 以及 MCP/REST 的 `methods_result`。公共结果只公开稳定 reason code、diagnostic ID、
 确认的 evaluation/method/event/hit refs 和 limitations。模型的自由文本 reason、被拒绝的响应、
 原始日志和内部校验细节仅保留在 execution records，不进入公共结果。Methods V2 不生成可下载
@@ -399,10 +413,11 @@ python -m problem_locator replay-method-rejection \
 命令会输出稳定 JSON receipt；`code` 用于机器判断，`message` 用于直接查看失败原因。它不会修改
 `DATA_ROOT`。
 
-若资源解析、Workspace、Logparse 预处理或 execution-record 在 Graph/Plan 生成前失败，服务端
-不会伪造 Evidence Graph、Evaluation Plan 或 evaluation identity。Case 直接进入 `FAILED`，
-`methods_result` 缺省；MCP/REST 从 `failure.reason_code` 和 `failure.diagnostic_id` 返回稳定分类与
-诊断 ID。已有 Graph/Plan 的终态仍使用完整 `methods_result`。
+若资源解析、Workspace、Logparse 预处理、上下文构建或 execution-record 在形成合法 Methods
+终态前失败，服务端不会用内部 Graph/Plan 引用伪造 `methods_result`。Case 直接进入 `FAILED`，
+客户端读取 `failure.code` 和 `failure.message`。已有 Evidence V2 终态分类时，
+`failure.reason_code` 与 `failure.diagnostic_id` 同时存在；`CONTEXT_LIMIT` 则保留原始错误码，
+这两个字段缺省，不会显示成“服务端未能保持 Evidence V2 的机械不变量”。
 
 ## 隔离重放指定 Job
 
@@ -510,8 +525,10 @@ State V8 与所有 V1/V2/V3/V4/V5/V6/V7 State、Job 和 Outcome 有意不兼容�
 
 - 当前版本面向可信用户、固定版本 Skill 和可信 Agent 命令所在的受控网络，不提供租户级授权；重放能力也没有引入管理员、管理端或额外权限模型。
 - 服务进程和 Agent 都不是操作系统沙箱。请使用专用操作系统账户运行，并只授予必要的仓库和数据访问权限。
-- Methods V2 不发布 `AUDIT_BUNDLE`；Graph、Plan、角色响应、prompt 和 validation-only replay
-  输入都保存在服务端 execution records 中。MCP/REST 只返回 `methods_result` 的固定公开字段。
+- Methods V2 不发布 `AUDIT_BUNDLE`；Graph、Plan、角色响应、包含紧凑评估输入的 prompt 和
+  validation-only replay 输入都保存在服务端 execution records 中。角色 Workspace 不保存
+  `runtime/context.txt`，避免模型把已经收到的 prompt 再读一遍。MCP/REST 只返回
+  `methods_result` 的固定公开字段。
 - Logparse 会在启动时进行指纹校验。首个符合条件的诊断任务可以解析一次日志；后续任务必须使用已持久化的 `LOGPARSE_RUN`，不得再次解包或解析原始归档。
 - 当前版本的并发数固定为 `1`，上下文、工作区和输出限制均为固定值；持久化依赖本地文件系统，不提供多实例故障转移。
 - Linux Server 启动验证、Windows/macOS 默认 Client 能力、显式 Linux Client、平台进程树/取消验证、确定性 Journey 和真实 Logparse 冒烟测试属于不同证明。测试或交接记录必须明确实际运行的平台和 Stage。

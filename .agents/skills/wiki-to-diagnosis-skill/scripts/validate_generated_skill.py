@@ -58,13 +58,20 @@ METHOD_OUTPUT_CONTRACT_PATTERN = re.compile(
 )
 REQUIRED_SKILL_PHRASES = (
     "request.json",
-    "method-evidence-graph.json",
-    "method-evaluation-plan.json",
+    "evaluation_input",
+    "observations",
+    "markers",
+    "evaluations",
+    "events",
     "evaluation_ref",
     "verdict",
     "supporting_event_refs",
     "reason",
     "UNKNOWN",
+)
+FORBIDDEN_SKILL_PHRASES = (
+    "method-evidence-graph.json",
+    "method-evaluation-plan.json",
 )
 
 
@@ -422,6 +429,9 @@ def validate(skill_dir: Path, wiki: Path) -> dict[str, object]:
             for required_phrase in REQUIRED_SKILL_PHRASES:
                 if required_phrase not in skill_text:
                     errors.append(f"SKILL.md must mention {required_phrase}")
+            for forbidden_phrase in FORBIDDEN_SKILL_PHRASES:
+                if forbidden_phrase in skill_text:
+                    errors.append(f"SKILL.md must not mention {forbidden_phrase}")
             if METHOD_OUTPUT_CONTRACT_PATTERN.search(skill_text) is None:
                 errors.append(
                     "SKILL.md must state the exact four-field Methods evaluation output"

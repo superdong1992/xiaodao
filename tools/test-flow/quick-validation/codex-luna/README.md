@@ -25,7 +25,14 @@ source snapshot，也不生成 `model-cert.json`。运行前先查看计划：
 工程失败才停止后续场景。
 
 `e2e` 固定使用 `multiple-rpc-timeouts`。生产 Runtime 从同一份已验证 registration、release
-`driver.json`、`client.log` 和 `server.log` 生成 Evidence Graph 与 Evaluation Plan。默认
+`driver.json`、`client.log` 和 `server.log` 生成权威 Evidence Graph 与 Evaluation Plan，再把机械派生的
+紧凑 `evaluation_input` 内嵌到生产 prompt。模型只读取该紧凑输入、`request.json` 和 prompt 中的方法卡，
+其中 `sources` 会保留全部冻结 target，包括没有命中 observation 的 source。
+model-only Workspace 的 `runtime/` 目录只保留必要的 `tool-state`，且整个 Workspace 不包含单独的
+Graph/Plan 文件或 `runtime/context.txt`；driver 仍以服务端记录中的权威 Graph/Plan 校验完整性、
+顺序和 event 子集。Wrapper 还要求 prompt 恰好包含一个与角色匹配的数据 section，并将 Specialist
+或 Reviewer 的闭合身份与 `request.json`、`manifest.json` 对齐；`inputs/` 只能包含这两个文件，
+任何旧证据目录或未知输入都会原样保留并 fail closed。默认
 `SPECIALIST_ONLY`，模型只提交 Specialist evaluation 数组，正常一次调用，协议 repair 后最多两次。
 显式选择 `BLIND_CONSENSUS` 才会再调用盲评 Reviewer，正常两次、最多四次。该路径不读取 Candidate、
 `PARTIALLY_RESOLVED`、`result.zip` 或 Methods V1 grounding。

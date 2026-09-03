@@ -273,7 +273,9 @@ def test_diagnose_creates_candidate_free_blind_review_job(tmp_path) -> None:
     )
 
 
-def test_reviewer_context_receives_only_graph_plan_and_method_cards(tmp_path) -> None:
+def test_reviewer_context_receives_compact_evaluation_input_and_method_cards(
+    tmp_path,
+) -> None:
     inputs = _flow_inputs(tmp_path)
     source, skill, _, _ = inputs
     _, outcome, _, _, job, graph, plan = _plan_and_review_job(inputs)
@@ -288,6 +290,12 @@ def test_reviewer_context_receives_only_graph_plan_and_method_cards(tmp_path) ->
         method_ids=tuple(item.method_id for item in plan.evaluations),
     )
     validate_workspace_manifest_for_job(manifest, job)
+    combined_skill = (
+        (skill.package_root / "SKILL.md").read_text(encoding="utf-8").rstrip()
+        + "\n\n"
+        + "\n\n".join(item.content.rstrip() for item in cards)
+        + "\n"
+    )
     context = ContextBuilder().build(
         job,
         ContextMaterials(
@@ -297,7 +305,7 @@ def test_reviewer_context_receives_only_graph_plan_and_method_cards(tmp_path) ->
             manifest=manifest,
             previous_outcomes=(),
             evidence=(),
-            skill=(skill.package_root / "SKILL.md").read_text(encoding="utf-8"),
+            skill=combined_skill,
             methods_evidence_graph=graph,
             methods_evaluation_plan=plan,
             methods_skill=skill,
@@ -310,10 +318,15 @@ def test_reviewer_context_receives_only_graph_plan_and_method_cards(tmp_path) ->
     assert "candidate_conclusion_id" not in context.body
     assert graph.graph_ref in context.body
     assert plan.plan_ref in context.body
+    assert '"evaluation_input"' in context.body
+    assert '"observations"' in context.body
+    assert '"markers"' in context.body
+    assert '"evaluations"' in context.body
+    assert '"events"' in context.body
     assert all(item.method_id in context.body for item in cards)
-    assert all(item.content.splitlines()[0] in context.body for item in cards)
-    assert USER_FACT_VALUE in context.body
-    assert "threshold_config" in context.body
+    assert all(context.body.count(item.content.splitlines()[0]) == 1 for item in cards)
+    assert USER_FACT_VALUE not in context.body
+    assert "threshold_config" not in context.body
     assert job.context_snapshot is not None
     assert job.context_snapshot.user_facts == source.context_snapshot.user_facts
     assert manifest.entries == []

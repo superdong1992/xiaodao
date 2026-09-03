@@ -80,8 +80,10 @@ token/cost 和 admission blocker。`--evaluation-mode` 省略时使用 `SPECIALI
 
 1. 固定 Logparse fixture 完成一次确定性预处理；
 2. 服务端生成 `methods-evidence-graph-v2.json` 和 `methods-evaluation-plan-v2.json`；
-3. Specialist 只读取 request、Graph、Plan 和方法卡，写
-   `output/method-diagnosis.draft.json`；
+3. Specialist 从 production prompt 中读取紧凑 `evaluation_input` 和方法卡，仅在方法规则需要用户
+   输入时读取 `request.json`，然后写 `output/method-diagnosis.draft.json`；完整 Graph/Plan 只保留在
+   服务端 execution records，不进入角色 Workspace；同一 prompt 也不会再以 `runtime/context.txt`
+   暴露给模型；
 4. `SPECIALIST_ONLY` 直接发布 Case 的 `methods_result`；
 5. `BLIND_CONSENSUS` 才由 `OutcomeSubmissionService` 创建独立 REVIEW Job，Reviewer 写
    `output/method-review.draft.json`，随后由 Runtime 机械共识。

@@ -119,11 +119,13 @@
 
 frontmatter 只包含 `name` 和 `description`。入口保持简短，并明确：
 
-1. 读取冻结 `request.json`、Server 写入的 `method-evidence-graph.json` 和
-   `method-evaluation-plan.json`。
-2. 方法规则需要用户输入时读取 `request.json` 中的冻结值。日志证据只能来自 Evidence Graph 和
-   Evaluation Plan；不读取目标日志、不重新扫描 marker，也不重新选择日志。
-3. 按 Evaluation Plan 顺序评估全部 `evaluation_ref`；不能在第一个确认项后停止。
+1. 读取冻结 `request.json` 和运行时上下文中的紧凑 `evaluation_input`。
+2. 方法规则需要用户输入时读取 `request.json` 中的冻结值。`evaluation_input.observations` 是去重
+   物理日志行目录，`markers` 是去重声明 marker 目录，`evaluations` 是完整有序待判定清单，每项的
+   `events` 给出 event ref 与 observation/marker 关联。
+3. 日志证据只能来自 `evaluation_input`；不读取目标日志、不重新扫描 marker、不读取独立 Graph/Plan
+   文件，也不重新选择日志。按 `evaluation_input.evaluations` 顺序评估全部 `evaluation_ref`；不能在
+   第一个确认项后停止。
 4. 每项只输出 `evaluation_ref`、`verdict`、`supporting_event_refs` 和 `reason`。
    `CONFIRMED` 必须按计划顺序选择当前 evaluation 的非空 event ref 子集；`REJECTED` 或
    `UNKNOWN` 必须使用空数组。
@@ -225,10 +227,10 @@ Wiki 的同义输入按以下规则合并：
   `evidence_markers` 按 `references/source-log-templates.md` 的源模板顺序排列。
 - 同一模板被多个方法用于确认、排除、计算或请求关联时，把 marker 列入每个适用方法。共同日志的
   字段含义和观测边界可以只写一次共享引用，但共享解释不能替代方法索引；只存在于共享引用的 marker
-  不会进入该方法的 Evidence Graph。
+  不会进入该方法的服务端证据集合。
 - `activation_markers` 必填、非空且组内唯一，并且必须是当前方法 `evidence_markers` 的保序子序列。
   它只列“出现后值得为该方法创建 evaluation”的 marker；activation 命中不表示单条日志已经确认
-  原因，Agent 仍须使用完整 Evidence Graph 和方法卡作出判定。公共症状只能作为 context，不能用于
+  原因，Agent 仍须使用当前 evaluation 的完整 `events` 和方法卡作出判定。公共症状只能作为 context，不能用于
   激活所有原因；公共 RPC timeout 日志只能放在 `evidence_markers` 中作为判断上下文。同一 literal
   确实会触发多个方法时，可以分别出现在这些方法的 `activation_markers` 中。
 - 不能用日志缺失排除受抑制、限流或采样影响的原因。

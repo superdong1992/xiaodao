@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -8,13 +9,15 @@ import pytest
 
 from problem_locator.application import build_application_service
 from problem_locator.contracts import (
+    BoundedContext,
     CaseAggregate,
+    ContextSection,
+    ContextSectionKind,
     ErrorCode,
     ExecutionLogSinks,
     ExecutionStage,
     Job,
     JobStatus,
-    MethodEvaluationPlanV2,
     OutcomeResultType,
     ResumeCase,
     StateFile,
@@ -70,6 +73,7 @@ from tests.deterministic.unit.runtime.test_diagnosis_runtime import (
     _Clock,
     _MethodsTwoPassBackend,
     _StateView,
+    _TooLargeContext,
     _claimed_logparse_job_state_and_resources,
     _logparse_catalog,
 )
@@ -83,7 +87,7 @@ from tests.deterministic.unit.runtime.test_methods_workspace_context_v2 import (
 
 
 def _assert_model_minimal_methods_prompt(prompt: str) -> None:
-    assert '"user_facts"' in prompt
+    assert '"user_facts"' not in prompt
     assert '"problem_spec"' not in prompt
     for state_field in (
         "diagnosis_state_revision",
@@ -96,6 +100,19 @@ def _assert_model_minimal_methods_prompt(prompt: str) -> None:
         "candidate_conclusion",
     ):
         assert f'"{state_field}"' not in prompt
+
+
+def _evaluation_input_from_prompt(prompt: str) -> dict[str, Any]:
+    for line in prompt.splitlines():
+        if not line.startswith("{"):
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and isinstance(value.get("evaluation_input"), dict):
+            return value["evaluation_input"]
+    raise AssertionError("Methods role prompt has no compact evaluation_input")
 
 
 class _EvidenceV2SpecialistBackend(_MethodsTwoPassBackend):
@@ -119,9 +136,17 @@ class _EvidenceV2SpecialistBackend(_MethodsTwoPassBackend):
             if path.is_file()
         }
         self.role_workspace_files.append(names)
+        assert {path.name for path in inputs.iterdir()} == {
+            "manifest.json",
+            "request.json",
+        }
+        assert {
+            path.name for path in (workspace_root / "runtime").iterdir()
+        } == {"tool-state"}
         assert "inputs/request.json" in names
-        assert "inputs/method-evidence-graph.json" in names
-        assert "inputs/method-evaluation-plan.json" in names
+        assert "inputs/method-evidence-graph.json" not in names
+        assert "inputs/method-evaluation-plan.json" not in names
+        assert "runtime/context.txt" not in names
         assert "inputs/target_logs.json" not in names
         assert "inputs/logparse-receipt.json" not in names
         assert not any(name.startswith("inputs/target-logs/") for name in names)
@@ -133,13 +158,15 @@ class _EvidenceV2SpecialistBackend(_MethodsTwoPassBackend):
         request = parse_canonical_json_bytes((inputs / "request.json").read_bytes())
         assert request["job"]["job_id"] == self.job.job_id
         assert request["user_facts"]
+        assert request["user_facts"][0]["value"] not in kwargs["prompt"]
         prompt = kwargs["prompt"]
         self.role_prompts.append(prompt)
         _assert_model_minimal_methods_prompt(prompt)
         assert "Evidence Graph" in prompt
+        assert "evaluation_input" in prompt
         assert "evaluation_ref" in prompt
         assert "supporting_event_refs" in prompt
-        assert "evidence_event_refs" in prompt
+        assert '"events"' in prompt
         assert "hit refs" in prompt
 
         response = self.responses.pop(0)
@@ -162,20 +189,17 @@ class _EvidenceV2SpecialistBackend(_MethodsTwoPassBackend):
             response in {"VALID", "VALID_SECRET"}
             or response in {"VALID_UNKNOWN", "VALID_REJECTED"}
         ):
-            plan = parse_canonical_json_bytes(
-                (inputs / "method-evaluation-plan.json").read_bytes(),
-                MethodEvaluationPlanV2,
-            )
+            evaluation_input = _evaluation_input_from_prompt(prompt)
             verdict = {
                 "VALID_UNKNOWN": "UNKNOWN",
                 "VALID_REJECTED": "REJECTED",
             }.get(response, "CONFIRMED")
             response = [
                 {
-                    "evaluation_ref": item.evaluation_ref,
+                    "evaluation_ref": item["evaluation_ref"],
                     "verdict": verdict,
                     "supporting_event_refs": (
-                        list(item.evidence_event_refs)
+                        [event["event_ref"] for event in item["events"]]
                         if verdict == "CONFIRMED"
                         else []
                     ),
@@ -185,10 +209,43 @@ class _EvidenceV2SpecialistBackend(_MethodsTwoPassBackend):
                         else "The frozen evidence satisfies this method card."
                     ),
                 }
-                for item in plan.evaluations
+                for item in evaluation_input["evaluations"]
             ]
         (workspace_root / "output/method-diagnosis.draft.json").write_bytes(
             json.dumps(response, ensure_ascii=False).encode("utf-8")
+        )
+
+
+class _ContextBodyAtRoleLimit:
+    def build(self, job: Job, materials: Any) -> BoundedContext:
+        del materials
+        body = "x" * job.resource_limits.context_bytes
+        encoded = body.encode("utf-8")
+        return BoundedContext(
+            job_id=job.job_id,
+            job_type=job.job_type,
+            body=body,
+            sections=[
+                ContextSection(
+                    ordinal=0,
+                    kind=ContextSectionKind.JOB_INSTRUCTION,
+                    source_refs=[job.job_id],
+                    required=True,
+                    utf8_bytes=len(encoded),
+                    content_sha256=hashlib.sha256(encoded).hexdigest(),
+                ),
+                ContextSection(
+                    ordinal=1,
+                    kind=ContextSectionKind.RESOURCE_MANIFEST,
+                    source_refs=[job.job_id],
+                    required=True,
+                    utf8_bytes=0,
+                    content_sha256=hashlib.sha256(b"").hexdigest(),
+                ),
+            ],
+            utf8_bytes=len(encoded),
+            limit_bytes=job.resource_limits.context_bytes,
+            body_sha256=hashlib.sha256(encoded).hexdigest(),
         )
 
 
@@ -234,6 +291,18 @@ class _AfterWriteAuditRecords(InMemoryExecutionRecordStore):
             self.failed_once = True
             raise OSError("injected after-write failure")
         return receipt
+
+
+class _RejectContextAuditRecords(InMemoryExecutionRecordStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.context_publish_attempts = 0
+
+    def publish_audit_bytes(self, job_id: str, filename: str, raw_bytes: bytes):
+        if filename == "context.txt":
+            self.context_publish_attempts += 1
+            raise OSError("injected context audit archive failure")
+        return super().publish_audit_bytes(job_id, filename, raw_bytes)
 
 
 class _CrashBeforeOutcomeRecords(_ObservedRecords):
@@ -288,10 +357,14 @@ class _EvidenceV2ReviewerBackend:
         assert "private specialist reason" not in prompt
         assert "specialist_evaluation" not in prompt
         workspace_root = Path(kwargs["workspace_root"])
-        plan = parse_canonical_json_bytes(
-            (workspace_root / "inputs/method-evaluation-plan.json").read_bytes(),
-            MethodEvaluationPlanV2,
-        )
+        assert {
+            path.name for path in (workspace_root / "inputs").iterdir()
+        } == {"manifest.json", "request.json"}
+        assert {
+            path.name for path in (workspace_root / "runtime").iterdir()
+        } == {"tool-state"}
+        assert not (workspace_root / "runtime/context.txt").exists()
+        evaluation_input = _evaluation_input_from_prompt(prompt)
         response = self.responses.pop(0)
         if response == "MODEL_FAILURE":
             raise runtime_failure(
@@ -307,20 +380,20 @@ class _EvidenceV2ReviewerBackend:
                 event_selection = "LAST"
             response = [
                 {
-                    "evaluation_ref": item.evaluation_ref,
+                    "evaluation_ref": item["evaluation_ref"],
                     "verdict": verdict,
                     "supporting_event_refs": (
                         (
-                            [item.evidence_event_refs[-1]]
+                            [item["events"][-1]["event_ref"]]
                             if event_selection == "LAST"
-                            else list(item.evidence_event_refs)
+                            else [event["event_ref"] for event in item["events"]]
                         )
                         if verdict == "CONFIRMED"
                         else []
                     ),
                     "reason": "Independent blind review of the frozen plan.",
                 }
-                for item in plan.evaluations
+                for item in evaluation_input["evaluations"]
             ]
         (workspace_root / "output/method-review.draft.json").write_bytes(
             json.dumps(response, ensure_ascii=False).encode("utf-8")
@@ -683,6 +756,80 @@ def test_specialist_scans_once_hard_cuts_logs_and_publishes_handoff(
     assert prompt == backend.role_prompts[0].encode("utf-8")
 
 
+def test_specialist_context_limit_preserves_classified_failure_without_terminal_projection(
+    tmp_path: Path,
+) -> None:
+    runtime, job, backend, _ = _runtime(tmp_path, ("VALID",))
+    runtime._context_builder = _TooLargeContext()  # noqa: SLF001 - failure injection
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    error = receipt.job_outcome.error
+    assert receipt.job_outcome.result_type is OutcomeResultType.FAILED
+    assert error is not None
+    assert error.stage is ExecutionStage.CONTEXT_BUILD
+    assert error.code is ErrorCode.CONTEXT_LIMIT
+    assert error.reason_code is None
+    assert error.details[0].observed == 131073
+    assert error.details[0].limit == 131072
+    assert receipt.job_outcome.methods_terminal_projection is None
+    assert receipt.job_outcome.methods_reviewer_result is None
+    assert backend.calls == []
+
+
+def test_specialist_final_role_prompt_is_included_in_context_byte_limit(
+    tmp_path: Path,
+) -> None:
+    runtime, job, backend, records = _runtime(tmp_path, ("VALID",))
+    runtime._context_builder = _ContextBodyAtRoleLimit()  # noqa: SLF001
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    error = receipt.job_outcome.error
+    assert error is not None
+    assert error.stage is ExecutionStage.CONTEXT_BUILD
+    assert error.code is ErrorCode.CONTEXT_LIMIT
+    assert error.details[0].limit == job.resource_limits.context_bytes
+    assert error.details[0].observed > error.details[0].limit
+    assert receipt.job_outcome.methods_terminal_projection is None
+    assert backend.calls == []
+    assert read_method_prompt_v2(
+        records,
+        job_id=job.job_id,
+        role="SPECIALIST",
+        attempt="PRIMARY",
+    ) is None
+
+
+def test_specialist_context_audit_failure_remains_audit_terminal(
+    tmp_path: Path,
+) -> None:
+    records = _RejectContextAuditRecords()
+    runtime, job, backend, _ = _runtime(
+        tmp_path,
+        ("VALID",),
+        records=records,
+    )
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    outcome = receipt.job_outcome
+    projection = outcome.methods_terminal_projection
+    assert records.context_publish_attempts == 1
+    assert backend.calls == []
+    assert outcome.result_type is OutcomeResultType.FAILED
+    assert outcome.error is not None
+    assert outcome.error.stage is ExecutionStage.EXECUTION_RECORD
+    assert outcome.error.code is ErrorCode.EXECUTION_RECORD_FAILED
+    assert outcome.error.retryable is False
+    assert outcome.error.reason_code == "AUDIT_ARCHIVE_FAILED"
+    assert projection is not None
+    assert projection.status == "FAILED"
+    assert projection.reason_code == "AUDIT_ARCHIVE_FAILED"
+    assert projection.evidence_graph_ref is not None
+    assert projection.plan_ref is not None
+
+
 @pytest.mark.parametrize(
     ("response", "expected_status", "expected_reason"),
     [
@@ -857,6 +1004,58 @@ def test_reviewer_is_blind_and_reads_pending_state_after_model(
     assert attribution["terminal_status"] == "RESOLVED"
     assert attribution["reason_code"] is None
     assert attribution["consensus_subreason"] is None
+
+
+def test_reviewer_context_limit_preserves_classified_failure_without_terminal_projection(
+    tmp_path: Path,
+) -> None:
+    runtime, job, backend, _, _ = _review_runtime(
+        tmp_path,
+        ("VALID_CONFIRMED",),
+    )
+    runtime._context_builder = _TooLargeContext()  # noqa: SLF001 - failure injection
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    error = receipt.job_outcome.error
+    assert receipt.job_outcome.result_type is OutcomeResultType.FAILED
+    assert error is not None
+    assert error.stage is ExecutionStage.CONTEXT_BUILD
+    assert error.code is ErrorCode.CONTEXT_LIMIT
+    assert error.reason_code is None
+    assert error.details[0].observed == 131073
+    assert error.details[0].limit == 131072
+    assert receipt.job_outcome.methods_terminal_projection is None
+    assert receipt.job_outcome.methods_reviewer_result is None
+    assert backend.calls == []
+
+
+def test_reviewer_final_role_prompt_is_included_in_context_byte_limit(
+    tmp_path: Path,
+) -> None:
+    runtime, job, backend, records, events = _review_runtime(
+        tmp_path,
+        ("VALID_CONFIRMED",),
+    )
+    runtime._context_builder = _ContextBodyAtRoleLimit()  # noqa: SLF001
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    error = receipt.job_outcome.error
+    assert error is not None
+    assert error.stage is ExecutionStage.CONTEXT_BUILD
+    assert error.code is ErrorCode.CONTEXT_LIMIT
+    assert error.details[0].limit == job.resource_limits.context_bytes
+    assert error.details[0].observed > error.details[0].limit
+    assert receipt.job_outcome.methods_terminal_projection is None
+    assert backend.calls == []
+    assert "source-state-read" not in events
+    assert read_method_prompt_v2(
+        records,
+        job_id=job.job_id,
+        role="REVIEWER",
+        attempt="PRIMARY",
+    ) is None
 
 
 @pytest.mark.parametrize(

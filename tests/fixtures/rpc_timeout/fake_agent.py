@@ -32,7 +32,6 @@ sys.path.insert(0, os.fspath(REPOSITORY_ROOT / "src"))
 from problem_locator.contracts import (  # noqa: E402
     AgentJobOutcomeDraftV2,
     JobType,
-    MethodEvaluationPlanV2,
     OutcomeResultType,
     RouteDecision,
     RouteKind,
@@ -126,29 +125,44 @@ def _route(instruction: dict[str, Any], context: str) -> None:
     )
 
 
-def _evaluation_response(*, verdict: str, reason: str) -> list[dict[str, object]]:
-    plan_bytes = Path("inputs/method-evaluation-plan.json").read_bytes()
-    plan = parse_canonical_json_bytes(plan_bytes, MethodEvaluationPlanV2)
-    if canonical_json_bytes(plan) != plan_bytes:
-        raise RuntimeError("the Evaluation Plan is not canonical")
+def _evaluation_response(
+    context: str,
+    *,
+    verdict: str,
+    reason: str,
+) -> list[dict[str, object]]:
+    role_input = None
+    for section_name in ("EVIDENCE", "REVIEW_TARGET"):
+        try:
+            candidate = json.loads(_section(context, section_name))
+        except RuntimeError:
+            continue
+        if isinstance(candidate, dict) and "evaluation_input" in candidate:
+            role_input = candidate
+            break
+    if role_input is None:
+        raise RuntimeError("compact Methods evaluation_input is absent")
+    evaluation_input = role_input["evaluation_input"]
     return [
         {
-            "evaluation_ref": item.evaluation_ref,
+            "evaluation_ref": item["evaluation_ref"],
             "verdict": verdict,
             "supporting_event_refs": (
-                list(item.evidence_event_refs) if verdict == "CONFIRMED" else []
+                [event["event_ref"] for event in item["events"]]
+                if verdict == "CONFIRMED"
+                else []
             ),
             "reason": reason,
         }
-        for item in plan.evaluations
+        for item in evaluation_input["evaluations"]
     ]
 
 
 def _diagnose(instruction: dict[str, Any], context: str) -> None:
-    del context
     Path("output/method-diagnosis.draft.json").write_bytes(
         canonical_json_bytes(
             _evaluation_response(
+                context,
                 verdict="CONFIRMED",
                 reason="The server-generated Evidence Graph satisfies this method.",
             )
@@ -175,7 +189,7 @@ def _await_review_release(job_id: str) -> None:
         time.sleep(0.02)
 
 
-def _review(instruction: dict[str, Any]) -> None:
+def _review(instruction: dict[str, Any], context: str) -> None:
     job_id = str(instruction["job_id"])
     _record_invocation(
         job_id=job_id,
@@ -186,6 +200,7 @@ def _review(instruction: dict[str, Any]) -> None:
     Path("output/method-review.draft.json").write_bytes(
         canonical_json_bytes(
             _evaluation_response(
+                context,
                 verdict="CONFIRMED",
                 reason="Independent blind review confirms this evaluation.",
             )
@@ -202,7 +217,7 @@ def main() -> int:
     elif job_type is JobType.DIAGNOSE:
         _diagnose(instruction, context)
     elif job_type is JobType.REVIEW:
-        _review(instruction)
+        _review(instruction, context)
     else:  # pragma: no cover - JobType is closed, retained for defensive clarity.
         raise RuntimeError(f"unsupported fake Agent job type: {job_type.value}")
     return 0

@@ -518,8 +518,11 @@ def load_methods_package(
     skill_name = _frontmatter_name(skill_text)
     for phrase in (
         "request.json",
-        "method-evidence-graph.json",
-        "method-evaluation-plan.json",
+        "evaluation_input",
+        "observations",
+        "markers",
+        "evaluations",
+        "events",
         "evaluation_ref",
         "verdict",
         "supporting_event_refs",
@@ -528,6 +531,14 @@ def load_methods_package(
     ):
         if phrase not in skill_text:
             raise ValueError(f"SKILL.md must mention {phrase}")
+    for obsolete_input in (
+        "method-evidence-graph.json",
+        "method-evaluation-plan.json",
+    ):
+        if obsolete_input in skill_text:
+            raise ValueError(
+                f"SKILL.md must not request obsolete model input {obsolete_input}"
+            )
     if _METHOD_OUTPUT_CONTRACT_PATTERN.search(skill_text) is None:
         raise ValueError(
             "SKILL.md must state the exact four-field Methods evaluation output"

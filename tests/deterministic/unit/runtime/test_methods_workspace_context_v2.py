@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+
+import problem_locator.runtime.context_builder as context_builder_module
 
 from problem_locator.contracts import (
     CaseAggregate,
@@ -24,6 +27,10 @@ from problem_locator.contracts import (
 from problem_locator.runtime.catalog import VersionedAssetCatalog
 from problem_locator.runtime.context_builder import ContextBuilder
 from problem_locator.runtime.context_policy import RuntimeAssetResolver
+from problem_locator.runtime.diagnosis_runtime import _method_role_prompt_v2
+from problem_locator.runtime.methods_evaluation_input_v2 import (
+    build_method_evaluation_input_v2,
+)
 from problem_locator.runtime.methods_evidence_v2 import (
     build_method_evaluation_plan_v2,
     scan_method_evidence_v2,
@@ -35,6 +42,7 @@ from problem_locator.runtime.methods_records_v2 import (
     read_method_evidence_graph_v2,
 )
 from problem_locator.runtime.failures import RuntimeExecutionError
+from problem_locator.runtime.methods_skill import load_specialized_skill_registration
 from problem_locator.runtime.workspace import WorkspaceManager
 from problem_locator.storage.coordination import StorageCoordinationLock
 from problem_locator.storage.execution_records import FileExecutionRecordStore
@@ -266,17 +274,51 @@ def _jobs(
     tmp_path: Path,
     *,
     methods: tuple[tuple[str, str], ...] = (("slow-execution", "API_COMPLETE"),),
+    shared_markers: tuple[str, ...] | None = None,
     target_bytes: bytes | None = None,
 ):
     skills_root = tmp_path / "skills"
+    skill_name = "workspace-context-v2"
     skill = load_test_methods_skill(
         skills_root,
-        name="workspace-context-v2",
+        name=skill_name,
         methods=methods,
     )
+    if shared_markers is not None:
+        registration_root = skills_root / skill_name
+        methods_path = skill.package_root / "methods.json"
+        methods_value = json.loads(methods_path.read_text(encoding="utf-8"))
+        for method in methods_value["methods"]:
+            method["evidence_markers"] = list(shared_markers)
+            method["activation_markers"] = list(shared_markers)
+            reference_path = skill.package_root / method["reference"]
+            card = reference_path.read_text(encoding="utf-8")
+            original_marker = next(
+                marker
+                for method_id, marker in methods
+                if method_id == method["id"]
+            )
+            card = card.replace(
+                f"`{original_marker}`",
+                "\n".join(f"`{marker}`" for marker in shared_markers),
+                1,
+            )
+            reference_path.write_text(card, encoding="utf-8")
+        methods_path.write_text(
+            json.dumps(methods_value, ensure_ascii=False, sort_keys=True, indent=2)
+            + "\n",
+            encoding="utf-8",
+        )
+        (skill.package_root / "references/source-log-templates.md").write_text(
+            "# Source log templates\n\n```text\n"
+            + "\n".join(shared_markers)
+            + "\n```\n",
+            encoding="utf-8",
+        )
+        skill = load_specialized_skill_registration(registration_root)
     catalog = VersionedAssetCatalog(
         skill_dir=skills_root,
-        generic_skill_name="workspace-context-v2",
+        generic_skill_name=skill_name,
     )
     skill_ref = VersionedRef(
         id="diagnosis-skill/workspace-context-v2",
@@ -392,7 +434,7 @@ def _jobs(
     return catalog, skill, specialist, reviewer, specialist_workspace, graph, plan, target_bytes
 
 
-def test_role_workspaces_hard_cut_to_one_graph_plan_and_real_cards(
+def test_role_workspaces_hide_graph_plan_and_publish_compact_context_once(
     tmp_path: Path,
 ) -> None:
     (
@@ -437,14 +479,8 @@ def test_role_workspaces_hard_cut_to_one_graph_plan_and_real_cards(
         }
     ]
     assert set(request) == {"schema_version", "job", "user_facts"}
-    assert parse_canonical_json_bytes(
-        (inputs / "method-evidence-graph.json").read_bytes(),
-        model_type=MethodEvidenceGraphV2,
-    ) == graph
-    assert parse_canonical_json_bytes(
-        (inputs / "method-evaluation-plan.json").read_bytes(),
-        model_type=MethodEvaluationPlanV2,
-    ) == plan
+    assert not (inputs / "method-evidence-graph.json").exists()
+    assert not (inputs / "method-evaluation-plan.json").exists()
     assert not (inputs / "target_logs.json").exists()
     assert not (inputs / "logparse-receipt.json").exists()
     assert not (inputs / "target-logs").exists()
@@ -485,14 +521,8 @@ def test_role_workspaces_hard_cut_to_one_graph_plan_and_real_cards(
     assert reviewer_request["job"]["job_id"] == reviewer.job_id
     assert reviewer_request["user_facts"] == request["user_facts"]
     review_inputs = reviewer_workspace.root / "inputs"
-    assert parse_canonical_json_bytes(
-        (review_inputs / "method-evidence-graph.json").read_bytes(),
-        model_type=MethodEvidenceGraphV2,
-    ) == graph
-    assert parse_canonical_json_bytes(
-        (review_inputs / "method-evaluation-plan.json").read_bytes(),
-        model_type=MethodEvaluationPlanV2,
-    ) == plan
+    assert not (review_inputs / "method-evidence-graph.json").exists()
+    assert not (review_inputs / "method-evaluation-plan.json").exists()
     assert not (review_inputs / "method-diagnosis.json").exists()
     assert not (review_inputs / "method-grounding-audit.json").exists()
 
@@ -514,8 +544,8 @@ def test_role_workspaces_hard_cut_to_one_graph_plan_and_real_cards(
     reviewer_context = ContextBuilder().build(reviewer, reviewer_materials)
 
     for context in (specialist_context, reviewer_context):
-        assert USER_FACT_VALUE in context.body
-        assert '"user_facts"' in context.body
+        assert USER_FACT_VALUE not in context.body
+        assert '"user_facts"' not in context.body
         assert graph.graph_ref in context.body
         assert plan.plan_ref in context.body
         assert skill.methods.methods[0].id in context.body
@@ -548,6 +578,228 @@ def test_role_workspaces_hard_cut_to_one_graph_plan_and_real_cards(
         assert "candidate_conclusion_id" not in context.body
     assert '"role":"SPECIALIST"' in specialist_context.body
     assert '"role":"REVIEWER"' in reviewer_context.body
+
+
+def test_specialist_context_compacts_shared_marker_capacity_without_truncation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shared_markers = ("CAPACITY_SHARED_ALPHA", "CAPACITY_SHARED_OMEGA")
+    methods = (
+        ("first-capacity-method", shared_markers[0]),
+        ("second-capacity-method", shared_markers[0]),
+        ("third-capacity-method", shared_markers[0]),
+    )
+    first_sentinel = "CAPACITY_FIRST_SENTINEL"
+    last_sentinel = "CAPACITY_LAST__SENTINEL"
+    lines = tuple(
+        (
+            first_sentinel
+            if index == 0
+            else last_sentinel
+            if index == 39
+            else f"CAPACITY_R{index:02d}___SENTINEL"
+        )
+        + f" {shared_markers[0]} {shared_markers[1]}"
+        + f" request_id=req-{index:02d} payload="
+        + "证据链路" * 64
+        + f" row={index:02d}"
+        for index in range(40)
+    )
+    assert len({len(line.encode("utf-8")) for line in lines}) == 1
+
+    (
+        catalog,
+        skill,
+        specialist,
+        reviewer,
+        workspace,
+        graph,
+        plan,
+        _,
+    ) = _jobs(
+        tmp_path,
+        methods=methods,
+        shared_markers=shared_markers,
+        target_bytes=("\n".join(lines) + "\n").encode("utf-8"),
+    )
+    assert len(graph.hits) == len(lines) * len(shared_markers) * len(methods)
+
+    receipt = WorkspaceManager.publish_methods_specialist_inputs_v2(
+        workspace,
+        specialist,
+        evidence_graph=graph,
+        evaluation_plan=plan,
+    )
+    materials = RuntimeAssetResolver(catalog).resolve_job(specialist).bind_workspace(
+        receipt.workspace,
+        job=specialist,
+        methods_evidence_graph=graph,
+        methods_evaluation_plan=plan,
+    ).materials
+    evaluation_input = build_method_evaluation_input_v2(
+        evidence=graph,
+        plan=plan,
+    )
+
+    projection_calls = 0
+    production_projection = context_builder_module.build_method_evaluation_input_v2
+
+    def counted_projection(*, evidence, plan):
+        nonlocal projection_calls
+        projection_calls += 1
+        return production_projection(evidence=evidence, plan=plan)
+
+    monkeypatch.setattr(
+        context_builder_module,
+        "build_method_evaluation_input_v2",
+        counted_projection,
+    )
+    context = ContextBuilder().build(specialist, materials)
+
+    assert projection_calls == 1
+    assert [item.source_id for item in evaluation_input.sources] == ["server"]
+    assert len(evaluation_input.observations) == len(lines)
+    assert [item.line for item in evaluation_input.observations] == list(lines)
+    assert [item.literal for item in evaluation_input.markers] == sorted(shared_markers)
+    assert [item.method_id for item in evaluation_input.evaluations] == [
+        method_id for method_id, _ in methods
+    ]
+
+    expected_observation_ids = set(range(1, len(lines) + 1))
+    expected_marker_ids = {item.id for item in evaluation_input.markers}
+    for evaluation, planned in zip(
+        evaluation_input.evaluations,
+        plan.evaluations,
+        strict=True,
+    ):
+        assert evaluation.evaluation_ref == planned.evaluation_ref
+        assert evaluation.method_id == planned.method_id
+        assert tuple(item.event_ref for item in evaluation.events) == (
+            planned.evidence_event_refs
+        )
+        assert len(evaluation.events) == len(lines)
+        assert all(
+            {match.marker_id for match in event.matches} == expected_marker_ids
+            for event in evaluation.events
+        )
+        assert {
+            match.observation_id
+            for event in evaluation.events
+            for match in event.matches
+        } == expected_observation_ids
+
+    reviewer_manager = WorkspaceManager(tmp_path / "capacity-reviewer-data")
+    reviewer_workspace = reviewer_manager.prepare(
+        reviewer,
+        _aggregate(reviewer, source_job=specialist),
+        _UnusedResourceStore(),  # type: ignore[arg-type]
+        methods_evaluation_plan=plan,
+    )
+    reviewer_receipt = reviewer_manager.publish_methods_reviewer_inputs_v2(
+        reviewer_workspace,
+        reviewer,
+        evidence_graph=graph,
+        evaluation_plan=plan,
+    )
+    reviewer_materials = RuntimeAssetResolver(catalog).resolve_job(
+        reviewer
+    ).bind_workspace(
+        reviewer_receipt.workspace,
+        job=reviewer,
+        methods_evidence_graph=graph,
+        methods_evaluation_plan=plan,
+    ).materials
+    reviewer_context = ContextBuilder().build(reviewer, reviewer_materials)
+    reviewer_role_payloads = []
+    for raw_line in reviewer_context.body.splitlines():
+        try:
+            value = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and value.get("role") == "REVIEWER":
+            reviewer_role_payloads.append(value)
+
+    assert projection_calls == 2
+    assert reviewer_context.limit_bytes == 204_800
+    for role_context, role, request_bytes in (
+        (context, "SPECIALIST", receipt.request_bytes),
+        (reviewer_context, "REVIEWER", reviewer_receipt.request_bytes),
+    ):
+        maximum_model_input_bytes = max(
+            len(
+                _method_role_prompt_v2(
+                    context=role_context,
+                    role=role,
+                    attempt=attempt,
+                ).encode("utf-8")
+            )
+            + len(request_bytes)
+            for attempt in ("PRIMARY", "REPAIR")
+        )
+        assert role_context.limit_bytes - maximum_model_input_bytes >= 32 * 1024
+    assert len(reviewer_role_payloads) == 1
+    assert reviewer_role_payloads[0]["evaluation_input"] == (
+        evaluation_input.model_dump(mode="json")
+    )
+    assert [
+        item["evaluation_ref"]
+        for item in reviewer_role_payloads[0]["evaluation_input"]["evaluations"]
+    ] == [item.evaluation_ref for item in evaluation_input.evaluations]
+    assert [
+        [event["event_ref"] for event in item["events"]]
+        for item in reviewer_role_payloads[0]["evaluation_input"]["evaluations"]
+    ] == [
+        [event.event_ref for event in item.events]
+        for item in evaluation_input.evaluations
+    ]
+
+    current_role_payload = canonical_json_bytes(
+        {
+            "schema_version": 2,
+            "role": "SPECIALIST",
+            "job_id": specialist.job_id,
+            "case_id": specialist.case_id,
+            "request_path": "inputs/request.json",
+            "evaluation_input": evaluation_input.model_dump(mode="json"),
+        }
+    )
+    legacy_role_payload = canonical_json_bytes(
+        {
+            "schema_version": 2,
+            "role": "SPECIALIST",
+            "job_id": specialist.job_id,
+            "case_id": specialist.case_id,
+            "request_path": "inputs/request.json",
+            "evidence_graph_path": "inputs/method-evidence-graph.json",
+            "evaluation_plan_path": "inputs/method-evaluation-plan.json",
+            "evidence_graph": graph.model_dump(mode="json"),
+            "evaluation_plan": plan.model_dump(mode="json"),
+            "method_cards": [
+                item.model_dump(mode="json")
+                for item in materials.methods_method_cards
+            ],
+        }
+    )
+    context_bytes = context.body.encode("utf-8")
+    assert context_bytes.count(current_role_payload) == 1
+    assert (
+        len(canonical_json_bytes(graph)) + len(canonical_json_bytes(plan))
+        > context.limit_bytes
+    )
+    legacy_context_bytes = context_bytes.replace(
+        current_role_payload,
+        legacy_role_payload,
+        1,
+    )
+    assert len(legacy_context_bytes) > context.limit_bytes
+
+    for role_context in (context, reviewer_context):
+        for line in lines:
+            assert role_context.body.count(line) == 1
+        assert role_context.body.count(first_sentinel) == 1
+        assert role_context.body.count(last_sentinel) == 1
+        assert skill.methods.methods[0].id in role_context.body
 
 
 def test_review_context_policy_declares_candidate_free_methods_v2() -> None:
@@ -610,7 +862,7 @@ def test_single_field_mutations_are_rejected_from_production_baseline(
         )
 
 
-def test_fresh_restart_publishes_recorded_graph_plan_without_preprocess_inputs(
+def test_fresh_restart_keeps_recorded_graph_plan_out_of_model_workspace(
     tmp_path: Path,
 ) -> None:
     (
@@ -685,11 +937,9 @@ def test_fresh_restart_publishes_recorded_graph_plan_without_preprocess_inputs(
     assert {path.name for path in inputs.iterdir()} == {
         "manifest.json",
         "request.json",
-        "method-evidence-graph.json",
-        "method-evaluation-plan.json",
     }
-    assert receipt.evidence_graph_bytes == canonical_json_bytes(recorded_graph)
-    assert receipt.evaluation_plan_bytes == canonical_json_bytes(recorded_plan)
+    assert receipt.graph_ref == recorded_graph.graph_ref
+    assert receipt.plan_ref == recorded_plan.plan_ref
     assert receipt.workspace.manifest.entries == []
     assert receipt.workspace.attachments == ()
     assert receipt.workspace.evidence == ()
@@ -706,6 +956,7 @@ def test_fresh_restart_publishes_recorded_graph_plan_without_preprocess_inputs(
         methods_evaluation_plan=recorded_plan,
     ).materials
     context = ContextBuilder().build(specialist, materials)
+    assert USER_FACT_VALUE not in context.body
     assert recorded_graph.graph_ref in context.body
     assert recorded_plan.plan_ref in context.body
     assert skill.methods.methods[0].id in context.body

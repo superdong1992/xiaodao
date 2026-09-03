@@ -254,7 +254,10 @@ description: Test-owned release registration consumed by the production Runtime.
 
 # RPC timeout diagnosis
 
-Read request.json, method-evidence-graph.json, and method-evaluation-plan.json.
+Read request.json and the compact evaluation_input embedded in the context.
+Do not read separate Evidence Graph or Evaluation Plan files.
+Use sources, including zero-hit sources, and resolve the observations and markers
+catalogs through the ordered events in evaluations.
 Return only evaluation_ref, verdict, supporting_event_refs, and reason;
 UNKNOWN is allowed.
 """,
@@ -284,7 +287,7 @@ UNKNOWN is allowed.
             (
                 "## 适用条件\n固定用例。",
                 "## 所需证据\n" + "\n".join(f"- `{item}`" for item in templates),
-                "## 计算与判断\n按冻结 Evidence Graph 判断。",
+                "## 计算与判断\n按上下文中的紧凑 evaluation_input 判断。",
                 "## 确认条件\n存在正向证据。",
                 "## 未知边界\n证据不足时 UNKNOWN。",
                 "## 输出含义\n输出 evaluation verdict。",
@@ -444,6 +447,14 @@ def test_production_runtime_generates_graph_plan_state_outcome_and_methods_resul
     assert result["evaluation_mode"] == "SPECIALIST_ONLY"
     assert result["preprocessing_calls"] in {0, 1}
     assert _sequence(backend) == [("SPECIALIST", "PRIMARY")]
+    invocation = backend.invocations[0]
+    assert invocation["evidence_graph_ref"] == result["scenario"]["evidence_graph"][
+        "ref"
+    ]
+    assert invocation["plan_ref"] == result["scenario"]["evaluation_plan"]["ref"]
+    assert list(invocation["evaluation_refs"]) == result["methods_result"][
+        "confirmed_evaluation_refs"
+    ]
     assert result["public_case_status"] == "RESOLVED"
     assert result["methods_result"]["status"] == "RESOLVED"
     assert result["methods_result"]["confirmed_method_ids"] == [
@@ -512,6 +523,8 @@ def test_production_runtime_allows_one_specialist_repair_only(
         ("SPECIALIST", "PRIMARY"),
         ("SPECIALIST", "REPAIR"),
     ]
+    assert len({item["plan_ref"] for item in backend.invocations}) == 1
+    assert len({item["evaluation_refs"] for item in backend.invocations}) == 1
 
 
 def test_production_runtime_allows_one_repair_per_role_and_four_calls_total(
@@ -535,6 +548,9 @@ def test_production_runtime_allows_one_repair_per_role_and_four_calls_total(
         ("REVIEWER", "REPAIR"),
     ]
     assert len(backend.invocations) == 4
+    assert len({item["evidence_graph_ref"] for item in backend.invocations}) == 1
+    assert len({item["plan_ref"] for item in backend.invocations}) == 1
+    assert len({item["evaluation_refs"] for item in backend.invocations}) == 1
 
 
 def test_production_runtime_archives_every_legal_early_terminal(

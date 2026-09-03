@@ -73,7 +73,7 @@ test("det.evidence-v2-core is a zero-model pytest Gate in deterministic.full", (
 
 test("the Core selector list is fixed, unique, and points at existing production tests", () => {
   assert.equal(new Set(EVIDENCE_V2_CORE_SELECTORS).size, EVIDENCE_V2_CORE_SELECTORS.length);
-  assert.equal(EVIDENCE_V2_CORE_SELECTORS.length, 55);
+  assert.equal(EVIDENCE_V2_CORE_SELECTORS.length, 63);
   assert.match(evidenceV2CoreCasesDigest(), /^[a-f0-9]{64}$/);
   for (const selector of EVIDENCE_V2_CORE_SELECTORS) {
     const file = selector.split("::", 1)[0];

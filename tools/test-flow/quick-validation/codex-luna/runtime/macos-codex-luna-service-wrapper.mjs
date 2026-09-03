@@ -130,7 +130,7 @@ function copyPlainTree(sourceRoot, destinationRoot, { skippedRoot = null } = {})
   fs.chmodSync(destinationRoot, metadata.mode & 0o777);
 }
 
-export function stageLinuxServiceProject(workspaceRoot) {
+export function stageLinuxServiceProject(workspaceRoot, { runtimeEntries = null } = {}) {
   const root = path.resolve(workspaceRoot);
   const runtimeRoot = path.join(root, "runtime");
   const projectRoot = path.join(runtimeRoot, LINUX_SERVICE_PROJECT_DIRECTORY);
@@ -139,7 +139,25 @@ export function stageLinuxServiceProject(workspaceRoot) {
   try {
     copyPlainTree(path.join(root, "inputs"), path.join(projectRoot, "inputs"));
     copyPlainTree(path.join(root, "output"), path.join(projectRoot, "output"));
-    copyPlainTree(runtimeRoot, path.join(projectRoot, "runtime"), { skippedRoot: projectRoot });
+    if (runtimeEntries === null) {
+      copyPlainTree(runtimeRoot, path.join(projectRoot, "runtime"), { skippedRoot: projectRoot });
+    } else {
+      if (
+        !Array.isArray(runtimeEntries)
+        || new Set(runtimeEntries).size !== runtimeEntries.length
+        || runtimeEntries.some((entry) => !/^[a-z0-9][a-z0-9-]*$/u.test(entry))
+      ) fail("MACOS_CODEX_LUNA_SERVICE_PROJECT_INPUT_INVALID", "Selected runtime entries are invalid");
+      const runtimeMetadata = fs.lstatSync(runtimeRoot);
+      if (!runtimeMetadata.isDirectory() || runtimeMetadata.isSymbolicLink()) fail("MACOS_CODEX_LUNA_SERVICE_PROJECT_INPUT_INVALID", "Service runtime input must be a plain directory");
+      const destinationRuntime = path.join(projectRoot, "runtime");
+      fs.mkdirSync(destinationRuntime, { mode: 0o700 });
+      for (const entry of runtimeEntries) {
+        const sourceEntry = path.join(runtimeRoot, entry);
+        if (!fs.existsSync(sourceEntry)) continue;
+        copyPlainTree(sourceEntry, path.join(destinationRuntime, entry));
+      }
+      fs.chmodSync(destinationRuntime, runtimeMetadata.mode & 0o777);
+    }
   } catch (error) {
     fs.rmSync(projectRoot, { recursive: true, force: true });
     throw error;

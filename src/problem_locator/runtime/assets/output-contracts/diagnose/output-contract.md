@@ -6,12 +6,14 @@ not wrap it in an object or Markdown and do not write
 `output/job_outcome.draft.json`.
 
 The Server has already scanned the logs once. Use only the server-produced
-`inputs/request.json` frozen user facts,
-`inputs/method-evidence-graph.json`,
-`inputs/method-evaluation-plan.json`, and the pinned Methods package. Apply a
-request value only when the method rule names its required user input. Log
-evidence comes only from the Evidence Graph and Evaluation Plan; do not read or
-scan target logs or rebuild evidence references.
+`inputs/request.json` frozen user facts, the compact `evaluation_input` object
+in the required Evidence context section, and the pinned Methods package.
+`evaluation_input` is the complete model-visible projection of the authoritative
+Evidence Graph and Evaluation Plan. Its `sources` catalog includes every frozen
+target, including a source with no matching observation; `observations` contains
+only matching physical lines. Apply a request value only when the method
+rule names its required user input. Do not read or rescan target logs, rebuild
+evidence references, or load separate Graph/Plan files.
 
 Return one item for every Evaluation Plan item, in exact plan order:
 
@@ -29,8 +31,8 @@ Return one item for every Evaluation Plan item, in exact plan order:
 Every item has exactly `evaluation_ref`, `verdict`, `supporting_event_refs`, and
 `reason`. `evaluation_ref` must equal the corresponding plan value. `verdict` is
 exactly one of `CONFIRMED`, `REJECTED`, or `UNKNOWN`. For `CONFIRMED`,
-`supporting_event_refs` is a non-empty subset of that plan item's
-`evidence_event_refs`, retaining their plan order. For `REJECTED` or `UNKNOWN`,
+`supporting_event_refs` is a non-empty subset of that evaluation item's event
+refs, retaining their evaluation order. For `REJECTED` or `UNKNOWN`,
 it is an empty array. Select only exact event refs issued in the Evaluation Plan.
 Do not return hit refs and do not copy or invent markers, raw log text, line
 numbers, hashes, identity values, or any other evidence fields. `reason` is

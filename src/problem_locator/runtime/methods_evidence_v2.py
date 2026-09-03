@@ -24,6 +24,12 @@ from .methods_grounding import FrozenTargetLogV1
 from .methods_skill import ResolvedSpecializedSkillV1
 
 
+def _line_contains_marker(folded_line: str, folded_marker: str) -> bool:
+    """Return whether one normalized marker occurs in one normalized log line."""
+
+    return folded_marker in folded_line
+
+
 def _validated_logs(
     target_logs: Sequence[FrozenTargetLogV1],
 ) -> tuple[FrozenTargetLogV1, ...]:
@@ -83,20 +89,32 @@ def scan_method_evidence_v2(
         )
     )
     source_ref_by_id = {item.source_id: item.source_ref for item in sources}
-    indexed_markers = tuple(
+    marker_bindings_by_folded_literal: dict[
+        str,
+        list[tuple[int, str, int, str, bool]],
+    ] = {}
+    marker_bindings = (
         (
-            method.priority,
-            method.id,
-            marker_index,
-            marker,
             marker.casefold(),
-            marker in method.activation_markers,
+            (
+                method.priority,
+                method.id,
+                marker_index,
+                marker,
+                marker in method.activation_markers,
+            ),
         )
         for method in sorted(
             skill.methods.methods,
             key=lambda item: (item.priority, item.id),
         )
         for marker_index, marker in enumerate(method.evidence_markers, start=1)
+    )
+    for folded_marker, binding in marker_bindings:
+        marker_bindings_by_folded_literal.setdefault(folded_marker, []).append(binding)
+    indexed_markers = tuple(
+        (folded_marker, tuple(bindings))
+        for folded_marker, bindings in marker_bindings_by_folded_literal.items()
     )
 
     hits: list[MethodEvidenceHitV2] = []
@@ -107,29 +125,17 @@ def scan_method_evidence_v2(
         source_ref = source_ref_by_id[target.source_id]
         for line_number, line in enumerate(lines, start=1):
             folded_line = line.casefold()
-            for (
-                method_priority,
-                method_id,
-                marker_index,
-                marker,
-                folded_marker,
-                is_activation_marker,
-            ) in indexed_markers:
-                if folded_marker not in folded_line:
+            for folded_marker, bindings in indexed_markers:
+                if not _line_contains_marker(folded_line, folded_marker):
                     continue
-                hit_ref = method_evidence_hit_ref_v2(
-                    method_id=method_id,
-                    method_priority=method_priority,
-                    marker_index=marker_index,
-                    source_ref=source_ref,
-                    source_id=target.source_id,
-                    line_number=line_number,
-                    marker=marker,
-                    line=line,
-                )
-                hits.append(
-                    MethodEvidenceHitV2(
-                        hit_ref=hit_ref,
+                for (
+                    method_priority,
+                    method_id,
+                    marker_index,
+                    marker,
+                    is_activation_marker,
+                ) in bindings:
+                    hit_ref = method_evidence_hit_ref_v2(
                         method_id=method_id,
                         method_priority=method_priority,
                         marker_index=marker_index,
@@ -139,9 +145,21 @@ def scan_method_evidence_v2(
                         marker=marker,
                         line=line,
                     )
-                )
-                if is_activation_marker:
-                    activated_method_ids.add(method_id)
+                    hits.append(
+                        MethodEvidenceHitV2(
+                            hit_ref=hit_ref,
+                            method_id=method_id,
+                            method_priority=method_priority,
+                            marker_index=marker_index,
+                            source_ref=source_ref,
+                            source_id=target.source_id,
+                            line_number=line_number,
+                            marker=marker,
+                            line=line,
+                        )
+                    )
+                    if is_activation_marker:
+                        activated_method_ids.add(method_id)
 
     frozen_hits = tuple(
         sorted(

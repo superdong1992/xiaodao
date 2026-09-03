@@ -120,9 +120,10 @@ description: Untrusted test input consumed by the production Runtime for Unicode
 
 # Unicode casefold diagnosis
 
-Read request.json, method-evidence-graph.json, and method-evaluation-plan.json.
-Return only evaluation_ref, verdict, supporting_event_refs, and reason;
-UNKNOWN is allowed.
+Read request.json and the evaluation_input embedded in the runtime context.
+Use evaluation_input.observations and evaluation_input.markers through each
+item in evaluation_input.evaluations and its events. Return only evaluation_ref,
+verdict, supporting_event_refs, and reason; UNKNOWN is allowed.
 """,
         encoding="utf-8",
     )

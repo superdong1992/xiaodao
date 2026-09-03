@@ -33,9 +33,11 @@ description: Convert an authored troubleshooting Wiki into one evidence-driven d
    日志必然确认原因；公共症状只能作为判断上下文，不能用来激活所有方法。公共 RPC timeout 日志也
    只能放在 `evidence_markers` 中作为 context。同一 literal 如果确实会触发多个方法，可以分别写入
    这些方法的 `activation_markers`。
-8. 为每张方法卡写清楚可机械执行的确认、排除和未知条件。Server 会把一次扫描得到的 Evidence Graph
-   和完整 Evaluation Plan 交给 Agent；冻结 `request.json` 继续提供方法规则所需的用户输入。
-   生成的 Skill 只负责让 Agent 能按方法规则判断每个 `evaluation_ref`，并从当前计划项选择
+8. 为每张方法卡写清楚可机械执行的确认、排除和未知条件。Server 会把一次扫描结果投影成紧凑
+   `evaluation_input` 并放入运行时上下文：`observations` 保存去重后的物理日志行，`markers` 保存
+   去重后的声明 marker，`evaluations` 按计划顺序列出待判定方法，每项的 `events` 保存可选择的
+   event ref 及其 observation/marker 关联。冻结 `request.json` 继续提供方法规则所需的用户输入。
+   生成的 Skill 只负责按方法规则判断每个 `evaluation_ref`，并从当前 evaluation 选择
    `supporting_event_refs`；不要求 Agent 回抄 marker、日志原文、行号、哈希、事件身份字段或 hit ref。
 9. 按用户指定的目录和名称生成一个 Skill。生成前先阅读 [输出合同](references/output-contract.md)，严格使用其中的文件结构和字段。
 10. 生成后运行本 Skill 的校验脚本。校验失败时只修正被报告的结构问题；不要借机改变 Wiki 语义。
@@ -53,7 +55,7 @@ description: Convert an authored troubleshooting Wiki into one evidence-driven d
 - Wiki 没有说明、而且会实质改变结论的信息，必须报告为作者待确认项；不能自行补默认值。
 - 方法卡可以引用共享边界，但不能依赖未列入 `methods.json` 的隐藏文件。
 - Wiki 给出的每种稳定日志模板都必须在 `references/source-log-templates.md` 中按源顺序完整保留。
-  `evidence_markers` 不只承担原因路由，还必须让 Evidence Graph 收齐该方法判断、计算、排除和请求关联
+  `evidence_markers` 不只承担原因路由，还必须让服务端收齐该方法判断、计算、排除和请求关联
   所需的日志。共同日志可以共享解释，但凡方法会读取其出现情况或字段，就要在每个适用方法的
   “所需证据”中逐字列出完整模板，并在该方法中索引。
 - `activation_markers` 只控制是否为方法创建 evaluation，不缩减 `evidence_markers` 收集的上下文，
@@ -63,15 +65,17 @@ description: Convert an authored troubleshooting Wiki into one evidence-driven d
 
 完整使用入口接收 Wiki 声明的用户参数和日志附件。运行器先完成 Logparse 预处理，再由 Server 扫描
 一次冻结日志；只有命中方法的 `activation_markers` 时才创建该方法的 evaluation，同时保留该方法
-全部 `evidence_markers` 命中的上下文，生成 `method-evidence-graph.json` 和
-`method-evaluation-plan.json`。生成的定位 Skill
-在评估阶段同时读取冻结 `request.json`，并遵守以下边界：
+全部 `evidence_markers` 命中的上下文。Server 内部保存权威审计记录，并把紧凑
+`evaluation_input` 放入 Agent 的运行时上下文。生成的定位 Skill 在评估阶段仍可读取冻结
+`request.json`，并遵守以下边界：
 
 - `request.json` 提供 Wiki 声明的用户输入；方法规则需要某项输入时使用其冻结值。
-- `method-evidence-graph.json` 是本次评估的完整证据集合，`method-evaluation-plan.json` 是完整待判定清单。
-- 日志证据只能来自 Evidence Graph 和 Evaluation Plan；不读取目标日志，不重新扫描 marker，
-  不重新选择生命周期、进程或日志路径。
-- 按 Evaluation Plan 顺序逐项应用对应方法卡；不能在第一个确认项后停止。
+- `evaluation_input.observations` 是去重后的物理日志行目录，`evaluation_input.markers` 是去重后的
+  声明 marker 目录；`evaluation_input.evaluations` 是完整有序待判定清单，每项的 `events` 给出
+  当前方法可用的 event ref 和 observation/marker 关联。
+- 日志证据只能来自运行时上下文中的 `evaluation_input`；不读取目标日志，不重新扫描 marker，
+  不读取独立 Graph/Plan 文件，也不重新选择生命周期、进程或日志路径。
+- 按 `evaluation_input.evaluations` 顺序逐项应用对应方法卡；不能在第一个确认项后停止。
 - 每个输出项只能包含 `evaluation_ref`、`verdict`、`supporting_event_refs` 和 `reason`。
   `CONFIRMED` 必须按计划顺序选择当前 evaluation 的非空 event ref 子集；`REJECTED` 或
   `UNKNOWN` 必须使用空数组。

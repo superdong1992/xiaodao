@@ -1,6 +1,6 @@
 # 已修复问题台账
 
-更新时间：2026-08-28
+更新时间：2026-09-03
 
 本文件记录已经在当前工作区验证、修复并由专项回归测试保护的问题。活跃待办仍只写入
 [`TODO.md`](TODO.md)；同一问题再次回归时更新原条目，不另建一个缺少历史关联的条目。
@@ -2096,3 +2096,64 @@
   `dev.default` 在 quick 升级后正常获准，完整确定性闭包全部 PASS。源码快照为
   `git-visible-worktree-v1:86407911bd63718703d2ba23946e9415039d35777da0b4b0a4e00b11fcca235a`
   （749 files）。本元数据行本身不宣称被其引用的快照覆盖。
+
+## PL-FIX-052：Evidence V2 证据重复放大导致 Context 超限并误报 OUTCOME_INVALID
+
+- **状态**：已修复；验证结论以本条最终复验元数据为准。
+- **症状**：几十行长日志在 1:1 marker-hit、跨方法共享 marker 和每个 hit 携带完整原始行后，
+  可形成约 254 KiB 的 Evidence Graph；旧上下文又同时内嵌完整 Graph、Plan 和重复方法卡，实际
+  Specialist 输入达到约 295 KiB，超过 `specialist_context_bytes=262144`。服务端随后把
+  `CONTEXT_LIMIT` 改写为 `SERVER_INVARIANT_VIOLATION / OUTCOME_INVALID`，用户看到的原因与真实容量
+  问题无关。
+- **受影响版本**：Problem Locator `5.0.0` Evidence V2 初版，至
+  `codex/evidence-v2-reviewer-toggle-minimal@2f8f5d80`。
+- **根因**：Graph 为了审计与机械校验，按 method-qualified hit 重复保存 marker 和命中行；
+  ContextBuilder 却把这份服务端记录直接当模型输入，并同时保留模型可读 Graph/Plan 文件和
+  `runtime/context.txt`。Scanner 还会按方法重复检查相同 casefold marker。Specialist 的
+  Workspace/context 异常捕获又无差别生成 Methods 系统失败，吞掉了原始容量错误；预算只检查
+  context body，没有计入最终角色指令和必读 request。
+- **不可回归行为**：
+  - Graph/Plan 的公开结构、ref、method-qualified hit 和服务端审计语义不变；模型只接收一次机械
+    派生的紧凑 `evaluation_input`。`sources` 保留全部冻结目标，包括零命中 source；物理日志行和
+    marker 字面量各存一次，evaluation、event、identity 和全部 method-qualified match 关系不得
+    截断、采样、合并或丢失。
+  - 同一 casefold marker 每行只做一次 substring 检查，再按原顺序展开各方法 hit；不得改变
+    activation、Graph/Plan 字节或终态校验。
+  - Specialist/Reviewer 角色 Workspace 的 `inputs/` 只保留 `manifest.json`、`request.json`，
+    `runtime/` 只保留 `tool-state`；完整 Graph/Plan 和 `runtime/context.txt` 只能留在服务端
+    execution records。用户事实只从 request 读取，不再复制进 prompt。
+  - `context_bytes` 必须在模型调用前覆盖 context body、必读 request 和最长 repair 角色后缀。
+    紧凑后仍超限时原样发布 `CONTEXT_LIMIT` 及 observed/limit，模型不得启动，`methods_result`、
+    Methods reason code 和 diagnostic ID 必须缺省；不能改写为 `OUTCOME_INVALID`。真正的审计归档
+    失败仍保持 `AUDIT_ARCHIVE_FAILED`。
+  - 默认产品、P1/P2 和 `release.full` 仍只运行 Specialist；Reviewer 继续只在显式开启或独立盲评
+    认证时运行。本修复不增加分批、截断、采样、配置跨重启冻结或一致性防护。
+  - 旧 Methods package 不得继续要求模型读取 Graph/Plan 文件；部署前必须用当前元 Skill 从原 Wiki
+    重新生成并校验 package，不能由 wrapper 删除或修补旧输入后伪造通过。
+- **修复历史**：2026-09-03，从干净基线创建独立工作树；增加无损紧凑投影与 source catalog，
+  删除模型 Workspace 中的 Graph/Plan、prompt 和用户事实重复通道，合并共享 marker 匹配，按最终
+  模型输入统一计费并仅让 `CONTEXT_LIMIT` 穿透原有 Specialist 终态映射；同步两套 Wiki 元 Skill、
+  内置 profile/output/context policy、P1/P2 wrapper、文档和固定认证选择器。
+- **专项回归测试**：
+  - `tests/deterministic/unit/runtime/test_methods_workspace_context_v2.py::test_specialist_context_compacts_shared_marker_capacity_without_truncation`
+  - 同文件 `test_role_workspaces_hide_graph_plan_and_publish_compact_context_once`
+  - `tests/deterministic/unit/runtime/test_methods_evaluation_input_v2.py::test_shared_marker_lines_are_catalogued_once_without_losing_relations`
+  - 同文件 `test_large_shared_marker_graph_projects_below_the_byte_boundary` 和
+    `test_source_catalog_preserves_scanned_source_without_matching_lines`
+  - `tests/deterministic/unit/runtime/test_methods_evidence_v2.py::test_shared_casefold_literal_is_matched_once_per_line_then_expanded`
+  - `tests/deterministic/unit/runtime/test_diagnosis_runtime_methods_v2.py::test_specialist_context_limit_preserves_classified_failure_without_terminal_projection`
+  - 同文件 `test_specialist_final_role_prompt_is_included_in_context_byte_limit`、
+    `test_reviewer_context_limit_preserves_classified_failure_without_terminal_projection`、
+    `test_reviewer_final_role_prompt_is_included_in_context_byte_limit` 和
+    `test_specialist_context_audit_failure_remains_audit_terminal`
+  - `.agents/skills/wiki-to-diagnosis-skill/scripts/validate_generated_skill.py` 与
+    `.claude/skills/wiki-to-logparse-diagnosis-skill/scripts/validate_generated_skill.py` 的旧输入负例
+  - `tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-service-wrapper.test.mjs`
+  - `tools/test-flow/quick-validation/codex-luna/tests/macos-codex-luna-model-cert-wrapper.test.mjs`
+- **最新 Test Flow verdict**：Dev `run-20260903T031108Z-ce0c6063` 为 `PASS_WITH_WARNINGS`，仅因
+  性能基线尚未校准；functional、operation、verification 均为 `PASS`，模型调用、token 和费用均为
+  0。`deterministic.full` 为 PASS：Evidence V2 Core 116/116、contracts 602/602、unit
+  1982 passed/68 skipped、integration 69/69、SameJob 3/3。验证源码快照
+  `git-visible-worktree-v1:f2e9fcc3fa07caaf0654fb5b5103040b9081ba72bc4beed7dd8254dfd1c96ed7`
+  （752 files），worktree/materialized source verification 均为 PASS。本元数据行本身不宣称被其引用的
+  源码快照覆盖。

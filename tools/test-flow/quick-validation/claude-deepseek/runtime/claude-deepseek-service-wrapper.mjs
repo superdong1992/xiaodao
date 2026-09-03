@@ -23,6 +23,12 @@ const MODULE_PATH = fileURLToPath(import.meta.url);
 const MAX_PROMPT_BYTES = 4 * 1024 * 1024;
 const ROLE_MARKER = "<<<METHODS_EVIDENCE_V2_ROLE>>>";
 const ROLE_END_MARKER = "<<<END METHODS_EVIDENCE_V2_ROLE>>>";
+const ROLE_CONTEXT_START = /<<<SECTION \d+ (EVIDENCE|REVIEW_TARGET)>>>/gu;
+const ROLE_CONTEXT_SECTION = /<<<SECTION \d+ (EVIDENCE|REVIEW_TARGET)>>>\n([\s\S]*?)\n<<<END SECTION>>>/gu;
+const LEGACY_ROLE_INPUTS = Object.freeze([
+  "inputs/method-evidence-graph.json",
+  "inputs/method-evaluation-plan.json",
+]);
 const ROLE_SPEC = Object.freeze({
   SPECIALIST: Object.freeze({
     promptRole: "Specialist",
@@ -49,6 +55,311 @@ function fail(code, message, details = {}) {
 
 function requireWrapper(condition, code, message, details = {}) {
   if (!condition) fail(code, message, details);
+}
+
+function isPlainObject(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function positiveInteger(value) {
+  return Number.isSafeInteger(value) && value > 0;
+}
+
+function relativePosixPath(value) {
+  if (typeof value !== "string" || value.length === 0 || value.startsWith("/") || value.includes("\\")) return false;
+  if (/^[A-Za-z]:/u.test(value)) return false;
+  return value.split("/").every((part) => part !== "" && part !== "." && part !== "..");
+}
+
+function compareUnicodeText(left, right) {
+  const leftPoints = [...left].map((item) => item.codePointAt(0));
+  const rightPoints = [...right].map((item) => item.codePointAt(0));
+  for (let index = 0; index < Math.min(leftPoints.length, rightPoints.length); index += 1) {
+    if (leftPoints[index] !== rightPoints[index]) return leftPoints[index] - rightPoints[index];
+  }
+  return leftPoints.length - rightPoints.length;
+}
+
+function compareDeterministicTuple(left, right) {
+  for (let index = 0; index < left.length; index += 1) {
+    const comparison = typeof left[index] === "number"
+      ? left[index] - right[index]
+      : compareUnicodeText(left[index], right[index]);
+    if (comparison !== 0) return comparison;
+  }
+  return 0;
+}
+
+function uuid(value) {
+  return typeof value === "string"
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(value);
+}
+
+function validVersionedRef(value) {
+  return exactKeys(value, ["id", "version", "content_hash"])
+    && typeof value.id === "string"
+    && value.id.length > 0
+    && typeof value.version === "string"
+    && value.version.length > 0
+    && /^[0-9a-f]{64}$/u.test(value.content_hash);
+}
+
+function validReviewTarget(value) {
+  return exactKeys(value, [
+    "schema_version",
+    "evaluation_id",
+    "source_job_id",
+    "graph_ref",
+    "plan_ref",
+    "skill_ref",
+    "reviewed_state_revision",
+  ])
+    && value.schema_version === 2
+    && uuid(value.evaluation_id)
+    && uuid(value.source_job_id)
+    && /^graph-[0-9a-f]{64}$/u.test(value.graph_ref)
+    && /^plan-[0-9a-f]{64}$/u.test(value.plan_ref)
+    && validVersionedRef(value.skill_ref)
+    && positiveInteger(value.reviewed_state_revision);
+}
+
+function validateCompactEvaluationInput(value) {
+  requireWrapper(
+    isPlainObject(value)
+      && exactKeys(value, ["schema_version", "evidence_graph_ref", "plan_ref", "limitations", "sources", "observations", "markers", "evaluations"])
+      && value.schema_version === 2
+      && /^graph-[0-9a-f]{64}$/u.test(value.evidence_graph_ref)
+      && /^plan-[0-9a-f]{64}$/u.test(value.plan_ref)
+      && Array.isArray(value.limitations)
+      && Array.isArray(value.sources)
+      && value.sources.length > 0
+      && Array.isArray(value.observations)
+      && value.observations.length > 0
+      && Array.isArray(value.markers)
+      && value.markers.length > 0
+      && Array.isArray(value.evaluations)
+      && value.evaluations.length > 0,
+    "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID",
+    "Production role prompt has an invalid compact evaluation_input",
+  );
+  requireWrapper(
+    value.limitations.every((item) => typeof item === "string" && item.length > 0)
+      && new Set(value.limitations).size === value.limitations.length,
+    "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID",
+    "Compact evaluation limitations are invalid",
+  );
+
+  const sourceNames = new Set();
+  let previousSourceKey = null;
+  for (const [index, item] of value.sources.entries()) {
+    const sourceKey = [item?.source_id, item?.relative_path];
+    requireWrapper(
+      exactKeys(item, ["id", "source_id", "relative_path"])
+        && item.id === index + 1
+        && /^[a-z][a-z0-9]*(?:[_-][a-z0-9]+)*$/u.test(item.source_id)
+        && item.source_id.length <= 256
+        && relativePosixPath(item.relative_path),
+      "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID",
+      "Compact evaluation sources are invalid",
+    );
+    requireWrapper(
+      previousSourceKey === null
+        || compareDeterministicTuple(previousSourceKey, sourceKey) < 0,
+      "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID",
+      "Compact evaluation sources are not in deterministic order",
+    );
+    requireWrapper(
+      !sourceNames.has(item.source_id),
+      "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID",
+      "Compact evaluation source ids are not unique",
+    );
+    sourceNames.add(item.source_id);
+    previousSourceKey = sourceKey;
+  }
+
+  const observationIds = new Set();
+  const physicalLines = new Set();
+  let previousObservationKey = null;
+  for (const [index, item] of value.observations.entries()) {
+    const observationKey = [item?.source_id, item?.line_number, item?.line];
+    requireWrapper(
+      exactKeys(item, ["id", "source_id", "line_number", "line"])
+        && item.id === index + 1
+        && /^[a-z][a-z0-9]*(?:[_-][a-z0-9]+)*$/u.test(item.source_id)
+        && sourceNames.has(item.source_id)
+        && positiveInteger(item.line_number)
+        && typeof item.line === "string"
+        && item.line.length > 0
+        && (
+          previousObservationKey === null
+          || compareDeterministicTuple(previousObservationKey, observationKey) < 0
+        ),
+      "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID",
+      "Compact evaluation observations are invalid",
+    );
+    observationIds.add(item.id);
+    physicalLines.add(`${item.source_id}\0${item.line_number}`);
+    previousObservationKey = observationKey;
+  }
+  requireWrapper(
+    physicalLines.size === value.observations.length,
+    "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID",
+    "Compact evaluation observations repeat one physical log line",
+  );
+
+  const markerIds = new Set();
+  const markerLiterals = new Set();
+  let previousMarker = null;
+  for (const [index, item] of value.markers.entries()) {
+    requireWrapper(
+      exactKeys(item, ["id", "literal"])
+        && item.id === index + 1
+        && typeof item.literal === "string"
+        && item.literal.length > 0
+        && (previousMarker === null || compareUnicodeText(previousMarker, item.literal) < 0),
+      "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID",
+      "Compact evaluation markers are invalid",
+    );
+    markerIds.add(item.id);
+    markerLiterals.add(item.literal);
+    previousMarker = item.literal;
+  }
+  requireWrapper(
+    markerLiterals.size === value.markers.length,
+    "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID",
+    "Compact evaluation marker literals are not unique",
+  );
+
+  const evaluationRefs = new Set();
+  const methodIds = new Set();
+  const eventRefs = new Set();
+  const qualifiedMatches = new Set();
+  const usedObservationIds = new Set();
+  const usedMarkerIds = new Set();
+  let previousEvaluation = null;
+  for (const evaluation of value.evaluations) {
+    requireWrapper(
+      exactKeys(evaluation, ["evaluation_ref", "method_id", "method_priority", "events"])
+        && /^eval-[0-9a-f]{64}$/u.test(evaluation.evaluation_ref)
+        && /^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(evaluation.method_id)
+        && positiveInteger(evaluation.method_priority)
+        && Array.isArray(evaluation.events)
+        && evaluation.events.length > 0,
+      "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID",
+      "Compact evaluation item is invalid",
+    );
+    requireWrapper(
+      previousEvaluation === null
+        || previousEvaluation.method_priority < evaluation.method_priority
+        || (
+          previousEvaluation.method_priority === evaluation.method_priority
+          && previousEvaluation.method_id < evaluation.method_id
+        ),
+      "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID",
+      "Compact evaluations are not in deterministic plan order",
+    );
+    previousEvaluation = evaluation;
+    requireWrapper(
+      !evaluationRefs.has(evaluation.evaluation_ref) && !methodIds.has(evaluation.method_id),
+      "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID",
+      "Compact evaluations are not unique",
+    );
+    evaluationRefs.add(evaluation.evaluation_ref);
+    methodIds.add(evaluation.method_id);
+    for (const event of evaluation.events) {
+      requireWrapper(
+        exactKeys(event, ["event_ref", "identity_tokens", "matches"])
+          && /^event-[0-9a-f]{64}$/u.test(event.event_ref)
+          && Array.isArray(event.identity_tokens)
+          && event.identity_tokens.every((item) => typeof item === "string" && /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*=[^\s,;]+$/u.test(item))
+          && new Set(event.identity_tokens).size === event.identity_tokens.length
+          && new Set(event.identity_tokens.map((item) => item.split("=", 1)[0])).size === event.identity_tokens.length
+          && Array.isArray(event.matches)
+          && event.matches.length > 0
+          && !eventRefs.has(event.event_ref),
+        "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID",
+        "Compact evaluation event is invalid",
+      );
+      eventRefs.add(event.event_ref);
+      for (const match of event.matches) {
+        const qualified = `${evaluation.method_id}\0${match?.observation_id}\0${match?.marker_id}\0${match?.method_marker_index}`;
+        requireWrapper(
+          exactKeys(match, ["observation_id", "marker_id", "method_marker_index"])
+            && observationIds.has(match.observation_id)
+            && markerIds.has(match.marker_id)
+            && positiveInteger(match.method_marker_index)
+            && !qualifiedMatches.has(qualified),
+          "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID",
+          "Compact method-qualified match is invalid",
+        );
+        qualifiedMatches.add(qualified);
+        usedObservationIds.add(match.observation_id);
+        usedMarkerIds.add(match.marker_id);
+      }
+    }
+  }
+  requireWrapper(
+    usedObservationIds.size === observationIds.size
+      && [...observationIds].every((id) => usedObservationIds.has(id))
+      && usedMarkerIds.size === markerIds.size
+      && [...markerIds].every((id) => usedMarkerIds.has(id)),
+    "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID",
+    "Compact evaluation_input does not exactly cover its observations and markers",
+  );
+  return value;
+}
+
+function roleEvaluationInput(prompt, role) {
+  requireWrapper(
+    LEGACY_ROLE_INPUTS.every((relative) => !prompt.includes(relative)),
+    "CLAUDE_DEEPSEEK_LEGACY_MODEL_INPUT_EXPOSED",
+    "Production role prompt exposes a legacy Graph/Plan input path",
+  );
+  const expectedSection = role === "SPECIALIST" ? "EVIDENCE" : "REVIEW_TARGET";
+  const starts = [...prompt.matchAll(new RegExp(ROLE_CONTEXT_START.source, "gu"))];
+  const sections = [...prompt.matchAll(new RegExp(ROLE_CONTEXT_SECTION.source, "gu"))];
+  requireWrapper(
+    starts.length === 1
+      && sections.length === 1
+      && sections[0][1] === expectedSection,
+    "CLAUDE_DEEPSEEK_EVALUATION_INPUT_MISSING",
+    "Production role prompt must contain exactly one role data section",
+  );
+  let payload;
+  try { payload = JSON.parse(sections[0][2]); }
+  catch {
+    fail(
+      "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID",
+      "Production role data section is not valid JSON",
+    );
+  }
+  const validIdentity = role === "SPECIALIST"
+    ? exactKeys(payload, ["schema_version", "role", "job_id", "case_id", "request_path", "evaluation_input"])
+      && uuid(payload.job_id)
+      && uuid(payload.case_id)
+    : exactKeys(payload, ["schema_version", "role", "target", "request_path", "evaluation_input"])
+      && validReviewTarget(payload.target);
+  requireWrapper(
+    validIdentity
+      && payload.schema_version === 2
+      && payload.role === role
+      && payload.request_path === "inputs/request.json"
+      && isPlainObject(payload.evaluation_input),
+    "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID",
+    "Production role data section has an invalid identity or shape",
+  );
+  const evaluationInput = validateCompactEvaluationInput(payload.evaluation_input);
+  if (role === "REVIEWER") {
+    requireWrapper(
+      payload.target.graph_ref === evaluationInput.evidence_graph_ref
+        && payload.target.plan_ref === evaluationInput.plan_ref,
+      "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID",
+      "Reviewer target does not match its compact evaluation_input",
+    );
+  }
+  return evaluationInput;
 }
 
 export function parseArguments(argv) {
@@ -106,6 +417,7 @@ export function parseMethodsRolePrompt(prompt) {
   const expectedOutput = ROLE_SPEC[role].output;
   requireWrapper(prompt.includes(`Write only ${expectedOutput}.`), "CLAUDE_DEEPSEEK_ROLE_OUTPUT_INVALID", "Evidence V2 role prompt does not bind its one output draft");
   requireWrapper(prompt.includes("evaluation_ref, verdict, supporting_event_refs, and reason"), "CLAUDE_DEEPSEEK_ROLE_CONTRACT_INVALID", "Evidence V2 evaluation array contract is missing");
+  roleEvaluationInput(prompt, role);
   return Object.freeze({ role, attempt, output: expectedOutput });
 }
 
@@ -205,15 +517,15 @@ function portablePermissionPath(value) {
 }
 
 export function roleToolPolicy({ workspaceRoot, output }) {
-  const inputs = portablePermissionPath(path.join(workspaceRoot, "inputs"));
+  const requestFile = portablePermissionPath(path.join(workspaceRoot, "inputs", "request.json"));
   const outputFile = portablePermissionPath(path.join(workspaceRoot, ...output.split("/")));
   const policy = {
     schema_version: 1,
     tools: ["Read", "Write"],
     // Claude Code emits file creation as Write, while its permission matcher
     // authorizes that tool with the Edit(path) permission category.
-    allowed_tools: [`Read(${inputs}/**)`, `Read(${outputFile})`, `Edit(${outputFile})`],
-    readable_scope: "job-workspace-inputs-and-role-draft",
+    allowed_tools: [`Read(${requestFile})`, `Edit(${outputFile})`],
+    readable_scope: "job-request-only",
     writable_scope: output,
     network: false,
     shell: false,
@@ -236,8 +548,8 @@ function resolveToolPath(workspaceRoot, value) {
 
 export function auditRoleWorkspace({ workspaceRoot, roleSpec, processResult }) {
   const inputs = path.join(workspaceRoot, "inputs");
-  const requiredInputs = ["request.json", "method-evidence-graph.json", "method-evaluation-plan.json"];
-  requireWrapper(requiredInputs.every((name) => fs.existsSync(path.join(inputs, name)) && fs.statSync(path.join(inputs, name)).isFile()), "CLAUDE_DEEPSEEK_ROLE_INPUT_MISSING", "Evidence V2 role workspace is missing request, Graph, or Plan");
+  validateRoleWorkspaceInputs(workspaceRoot);
+  const request = path.join(inputs, "request.json");
   const forbidden = [
     path.join(inputs, "target_logs.json"),
     path.join(inputs, "logparse-receipt.json"),
@@ -253,7 +565,7 @@ export function auditRoleWorkspace({ workspaceRoot, roleSpec, processResult }) {
   for (const record of processResult.records) {
     requireWrapper(record?.is_error !== true, "CLAUDE_DEEPSEEK_ROLE_TOOL_FAILED", "Evidence V2 role file tool failed or was denied");
     const target = resolveToolPath(workspaceRoot, record?.input?.file_path);
-    if (record.name === "Read" && (inside(inputs, target) || target === expectedOutput)) reads += 1;
+    if (record.name === "Read" && target === request) reads += 1;
     else if (record.name === "Write" && inside(outputRoot, target) && target === expectedOutput && typeof record.input?.content === "string") writes.push(record);
     else fail("CLAUDE_DEEPSEEK_ROLE_TOOL_SCOPE_INVALID", "Evidence V2 role used a tool or path outside its frozen Read/Write policy");
   }
@@ -273,6 +585,52 @@ export function auditRoleWorkspace({ workspaceRoot, roleSpec, processResult }) {
     output_sha256: sha256Bytes(disk),
     harness_normalized: false,
   });
+}
+
+function validateRoleWorkspaceInputs(workspaceRoot) {
+  const inputs = path.join(workspaceRoot, "inputs");
+  const request = path.join(inputs, "request.json");
+  requireWrapper(
+    LEGACY_ROLE_INPUTS.every((relative) => !fs.existsSync(path.join(workspaceRoot, ...relative.split("/")))),
+    "CLAUDE_DEEPSEEK_LEGACY_MODEL_INPUT_EXPOSED",
+    "Evidence V2 role workspace exposes legacy Graph/Plan model inputs",
+  );
+  requireWrapper(
+    !fs.existsSync(path.join(workspaceRoot, "runtime", "context.txt")),
+    "CLAUDE_DEEPSEEK_DUPLICATE_CONTEXT_EXPOSED",
+    "Evidence V2 role workspace exposes a duplicate runtime context",
+  );
+  let inputNames;
+  try { inputNames = fs.readdirSync(inputs).sort(); }
+  catch { fail("CLAUDE_DEEPSEEK_ROLE_INPUT_MISSING", "Evidence V2 role workspace inputs are unavailable"); }
+  requireWrapper(
+    canonicalJson(inputNames) === canonicalJson(["manifest.json", "request.json"]),
+    "CLAUDE_DEEPSEEK_ROLE_INPUT_LEAK",
+    "Evidence V2 role workspace inputs are not model-minimal",
+  );
+  for (const name of inputNames) {
+    const metadata = fs.lstatSync(path.join(inputs, name));
+    requireWrapper(
+      metadata.isFile() && !metadata.isSymbolicLink(),
+      "CLAUDE_DEEPSEEK_ROLE_INPUT_INVALID",
+      "Evidence V2 role inputs must be ordinary files",
+    );
+  }
+  const runtime = path.join(workspaceRoot, "runtime");
+  let runtimeNames;
+  try { runtimeNames = fs.readdirSync(runtime).sort(); }
+  catch { fail("CLAUDE_DEEPSEEK_ROLE_RUNTIME_INVALID", "Evidence V2 role runtime directory is unavailable"); }
+  requireWrapper(
+    canonicalJson(runtimeNames) === canonicalJson(["tool-state"]),
+    "CLAUDE_DEEPSEEK_ROLE_RUNTIME_LEAK",
+    "Evidence V2 role runtime directory contains an unexpected entry",
+  );
+  const toolState = fs.lstatSync(path.join(runtime, "tool-state"));
+  requireWrapper(
+    toolState.isDirectory() && !toolState.isSymbolicLink(),
+    "CLAUDE_DEEPSEEK_ROLE_RUNTIME_INVALID",
+    "Evidence V2 role tool-state must be an ordinary directory",
+  );
 }
 
 function privateEnvironment(claim) {
@@ -304,6 +662,7 @@ export async function runServiceInvocation(values, {
   let claim = null;
   try {
     claim = claimRoleAttempt(values["private-root"], parsed.role, parsed.attempt);
+    validateRoleWorkspaceInputs(workspaceRoot);
     budget = roleInvocationBudget(values["usage-root"], parsed.role, parsed.attempt);
     requireWrapper(budget.effective_call_cap_usd > 0, "CLAUDE_DEEPSEEK_ROLE_BUDGET_EXHAUSTED", `${parsed.role} exhausted its model-cert role budget`);
     try { fs.writeFileSync(progressPath, "", { encoding: "utf8", mode: 0o600, flag: "wx" }); }

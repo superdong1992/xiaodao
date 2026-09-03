@@ -17,12 +17,14 @@
 ## SKILL.md
 
 - frontmatter 只要求 `name` 和 `description`；`name` 必须与目录名及 `methods.json.skill_name` 相同。
-- 入口保持简短，说明读取冻结 `request.json`、Server 生成的 `method-evidence-graph.json` 和
-  `method-evaluation-plan.json`，并按需读取方法卡和共享引用。
+- 入口保持简短，说明读取冻结 `request.json` 和运行时上下文中的紧凑 `evaluation_input`，并按需
+  读取方法卡和共享引用。
 - 明确方法规则需要用户输入时读取 `request.json` 中的冻结值。
-- 明确日志证据只能来自 Evidence Graph 和 Evaluation Plan；不读取目标日志、不重新扫描 marker，
-  也不重新选择日志。
-- 明确按 Evaluation Plan 顺序评估全部 `evaluation_ref`，不能在第一个确认项后停止。
+- 明确 `evaluation_input.observations` 是去重物理日志行目录，`markers` 是去重声明 marker 目录，
+  `evaluations` 是完整有序待判定清单，每项的 `events` 给出 event ref 与 observation/marker 关联。
+- 明确日志证据只能来自 `evaluation_input`；不读取目标日志、不重新扫描 marker、不读取独立
+  Graph/Plan 文件，也不重新选择日志。
+- 明确按 `evaluation_input.evaluations` 顺序评估全部 `evaluation_ref`，不能在第一个确认项后停止。
 - 明确每项只输出 `evaluation_ref`、`verdict`、`supporting_event_refs` 和 `reason`。
   `CONFIRMED` 必须按计划顺序选择当前 evaluation 的非空 event ref 子集；`REJECTED` 或
   `UNKNOWN` 必须使用空数组。
@@ -103,14 +105,14 @@ Wiki `text` 日志模板使用 `{field_name}` 命名字段时，先按模板及�
   的 marker 是 `QUEUE_HISTORY print_time_ms=`，不是 `QUEUE_HISTORY`。
 - `activation_markers` 必填、非空且组内唯一，并且必须是当前方法 `evidence_markers` 的保序子序列。
   它只列“出现后值得为该方法创建 evaluation”的 marker。activation 命中不表示单条日志足以确认
-  原因；Agent 仍须读取完整 Evidence Graph，并按方法卡判断。公共症状只能作为 context，不能用于
+  原因；Agent 仍须读取当前 evaluation 的完整 `events`，并按方法卡判断。公共症状只能作为 context，不能用于
   激活所有原因；公共 RPC timeout 日志只能放在 `evidence_markers` 中作为判断上下文。同一 literal
   如果确实会触发多个方法，可以分别出现在这些方法的 `activation_markers` 中。
 - 方法按 Wiki 给出的可能性或诊断顺序排列；不要把顺序解释成互斥。
 - 共同症状、失败入口或请求关联日志的解释可以只写一次共享引用；但只要某个方法会根据该日志是否
   出现、其中的字段或它与其他日志的关联作出判定，就必须把 canonical marker 写入该方法的
   `evidence_markers`，并在该方法卡“所需证据”中列出完整模板。只存在于共享引用不算进入该方法的
-  Evidence Graph。
+  服务端证据集合。
 
 调用方提供的 source identity v2 使用以下闭合结构，不增加其他字段：
 
@@ -163,7 +165,7 @@ marker，或只把模板放入共享引用，都不能建立闭包。共享引�
 
 ## Methods V2 评估输出
 
-运行结果是一个根 JSON 数组，顺序与 `method-evaluation-plan.json` 完全一致。每项只能包含：
+运行结果是一个根 JSON 数组，顺序与 `evaluation_input.evaluations` 完全一致。每项只能包含：
 
 - `evaluation_ref`：逐字复制对应计划项的引用。
 - `verdict`：`CONFIRMED`、`REJECTED` 或 `UNKNOWN`。
@@ -172,7 +174,7 @@ marker，或只把模板放入共享引用，都不能建立闭包。共享引�
 - `reason`：非空的规则判断摘要。
 
 不得增加、遗漏、重复或重排计划项。不得输出 `method_id`、marker、日志原文、行号、哈希、
-`identity_tokens`、hit ref 或其他证据字段。Server 负责保存 Evidence Graph，并把双方一致选择的
+`identity_tokens`、hit ref 或其他证据字段。Server 负责保存权威审计记录，并把双方一致选择的
 event ref 映射到最终结果。
 
 ## 固定源日志模板引用
@@ -206,5 +208,5 @@ event ref 映射到最终结果。
 
 不要在共享引用中增加 Wiki 未提供的阈值或经验结论。
 
-当 Evidence Graph 中同一方法包含多次相关调用时，按方法卡规则评估该计划项覆盖的全部事件；
-证据不足以证明事件关系时返回 `UNKNOWN`，不得自行重组 Evidence Graph。
+当 `evaluation_input` 中同一方法包含多次相关调用时，按方法卡规则评估该 evaluation 覆盖的全部
+`events`；证据不足以证明事件关系时返回 `UNKNOWN`，不得自行重组事件关联。

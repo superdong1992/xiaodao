@@ -46,6 +46,8 @@ from problem_locator.contracts.methods_v2 import (
 from problem_locator.contracts.serialization import canonical_json_bytes, schema_bundle_bytes
 from problem_locator.runtime.methods_skill import ResolvedSpecializedSkillV1
 
+from .methods_evaluation_input_v2 import build_method_evaluation_input_v2
+
 
 @dataclass(frozen=True, slots=True)
 class ContextMaterials:
@@ -424,20 +426,10 @@ class ContextBuilder:
         )
         frozen_snapshot = job.context_snapshot
         if methods_v2:
-            # Methods V2 model roles need only the declared user inputs.  The
-            # Case ProblemSpec and all intermediate diagnosis state stay on the
-            # server; Graph/Plan carry the complete log-derived evidence.
-            context_snapshot: object = {
-                "schema_version": 2,
-                "user_facts": [
-                    {
-                        "name": item.provenance.input_name,
-                        "value": item.statement,
-                        "source_fact_id": item.item_id,
-                    }
-                    for item in frozen_snapshot.user_facts
-                ],
-            }
+            # Declared user inputs have one model-visible source: request.json.
+            # Keep the mandatory snapshot section but do not duplicate values
+            # that a role is already required to read from that frozen file.
+            context_snapshot: object = {"schema_version": 2}
             open_requirements = []
         else:
             context_snapshot = frozen_snapshot
@@ -493,6 +485,10 @@ class ContextBuilder:
             graph = materials.methods_evidence_graph
             plan = materials.methods_evaluation_plan
             assert graph is not None and plan is not None
+            evaluation_input = build_method_evaluation_input_v2(
+                evidence=graph,
+                plan=plan,
+            )
             if job.methods_review_target is not None:
                 reviewer_input = materials.manifest.methods_reviewer_input
                 if reviewer_input is None:
@@ -513,14 +509,10 @@ class ContextBuilder:
                 "role": role,
                 **role_identity,
                 "request_path": "inputs/request.json",
-                "evidence_graph_path": "inputs/method-evidence-graph.json",
-                "evaluation_plan_path": "inputs/method-evaluation-plan.json",
-                "evidence_graph": graph.model_dump(mode="json"),
-                "evaluation_plan": plan.model_dump(mode="json"),
-                "method_cards": [
-                    item.model_dump(mode="json")
-                    for item in materials.methods_method_cards
-                ],
+                # Graph/Plan remain the authoritative server audit records. The
+                # model receives their exact lossless projection once; selected
+                # method cards already appear in the required SKILL section.
+                "evaluation_input": evaluation_input.model_dump(mode="json"),
             }
             prefix.append(
                 _SectionDraft(

@@ -32,7 +32,9 @@ P1 Claude/DeepSeek 和 P2 Codex/Luna Gate 已接入同一 `model-cert-input.json
 是 `model-cert.json` 的唯一写入方；中央 action 只读取并按当前 source/Core 完整复核，绝不二次创建
 或改写该文件。adapter PASS 后由 Test Flow 统一复核 source snapshot、
 V8 manifest、Core verdict、调用/repair、usage、prompt/profile/tool policy 和最终
-`methods_result` 身份。两家模型都只能读取服务端生成的 Evidence Graph、Evaluation Plan 和方法卡；
+`methods_result` 身份。两家模型都只能使用 prompt 中由服务端 Graph/Plan 机械派生的紧凑
+`evaluation_input`、精确方法卡和按需读取的 `request.json`；完整 Graph/Plan 只留在 execution
+records，不进入模型工作区；
 默认 `SPECIALIST_ONLY` 各调用一次，最多执行一次 Specialist repair；显式
 `BLIND_CONSENSUS` 才运行 Reviewer，正常两次调用、总上限四次。`release-verdict.json` 聚合器只接受
 同一模式、同一 attempt、同一 source snapshot、同一 Core 和同一 production registration 的 P1/P2 PASS 收据。

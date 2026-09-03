@@ -61,6 +61,9 @@ def test_two_generators_share_the_methods_v2_agent_surface() -> None:
     assert package_validator.REQUIRED_SKILL_PHRASES == (
         registration_validator.REQUIRED_SKILL_PHRASES
     )
+    assert package_validator.FORBIDDEN_SKILL_PHRASES == (
+        registration_validator.FORBIDDEN_SKILL_PHRASES
+    )
     assert package_validator.METHOD_KEYS == registration_validator.METHOD_KEYS
     assert "activation_markers" in package_validator.METHOD_KEYS
     for contract in (
@@ -72,6 +75,8 @@ def test_two_generators_share_the_methods_v2_agent_surface() -> None:
         text = contract.read_text(encoding="utf-8")
         for phrase in package_validator.REQUIRED_SKILL_PHRASES:
             assert phrase in text
+        for phrase in package_validator.FORBIDDEN_SKILL_PHRASES:
+            assert phrase not in text
         assert "`activation_markers` 必填、非空且组内唯一" in text
         assert "公共 RPC timeout 日志只能放在 `evidence_markers`" in text
         assert "INSUFFICIENT_EVIDENCE" not in text
@@ -99,14 +104,14 @@ name: diagnose-rpc-timeout
 description: Diagnose one RPC timeout from frozen evidence.
 ---
 
-Read request.json, method-evidence-graph.json, and method-evaluation-plan.json.
-Use request values for declared inputs. Log evidence comes only from the
-Evidence Graph and Evaluation Plan; do not rescan logs. Evaluate every
-evaluation_ref in plan order and return only evaluation_ref, verdict,
-supporting_event_refs, and reason; use UNKNOWN when the evidence cannot decide
-the method rule.
-Server-produced evidence sources may originate from target_logs and retain
-identity_tokens internally.
+Read frozen request.json and the compact evaluation_input from runtime context.
+Use request values for declared inputs. Its observations catalog deduplicated
+physical log lines, markers catalog declared literals, and ordered evaluations
+contain the events available to each method. Log evidence comes only from
+evaluation_input; do not rescan markers or target logs. Evaluate every
+evaluation_ref in evaluation_input evaluations order and return only
+evaluation_ref, verdict, supporting_event_refs, and reason; use UNKNOWN when
+the evidence cannot decide the method rule.
 """,
         encoding="utf-8",
     )
@@ -211,7 +216,7 @@ def test_canonical_validator_independently_recomputes_source_wiki_identity(
     ]
 
 
-def test_generated_v2_skill_reads_request_for_required_user_inputs(
+def test_generated_v2_skill_reads_compact_context_and_required_user_inputs(
     tmp_path: Path,
 ) -> None:
     wiki = tmp_path / "wiki.md"
@@ -236,12 +241,51 @@ def test_generated_v2_skill_reads_request_for_required_user_inputs(
 
     assert result["ok"] is True
     assert "request.json" in skill_text
-    assert "method-evidence-graph.json" in skill_text
-    assert "method-evaluation-plan.json" in skill_text
+    assert "method-evidence-graph.json" not in skill_text
+    assert "method-evaluation-plan.json" not in skill_text
+    assert all(
+        field in skill_text
+        for field in (
+            "evaluation_input",
+            "observations",
+            "markers",
+            "evaluations",
+            "events",
+        )
+    )
     assert all(
         field in skill_text
         for field in ("evaluation_ref", "verdict", "supporting_event_refs", "reason")
     )
+
+
+def test_validator_rejects_legacy_graph_plan_skill_instructions(
+    tmp_path: Path,
+) -> None:
+    wiki = tmp_path / "wiki.md"
+    template = "RPC_TIMEOUT request_id={request_id}"
+    wiki_bytes = f"# Wiki\n\n```text\n{template}\n```\n".encode("utf-8")
+    wiki.write_bytes(wiki_bytes)
+    package = _write_package(
+        tmp_path,
+        wiki_sha256=hashlib.sha256(wiki_bytes).hexdigest(),
+        log_derived_fields=["request_id"],
+        evidence_marker="RPC_TIMEOUT request_id=",
+        reference_log_template=template,
+    )
+    skill_path = package / "SKILL.md"
+    skill_path.write_text(
+        skill_path.read_text(encoding="utf-8")
+        + "\nRead method-evidence-graph.json and method-evaluation-plan.json.\n",
+        encoding="utf-8",
+    )
+
+    rejected = _load_validator().validate(package, wiki)
+
+    assert rejected["errors"] == [
+        "SKILL.md must not mention method-evidence-graph.json",
+        "SKILL.md must not mention method-evaluation-plan.json",
+    ]
 
 
 def test_validator_requires_canonical_markers_and_named_field_order(

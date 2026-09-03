@@ -18,16 +18,69 @@ import {
   runServiceInvocation,
 } from "../runtime/claude-deepseek-service-wrapper.mjs";
 
-function prompt(role, attempt) {
+function compactEvaluationInput() {
+  return {
+    schema_version: 2,
+    evidence_graph_ref: `graph-${"a".repeat(64)}`,
+    plan_ref: `plan-${"b".repeat(64)}`,
+    limitations: ["Only frozen inputs were evaluated."],
+    sources: [
+      { id: 1, source_id: "client", relative_path: "logs/client.log" },
+      { id: 2, source_id: "server", relative_path: "logs/server.log" },
+    ],
+    observations: [{ id: 1, source_id: "server", line_number: 7, line: "MARKER request_id=42" }],
+    markers: [{ id: 1, literal: "MARKER" }],
+    evaluations: [{
+      evaluation_ref: `eval-${"c".repeat(64)}`,
+      method_id: "method-a",
+      method_priority: 1,
+      events: [{
+        event_ref: `event-${"d".repeat(64)}`,
+        identity_tokens: ["request_id=42"],
+        matches: [{ observation_id: 1, marker_id: 1, method_marker_index: 1 }],
+      }],
+    }],
+  };
+}
+
+function prompt(role, attempt, { evaluationInput = compactEvaluationInput(), suffix = "" } = {}) {
   const output = role === "Specialist" ? "output/method-diagnosis.draft.json" : "output/method-review.draft.json";
-  return `frozen context\n<<<METHODS_EVIDENCE_V2_ROLE>>>\nRole: ${role}. Attempt: ${attempt}.\nWrite one JSON root array whose items contain only evaluation_ref, verdict, supporting_event_refs, and reason.\nWrite only ${output}.\n<<<END METHODS_EVIDENCE_V2_ROLE>>>\n`;
+  const roleName = role === "Specialist" ? "SPECIALIST" : "REVIEWER";
+  const section = role === "Specialist" ? "EVIDENCE" : "REVIEW_TARGET";
+  const identity = role === "Specialist"
+    ? { job_id: "00000000-0000-0000-0000-000000000011", case_id: "00000000-0000-0000-0000-000000000001" }
+    : {
+      target: {
+        schema_version: 2,
+        evaluation_id: "00000000-0000-0000-0000-000000000090",
+        source_job_id: "00000000-0000-0000-0000-000000000011",
+        graph_ref: evaluationInput.evidence_graph_ref,
+        plan_ref: evaluationInput.plan_ref,
+        skill_ref: {
+          id: "diagnosis-skill/test-methods",
+          version: "1.0.0",
+          content_hash: "e".repeat(64),
+        },
+        reviewed_state_revision: 3,
+      },
+    };
+  const rolePayload = JSON.stringify({
+    schema_version: 2,
+    role: roleName,
+    ...identity,
+    request_path: "inputs/request.json",
+    evaluation_input: evaluationInput,
+  });
+  return `frozen context\n<<<SECTION 7 ${section}>>>\n${rolePayload}\n<<<END SECTION>>>\n<<<METHODS_EVIDENCE_V2_ROLE>>>\nRole: ${role}. Attempt: ${attempt}.\nWrite one JSON root array whose items contain only evaluation_ref, verdict, supporting_event_refs, and reason.\nWrite only ${output}.\n<<<END METHODS_EVIDENCE_V2_ROLE>>>\n${suffix}`;
 }
 
 function workspace(root) {
   const inputs = path.join(root, "inputs");
   fs.mkdirSync(path.join(root, "output"), { recursive: true });
   fs.mkdirSync(inputs, { recursive: true });
-  for (const name of ["request.json", "method-evidence-graph.json", "method-evaluation-plan.json"]) fs.writeFileSync(path.join(inputs, name), "{}\n");
+  fs.mkdirSync(path.join(root, "runtime", "tool-state"), { recursive: true });
+  fs.writeFileSync(path.join(inputs, "manifest.json"), "{}\n");
+  fs.writeFileSync(path.join(inputs, "request.json"), "{}\n");
 }
 
 const SUCCESS_PROVIDER_TERMINAL = Object.freeze({
@@ -85,6 +138,62 @@ test("production role marker binds Specialist and Reviewer primary or only repai
   assert.deepEqual(parseMethodsRolePrompt(prompt("Specialist", "primary evaluation")), { role: "SPECIALIST", attempt: "PRIMARY", output: "output/method-diagnosis.draft.json" });
   assert.deepEqual(parseMethodsRolePrompt(prompt("Reviewer", "only repair")), { role: "REVIEWER", attempt: "REPAIR", output: "output/method-review.draft.json" });
   assert.throws(() => parseMethodsRolePrompt("Candidate diagnosis"), (error) => error.code === "CLAUDE_DEEPSEEK_ROLE_MARKER_INVALID");
+  const invalid = compactEvaluationInput();
+  invalid.evaluations[0].events[0].matches = [];
+  assert.throws(() => parseMethodsRolePrompt(prompt("Specialist", "primary evaluation", { evaluationInput: invalid })), (error) => error.code === "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID");
+  const nonConsecutiveSources = compactEvaluationInput();
+  nonConsecutiveSources.sources[1].id = 3;
+  assert.throws(() => parseMethodsRolePrompt(prompt("Specialist", "primary evaluation", { evaluationInput: nonConsecutiveSources })), (error) => error.code === "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID");
+  const unorderedSources = compactEvaluationInput();
+  unorderedSources.sources.reverse();
+  unorderedSources.sources.forEach((source, index) => { source.id = index + 1; });
+  assert.throws(() => parseMethodsRolePrompt(prompt("Specialist", "primary evaluation", { evaluationInput: unorderedSources })), (error) => error.code === "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID");
+  const unknownObservationSource = compactEvaluationInput();
+  unknownObservationSource.observations[0].source_id = "proxy";
+  assert.throws(() => parseMethodsRolePrompt(prompt("Specialist", "primary evaluation", { evaluationInput: unknownObservationSource })), (error) => error.code === "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID");
+  const unorderedObservations = compactEvaluationInput();
+  unorderedObservations.observations = [
+    { id: 1, source_id: "server", line_number: 8, line: "MARKER request_id=43" },
+    { id: 2, source_id: "server", line_number: 7, line: "MARKER request_id=42" },
+  ];
+  unorderedObservations.evaluations[0].events[0].matches = [
+    { observation_id: 1, marker_id: 1, method_marker_index: 1 },
+    { observation_id: 2, marker_id: 1, method_marker_index: 1 },
+  ];
+  assert.throws(() => parseMethodsRolePrompt(prompt("Specialist", "primary evaluation", { evaluationInput: unorderedObservations })), (error) => error.code === "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID");
+  const unorderedMarkers = compactEvaluationInput();
+  unorderedMarkers.markers = [
+    { id: 1, literal: "Z_MARKER" },
+    { id: 2, literal: "A_MARKER" },
+  ];
+  unorderedMarkers.evaluations[0].events[0].matches = [
+    { observation_id: 1, marker_id: 1, method_marker_index: 1 },
+    { observation_id: 1, marker_id: 2, method_marker_index: 2 },
+  ];
+  assert.throws(() => parseMethodsRolePrompt(prompt("Specialist", "primary evaluation", { evaluationInput: unorderedMarkers })), (error) => error.code === "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID");
+  const pythonUnicodeMarkerOrder = compactEvaluationInput();
+  pythonUnicodeMarkerOrder.markers = [
+    { id: 1, literal: "\uE000_MARKER" },
+    { id: 2, literal: "\u{10000}_MARKER" },
+  ];
+  pythonUnicodeMarkerOrder.evaluations[0].events[0].matches = [
+    { observation_id: 1, marker_id: 1, method_marker_index: 1 },
+    { observation_id: 1, marker_id: 2, method_marker_index: 2 },
+  ];
+  assert.doesNotThrow(() => parseMethodsRolePrompt(prompt("Specialist", "primary evaluation", { evaluationInput: pythonUnicodeMarkerOrder })));
+  pythonUnicodeMarkerOrder.markers.reverse();
+  pythonUnicodeMarkerOrder.markers.forEach((marker, index) => { marker.id = index + 1; });
+  assert.throws(() => parseMethodsRolePrompt(prompt("Specialist", "primary evaluation", { evaluationInput: pythonUnicodeMarkerOrder })), (error) => error.code === "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID");
+  const invalidIdentityToken = compactEvaluationInput();
+  invalidIdentityToken.evaluations[0].events[0].identity_tokens = ["request_id =42"];
+  assert.throws(() => parseMethodsRolePrompt(prompt("Specialist", "primary evaluation", { evaluationInput: invalidIdentityToken })), (error) => error.code === "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID");
+  const extraEvidenceSection = `<<<SECTION 8 EVIDENCE>>>\n${JSON.stringify({ candidate: "leak" })}\n<<<END SECTION>>>\n`;
+  assert.throws(() => parseMethodsRolePrompt(prompt("Reviewer", "primary evaluation", { suffix: extraEvidenceSection })), (error) => error.code === "CLAUDE_DEEPSEEK_EVALUATION_INPUT_MISSING");
+  const extraReviewTarget = `<<<SECTION 8 REVIEW_TARGET>>>\n${JSON.stringify({ candidate: "leak" })}\n<<<END SECTION>>>\n`;
+  assert.throws(() => parseMethodsRolePrompt(prompt("Reviewer", "primary evaluation", { suffix: extraReviewTarget })), (error) => error.code === "CLAUDE_DEEPSEEK_EVALUATION_INPUT_MISSING");
+  const candidateInRolePayload = prompt("Reviewer", "primary evaluation").replace('"request_path"', '"candidate":{"statement":"leak"},"request_path"');
+  assert.throws(() => parseMethodsRolePrompt(candidateInRolePayload), (error) => error.code === "CLAUDE_DEEPSEEK_EVALUATION_INPUT_INVALID");
+  assert.throws(() => parseMethodsRolePrompt(prompt("Specialist", "primary evaluation", { suffix: "inputs/method-evidence-graph.json" })), (error) => error.code === "CLAUDE_DEEPSEEK_LEGACY_MODEL_INPUT_EXPOSED");
 });
 
 test("each role receives one primary and at most one repair with a four-call total cap", () => {
@@ -100,7 +209,7 @@ test("each role receives one primary and at most one repair with a four-call tot
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("role workspace accepts Write then Read of its own draft and rejects other output reads", () => {
+test("role workspace allows an optional request Read and one draft Write only", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-role-workspace-"));
   try {
     workspace(root);
@@ -111,24 +220,43 @@ test("role workspace accepts Write then Read of its own draft and rejects other 
       workspaceRoot: root,
       roleSpec: { role: "SPECIALIST", attempt: "PRIMARY", output: "output/method-diagnosis.draft.json" },
       processResult: { records: [
-        { name: "Read", is_error: false, input: { file_path: path.join(root, "inputs", "method-evaluation-plan.json") } },
+        { name: "Read", is_error: false, input: { file_path: path.join(root, "inputs", "request.json") } },
         { name: "Write", is_error: false, input: { file_path: output, content } },
-        { name: "Read", is_error: false, input: { file_path: output } },
       ] },
     });
     assert.equal(receipt.harness_normalized, false);
-    assert.equal(receipt.reads, 2);
+    assert.equal(receipt.reads, 1);
+    const promptOnlyReceipt = auditRoleWorkspace({
+      workspaceRoot: root,
+      roleSpec: { role: "SPECIALIST", attempt: "PRIMARY", output: "output/method-diagnosis.draft.json" },
+      processResult: { records: [
+        { name: "Write", is_error: false, input: { file_path: output, content } },
+      ] },
+    });
+    assert.equal(promptOnlyReceipt.reads, 0);
     assert.throws(() => auditRoleWorkspace({
       workspaceRoot: root,
       roleSpec: { role: "SPECIALIST", attempt: "PRIMARY", output: "output/method-diagnosis.draft.json" },
       processResult: { records: [
-        { name: "Read", is_error: false, input: { file_path: path.join(root, "inputs", "method-evaluation-plan.json") } },
         { name: "Write", is_error: false, input: { file_path: output, content } },
-        { name: "Read", is_error: false, input: { file_path: path.join(root, "output", "method-review.draft.json") } },
+        { name: "Read", is_error: false, input: { file_path: output } },
       ] },
     }), (error) => error.code === "CLAUDE_DEEPSEEK_ROLE_TOOL_SCOPE_INVALID");
+    fs.writeFileSync(path.join(root, "inputs", "method-evidence-graph.json"), "{}\n");
+    assert.throws(() => auditRoleWorkspace({ workspaceRoot: root, roleSpec: { role: "SPECIALIST", attempt: "PRIMARY", output: "output/method-diagnosis.draft.json" }, processResult: { records: [] } }), (error) => error.code === "CLAUDE_DEEPSEEK_LEGACY_MODEL_INPUT_EXPOSED");
+    fs.rmSync(path.join(root, "inputs", "method-evidence-graph.json"));
     fs.mkdirSync(path.join(root, "inputs", "target-logs"));
     assert.throws(() => auditRoleWorkspace({ workspaceRoot: root, roleSpec: { role: "SPECIALIST", attempt: "PRIMARY", output: "output/method-diagnosis.draft.json" }, processResult: { records: [] } }), (error) => error.code === "CLAUDE_DEEPSEEK_ROLE_INPUT_LEAK");
+    fs.rmSync(path.join(root, "inputs", "target-logs"), { recursive: true });
+    for (const name of ["evidence", "artifacts", "outcomes", "unknown.json"]) {
+      const target = path.join(root, "inputs", name);
+      if (name.endsWith(".json")) fs.writeFileSync(target, "{}\n");
+      else fs.mkdirSync(target);
+      assert.throws(() => auditRoleWorkspace({ workspaceRoot: root, roleSpec: { role: "SPECIALIST", attempt: "PRIMARY", output: "output/method-diagnosis.draft.json" }, processResult: { records: [] } }), (error) => error.code === "CLAUDE_DEEPSEEK_ROLE_INPUT_LEAK");
+      fs.rmSync(target, { recursive: true });
+    }
+    fs.writeFileSync(path.join(root, "runtime", "unknown.txt"), "leak\n");
+    assert.throws(() => auditRoleWorkspace({ workspaceRoot: root, roleSpec: { role: "SPECIALIST", attempt: "PRIMARY", output: "output/method-diagnosis.draft.json" }, processResult: { records: [] } }), (error) => error.code === "CLAUDE_DEEPSEEK_ROLE_RUNTIME_LEAK");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -136,12 +264,11 @@ test("role exposes Read/Write tools but grants its Write through the Edit permis
   const root = path.resolve("role-workspace");
   const policy = roleToolPolicy({ workspaceRoot: root, output: "output/method-review.draft.json" });
   assert.deepEqual(policy.tools, ["Read", "Write"]);
-  assert.equal(policy.allowed_tools.length, 3);
-  assert.match(policy.allowed_tools[0], /^Read\(.+\/inputs\/\*\*\)$/u);
-  assert.match(policy.allowed_tools[1], /^Read\(.+\/output\/method-review\.draft\.json\)$/u);
-  assert.match(policy.allowed_tools[2], /^Edit\(.+\/output\/method-review\.draft\.json\)$/u);
-  assert.doesNotMatch(policy.allowed_tools[2], /^Write\(/u);
-  assert.equal(policy.readable_scope, "job-workspace-inputs-and-role-draft");
+  assert.equal(policy.allowed_tools.length, 2);
+  assert.match(policy.allowed_tools[0], /^Read\(.+\/inputs\/request\.json\)$/u);
+  assert.match(policy.allowed_tools[1], /^Edit\(.+\/output\/method-review\.draft\.json\)$/u);
+  assert.doesNotMatch(policy.allowed_tools[1], /^Write\(/u);
+  assert.equal(policy.readable_scope, "job-request-only");
   assert.equal(policy.shell, false);
   assert.equal(policy.network, false);
   assert.equal(policy.writable_scope, "output/method-review.draft.json");
@@ -173,7 +300,7 @@ test("wrapper preserves the raw evaluation array and records the exact productio
         fs.writeFileSync(output, content);
         return {
           receipt: successfulProcessReceipt(options, "SPECIALIST"),
-          records: [{ name: "Read", is_error: false, input: { file_path: path.join(root, "inputs", "method-evaluation-plan.json") } }, { name: "Write", is_error: false, input: { file_path: output, content } }],
+          records: [{ name: "Read", is_error: false, input: { file_path: path.join(root, "inputs", "request.json") } }, { name: "Write", is_error: false, input: { file_path: output, content } }],
           skills: [], bash: [], mcp: [], denied: [], events: [{ type: "result", result: "done" }],
         };
       },
@@ -193,6 +320,56 @@ test("wrapper preserves the raw evaluation array and records the exact productio
     assert.equal(fs.readFileSync(output, "utf8"), content);
     assert.equal(fs.readFileSync(path.join(root, "evidence", "model-role-invocations", "specialist-primary.progress"), "utf8"), ".\n");
     assert.match(Buffer.concat(chunks).toString("utf8"), /done/u);
+  } finally { process.chdir(previous); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("legacy Graph or Plan input fails before the provider can run", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-role-legacy-input-"));
+  const previous = process.cwd();
+  try {
+    workspace(root);
+    fs.writeFileSync(path.join(root, "inputs", "method-evaluation-plan.json"), "{}\n");
+    process.chdir(root);
+    const values = {
+      "claude-entry": path.join(root, "cli.js"), settings: path.join(root, "settings.json"), "config-root": path.join(root, "config"),
+      "private-root": path.join(root, "private"), "evidence-root": path.join(root, "evidence"), "usage-root": path.join(root, "usage"), "run-id": "run",
+    };
+    for (const target of [values["claude-entry"], values.settings]) fs.writeFileSync(target, "fixture");
+    fs.mkdirSync(values["config-root"]);
+    let providerCalled = false;
+    await assert.rejects(runServiceInvocation(values, {
+      stdin: Readable.from([prompt("Specialist", "primary evaluation")]),
+      stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+      runClaude: async () => { providerCalled = true; },
+    }), { code: "CLAUDE_DEEPSEEK_LEGACY_MODEL_INPUT_EXPOSED" });
+    assert.equal(providerCalled, false);
+    const [receipt] = readRoleInvocationReceipts(values["usage-root"]);
+    assert.equal(receipt.failure_code, "CLAUDE_DEEPSEEK_LEGACY_MODEL_INPUT_EXPOSED");
+  } finally { process.chdir(previous); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("duplicate runtime context fails before the provider can run", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-role-duplicate-context-"));
+  const previous = process.cwd();
+  try {
+    workspace(root);
+    fs.writeFileSync(path.join(root, "runtime", "context.txt"), "duplicate prompt\n");
+    process.chdir(root);
+    const values = {
+      "claude-entry": path.join(root, "cli.js"), settings: path.join(root, "settings.json"), "config-root": path.join(root, "config"),
+      "private-root": path.join(root, "private"), "evidence-root": path.join(root, "evidence"), "usage-root": path.join(root, "usage"), "run-id": "run",
+    };
+    for (const target of [values["claude-entry"], values.settings]) fs.writeFileSync(target, "fixture");
+    fs.mkdirSync(values["config-root"]);
+    let providerCalled = false;
+    await assert.rejects(runServiceInvocation(values, {
+      stdin: Readable.from([prompt("Specialist", "primary evaluation")]),
+      stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+      runClaude: async () => { providerCalled = true; },
+    }), { code: "CLAUDE_DEEPSEEK_DUPLICATE_CONTEXT_EXPOSED" });
+    assert.equal(providerCalled, false);
+    const [receipt] = readRoleInvocationReceipts(values["usage-root"]);
+    assert.equal(receipt.failure_code, "CLAUDE_DEEPSEEK_DUPLICATE_CONTEXT_EXPOSED");
   } finally { process.chdir(previous); fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -223,11 +400,8 @@ test("Specialist and Reviewer each own a two-dollar pool and repairs consume onl
           return {
             receipt: successfulProcessReceipt(options, role, costUsd),
             records: [
-              { name: "Read", is_error: false, input: { file_path: path.join(work, "inputs", "method-evaluation-plan.json") } },
+              { name: "Read", is_error: false, input: { file_path: path.join(work, "inputs", "request.json") } },
               { name: "Write", is_error: false, input: { file_path: output, content } },
-              ...(role === "REVIEWER"
-                ? [{ name: "Read", is_error: false, input: { file_path: output } }]
-                : []),
             ],
             skills: [], bash: [], mcp: [], denied: [], events: [{ type: "result", result: "done" }],
           };
@@ -277,7 +451,7 @@ test("a repair with no role-pool balance closes before invoking the provider", a
         return {
           receipt: successfulProcessReceipt(options, "SPECIALIST", 2),
           records: [
-            { name: "Read", is_error: false, input: { file_path: path.join(primaryWork, "inputs", "method-evaluation-plan.json") } },
+            { name: "Read", is_error: false, input: { file_path: path.join(primaryWork, "inputs", "request.json") } },
             { name: "Write", is_error: false, input: { file_path: output, content } },
           ],
           skills: [], bash: [], mcp: [], denied: [], events: [{ type: "result", result: "done" }],

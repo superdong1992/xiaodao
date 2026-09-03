@@ -263,8 +263,8 @@ test("Evidence V2 model cert defaults to Specialist-only and preserves explicit 
     const policy = {
       schema_version: 1,
       tools: ["Read", "Write"],
-      allowed_tools: ["Read(//workspace/inputs/**)", `Read(//workspace/${output})`, `Edit(//workspace/${output})`],
-      readable_scope: "job-workspace-inputs-and-role-draft",
+      allowed_tools: ["Read(//workspace/inputs/request.json)", `Edit(//workspace/${output})`],
+      readable_scope: "job-request-only",
       writable_scope: output,
       network: false,
       shell: false,
@@ -327,9 +327,9 @@ test("Evidence V2 model cert defaults to Specialist-only and preserves explicit 
   const blind = { evaluationMode: "BLIND_CONSENSUS" };
   assert.deepEqual(auditClaudeModelCertInvocations(normal, blind).repair_counts, { specialist: 0, reviewer: 0 });
   assert.deepEqual(normal[0].tool_policy.tools, ["Read", "Write"]);
-  assert.match(normal[0].tool_policy.allowed_tools[2], /^Edit\(/u);
+  assert.match(normal[0].tool_policy.allowed_tools[1], /^Edit\(/u);
   const wrongPermissionCategory = structuredClone(normal);
-  wrongPermissionCategory[0].tool_policy.allowed_tools[2] = "Write(//workspace/output/method-diagnosis.draft.json)";
+  wrongPermissionCategory[0].tool_policy.allowed_tools[1] = "Write(//workspace/output/method-diagnosis.draft.json)";
   const wrongPermissionCore = { ...wrongPermissionCategory[0].tool_policy };
   delete wrongPermissionCore.sha256;
   wrongPermissionCategory[0].tool_policy.sha256 = crypto.createHash("sha256").update(canonicalJson(wrongPermissionCore)).digest("hex");

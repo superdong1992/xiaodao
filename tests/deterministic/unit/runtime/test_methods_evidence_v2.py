@@ -112,6 +112,75 @@ def test_shared_literal_emits_one_method_qualified_hit_per_method() -> None:
     assert all(item.hit_ref.startswith("hit-") for item in graph.hits)
 
 
+def test_shared_casefold_literal_is_matched_once_per_line_then_expanded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    skill = _skill(
+        ("first-method", ("Straße", "FIRST_ONLY")),
+        ("second-method", ("STRASSE", "SECOND_ONLY")),
+    )
+    observed_calls: list[tuple[str, str]] = []
+    original_matcher = methods_evidence_v2._line_contains_marker
+
+    def observe_match(folded_line: str, folded_marker: str) -> bool:
+        observed_calls.append((folded_line, folded_marker))
+        return original_matcher(folded_line, folded_marker)
+
+    monkeypatch.setattr(
+        methods_evidence_v2,
+        "_line_contains_marker",
+        observe_match,
+    )
+
+    graph = scan_method_evidence_v2(
+        skill=skill,
+        target_logs=(
+            _target(
+                "server",
+                "noise\nSTRASSE first_only second_only request=42\n",
+            ),
+        ),
+    )
+
+    assert observed_calls == [
+        ("noise", "strasse"),
+        ("noise", "first_only"),
+        ("noise", "second_only"),
+        ("strasse first_only second_only request=42", "strasse"),
+        ("strasse first_only second_only request=42", "first_only"),
+        ("strasse first_only second_only request=42", "second_only"),
+    ]
+    assert [
+        (item.method_id, item.marker, item.line_number, item.line)
+        for item in graph.hits
+    ] == [
+        (
+            "first-method",
+            "Straße",
+            2,
+            "STRASSE first_only second_only request=42",
+        ),
+        (
+            "first-method",
+            "FIRST_ONLY",
+            2,
+            "STRASSE first_only second_only request=42",
+        ),
+        (
+            "second-method",
+            "STRASSE",
+            2,
+            "STRASSE first_only second_only request=42",
+        ),
+        (
+            "second-method",
+            "SECOND_ONLY",
+            2,
+            "STRASSE first_only second_only request=42",
+        ),
+    ]
+
+
 def test_scan_casefolds_but_preserves_declared_marker_and_frozen_line() -> None:
     skill = _skill(("unicode-method", ("Straße",)))
     target = _target("server", "STRASSE request=42\n")
