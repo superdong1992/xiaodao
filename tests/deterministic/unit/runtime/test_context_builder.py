@@ -268,8 +268,15 @@ def _materials(
     previous_outcomes: tuple[JobOutcome, ...] = (),
     profile: str | None = None,
 ) -> ContextMaterials:
+    manifest = _manifest(job, evidence, previous_outcomes)
+    methods_v1_specialist = (
+        job.job_type is JobType.DIAGNOSE
+        and manifest.resolved_logparse_plan is not None
+    )
     exposed_previous_outcomes = (
-        () if job.job_type is JobType.REVIEW else previous_outcomes
+        ()
+        if job.job_type is JobType.REVIEW or methods_v1_specialist
+        else previous_outcomes
     )
     fixture = MATERIAL_TEXT[job.job_type.value.lower()]
     role_values = {
@@ -280,7 +287,7 @@ def _materials(
         profile=fixture["profile"] if profile is None else profile,
         tool_bundle=fixture["tool_bundle"],
         output_contract=fixture["output_contract"],
-        manifest=_manifest(job, evidence, previous_outcomes),
+        manifest=manifest,
         previous_outcomes=exposed_previous_outcomes,
         evidence=evidence,
         **role_values,
@@ -332,9 +339,12 @@ def test_three_roles_have_fixed_framing_order_and_required_core(
     job, materials, _, _ = _complete_inputs(job_type)
     context = ContextBuilder().build(job, materials)
 
-    assert [section.kind.value for section in context.sections] == EXPECTED_ORDER[
-        job_type.value
-    ]
+    expected_order = EXPECTED_ORDER[job_type.value]
+    if job_type is JobType.DIAGNOSE:
+        expected_order = [
+            item for item in expected_order if item != "PREVIOUS_OUTCOME"
+        ]
+    assert [section.kind.value for section in context.sections] == expected_order
     assert [section.ordinal for section in context.sections] == list(
         range(len(context.sections))
     )
@@ -466,7 +476,26 @@ def test_production_output_contract_materializes_the_role_specific_protocol(
 
 
 def test_previous_outcome_is_full_canonical_dto_and_manifest_hash_is_checked() -> None:
-    job, materials, previous, _ = _complete_inputs(JobType.DIAGNOSE)
+    payload = _base_job(JobType.DIAGNOSE).model_dump(mode="json")
+    payload.update(
+        attachment_refs=[],
+        artifact_refs=[],
+        logparse_product=None,
+        logparse_tool_ref=None,
+    )
+    job = Job.model_validate(payload)
+    previous_item = _previous_outcome(job)
+    assert previous_item is not None
+    previous = (previous_item,)
+    evidence = tuple(
+        _evidence(job, evidence_id, UNICODE_SUMMARY)
+        for evidence_id in job.evidence_refs
+    )
+    materials = _materials(
+        job,
+        evidence=evidence,
+        previous_outcomes=previous,
+    )
     context = ContextBuilder().build(job, materials)
     previous_index = next(
         index

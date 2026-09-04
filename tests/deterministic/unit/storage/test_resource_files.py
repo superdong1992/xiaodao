@@ -385,6 +385,109 @@ def test_publisher_moves_first_file_then_idempotently_adopts_same_target(
     assert replacer.call_count == 1
 
 
+def test_publisher_rejects_hardlinked_staged_file_before_move(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    payload = b"single-link-only"
+    staged = _staged_file(layout, payload)
+    os.link(staged, staged.parent / "hardlink-alias")
+    _, guard, _, replacer, publisher = _publisher(layout)
+    final = layout.data_root / _key()
+
+    with guard.acquire():
+        with pytest.raises(ValueError, match="hard-linked"):
+            _publish_file(publisher, staged, payload, _key())
+
+    assert not final.exists()
+    assert replacer.events == []
+
+
+def test_publisher_rejects_same_bytes_from_a_different_inode_after_move(
+    tmp_path: Path,
+) -> None:
+    layout = _layout(tmp_path)
+    payload = b"same-content-different-node"
+    staged = _staged_file(layout, payload)
+
+    def replace_with_copy(
+        source: os.PathLike[str] | str,
+        destination: os.PathLike[str] | str,
+    ) -> None:
+        source_path = Path(source)
+        replacement = source_path.parent / "replacement-copy"
+        replacement.write_bytes(source_path.read_bytes())
+        os.replace(replacement, destination)
+
+    replacer = FaultInjectingReplace(delegate=replace_with_copy)
+    _, guard, _, _, publisher = _publisher(layout, replacer=replacer)
+    final = layout.data_root / _key()
+
+    with guard.acquire():
+        with pytest.raises(OSError, match="atomic move"):
+            _publish_file(publisher, staged, payload, _key())
+
+    assert staged.read_bytes() == payload
+    assert final.read_bytes() == payload
+
+
+def test_publisher_rejects_hardlink_created_during_move(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    payload = b"link-race"
+    staged = _staged_file(layout, payload)
+    alias = staged.parent / "late-hardlink"
+
+    def link_then_replace(
+        source: os.PathLike[str] | str,
+        destination: os.PathLike[str] | str,
+    ) -> None:
+        os.link(source, alias)
+        os.replace(source, destination)
+
+    replacer = FaultInjectingReplace(delegate=link_then_replace)
+    _, guard, _, _, publisher = _publisher(layout, replacer=replacer)
+    final = layout.data_root / _key()
+
+    with guard.acquire():
+        with pytest.raises(ValueError, match="hard-linked"):
+            _publish_file(publisher, staged, payload, _key())
+
+    assert alias.read_bytes() == payload
+    assert final.read_bytes() == payload
+
+
+def test_publisher_final_hash_rejects_same_size_tamper_with_restored_mtime(
+    tmp_path: Path,
+) -> None:
+    layout = _layout(tmp_path)
+    payload = b"trusted-bytes"
+    tampered = b"hostile-bytes"
+    assert len(tampered) == len(payload)
+    staged = _staged_file(layout, payload)
+
+    def tamper_then_replace(
+        source: os.PathLike[str] | str,
+        destination: os.PathLike[str] | str,
+    ) -> None:
+        source_path = Path(source)
+        before = source_path.stat(follow_symlinks=False)
+        source_path.write_bytes(tampered)
+        os.utime(
+            source_path,
+            ns=(before.st_atime_ns, before.st_mtime_ns),
+        )
+        os.replace(source, destination)
+
+    replacer = FaultInjectingReplace(delegate=tamper_then_replace)
+    _, guard, _, _, publisher = _publisher(layout, replacer=replacer)
+    final = layout.data_root / _key()
+
+    with guard.acquire():
+        with pytest.raises(ValueError, match="hash"):
+            _publish_file(publisher, staged, payload, _key())
+
+    assert final.read_bytes() == tampered
+    assert replacer.call_count == 1
+
+
 def test_publisher_rejects_existing_target_with_different_content(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     final, _ = _formal_file(layout, b"different", read_only=True)
@@ -595,6 +698,72 @@ def test_reader_materializes_one_resource_into_main_and_logparse_workspaces(
             logparse_destination.stat().st_ino,
         }
     ) == 3
+
+
+def test_reader_reuses_copy_hash_and_defers_source_rehash_until_after_move(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = _layout(tmp_path)
+    source, ref = _formal_file(layout, b"one-pass temporary", read_only=True)
+    destination = (
+        layout.workspaces
+        / JOB_ID
+        / "inputs"
+        / "evidence"
+        / RESOURCE_ID
+        / "payload"
+    )
+    reader = FormalResourceReader(layout, DurableRecordingFileSync())
+    hashed_paths: list[Path] = []
+    real_hash = resource_files.hash_file
+
+    def record_hash(path: Path):
+        hashed_paths.append(Path(path))
+        return real_hash(path)
+
+    monkeypatch.setattr(resource_files, "hash_file", record_hash)
+
+    assert reader.materialize(ref, destination) == destination
+
+    # copy_binary_stream validates source-to-temp bytes.  The moved destination
+    # is checked once, followed by the formal source boundary.
+    assert hashed_paths == [destination, source]
+
+
+def test_reader_deferred_source_rehash_rejects_drift_after_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = _layout(tmp_path)
+    source, ref = _formal_file(layout, b"trusted-source", read_only=True)
+    destination = (
+        layout.workspaces
+        / JOB_ID
+        / "inputs"
+        / "evidence"
+        / RESOURCE_ID
+        / "payload"
+    )
+    reader = FormalResourceReader(layout, DurableRecordingFileSync())
+    real_copy = resource_files.copy_binary_stream
+
+    def mutate_source_after_copy(*args: object, **kwargs: object):
+        receipt = real_copy(*args, **kwargs)  # type: ignore[arg-type]
+        source.chmod(0o644)
+        source.write_bytes(b"hostile-source")
+        return receipt
+
+    monkeypatch.setattr(
+        resource_files,
+        "copy_binary_stream",
+        mutate_source_after_copy,
+    )
+
+    with pytest.raises(ValueError, match="hash"):
+        reader.materialize(ref, destination)
+
+    assert destination.read_bytes() == b"trusted-source"
 
 
 @pytest.mark.parametrize(

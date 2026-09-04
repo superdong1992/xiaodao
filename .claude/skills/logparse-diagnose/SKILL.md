@@ -1,9 +1,14 @@
 ---
 name: logparse-diagnose
-description: Use inside a Problem Locator DIAGNOSE Job as the broker-facing Helper for product-owned Server preprocessing or for a selected diagnosis Skill that needs target logs. This skill uses only the job-scoped problem-locator-logparse broker client and never invokes logparse directly.
+description: Legacy broker-facing compatibility Helper for older Problem Locator environments or delegated diagnosis Skills. The current V6 specialized Runtime executes its fixed preprocessing request directly and does not call this Helper.
 ---
 
 # Logparse Diagnose
+
+The current V6 specialized hot path does not invoke this Skill. It remains a
+closed compatibility asset for older Server prompts and explicitly delegated
+diagnosis flows; do not add it to a new specialized deployment merely to satisfy
+the current Runtime.
 
 Act only as the broker-facing Helper for the Problem Locator Runtime or the selected
 `diagnose-*` Skill. Do not route, diagnose the business cause, create a Candidate,

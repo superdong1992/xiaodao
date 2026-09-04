@@ -14,7 +14,7 @@ import {
 
 export const MACOS_CODEX_LUNA_E2E_CONTRACT_VERSION = 1;
 export const MACOS_CODEX_LUNA_METHODS_PROMPT_VERSION = 1;
-export const MACOS_CODEX_LUNA_CLIENT_PROMPT_VERSION = 2;
+export const MACOS_CODEX_LUNA_CLIENT_PROMPT_VERSION = 4;
 export const MACOS_CODEX_LUNA_SCENARIOS = Object.freeze(["multiple-rpc-timeouts"]);
 export const STANDALONE_CODEX_LUNA_SCENARIOS = MACOS_CODEX_LUNA_SCENARIOS;
 export const MACOS_CODEX_LUNA_METHODS_CALLS = 1;
@@ -403,15 +403,33 @@ function flatArguments(value) {
 }
 
 export function auditMcpToolCalls(calls, { attachmentId = null, uploadRevision = null } = {}) {
-  requireE2E(Array.isArray(calls) && calls.length >= 6, "MACOS_CODEX_LUNA_MCP_CALLS_INVALID", "MCP call ledger is incomplete");
+  requireE2E(Array.isArray(calls) && calls.length >= 5, "MACOS_CODEX_LUNA_MCP_CALLS_INVALID", "MCP call ledger is incomplete");
   const names = calls.map((call) => call.tool);
   requireE2E(calls.every((call) => MACOS_CODEX_LUNA_PUBLIC_TOOLS.includes(call.tool) && call.server === "problem-locator" && call.status === "completed" && call.error == null && flatArguments(call.arguments)), "MACOS_CODEX_LUNA_MCP_CALL_INVALID", "MCP calls must be completed, flat, and confined to the public server/tool allowlist");
   requireE2E(names.filter((name) => name === "problem_locator_create_case").length === 1 && names[0] === "problem_locator_create_case", "MACOS_CODEX_LUNA_CREATE_CASE_CARDINALITY_INVALID", "Client must create exactly one Case first");
   requireE2E(names.filter((name) => name === "problem_locator_prepare_attachment").length === 1, "MACOS_CODEX_LUNA_PREPARE_CARDINALITY_INVALID", "Client must prepare exactly one attachment");
   const prepareIndex = names.indexOf("problem_locator_prepare_attachment");
   const submitIndex = names.indexOf("problem_locator_submit_supplement");
-  const artifactIndex = names.lastIndexOf("problem_locator_list_artifacts");
-  requireE2E(prepareIndex > names.indexOf("problem_locator_get_case") && submitIndex > prepareIndex && artifactIndex > submitIndex, "MACOS_CODEX_LUNA_MCP_ORDER_INVALID", "MCP call order violates the attachment workflow");
+  const terminalStatuses = new Set(["RESOLVED", "PARTIALLY_RESOLVED", "UNRESOLVED", "FAILED", "CANCELLED", "INTERRUPTED"]);
+  const structuredData = (call) => {
+    const result = call?.result;
+    const candidates = [result?.structuredContent, result?.structured_content, result];
+    const envelope = candidates.find((item) => isPlainObject(item) && item.ok === true && item.error === null && isPlainObject(item.data));
+    return envelope?.data ?? null;
+  };
+  const terminalGetIndex = calls.findLastIndex((call) => call.tool === "problem_locator_get_case" && terminalStatuses.has(structuredData(call)?.case_view?.status));
+  requireE2E(prepareIndex > names.indexOf("problem_locator_get_case") && submitIndex > prepareIndex && terminalGetIndex > submitIndex, "MACOS_CODEX_LUNA_MCP_ORDER_INVALID", "MCP call order violates the attachment workflow");
+  requireE2E(calls[prepareIndex - 1]?.tool === "problem_locator_get_case" && calls[prepareIndex - 1]?.arguments?.wait_seconds === 0, "MACOS_CODEX_LUNA_PREPARE_REFRESH_INVALID", "Attachment preparation must use one immediate fresh Case revision");
+  requireE2E(submitIndex === prepareIndex + 1, "MACOS_CODEX_LUNA_READY_REFRESH_REDUNDANT", "The upload receipt revision must go directly to supplement without another MCP refresh");
+  const terminalData = structuredData(calls[terminalGetIndex]);
+  const inlineArtifacts = Object.hasOwn(terminalData, "artifact_views");
+  const artifactListIndices = names.flatMap((name, index) => name === "problem_locator_list_artifacts" ? [index] : []);
+  if (inlineArtifacts) {
+    requireE2E(Array.isArray(terminalData.artifact_views), "MACOS_CODEX_LUNA_ARTIFACT_VIEWS_INVALID", "Terminal get_case artifact_views must be an array");
+    requireE2E(artifactListIndices.length === 0, "MACOS_CODEX_LUNA_ARTIFACT_LIST_REDUNDANT", "Client must not list artifacts when terminal get_case includes artifact_views");
+  } else {
+    requireE2E(artifactListIndices.length === 1 && artifactListIndices[0] > terminalGetIndex, "MACOS_CODEX_LUNA_ARTIFACT_FALLBACK_INVALID", "Legacy list_artifacts fallback is allowed only after terminal get_case omits artifact_views");
+  }
   const requestIds = calls.filter((call) => WRITE_TOOLS.has(call.tool)).map((call) => call.arguments.request_id);
   requireE2E(requestIds.every(isNonEmptyString) && new Set(requestIds).size === requestIds.length, "MACOS_CODEX_LUNA_REQUEST_ID_INVALID", "Each logical write must use a distinct stable request ID");
   const revisions = calls.filter((call) => WRITE_TOOLS.has(call.tool) && call.tool !== "problem_locator_create_case").map((call) => call.arguments.expected_case_revision);
@@ -420,8 +438,9 @@ export function auditMcpToolCalls(calls, { attachmentId = null, uploadRevision =
     const submit = calls[submitIndex];
     requireE2E(Array.isArray(submit.arguments.attachment_ids) && submit.arguments.attachment_ids.includes(attachmentId), "MACOS_CODEX_LUNA_ATTACHMENT_NOT_SUBMITTED", "READY attachment was not submitted after upload");
   }
+  requireE2E(calls[submitIndex].arguments.wait_seconds === 30, "MACOS_CODEX_LUNA_SUBMIT_WAIT_INVALID", "Supplement must merge the first finite wait into the write call");
   if (uploadRevision !== null) requireE2E(calls[submitIndex].arguments.expected_case_revision === uploadRevision, "MACOS_CODEX_LUNA_UPLOAD_REVISION_STALE", "Supplement did not use the upload receipt revision");
-  return { schema_version: 1, status: "PASS", call_count: calls.length, sequence: names, write_request_ids: requestIds, revisions };
+  return { schema_version: 1, status: "PASS", call_count: calls.length, sequence: names, write_request_ids: requestIds, revisions, artifact_projection_source: inlineArtifacts ? "GET_CASE" : "LIST_ARTIFACTS" };
 }
 
 export function auditHttpBoundary(entries, { mcpUrl, uploadUrl, downloadUrl = null }) {

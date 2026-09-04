@@ -258,15 +258,28 @@ def scan_method_markers(
             raise ValueError("target log source ids must be unique")
         source_ids.add(item.source_id)
 
+    marker_bindings = tuple(
+        (method.id, marker, marker.casefold())
+        for method in skill.methods.methods
+        for marker in method.evidence_markers
+    )
+    folded_markers = tuple(
+        dict.fromkeys(folded for _, _, folded in marker_bindings)
+    )
     marker_hits: list[tuple[str, str, int]] = []
     hit_method_ids: set[str] = set()
     for target in logs:
         for line_number, line in enumerate(target.lines, start=1):
-            for method in skill.methods.methods:
-                for marker in method.evidence_markers:
-                    if marker_occurs(marker, line):
-                        marker_hits.append((target.source_id, marker, line_number))
-                        hit_method_ids.add(method.id)
+            folded_line = line.casefold()
+            matched_markers = {
+                marker for marker in folded_markers if marker in folded_line
+            }
+            if not matched_markers:
+                continue
+            for method_id, marker, folded_marker in marker_bindings:
+                if folded_marker in matched_markers:
+                    marker_hits.append((target.source_id, marker, line_number))
+                    hit_method_ids.add(method_id)
     return SkillLoadReceiptV1(
         package_tree_sha256=skill.package_tree_sha256,
         scanned_source_ids=tuple(item.source_id for item in logs),
@@ -329,6 +342,7 @@ def verify_method_diagnosis(
 
     evidence_method_ids: set[str] = set()
     evidence_identities: set[tuple[str, tuple[str, ...]]] = set()
+    source_lines: dict[str, tuple[str, ...]] = {}
     for item in diagnosis.evidence:
         method = methods.get(item.method_id)
         if method is None:
@@ -350,7 +364,10 @@ def verify_method_diagnosis(
             if source_key in seen_sources:
                 raise ValueError("evidence sources must not duplicate a target line")
             seen_sources.add(source_key)
-            lines = target.lines
+            lines = source_lines.get(source.source_id)
+            if lines is None:
+                lines = target.lines
+                source_lines[source.source_id] = lines
             if source.line_number > len(lines):
                 raise ValueError("evidence source line_number exceeds the frozen log")
             actual_line = lines[source.line_number - 1]

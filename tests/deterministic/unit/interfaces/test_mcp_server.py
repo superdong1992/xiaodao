@@ -173,12 +173,22 @@ def test_mcp_get_case_and_list_artifacts_preserve_generic_v2_report_contract() -
     assert public_result["report_sha256"] == artifact.sha256
     assert public_result["report_artifact_id"] == artifact.artifact_id
     assert "<<<GENERIC_DIAGNOSIS_RESULT_V2:" not in public_result["report_markdown"]
+    case_artifact = case_result["data"]["artifact_views"][0]
     public_artifact = artifact_result["data"]["artifacts"][0]
+    assert case_artifact == public_artifact
     assert public_artifact["kind"] == ArtifactKind.GENERIC_REPORT.value
     assert public_artifact["size"] == artifact.size
     assert public_artifact["sha256"] == artifact.sha256
+    assert public_artifact["download_url"].endswith(
+        f"/api/v1/artifacts/{ARTIFACT_ID}/content?case_id={CASE_ID}"
+    )
     assert "storage_key" not in public_artifact
     assert "metadata" not in public_artifact
+    assert "created_by_job_id" not in public_artifact
+    assert query.calls == [
+        ("get_case", (CASE_ID, None, 0)),
+        ("list_artifacts", (CASE_ID, False)),
+    ]
 
 
 def test_fake_application_service_replays_same_request_and_rejects_changed_payload() -> None:
@@ -1075,6 +1085,7 @@ def test_official_sdk_calls_all_seven_stateless_tools(caplog) -> None:
                         output_validators[TOOL_NAMES[3]].validate(_structured(get_case))
                         assert _structured(get_case)["data"]["case_view"]["case_revision"] == 3
                         assert _structured(get_case)["data"]["wait_timed_out"] is True
+                        assert _structured(get_case)["data"]["artifact_views"] == []
 
                         resume = await session.call_tool(
                             TOOL_NAMES[4],

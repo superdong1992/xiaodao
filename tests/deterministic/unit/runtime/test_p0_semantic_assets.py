@@ -126,6 +126,15 @@ def test_router_writes_one_server_finalized_draft_without_a_tool_round_trip() ->
     assert "independently parses, validates" in contract
 
 
+def test_router_profile_does_not_claim_the_unfiltered_skill_index_was_prefiltered() -> None:
+    _profile_meta, profile = _asset("profiles/router")
+
+    assert "every registered production Skill" in profile
+    assert "it is not filtered" in profile
+    assert "already filtered" not in profile
+    assert "never reinterpret an `input_name`" in profile
+
+
 def test_specialist_assets_require_grounded_methods_v1_output() -> None:
     profile_meta, profile = _asset("profiles/specialist")
     contract_meta, contract = _asset("output-contracts/diagnose")

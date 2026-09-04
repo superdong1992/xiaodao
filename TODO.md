@@ -28,6 +28,39 @@
 - 条件参数若已作为初始 USER_FACT 提供，应直接固定并复用，不得重复询问；若未提供，分支激活后才创建一次可补充的 OPEN requirement。
 - 生成器、manifest/合同、Catalog、Coordinator、服务端验证器和正反向测试必须共同覆盖“命中分支才询问、未命中分支不询问且不阻塞”。
 
+## P1：显式专用路由与多 Case 队头阻塞
+
+- 当前 `create_case` 没有专用 Skill selector，registration 也只有自由文本 capability；唯一候选仍可能
+  与问题不匹配。因此不能按候选数量自动跳过 ROUTE。若要消除实测约 2 分 34 秒的 ROUTE Agent，
+  需要选择一种显式合同：由专用客户端提交完整扁平 selector，或把某个 Linux endpoint 明确配置成
+  单一专用入口。服务端必须校验当前 production registration 并冻结完整 ref；旧客户端省略 selector
+  时继续执行语义 ROUTE。
+- 先用 `backend_phase=ROUTE` 的真实遥测核对 `turn_count`、`model_api_duration_ms` 和 Write 工具耗时。
+  如果 ROUTE 因落盘草稿产生额外模型回合，可另行设计“模型只返回最小 RouteDecision、服务端补齐并
+  冻结完整 Outcome”的单响应合同；不得把未密封的 stdout 文本直接当作权威结果。
+- 当前调度器仍只有一个 active worker。多用户时，短 ROUTE 会排在其他 Case 的长 DIAGNOSE 后面，
+  单 Case 本地基准无法暴露这类队头阻塞。后续若拆分 ROUTE lane 或开放并发，必须先冻结 CPU、内存、
+  Logparse 子进程、状态提交和取消/恢复的资源隔离合同，再用多 Case Linux 压测给出 P50/P95/P99。
+- 长期运行时，单体 StateFile 的提交耗时会随 Case 数增长。后续应单独评估按 Case 分片或 append-only
+  日志；不得在没有崩溃恢复、幂等和源码快照证明的情况下，把该存储改造混入模型热路径优化。
+
+## P1：专用定位单响应模型合同与 Logparse 批处理
+
+- 当前 Specialist 仍由通用 Agent CLI 读取 `request.json`、目标日志和方法卡，再写
+  `method-diagnosis.draft.json`。真实环境约 4 分 23 秒的 `BACKEND_EXECUTE` 是否来自多轮文件工具调用，
+  必须先用新增 `backend_phase/backend_invocation_id` 遥测核对 `turn_count`、各工具耗时和模型 API 时间。
+  若证据成立，应设计服务端生成的有界 evidence packet，并让低延迟模型一次返回可由服务端密封的
+  结构化草稿；不能直接信任未密封 stdout，也不能丢掉原始日志的最终逐行校验。
+- 一个 `parse-targets` 仍会按 anchor 串行启动多个 `mech-target-logs` Python 进程。优先给 pinned
+  Logparse 增加一次性 multi-target 命令，在单进程中按声明顺序返回全部目标；并发子进程只能作为
+  次选，启用前必须证明上游解析树只读、取消能回收整棵进程树，且总 CPU/内存仍受 Job 上限约束。
+- Logparse 新产物树仍会在初检、目标捕获、跨 Specialist 边界和正式发布时多次完整 hash。后续可在
+  第一次完整校验后立即封存为只读受控 stage，保存 inode/metadata seal 和 TreeManifest；中间边界
+  用轻量 seal，跨 Agent 与正式发布仍做完整 hash。不得用可恢复的 mtime/size 代替最终内容校验。
+- 30 秒长轮询会让分钟级 Job 产生多次客户端工具回合。只有确认 Claude Code/Codex Host、反向代理
+  和企业网络都支持更长请求后，才考虑把上限提高到 90–300 秒；否则应使用连接稳定的进度流协议，
+  不能单纯延长超时导致远端 MCP 请求被 Host 提前中断。
+
 ## P1：Methods V1 UNRESOLVED 真实分布
 
 - 当前确定性测试已覆盖 Reviewer `REJECT`、`NEED_MORE_EVIDENCE`、证据不足和发布失败的收口行为，

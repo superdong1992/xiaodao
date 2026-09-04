@@ -9,6 +9,7 @@ SKILL_PATH = REPOSITORY_ROOT / ".claude/skills/logparse-diagnose/SKILL.md"
 
 def test_helper_has_closed_server_preprocessing_mode() -> None:
     text = SKILL_PATH.read_text(encoding="utf-8")
+    assert "current V6 specialized hot path does not invoke this Skill" in text
     server_mode = text.split("## Invocation modes", 1)[1].split(
         "## Authority and inputs", 1
     )[0]

@@ -201,6 +201,61 @@ def test_verify_method_diagnosis_classifies_full_scan_miss() -> None:
     )
 
 
+def test_verify_method_diagnosis_decodes_each_cited_source_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    skill = load_specialized_skill_registration(RUNTIME_SKILL)
+    line = "rpc deadline exceeded request_id=42"
+    target = _target_log(f"{line}\n{line}\n".encode())
+    skill_load = scan_method_markers(skill=skill, target_logs=(target,))
+    draft = MethodDiagnosisDraftV1.from_mapping(
+        {
+            "schema_version": 1,
+            "status": "CONFIRMED",
+            "confirmed_methods": ["rpc-call-timeout"],
+            "candidate_methods": [],
+            "evidence": [
+                {
+                    "method_id": "rpc-call-timeout",
+                    "summary": "Two timeout observations share one frozen source.",
+                    "identity_tokens": ["request_id=42"],
+                    "sources": [
+                        {
+                            "source_id": "client",
+                            "line_number": number,
+                            "marker": "rpc deadline exceeded",
+                            "line": line,
+                        }
+                        for number in (1, 2)
+                    ],
+                }
+            ],
+            "limitations": [],
+            "safety_notes": [],
+        }
+    )
+    original = FrozenTargetLogV1.lines.fget
+    assert original is not None
+    reads = 0
+
+    def counted_lines(value: FrozenTargetLogV1) -> tuple[str, ...]:
+        nonlocal reads
+        reads += 1
+        return original(value)
+
+    monkeypatch.setattr(FrozenTargetLogV1, "lines", property(counted_lines))
+
+    verify_method_diagnosis(
+        skill=skill,
+        draft=draft,
+        target_logs=(target,),
+        logparse_receipt_sha256="a" * 64,
+        skill_load=skill_load,
+    )
+
+    assert reads == 2  # one full-scan verification plus one shared citation view
+
+
 def _empty_workspace(root: Path) -> None:
     for relative in ("inputs", "runtime/tool-state", "output"):
         (root / relative).mkdir(parents=True, exist_ok=True)

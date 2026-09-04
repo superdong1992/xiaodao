@@ -14,7 +14,12 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from problem_locator.contracts.models import NonEmptyText, OpaqueId, UtcTimestamp
 from problem_locator.journey import JourneyEvent
-from problem_locator.journey_timing import JobTiming, TimingReport, analyze_timing
+from problem_locator.journey_timing import (
+    JobTiming,
+    TimingReport,
+    TimingSpan,
+    analyze_timing,
+)
 
 
 _KNOWN_EVENTS = frozenset(
@@ -324,26 +329,80 @@ def _number(data: dict[str, Any], name: str) -> float | None:
     return result if result >= 0 else None
 
 
-def _backend_duration(job: JobTiming) -> float | None:
-    values = [
-        span.duration_ms
+def _backend_spans(job: JobTiming) -> tuple[TimingSpan, ...]:
+    return tuple(
+        span
         for span in job.spans
         if span.category == "stage" and span.detail == "BACKEND_EXECUTE"
-    ]
-    return sum(values) if values else None
+    )
+
+
+def _matched_backend_duration(
+    spans: tuple[TimingSpan, ...],
+    used: set[int],
+    telemetry: dict[str, Any],
+) -> float | None:
+    invocation_id = telemetry.get("backend_invocation_id")
+    phase = telemetry.get("backend_phase")
+    candidate: int | None = None
+    has_invocation_id = (
+        isinstance(invocation_id, str)
+        and bool(invocation_id)
+        and invocation_id != "UNSPECIFIED"
+    )
+    if has_invocation_id:
+        candidate = next(
+            (
+                index
+                for index, span in enumerate(spans)
+                if index not in used
+                and span.backend_invocation_id == invocation_id
+            ),
+            None,
+        )
+        # A current telemetry record must never borrow another invocation's
+        # duration merely because its matching stage event is missing.
+        if candidate is None:
+            return None
+    if candidate is None and isinstance(phase, str) and phase != "UNSPECIFIED":
+        candidate = next(
+            (
+                index
+                for index, span in enumerate(spans)
+                if index not in used and span.backend_phase == phase
+            ),
+            None,
+        )
+    if candidate is None:
+        candidate = next(
+            (index for index in range(len(spans)) if index not in used),
+            None,
+        )
+    if candidate is None:
+        return None
+    used.add(candidate)
+    return spans[candidate].duration_ms
 
 
 def _detailed_telemetry(job: JobTiming) -> list[str]:
     if not job.telemetry:
         return ["    Agent 细分: 不可用（该 Journey 未记录遥测事件）"]
     result: list[str] = []
-    backend_ms = _backend_duration(job)
+    backend_spans = _backend_spans(job)
+    used_backend_spans: set[int] = set()
     for ordinal, (line_number, data) in enumerate(job.telemetry, start=1):
+        backend_ms = _matched_backend_duration(
+            backend_spans,
+            used_backend_spans,
+            data,
+        )
         status = data.get("stream_status", "UNKNOWN")
         reason = data.get("stream_reason")
         result.append(
             f"    Agent 调用 #{ordinal}: {status}"
-            f"{f' / {reason}' if reason else ''}，模式={data.get('diagnosis_mode', 'UNKNOWN')}，"
+            f"{f' / {reason}' if reason else ''}，"
+            f"阶段={data.get('backend_phase', 'UNSPECIFIED')}，"
+            f"模式={data.get('diagnosis_mode', 'UNKNOWN')}，"
             f"来源 journey.jsonl:{line_number}"
         )
         cli_ms = _number(data, "cli_duration_ms")

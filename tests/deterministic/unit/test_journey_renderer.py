@@ -287,6 +287,7 @@ def test_timing_attribution_ranks_exclusive_critical_path_and_agent_detail(
     base = "2026-08-05T08:00:"
     telemetry = {
         "diagnosis_mode": "SPECIALIZED",
+        "backend_phase": "METHODS_SPECIALIST",
         "backend_status": "SUCCESS",
         "stream_status": "COMPLETE",
         "stream_reason": None,
@@ -349,6 +350,7 @@ def test_timing_attribution_ranks_exclusive_critical_path_and_agent_detail(
     assert "系统处理: 11.000 s (91.7%)" in brief
     assert "未归类: 1.000 s (8.3%)" in brief
     assert "Agent 细分: COMPLETE（1/1 次调用）" in brief
+    assert "阶段=METHODS_SPECIALIST，模式=SPECIALIZED" in detailed
     assert "服务端 Backend: 7.000 s；CLI 报告总耗时: 6.500 s" in detailed
     assert "服务端包装开销: 500.000 ms" in detailed
     assert "CLI 非 API 时间: 1.500 s" in detailed
@@ -380,6 +382,7 @@ def test_unsupported_agent_output_keeps_base_timing_and_reason(tmp_path: Path) -
                 job_type="DIAGNOSE",
                 data={
                     "diagnosis_mode": "GENERIC",
+                    "backend_phase": "GENERIC",
                     "stream_status": "UNAVAILABLE",
                     "stream_reason": "UNSUPPORTED_STREAM_JSON",
                     "content_included": False,
@@ -394,4 +397,280 @@ def test_unsupported_agent_output_keeps_base_timing_and_reason(tmp_path: Path) -
 
     assert "Agent 后端执行" in brief
     assert "UNSUPPORTED_STREAM_JSON" in brief
-    assert "UNAVAILABLE / UNSUPPORTED_STREAM_JSON，模式=GENERIC" in detailed
+    assert "UNAVAILABLE / UNSUPPORTED_STREAM_JSON，阶段=GENERIC，模式=GENERIC" in detailed
+
+
+def test_agent_telemetry_pairs_each_call_with_its_own_backend_span(
+    tmp_path: Path,
+) -> None:
+    log_dir = tmp_path / "logs"
+    base_data = {
+        "diagnosis_mode": "SPECIALIZED",
+        "backend_status": "SUCCESS",
+        "stream_status": "COMPLETE",
+        "stream_reason": None,
+        "content_included": False,
+        "prompt_bytes": 100,
+        "prompt_write_status": "COMPLETE",
+        "prompt_write_ms": 1.0,
+        "turn_count": 1,
+        "usage_counts": {},
+        "block_observations": {},
+        "tool_observed_union_ms": 0.0,
+        "tool_observations": [],
+    }
+    _write(
+        log_dir,
+        [
+            _event(1, "case.created"),
+            _event(2, "job.claimed", job_id=JOB_ID, job_type="DIAGNOSE"),
+            _event(
+                3,
+                "job.stage.completed",
+                job_id=JOB_ID,
+                job_type="DIAGNOSE",
+                data={
+                    "stage": "BACKEND_EXECUTE",
+                    "backend_phase": "LOGPARSE_PREPROCESS",
+                    "backend_invocation_id": "call-preprocess",
+                },
+                duration_ms=1000.0,
+            ),
+            _event(
+                4,
+                "job.backend.telemetry",
+                job_id=JOB_ID,
+                job_type="DIAGNOSE",
+                data={
+                    **base_data,
+                    "backend_phase": "LOGPARSE_PREPROCESS",
+                    "backend_invocation_id": "call-preprocess",
+                    "cli_duration_ms": 900.0,
+                    "model_api_duration_ms": 800.0,
+                },
+            ),
+            _event(
+                5,
+                "job.stage.completed",
+                job_id=JOB_ID,
+                job_type="DIAGNOSE",
+                data={
+                    "stage": "BACKEND_EXECUTE",
+                    "backend_phase": "METHODS_SPECIALIST",
+                    "backend_invocation_id": "call-specialist",
+                },
+                duration_ms=2000.0,
+            ),
+            _event(
+                6,
+                "job.backend.telemetry",
+                job_id=JOB_ID,
+                job_type="DIAGNOSE",
+                data={
+                    **base_data,
+                    "backend_phase": "METHODS_SPECIALIST",
+                    "backend_invocation_id": "call-specialist",
+                    "cli_duration_ms": 1800.0,
+                    "model_api_duration_ms": 1600.0,
+                },
+            ),
+        ],
+    )
+
+    receipt = render_journey(log_dir, CASE_ID)
+    detailed = Path(receipt.detailed_log).read_text(encoding="utf-8")
+
+    assert "阶段=LOGPARSE_PREPROCESS" in detailed
+    assert "阶段=METHODS_SPECIALIST" in detailed
+    assert "服务端 Backend: 1.000 s；CLI 报告总耗时: 900.000 ms" in detailed
+    assert "服务端 Backend: 2.000 s；CLI 报告总耗时: 1.800 s" in detailed
+    assert "服务端 Backend: 3.000 s" not in detailed
+
+
+def test_agent_telemetry_uses_invocation_id_when_an_earlier_event_is_missing(
+    tmp_path: Path,
+) -> None:
+    log_dir = tmp_path / "logs"
+    telemetry = {
+        "diagnosis_mode": "SPECIALIZED",
+        "backend_phase": "METHODS_SPECIALIST",
+        "backend_invocation_id": "call-specialist",
+        "backend_status": "SUCCESS",
+        "stream_status": "COMPLETE",
+        "stream_reason": None,
+        "content_included": False,
+        "prompt_bytes": 100,
+        "prompt_write_status": "COMPLETE",
+        "prompt_write_ms": 1.0,
+        "cli_duration_ms": 1800.0,
+        "model_api_duration_ms": 1600.0,
+        "turn_count": 1,
+        "usage_counts": {},
+        "block_observations": {},
+        "tool_observed_union_ms": 0.0,
+        "tool_observations": [],
+    }
+    _write(
+        log_dir,
+        [
+            _event(1, "case.created"),
+            _event(2, "job.claimed", job_id=JOB_ID, job_type="DIAGNOSE"),
+            _event(
+                3,
+                "job.stage.completed",
+                job_id=JOB_ID,
+                job_type="DIAGNOSE",
+                data={
+                    "stage": "BACKEND_EXECUTE",
+                    "backend_phase": "LOGPARSE_PREPROCESS",
+                    "backend_invocation_id": "call-preprocess",
+                },
+                duration_ms=1000.0,
+            ),
+            _event(
+                4,
+                "job.stage.completed",
+                job_id=JOB_ID,
+                job_type="DIAGNOSE",
+                data={
+                    "stage": "BACKEND_EXECUTE",
+                    "backend_phase": "METHODS_SPECIALIST",
+                    "backend_invocation_id": "call-specialist",
+                },
+                duration_ms=2000.0,
+            ),
+            _event(
+                5,
+                "job.backend.telemetry",
+                job_id=JOB_ID,
+                job_type="DIAGNOSE",
+                data=telemetry,
+            ),
+        ],
+    )
+
+    receipt = render_journey(log_dir, CASE_ID)
+    detailed = Path(receipt.detailed_log).read_text(encoding="utf-8")
+
+    assert "阶段=METHODS_SPECIALIST" in detailed
+    assert "服务端 Backend: 2.000 s；CLI 报告总耗时: 1.800 s" in detailed
+    assert "服务端 Backend: 1.000 s；CLI 报告总耗时: 1.800 s" not in detailed
+
+
+def test_failed_backend_span_inherits_invocation_identity_from_start(
+    tmp_path: Path,
+) -> None:
+    log_dir = tmp_path / "logs"
+    telemetry = {
+        "diagnosis_mode": "SPECIALIZED",
+        "backend_phase": "METHODS_SPECIALIST",
+        "backend_invocation_id": "failed-call",
+        "backend_status": "FAILED",
+        "stream_status": "INCOMPLETE",
+        "stream_reason": "PROCESS_FAILED",
+        "content_included": False,
+        "prompt_bytes": 100,
+        "prompt_write_status": "COMPLETE",
+        "prompt_write_ms": 1.0,
+        "cli_duration_ms": 900.0,
+        "model_api_duration_ms": 800.0,
+        "turn_count": 1,
+        "usage_counts": {},
+        "block_observations": {},
+        "tool_observed_union_ms": 0.0,
+        "tool_observations": [],
+    }
+    _write(
+        log_dir,
+        [
+            _event(1, "case.created"),
+            _event(2, "job.claimed", job_id=JOB_ID, job_type="DIAGNOSE"),
+            _event(
+                3,
+                "job.stage.started",
+                job_id=JOB_ID,
+                job_type="DIAGNOSE",
+                data={
+                    "stage": "BACKEND_EXECUTE",
+                    "backend_phase": "METHODS_SPECIALIST",
+                    "backend_invocation_id": "failed-call",
+                },
+            ),
+            _event(
+                4,
+                "job.stage.failed",
+                job_id=JOB_ID,
+                job_type="DIAGNOSE",
+                data={"stage": "BACKEND_EXECUTE", "code": "BACKEND_EXIT_FAILED"},
+            ),
+            _event(
+                5,
+                "job.backend.telemetry",
+                job_id=JOB_ID,
+                job_type="DIAGNOSE",
+                data=telemetry,
+            ),
+        ],
+    )
+
+    receipt = render_journey(log_dir, CASE_ID)
+    detailed = Path(receipt.detailed_log).read_text(encoding="utf-8")
+
+    assert "服务端 Backend: 1.000 s；CLI 报告总耗时: 900.000 ms" in detailed
+
+
+def test_current_telemetry_never_borrows_duration_from_a_different_invocation(
+    tmp_path: Path,
+) -> None:
+    log_dir = tmp_path / "logs"
+    telemetry = {
+        "diagnosis_mode": "SPECIALIZED",
+        "backend_phase": "METHODS_SPECIALIST",
+        "backend_invocation_id": "missing-call",
+        "backend_status": "SUCCESS",
+        "stream_status": "COMPLETE",
+        "stream_reason": None,
+        "content_included": False,
+        "prompt_bytes": 100,
+        "prompt_write_status": "COMPLETE",
+        "prompt_write_ms": 1.0,
+        "cli_duration_ms": 1800.0,
+        "model_api_duration_ms": 1600.0,
+        "turn_count": 1,
+        "usage_counts": {},
+        "block_observations": {},
+        "tool_observed_union_ms": 0.0,
+        "tool_observations": [],
+    }
+    _write(
+        log_dir,
+        [
+            _event(1, "case.created"),
+            _event(2, "job.claimed", job_id=JOB_ID, job_type="DIAGNOSE"),
+            _event(
+                3,
+                "job.stage.completed",
+                job_id=JOB_ID,
+                job_type="DIAGNOSE",
+                data={
+                    "stage": "BACKEND_EXECUTE",
+                    "backend_phase": "METHODS_SPECIALIST",
+                    "backend_invocation_id": "different-call",
+                },
+                duration_ms=2000.0,
+            ),
+            _event(
+                4,
+                "job.backend.telemetry",
+                job_id=JOB_ID,
+                job_type="DIAGNOSE",
+                data=telemetry,
+            ),
+        ],
+    )
+
+    receipt = render_journey(log_dir, CASE_ID)
+    detailed = Path(receipt.detailed_log).read_text(encoding="utf-8")
+
+    assert "服务端 Backend: 无证据；CLI 报告总耗时: 1.800 s" in detailed
+    assert "服务端 Backend: 2.000 s；CLI 报告总耗时: 1.800 s" not in detailed

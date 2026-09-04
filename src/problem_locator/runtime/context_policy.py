@@ -124,6 +124,12 @@ class ResolvedJobAssets:
                 AssetKind.DIAGNOSIS_SKILL,
                 loaded_method_ids=loaded_method_ids,
             )
+        methods_v1_specialist = (
+            loaded_method_ids is not None
+            and methods_evidence_graph is None
+            and workspace.manifest.job_type is JobType.DIAGNOSE
+            and workspace.manifest.resolved_logparse_plan is not None
+        )
         materials = ContextMaterials(
             profile=self.profile_text,
             skill=skill_text,
@@ -134,6 +140,7 @@ class ResolvedJobAssets:
             previous_outcomes=(
                 ()
                 if workspace.manifest.job_type is JobType.REVIEW
+                or methods_v1_specialist
                 else workspace.previous_outcomes
             ),
             evidence=workspace.evidence,

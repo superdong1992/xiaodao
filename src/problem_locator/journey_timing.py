@@ -28,6 +28,8 @@ class TimingSpan:
     job_type: str | None = None
     status: str = "COMPLETE"
     detail: str | None = None
+    backend_phase: str | None = None
+    backend_invocation_id: str | None = None
 
     @property
     def duration_ms(self) -> float:
@@ -81,6 +83,18 @@ def _span_from_end(
 ) -> TimingSpan:
     end = _line_time(line)
     duration = line.event.duration_ms
+    end_phase = line.event.data.get("backend_phase")
+    start_phase = (
+        start_line.event.data.get("backend_phase")
+        if start_line is not None
+        else None
+    )
+    end_invocation_id = line.event.data.get("backend_invocation_id")
+    start_invocation_id = (
+        start_line.event.data.get("backend_invocation_id")
+        if start_line is not None
+        else None
+    )
     start = (
         end - float(duration)
         if duration is not None
@@ -99,6 +113,20 @@ def _span_from_end(
         job_type=line.event.job_type,
         status=status,
         detail=detail,
+        backend_phase=(
+            end_phase
+            if isinstance(end_phase, str)
+            else start_phase
+            if isinstance(start_phase, str)
+            else None
+        ),
+        backend_invocation_id=(
+            end_invocation_id
+            if isinstance(end_invocation_id, str)
+            else start_invocation_id
+            if isinstance(start_invocation_id, str)
+            else None
+        ),
     )
 
 
@@ -137,6 +165,8 @@ def _clip(span: TimingSpan, start: float, end: float) -> TimingSpan | None:
         job_type=span.job_type,
         status=span.status,
         detail=span.detail,
+        backend_phase=span.backend_phase,
+        backend_invocation_id=span.backend_invocation_id,
     )
 
 
@@ -267,6 +297,18 @@ def _collect_stage_spans(lines: tuple[Any, ...], as_of: float) -> list[TimingSpa
                     job_type=started.event.job_type,
                     status="IN_PROGRESS",
                     detail=stage,
+                    backend_phase=(
+                        started.event.data.get("backend_phase")
+                        if isinstance(started.event.data.get("backend_phase"), str)
+                        else None
+                    ),
+                    backend_invocation_id=(
+                        started.event.data.get("backend_invocation_id")
+                        if isinstance(
+                            started.event.data.get("backend_invocation_id"), str
+                        )
+                        else None
+                    ),
                 )
             )
 
@@ -294,6 +336,8 @@ def _collect_stage_spans(lines: tuple[Any, ...], as_of: float) -> list[TimingSpa
                 job_type=span.job_type,
                 status=span.status,
                 detail=span.detail,
+                backend_phase=span.backend_phase,
+                backend_invocation_id=span.backend_invocation_id,
             )
         )
     return adjusted

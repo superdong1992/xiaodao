@@ -52,7 +52,7 @@ _LOGPARSE_PREPROCESS_WORKSPACE_SUFFIX = ".logparse-preprocess"
 
 
 def _validate_workspace_segment(segment: str) -> None:
-    """Accept only a Job UUID or its one product-owned Pass A workspace."""
+    """Accept only a Job UUID or its product-owned preprocessing workspace."""
 
     job_id = (
         segment[: -len(_LOGPARSE_PREPROCESS_WORKSPACE_SUFFIX)]
@@ -87,6 +87,36 @@ class _ObservedFormalResource:
     size: int
     sha256: str
     path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedFileSnapshot:
+    device: int
+    inode: int
+    mode: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+    link_count: int
+
+
+def _require_single_link_file(path: Path) -> os.stat_result:
+    metadata = require_ordinary_file(path)
+    if metadata.st_nlink != 1:
+        raise ValueError("resource file must not be hard-linked")
+    return metadata
+
+
+def _file_snapshot(metadata: os.stat_result) -> _ValidatedFileSnapshot:
+    return _ValidatedFileSnapshot(
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+        mode=metadata.st_mode,
+        size=metadata.st_size,
+        mtime_ns=metadata.st_mtime_ns,
+        ctime_ns=metadata.st_ctime_ns,
+        link_count=metadata.st_nlink,
+    )
 
 
 def _inspect_physical_resource(
@@ -344,7 +374,7 @@ class FormalResourcePublisher:
         expected_size: int,
         expected_sha256: str,
         expected_tree_manifest: TreeManifest | None,
-    ) -> None:
+    ) -> _ValidatedFileSnapshot | None:
         if expected_kind is ResourceKind.DIRECTORY:
             if expected_tree_manifest is None:
                 raise ValueError("directory publication requires its TreeManifest")
@@ -354,14 +384,45 @@ class FormalResourcePublisher:
                 expected_size=expected_size,
                 expected_sha256=expected_sha256,
             )
-            return
+            return None
         if expected_tree_manifest is not None:
             raise ValueError("file publication cannot carry a TreeManifest")
+        before = _file_snapshot(_require_single_link_file(path))
         observed = hash_file(path)
+        after = _file_snapshot(_require_single_link_file(path))
+        if before != after:
+            raise OSError("resource file changed while it was validated")
         if observed.size != expected_size:
             raise ValueError("resource size does not match its staged reference")
         if observed.sha256 != expected_sha256:
             raise ValueError("resource hash does not match its staged reference")
+        return after
+
+    @staticmethod
+    def _validate_moved_file(
+        final_path: Path,
+        staged_snapshot: _ValidatedFileSnapshot,
+    ) -> None:
+        """Prove the validated single-link inode is the object that moved."""
+
+        moved = _file_snapshot(_require_single_link_file(final_path))
+        stable_move_fields = (
+            "device",
+            "inode",
+            "mode",
+            "size",
+            "mtime_ns",
+            "link_count",
+        )
+        # POSIX rename legitimately updates inode ctime.  It is useful for the
+        # before/after full-read snapshot above, but cannot be an invariant
+        # across the atomic move.  The final full hash after chmod/fsync remains
+        # the content-integrity authority.
+        if any(
+            getattr(moved, field) != getattr(staged_snapshot, field)
+            for field in stable_move_fields
+        ):
+            raise OSError("validated staged file changed during its atomic move")
 
     def publish(
         self,
@@ -398,7 +459,7 @@ class FormalResourcePublisher:
                     staged_content_path,
                     expected_kind,
                 )
-                self._validate_expected_content(
+                staged_file_snapshot = self._validate_expected_content(
                     staged_path,
                     expected_kind,
                     expected_size,
@@ -411,13 +472,25 @@ class FormalResourcePublisher:
                 ).st_dev:
                     raise OSError("staged and formal resource paths must share a volume")
                 self._replacer.replace(staged_path, final_path)
-            self._validate_expected_content(
-                final_path,
-                expected_kind,
-                expected_size,
-                expected_sha256,
-                expected_tree_manifest,
-            )
+                if expected_kind is ResourceKind.FILE:
+                    assert staged_file_snapshot is not None
+                    self._validate_moved_file(final_path, staged_file_snapshot)
+                else:
+                    self._validate_expected_content(
+                        final_path,
+                        expected_kind,
+                        expected_size,
+                        expected_sha256,
+                        expected_tree_manifest,
+                    )
+            else:
+                self._validate_expected_content(
+                    final_path,
+                    expected_kind,
+                    expected_size,
+                    expected_sha256,
+                    expected_tree_manifest,
+                )
             if expected_kind is ResourceKind.FILE:
                 finalize_read_only_file(final_path, self._file_sync)
             else:
@@ -556,11 +629,23 @@ class FormalResourceReader:
         shutil.rmtree(path)
 
     def materialize(self, resource_ref: ResourceRef, destination: Path) -> Path:
-        source = validate_formal_resource(
-            self._layout.data_root,
-            resource_ref,
-            require_read_only=True,
-        )
+        if resource_ref.resource_kind is ResourceKind.FILE:
+            # The copy itself computes the authoritative SHA-256, and the
+            # formal source is fully revalidated after publication.  Before
+            # copying, only the immutable node boundary is needed; hashing the
+            # same large file here would be a redundant full read.
+            source = resource_path(self._layout.data_root, resource_ref)
+            source_metadata = _require_single_link_file(source)
+            if source_metadata.st_size != resource_ref.size:
+                raise ValueError("formal resource size does not match ResourceRef")
+            if not is_read_only(source):
+                raise ValueError("formal resource file is not read-only")
+        else:
+            source = validate_formal_resource(
+                self._layout.data_root,
+                resource_ref,
+                require_read_only=True,
+            )
         destination = self._validate_destination(resource_ref, destination)
         self._ensure_materialization_parent(destination)
         ensure_no_symlink_ancestors(self._layout.workspaces, destination)
@@ -586,16 +671,15 @@ class FormalResourceReader:
                 temporary = self._new_materialization_temp(destination)
                 try:
                     with FileBinaryStream(source) as stream:
-                        copy_binary_stream(
+                        copied = copy_binary_stream(
                             stream,
                             temporary,
                             file_sync=self._file_sync,
                             byte_limit=resource_ref.size,
                         )
-                    observed = hash_file(temporary)
                     if (
-                        observed.size != resource_ref.size
-                        or observed.sha256 != resource_ref.sha256
+                        copied.size != resource_ref.size
+                        or copied.sha256 != resource_ref.sha256
                     ):
                         raise OSError(
                             "temporary materialized bytes differ from ResourceRef"

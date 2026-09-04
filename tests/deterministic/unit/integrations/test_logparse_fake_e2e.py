@@ -10,6 +10,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -501,6 +502,173 @@ def test_builder_ref_and_open_use_one_pinned_public_contract(
         session.close()
 
 
+def test_direct_preprocessing_never_starts_the_agent_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pinned_asset: ResolvedAsset,
+) -> None:
+    job = _job(pinned_asset.ref)
+    workspace = tmp_path / "workspace"
+    request = _parse_request("direct")
+    manifest, _entry = _materialize_workspace(
+        workspace,
+        job,
+        b"direct preprocessing",
+        plan_request=request,
+    )
+    _write_request(workspace, "direct", request)
+
+    def reject_endpoint(*_args: object, **_kwargs: object) -> object:
+        pytest.fail("direct preprocessing must not construct an Agent endpoint")
+
+    monkeypatch.setattr(broker_module, "_BrokerHttpServer", reject_endpoint)
+    session = _factory(pinned_asset).open(
+        job,
+        workspace,
+        manifest,
+        InMemoryCancellationSignal(),
+    )
+    try:
+        assert session._server is None
+        assert session._server_thread is None
+        assert (
+            session.execute_preprocessing(
+                "parse-targets",
+                "output/proposals/direct/request.json",
+                "output/proposals/direct/target_logs.json",
+            )
+            is None
+        )
+    finally:
+        session.close()
+
+    assert session._server is None
+    assert session._server_thread is None
+
+
+def test_concurrent_agent_environment_calls_start_one_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pinned_asset: ResolvedAsset,
+) -> None:
+    job = _job(pinned_asset.ref)
+    workspace = tmp_path / "workspace"
+    manifest, _entry = _materialize_workspace(workspace, job, b"endpoint-race")
+    real_server = broker_module._BrokerHttpServer
+    constructed: list[object] = []
+
+    class CountingServer(real_server):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)
+            constructed.append(self)
+
+    monkeypatch.setattr(broker_module, "_BrokerHttpServer", CountingServer)
+    session = _factory(pinned_asset).open(
+        job,
+        workspace,
+        manifest,
+        InMemoryCancellationSignal(),
+    )
+    barrier = threading.Barrier(9)
+    environments: list[dict[str, str]] = []
+    failures: list[BaseException] = []
+
+    def read_environment() -> None:
+        try:
+            barrier.wait(timeout=5.0)
+            environments.append(session.agent_environment())
+        except BaseException as exc:  # pragma: no cover - failure evidence
+            failures.append(exc)
+
+    callers = [threading.Thread(target=read_environment) for _ in range(8)]
+    try:
+        for caller in callers:
+            caller.start()
+        barrier.wait(timeout=5.0)
+        for caller in callers:
+            caller.join(timeout=5.0)
+
+        assert all(not caller.is_alive() for caller in callers)
+        assert failures == []
+        assert len(environments) == 8
+        assert all(environment == environments[0] for environment in environments)
+        assert len(constructed) == 1
+    finally:
+        session.close()
+
+
+def test_close_before_agent_environment_never_starts_an_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pinned_asset: ResolvedAsset,
+) -> None:
+    job = _job(pinned_asset.ref)
+    workspace = tmp_path / "workspace"
+    manifest, _entry = _materialize_workspace(workspace, job, b"close-before-start")
+    constructed = False
+
+    def reject_endpoint(*_args: object, **_kwargs: object) -> object:
+        nonlocal constructed
+        constructed = True
+        pytest.fail("a closed session must not start an Agent endpoint")
+
+    monkeypatch.setattr(broker_module, "_BrokerHttpServer", reject_endpoint)
+    session = _factory(pinned_asset).open(
+        job,
+        workspace,
+        manifest,
+        InMemoryCancellationSignal(),
+    )
+
+    session.close()
+
+    assert constructed is False
+    assert session._server is None
+    assert session._server_thread is None
+    with pytest.raises(RuntimeError, match="closed"):
+        session.agent_environment()
+
+
+def test_endpoint_start_failure_closes_socket_and_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pinned_asset: ResolvedAsset,
+) -> None:
+    job = _job(pinned_asset.ref)
+    workspace = tmp_path / "workspace"
+    manifest, _entry = _materialize_workspace(workspace, job, b"start-failure")
+    real_server = broker_module._BrokerHttpServer
+    constructed: list[object] = []
+
+    class CapturingServer(real_server):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)
+            constructed.append(self)
+
+    def fail_after_start(point: str) -> None:
+        if point == "endpoint_started":
+            raise OSError("injected endpoint startup failure")
+
+    monkeypatch.setattr(broker_module, "_BrokerHttpServer", CapturingServer)
+    session = _factory(pinned_asset, fault_point=fail_after_start).open(
+        job,
+        workspace,
+        manifest,
+        InMemoryCancellationSignal(),
+    )
+
+    with pytest.raises(OSError, match="injected endpoint startup failure"):
+        session.agent_environment()
+
+    assert len(constructed) == 1
+    server = constructed[0]
+    assert server.socket.fileno() == -1
+    assert session._server is None
+    assert session._server_thread is None
+    assert session._closed is True
+    session.close()
+
+
 def test_public_asset_error_has_no_endpoint_claim_or_process_side_effect(
     tmp_path: Path,
     pinned_asset: ResolvedAsset,
@@ -538,11 +706,23 @@ def test_first_parse_dual_anchor_claim_audit_close_and_fixed_argv(
     pinned_asset: ResolvedAsset,
 ) -> None:
     journey_events: list[tuple[str, dict[str, object]]] = []
+    fingerprint_calls = 0
+    fingerprint = broker_module.fingerprint_logparse_asset
 
     def capture_journey(event: str, **fields: object) -> None:
         journey_events.append((event, fields))
 
+    def count_fingerprint(*args: Any, **kwargs: Any) -> ResolvedAsset:
+        nonlocal fingerprint_calls
+        fingerprint_calls += 1
+        return fingerprint(*args, **kwargs)
+
     monkeypatch.setattr(broker_module, "record_journey_event", capture_journey)
+    monkeypatch.setattr(
+        broker_module,
+        "fingerprint_logparse_asset",
+        count_fingerprint,
+    )
     source = b"synthetic fake archive"
     job = _job(pinned_asset.ref)
     workspace = tmp_path / "workspace"
@@ -663,6 +843,9 @@ def test_first_parse_dual_anchor_claim_audit_close_and_fixed_argv(
         record = _record(record_path)
         assert record["parse_count"] == 1
         assert record["target_logs_count"] == 2
+        # Session open, the accepted operation, parse, and each target child
+        # independently retain the pinned-asset boundary.
+        assert fingerprint_calls == 5
         assert [event for event, _fields in journey_events] == [
             "job.logparse.operation.started",
             "job.logparse.phase.completed",
@@ -1473,6 +1656,7 @@ def test_failed_server_close_is_retryable_without_revalidating_the_token(
     session = _factory(pinned_asset).open(
         job, workspace, manifest, InMemoryCancellationSignal()
     )
+    session.agent_environment()
     server = session._server
     assert server is not None
     real_server_close = server.server_close

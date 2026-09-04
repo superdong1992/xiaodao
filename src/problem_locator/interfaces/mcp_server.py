@@ -25,7 +25,6 @@ from pydantic import (
 from problem_locator import __version__
 from problem_locator.contracts.commands import (
     CancelCase,
-    CaseQueryResponse,
     CreateCase,
     PrepareAttachment,
     ResumeCase,
@@ -242,7 +241,10 @@ _DESCRIPTIONS = {
         "Submit facts and READY attachments to a waiting case. Pair input_names "
         "and input_values by array index."
     ),
-    "problem_locator_get_case": "Read the current public case view.",
+    "problem_locator_get_case": (
+        "Read the current public case view and its downloadable Artifact transfer "
+        "descriptors."
+    ),
     "problem_locator_resume_case": "Resume a persisted pending or interrupted case.",
     "problem_locator_cancel_case": "Cancel a case using its current revision.",
     "problem_locator_list_artifacts": "List user-downloadable case artifacts.",
@@ -460,7 +462,27 @@ class McpAdapter:
                 request.wait_for_job_id,
                 request.wait_seconds,
             )
-            return success_envelope(response)
+            # A terminal Case already exposes the authoritative downloadable
+            # Artifact summaries.  Add their public transfer descriptors to
+            # the same read so a Remote MCP client does not need a second
+            # list_artifacts round trip merely to discover download URLs.
+            # Keep the original CaseQueryResponse members unchanged for
+            # compatibility with existing clients.
+            views = [
+                artifact_view(
+                    summary,
+                    case_id=request.case_id,
+                    public_base_url=self._public_base_url,
+                )
+                for summary in response.case_view.artifacts
+            ]
+            return success_envelope(
+                {
+                    "case_view": response.case_view,
+                    "wait_timed_out": response.wait_timed_out,
+                    "artifact_views": views,
+                }
+            )
 
         if isinstance(request, ResumeCaseRequest):
             command = ResumeCase(

@@ -77,7 +77,7 @@ from tests.deterministic.contracts.fakes import (
 )
 from tests.deterministic.unit.runtime.test_diagnosis_runtime import (
     _Clock,
-    _MethodsTwoPassBackend,
+    _MethodsRuntimeBackend,
     _StateView,
     _TooLargeContext,
     _claimed_logparse_job_state_and_resources,
@@ -121,7 +121,7 @@ def _evaluation_input_from_prompt(prompt: str) -> dict[str, Any]:
     raise AssertionError("Methods role prompt has no compact evaluation_input")
 
 
-class _EvidenceV2SpecialistBackend(_MethodsTwoPassBackend):
+class _EvidenceV2SpecialistBackend(_MethodsRuntimeBackend):
     def __init__(
         self,
         factory: FakeLogparseBrokerFactory,
@@ -1047,6 +1047,7 @@ def test_reviewer_disabled_finishes_from_specialist_without_review_artifacts(
     assert receipt.job_outcome.methods_review_target is None
     assert receipt.job_outcome.methods_reviewer_result is None
     assert len(backend.calls) == 1
+    assert backend.calls[0]["backend_phase"] == "METHODS_SPECIALIST"
     state = read_method_state_v2(records, job_id=job.job_id)
     assert state is not None
     assert state.status == expected_status
@@ -1114,6 +1115,7 @@ def test_specialist_output_io_failure_is_failed_without_repair(
     receipt = runtime.execute(job, InMemoryCancellationSignal())
 
     assert len(backend.calls) == 1
+    assert backend.calls[0]["backend_phase"] == "METHODS_SPECIALIST"
     projection = receipt.job_outcome.methods_terminal_projection
     assert receipt.job_outcome.result_type is OutcomeResultType.FAILED
     assert projection is not None
@@ -1171,6 +1173,7 @@ def test_reviewer_is_blind_and_reads_pending_state_after_model(
     receipt = runtime.execute(job, InMemoryCancellationSignal())
 
     assert len(backend.calls) == 1
+    assert backend.calls[0]["backend_phase"] == "METHODS_REVIEWER"
     assert events.index("backend") < events.index("source-state-read")
     assert receipt.job_outcome.result_type is OutcomeResultType.COMPLETED
     projection = receipt.job_outcome.methods_terminal_projection

@@ -811,10 +811,10 @@ export function auditClientBash(commands, { archivePath, archive, descriptor, do
   if (download !== null) {
     requireContract(typeof download.path === "string" && path.isAbsolute(download.path) && Number.isSafeInteger(download.artifact?.size) && /^[a-f0-9]{64}$/u.test(download.artifact?.sha256 ?? "") && typeof download.artifact?.download_url === "string", "CLAUDE_DEEPSEEK_DOWNLOAD_DESCRIPTOR_INVALID", "Artifact download audit input is invalid");
     const get = parsed[3];
-    requireContract(get.words[0] === "/usr/bin/curl" && get.words.includes("GET") && get.words.includes("--output") && get.words.includes(download.path) && get.words.includes(download.artifact.download_url), "CLAUDE_DEEPSEEK_DOWNLOAD_COMMAND_INVALID", "curl GET is not bound to list_artifacts download_url and the frozen result path");
+    requireContract(get.words[0] === "/usr/bin/curl" && get.words.includes("GET") && get.words.includes("--output") && get.words.includes(download.path) && get.words.includes(download.artifact.download_url), "CLAUDE_DEEPSEEK_DOWNLOAD_COMMAND_INVALID", "curl GET is not bound to the Artifact download_url and the frozen result path");
     requireContract(parsed[4].words[0] === "/usr/bin/stat" && parsed[4].words[1] === "-f" && parsed[4].words[2] === "%z" && parsed[4].words[3] === download.path && parsed[4].words.length === 4, "CLAUDE_DEEPSEEK_DOWNLOAD_STAT_INVALID", "Downloaded result stat command is invalid");
     requireContract(parsed[5].words[0] === "/usr/bin/openssl" && parsed[5].words[1] === "dgst" && parsed[5].words[2] === "-sha256" && parsed[5].words[3] === download.path && parsed[5].words.length === 4, "CLAUDE_DEEPSEEK_DOWNLOAD_OPENSSL_INVALID", "Downloaded result digest command is invalid");
-    requireContract(String(parsed[4].stdout ?? "").trim() === String(download.artifact.size) && String(parsed[5].stdout ?? "").toLowerCase().includes(download.artifact.sha256), "CLAUDE_DEEPSEEK_DOWNLOAD_CHECK_INVALID", "Downloaded result size or SHA-256 receipt differs from list_artifacts");
+    requireContract(String(parsed[4].stdout ?? "").trim() === String(download.artifact.size) && String(parsed[5].stdout ?? "").toLowerCase().includes(download.artifact.sha256), "CLAUDE_DEEPSEEK_DOWNLOAD_CHECK_INVALID", "Downloaded result size or SHA-256 receipt differs from the Artifact descriptor");
   }
   return { schema_version: 2, status: "PASS", command_count: parsed.length, programs: parsed.map((entry) => entry.words[0]), upload_count: 1, download_count: download === null ? 0 : 1 };
 }

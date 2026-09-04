@@ -249,7 +249,14 @@ class AgentStreamTelemetry:
                 if count is not None:
                     self._usage_counts[safe_name] = count
 
-    def snapshot(self, *, diagnosis_mode: str, backend_status: str) -> dict[str, Any]:
+    def snapshot(
+        self,
+        *,
+        diagnosis_mode: str,
+        backend_status: str,
+        backend_phase: str = "UNSPECIFIED",
+        backend_invocation_id: str = "UNSPECIFIED",
+    ) -> dict[str, Any]:
         self.finish()
         with self._lock:
             if self._internal_failure:
@@ -316,6 +323,8 @@ class AgentStreamTelemetry:
 
             return {
                 "diagnosis_mode": diagnosis_mode,
+                "backend_phase": backend_phase,
+                "backend_invocation_id": backend_invocation_id,
                 "backend_status": backend_status,
                 "stream_format": "claude-stream-json",
                 "stream_status": status,

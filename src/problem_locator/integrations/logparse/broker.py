@@ -314,7 +314,6 @@ class PinnedLogparseBrokerFactory:
         if not self._asset_is_current():
             raise LogparseBrokerError(_asset_failure())
         root = _plain_workspace_root(workspace_root)
-        self._fault_point("before_endpoint")
         return PinnedLogparseBrokerSession(
             job=job,
             workspace_root=root,
@@ -386,9 +385,16 @@ class PinnedLogparseBrokerSession:
             session_stopping=self._stopping,
         )
 
+    def _start_endpoint_locked(self) -> None:
+        """Start the Agent-only loopback endpoint while holding ``_state_lock``."""
+
+        if self._server is not None:
+            return
         server: _BrokerHttpServer | None = None
         thread: threading.Thread | None = None
+        thread_started = False
         try:
+            self._fault_point("before_endpoint")
             server = _BrokerHttpServer(("127.0.0.1", 0), _BrokerRequestHandler)
             server.session = self
             server.timeout = 0.05
@@ -400,28 +406,57 @@ class PinnedLogparseBrokerSession:
             self._server = server
             self._server_thread = thread
             thread.start()
+            thread_started = True
             self._fault_point("endpoint_started")
         except BaseException:
             self._stopping.set()
             self._token_valid = False
-            if server is not None:
-                if thread is not None:
+            endpoint_stopped = not thread_started
+            server_closed = server is None
+            if thread_started and thread is not None:
+                try:
                     thread.join(timeout=2.0)
-                server.server_close()
+                except BaseException:
+                    pass
+                endpoint_stopped = not thread.is_alive()
+            if server is not None:
+                try:
+                    server.server_close()
+                    server_closed = True
+                except BaseException:
+                    server_closed = False
+            if thread_started and thread is not None and thread.is_alive():
+                try:
+                    thread.join(timeout=2.0)
+                except BaseException:
+                    pass
+                endpoint_stopped = not thread.is_alive()
+            if endpoint_stopped and server_closed:
+                self._server = None
+                self._server_thread = None
+                self._closed = True
+                self._close_complete.set()
+            else:
+                self._server = server
+                self._server_thread = thread if thread_started else None
             raise
 
     def _serve_endpoint(self) -> None:
         server = self._server
-        if server is None:  # pragma: no cover - constructor invariant
+        if server is None:  # pragma: no cover - startup invariant
             return
         while not self._stopping.is_set():
             server.handle_request()
 
     def agent_environment(self) -> dict[str, str]:
         with self._state_lock:
-            if self._closed or not self._token_valid or self._server is None:
+            if self._closed or not self._token_valid:
                 raise RuntimeError("logparse broker session is closed")
-            host, port = self._server.server_address[:2]
+            self._start_endpoint_locked()
+            server = self._server
+            if server is None:  # pragma: no cover - startup invariant
+                raise RuntimeError("logparse broker endpoint is unavailable")
+            host, port = server.server_address[:2]
             endpoint = f"http://{host}:{port}{self._path}"
             return {_ENDPOINT_ENV: endpoint, _TOKEN_ENV: self._token}
 

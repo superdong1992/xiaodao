@@ -8,6 +8,7 @@ import os
 import stat
 import threading
 import time
+import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +41,12 @@ from .secret_redactor import StreamingSecretRedactor
 
 
 _PIPE_CHUNK_BYTES = 64 * 1024
+
+
+def _next_backend_invocation_id() -> str:
+    # Journey files survive service restarts.  A random identifier avoids the
+    # PID-reuse collisions that a process-local counter would create there.
+    return uuid.uuid4().hex
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,7 +208,9 @@ class AgentBackend:
         broker_environment: dict[str, str] | None = None,
         test_limits: BackendExecutionLimits | None = None,
         diagnosis_mode: Literal["GENERIC", "SPECIALIZED"] = "SPECIALIZED",
+        backend_phase: str = "UNSPECIFIED",
     ) -> BackendExecution:
+        backend_invocation_id = _next_backend_invocation_id()
         telemetry = AgentStreamTelemetry(monotonic=self._monotonic)
         stdout_sink = _OwnedSink(log_sinks.stdout)
         stderr_sink = (
@@ -229,6 +238,8 @@ class AgentBackend:
                 broker_environment=broker_environment,
                 test_limits=test_limits,
                 telemetry=telemetry,
+                backend_phase=backend_phase,
+                backend_invocation_id=backend_invocation_id,
             )
         except RuntimeExecutionError as exc:
             failure = exc.failure
@@ -263,6 +274,8 @@ class AgentBackend:
                 "job.backend.telemetry",
                 data=telemetry.snapshot(
                     diagnosis_mode=diagnosis_mode,
+                    backend_phase=backend_phase,
+                    backend_invocation_id=backend_invocation_id,
                     backend_status="FAILED" if failure is not None else "SUCCESS",
                 ),
             )
@@ -285,13 +298,19 @@ class AgentBackend:
         broker_environment: dict[str, str] | None = None,
         test_limits: BackendExecutionLimits | None = None,
         telemetry: AgentStreamTelemetry,
+        backend_phase: str,
+        backend_invocation_id: str,
     ) -> BackendExecution:
         limits = test_limits or BackendExecutionLimits.from_resource_limits(
             resource_limits
         )
         backend_start_observed = record_stage_started(
             ExecutionStage.BACKEND_START,
-            data={"workspace_root": workspace_root},
+            data={
+                "workspace_root": workspace_root,
+                "backend_phase": backend_phase,
+                "backend_invocation_id": backend_invocation_id,
+            },
         )
         if cancellation.is_cancelled():
             raise RuntimeExecutionError(_cancelled_failure(cancellation.reason))
@@ -443,11 +462,17 @@ class AgentBackend:
                     data={
                         "argv": invocation.argv,
                         "process_id": getattr(managed.process, "pid", None),
+                        "backend_phase": backend_phase,
+                        "backend_invocation_id": backend_invocation_id,
                     },
                 )
                 backend_execution_observed = record_stage_started(
                     ExecutionStage.BACKEND_EXECUTE,
-                    data={"process_id": getattr(managed.process, "pid", None)},
+                    data={
+                        "process_id": getattr(managed.process, "pid", None),
+                        "backend_phase": backend_phase,
+                        "backend_invocation_id": backend_invocation_id,
+                    },
                 )
 
             while primary_failure is None and managed.process.poll() is None:
@@ -640,6 +665,8 @@ class AgentBackend:
                 "elapsed_seconds": result.elapsed_seconds,
                 "workspace_scan_count": workspace_scan_count,
                 "workspace_scan_duration_ms": workspace_scan_duration_ms,
+                "backend_phase": backend_phase,
+                "backend_invocation_id": backend_invocation_id,
             },
         )
         try:

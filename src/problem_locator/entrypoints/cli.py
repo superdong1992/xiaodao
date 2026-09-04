@@ -130,6 +130,7 @@ def run_uvicorn(app: Any, host: str, port: int, workers: int) -> None:
         workers=1,
         log_config=None,
         access_log=False,
+        timeout_keep_alive=75,
     )
 
 

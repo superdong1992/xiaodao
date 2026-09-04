@@ -23,7 +23,7 @@ State、Job 和权威 Outcome 已硬切到 V9。Problem Locator 6.0.0 只接受�
 
 - 产品注册只声明路由、必需用户输入/附件、Logparse 产品与 anchor，以及 DIAGNOSE/REVIEW 的内置运行时绑定。
 - `.agents` 下的 Wiki 元 Skill 只生成闭合的 Methods package；`.claude` 下的局域网部署元 Skill 生成完整的生产 registration root，并在其 `package/` 中放置同一 Methods package。两者都不生成 GenerationSpec、`diagnosis-skill.json` 或验证合同。
-- 产品拥有的 Logparse 预处理在独立 Workspace 中加载一次现装 `logparse-diagnose`，由 Helper 完成唯一一次 broker parse/reuse。服务端读取冻结目标日志，并且只扫描一次。
+- 产品拥有的 Logparse 预处理在独立 Workspace 中直接执行一次 job-scoped broker parse/reuse，不再启动只负责转发固定命令的 Agent。broker 关闭并撤销能力后，服务端才读取冻结目标日志、扫描方法并启动 Specialist。
 - Specialist 从冻结请求、目标日志、Logparse receipt 和精确方法卡生成 `MethodDiagnosisDraftV1`，给出具体 summary、identity token、source、marker、一基行号和完整日志原文。服务端重新读取权威日志并校验哈希，再映射 Candidate、DecisionAuditV2、DiagnosisOutcome 和用户报告。Reviewer 开启时在独立 Job 中提交 `MethodReviewV1`。
 
 `.agents/skills/wiki-to-diagnosis-skill` 直接从一份已评审 Wiki 生成 `SKILL.md`、`methods.json` 和独立可加载的 `references/*.md` 方法卡。`methods.json` 固定声明源 Wiki SHA-256、必需用户输入、必需附件、日志派生字段、共享参考和有序方法索引；`shared_references[0]` 固定绑定逐项逐序保留源 Wiki 机械日志模板的 `references/source-log-templates.md`。每个方法用 `evidence_markers` 收齐判断所需日志，`activation_markers` 仅作为包格式的辅助索引；Methods V1 仍检查全部方法和权威目标日志。
@@ -32,7 +32,7 @@ State、Job 和权威 Outcome 已硬切到 V9。Problem Locator 6.0.0 只接受�
 `supporting_event_refs` 的旧 Evidence V2 package 不会继续加载；部署新版本前，必须用当前元 Skill
 从原 Wiki 重新生成 package，并在新目录中完成校验后再切换 `SKILL_DIR`，不要原地混用新旧包。
 
-仓库另提供 [`.claude/skills/wiki-to-logparse-diagnosis-skill`](.claude/skills/wiki-to-logparse-diagnosis-skill)，用于在局域网 Claude Code 中从 Wiki 生成可直接部署到 Linux Server `SKILL_DIR` 的完整 registration root。生成物包含 `registration-template.json` 与闭合 Methods package，固定要求 `client_slot`、`client_process_name`、`server_slot`、`server_process_name`，双端共用作者确认的 module，PID 仅在用户主动提供时使用。客户端不会加载这个业务 Skill，也不会在本地调用 Logparse；它只使用 `$problem-locator-client` 经 HTTP MCP 提交 Case。Server 完成 ROUTE、Helper 驱动的 Logparse 预处理、Methods 诊断、可选 Review 和权威结果打包。
+仓库另提供 [`.claude/skills/wiki-to-logparse-diagnosis-skill`](.claude/skills/wiki-to-logparse-diagnosis-skill)，用于在局域网 Claude Code 中从 Wiki 生成可直接部署到 Linux Server `SKILL_DIR` 的完整 registration root。生成物包含 `registration-template.json` 与闭合 Methods package，固定要求 `client_slot`、`client_process_name`、`server_slot`、`server_process_name`，双端共用作者确认的 module，PID 仅在用户主动提供时使用。客户端不会加载这个业务 Skill，也不会在本地调用 Logparse；它只使用 `$problem-locator-client` 经 HTTP MCP 提交 Case。Server 完成 ROUTE、直接 Logparse 预处理、Methods 诊断、可选 Review 和权威结果打包。
 
 Logparse 产品可以省略。省略时 Runtime 记录有效产品 `default`，Broker 不向上游强制传入 `--product`；只有非默认产品才显式传参。生成定位 Skill 时，作者只声明 Logparse 归档 requirement 的数量约束，不填写 Content-Type；上传时用户也只选择归档文件。平台按文件后缀确定内部 Content-Type：`.gz/.tar.gz/.tgz` 为 `application/gzip`，`.zip` 为 `application/zip`，`.tar` 为 `application/x-tar`。
 
@@ -94,7 +94,7 @@ uv lock --check
 | `PORT` | 否 | `8000` | Uvicorn 监听端口 |
 | `CLAUDE_COMMAND` | 否 | `claude` | 默认 Agent 命令，会原样解析为 argv 参数模板；服务不会自动追加 stream-json 参数 |
 | `ROUTE_CLAUDE_COMMAND` | 否 | `CLAUDE_COMMAND` | ROUTE Agent 命令；可单独选择低延迟模型，不影响 DIAGNOSE 和 REVIEW |
-| `DIAGNOSE_CLAUDE_COMMAND` | 否 | `CLAUDE_COMMAND` | SPECIALIZED、GENERIC DIAGNOSE 和 REVIEW Agent 命令，也用于专用诊断的 Logparse 预处理 |
+| `DIAGNOSE_CLAUDE_COMMAND` | 否 | `CLAUDE_COMMAND` | SPECIALIZED、GENERIC DIAGNOSE 和 REVIEW Agent 命令；专用诊断的 Logparse 预处理由服务进程直接执行，不使用该命令 |
 | `LOGPARSE_PYTHON` | 否 | 当前 Python | Logparse 使用的 Python 启动命令 |
 | `DFX_LOG_LEVEL` | 否 | `INFO` | 结构化诊断日志级别：`DEBUG`、`INFO`、`WARNING`、`ERROR` 或 `CRITICAL` |
 | `DFX_LOG_DIR` | 否 | 无 | 服务端可观测日志目录的绝对路径；配置后生成 `debug.jsonl`、`journey.jsonl` 和按 Case 渲染的人类可读日志 |
@@ -105,13 +105,21 @@ uv lock --check
 也不再要求模型调用结果封装工具；Agent 退出后由服务进程在本地完成规范化、marker 封装和复验。
 Reviewer 必须继续复用 `DIAGNOSE_CLAUDE_COMMAND`，以保持与 Specialist 相同的模型身份。
 
+专用定位在输入齐备后的默认热路径只启动一个 Specialist Agent；固定 Logparse 请求由服务进程直接
+执行。Specialist 主 Workspace 只保留资源元数据，附件只在预处理 Workspace 物化一次；模型上下文
+也不再重复携带完整 Case snapshot 和 ROUTE Outcome。客户端应在写调用中使用最多 30 秒的有限等待，
+并优先读取 `problem_locator_get_case.data.artifact_views` 下载终态结果。只有旧服务完全没有该字段时，
+才回退 `problem_locator_list_artifacts`。服务默认把 HTTP keep-alive 保持 75 秒，可覆盖连续长轮询之间
+的空档，减少局域网连接重建。大文件物化会复用流式复制时已经计算的 SHA-256，不再在复制前预读
+整个源文件，也不在 atomic move 前重复读取临时文件；移动后的目标和复制后的正式源仍会完整复核。
+
 运行时限制是冻结的契约常量，不属于可配置项。6.0.0 会拒绝 `JOB_CONCURRENCY` 以及未知的 limit、max、retention 覆盖项，避免运维人员误以为某项实际上无效的限制已经生效。
 
-不要配置或持久化 `PROBLEM_LOCATOR_LOGPARSE_ENDPOINT` 和 `PROBLEM_LOCATOR_LOGPARSE_TOKEN`。这两个值会按任务临时创建，并在代理会话结束时删除。
+不要配置或持久化 `PROBLEM_LOCATOR_LOGPARSE_ENDPOINT` 和 `PROBLEM_LOCATOR_LOGPARSE_TOKEN`。
+当前专用热路径不会把它们交给 Agent；只有兼容的委托流程显式请求 Agent broker 环境时，Runtime 才会
+按任务临时创建，并在会话结束时撤销。
 
-运行 `DIAGNOSE_CLAUDE_COMMAND`（未设置时为 `CLAUDE_COMMAND`）的 Linux 服务账号还必须在其 Agent 配置根中安装仓库当前
-`.claude/skills/logparse-diagnose`。SPECIALIZED Logparse Pass 会先加载该 Helper，再使用任务级
-broker；Helper 缺失或加载失败时任务直接失败，不会绕过 Skill 改为直接调用 broker。
+专用定位热路径不再要求 Agent 配置根安装 `.claude/skills/logparse-diagnose`。Runtime 会在完整物化并校验独立预处理 Workspace 后，直接执行固定的一次 broker 请求；它仍受 Job 的 wall time、Workspace byte limit 和取消信号约束，并校验 accepted request、单次成功 audit、claim、目标日志哈希和冻结回执。运行期间使用允许正常文件写入的安全扫描，退出后严格复核；每个 Logparse 子进程启动前仍重新核对 pinned 资产。Runtime 在启动 Specialist 前关闭 broker、撤销任务能力。仓库保留该 Helper 资产供旧环境核对，但当前专用流程不会调用它。
 
 ### 局域网通用定位 Skill
 
@@ -258,10 +266,15 @@ uv run python -m problem_locator serve --env-file /absolute/path/to/service.env
 | `problem_locator_cancel_case` | `request_id/case_id/expected_case_revision` req |
 | `problem_locator_list_artifacts` | `case_id` req |
 
-`problem_locator_create_case` 的初始事实采用严格身份匹配：每个
-`initial_user_fact_names` 名称都必须由候选 Skill 声明为 `INPUT`
-requirement；名称不会通过别名或叙述文本推断。若没有 Skill 能同时声明全部已提供
-事实，服务端会在调用诊断模型前确定性返回 `NO_CAPABILITY`。
+`problem_locator_get_case` 的成功数据包含 `case_view`、`wait_timed_out` 和
+`artifact_views`。`artifact_views` 与 `case_view.artifacts` 来自同一次状态读取，并补充公开下载 URL；
+当前客户端在终态直接使用它，不再额外调用 `problem_locator_list_artifacts`。该独立工具继续保留，供
+旧服务兼容和显式产物查询使用。
+
+`problem_locator_create_case` 会原样保存初始事实名称和值，但不会据此预先删减 ROUTE 候选。
+Router 仍会看到全部已验证的 production Skill，并结合问题描述、能力和 requirement 做语义选择；
+即使只有一个候选，也可以返回 `NO_CAPABILITY`。进入已选专用 Skill 后，事实与 `INPUT`
+requirement 仍按名称严格匹配，不会从别名或叙述文本推断。
 
 七个公开 MCP input schema 全部扁平化，根属性只能是标量、nullable 标量或标量数组。`create_case` 的八个问题字段直接位于根层；两组 name/value 数组必须等长并按索引配对。完整规范示例见客户端 Skill。
 

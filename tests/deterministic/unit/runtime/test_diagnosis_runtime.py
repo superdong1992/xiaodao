@@ -8,6 +8,7 @@ import os
 import threading
 import shutil
 import tempfile
+import time
 import zipfile
 from collections.abc import Callable, Iterator
 from dataclasses import replace
@@ -16,6 +17,7 @@ from typing import Any
 
 import pytest
 
+import problem_locator.runtime.diagnosis_runtime as diagnosis_runtime_module
 import problem_locator.runtime.outcome_finalizer as outcome_finalizer_module
 
 from problem_locator.contracts import (
@@ -30,6 +32,7 @@ from problem_locator.contracts import (
     ArtifactKind,
     AssetKind,
     CaseAggregate,
+    CancellationReason,
     DiagnosisMode,
     ErrorCode,
     ERROR_SPECS,
@@ -76,7 +79,7 @@ from tests.deterministic.contracts.fakes import (
     InMemoryResourceStore,
     InMemoryStateRepository,
 )
-from problem_locator.runtime.agent_backend import BackendExecution
+from problem_locator.runtime.agent_backend import BackendExecution, BackendExecutionLimits
 from problem_locator.runtime.catalog import BUILTIN_ASSET_ROOT, VersionedAssetCatalog
 from problem_locator.runtime.context_builder import ContextBuilder, ContextLimitExceeded
 from problem_locator.runtime.context_policy import RuntimeAssetResolver
@@ -1058,6 +1061,7 @@ def test_generic_runtime_passes_only_exact_multiline_unicode_and_reads_result_fi
     assert job.evidence_refs == job.attachment_refs == job.previous_outcome_refs == []
     assert job.artifact_refs == []
     assert len(backend.calls) == 1
+    assert backend.calls[0]["backend_phase"] == "GENERIC"
     prompt = backend.calls[0]["prompt"]
     marker = (
         "<<<RAW_PROBLEM_TEXT_UTF8_BYTES:"
@@ -1410,6 +1414,7 @@ def test_runtime_executes_one_frozen_route_and_publishes_canonical_receipt(
     assert state.calls == [job.case_id]
     assert len(backend.calls) == 1  # type: ignore[union-attr]
     backend_call = backend.calls[0]  # type: ignore[union-attr]
+    assert backend_call["backend_phase"] == "ROUTE"
     workspace_root = Path(backend_call["workspace_root"])
     assert backend_call["prompt"] == (
         workspace_root / "runtime" / "context.txt"
@@ -2563,8 +2568,8 @@ class _PublicFakeClaimingBackend:
         )
 
 
-class _MethodsTwoPassBackend:
-    """Exercise product-owned Logparse Pass A followed by Methods-only Pass B."""
+class _MethodsRuntimeBackend:
+    """Exercise direct preprocessing followed by the sole Specialist Agent."""
 
     def __init__(
         self,
@@ -2859,13 +2864,13 @@ def _public_fake_claiming_runtime(
     DiagnosisRuntime,
     Job,
     FakeLogparseBrokerFactory,
-    _MethodsTwoPassBackend,
+    _MethodsRuntimeBackend,
     InMemoryResourceStore,
 ]:
     factory = FakeLogparseBrokerFactory()
     catalog = _logparse_catalog(tmp_path, factory)
     job, aggregate, resources = _claimed_logparse_job_state_and_resources(catalog)
-    backend = _MethodsTwoPassBackend(
+    backend = _MethodsRuntimeBackend(
         factory,
         job,
         result,
@@ -2902,7 +2907,7 @@ def _public_fake_claiming_runtime(
 
 def test_methods_v1_specialist_publishes_candidate_json_and_log_archive() -> None:
     temporary = tempfile.TemporaryDirectory(prefix="pl-v1-")
-    runtime, job, _, backend, resources = _public_fake_claiming_runtime(
+    runtime, job, factory, backend, resources = _public_fake_claiming_runtime(
         Path(temporary.name), "success"
     )
 
@@ -2956,7 +2961,54 @@ def test_methods_v1_specialist_publishes_candidate_json_and_log_archive() -> Non
         assert b"connection pool wait request_id=42" in archive.read(
             "server__compact__slot_server__inventory-service.log"
         )
-    assert len(backend.calls) == 2
+    assert len(factory.sessions) == 1
+    session = factory.sessions[0]
+    assert session.deterministic_execute_calls == [  # type: ignore[attr-defined]
+        (
+            "parse-targets",
+            "output/proposals/methods-preprocess/request.json",
+            "output/proposals/methods-preprocess/target_logs.json",
+        )
+    ]
+    assert session.closed is True  # type: ignore[attr-defined]
+    assert session.close_calls == 1  # type: ignore[attr-defined]
+
+    # Preprocessing is a direct server-owned broker call.  Only the Specialist
+    # reaches AgentBackend, after the broker capability has been revoked.
+    assert len(backend.calls) == 1
+    assert backend.session_closed_at_call == [True]
+    specialist_call = backend.calls[0]
+    assert specialist_call["broker_environment"] is None
+    assert specialist_call["backend_phase"] == "METHODS_SPECIALIST"
+
+    main_workspace = Path(specialist_call["workspace_root"])
+    preprocessing_workspace = Path(factory.open_calls[0][1])
+    assert preprocessing_workspace != main_workspace
+    main_manifest = parse_canonical_json_bytes(
+        (main_workspace / "inputs/manifest.json").read_bytes(),
+        WorkspaceInputManifest,
+    )
+    attachment_entry = next(
+        item for item in main_manifest.entries if item.input_kind == "ATTACHMENT"
+    )
+    assert not (main_workspace / attachment_entry.relative_path).exists()
+    assert (preprocessing_workspace / attachment_entry.relative_path).is_file()
+
+    request = parse_canonical_json_bytes(
+        (main_workspace / "inputs/request.json").read_bytes()
+    )
+    problem_time = next(
+        item["value"]
+        for item in request["user_inputs"]
+        if item["name"] == "problem_time"
+    )
+    prompt = specialist_call["prompt"]
+    assert problem_time == "2026-07-31T00:00:00.000Z"
+    assert (
+        '<<<SECTION 4 CONTEXT_SNAPSHOT>>>\n{"schema_version":2}\n'
+        "<<<END SECTION>>>\n"
+    ) in prompt
+    assert "<<<SECTION 6 PREVIOUS_OUTCOME>>>" not in prompt
     temporary.cleanup()
 
 
@@ -3096,7 +3148,7 @@ def test_default_product_survives_compiler_and_workspace_manifest(
         logparse_product="default",
     )
     job, aggregate, resources = _claimed_logparse_job_state_and_resources(catalog)
-    backend = _MethodsTwoPassBackend(
+    backend = _MethodsRuntimeBackend(
         factory,
         job,
         "failed",
@@ -3132,7 +3184,7 @@ def test_default_product_survives_compiler_and_workspace_manifest(
     assert job.logparse_product == "default"
     assert receipt.job_outcome.error is not None
     assert receipt.job_outcome.error.code is ErrorCode.LOGPARSE_FAILED
-    assert len(backend.calls) == 1
+    assert len(backend.calls) == 0
     preprocessing_root = Path(factory.open_calls[0][1])
     manifest = parse_canonical_json_bytes(
         (preprocessing_root / "inputs/manifest.json").read_bytes(),
@@ -3149,7 +3201,7 @@ def test_default_product_survives_compiler_and_workspace_manifest(
     assert "logparse_product" not in request
 
 
-class _AgentJsonClaimingBackend(_MethodsTwoPassBackend):
+class _AgentJsonClaimingBackend(_MethodsRuntimeBackend):
     @property
     def authored_bytes(self) -> bytes | None:
         return self.written_draft_bytes
@@ -3197,7 +3249,7 @@ def test_public_broker_fake_closes_claimed_failed_execution(
 
     assert receipt.job_outcome.error is not None
     assert receipt.job_outcome.error.code is ErrorCode.LOGPARSE_FAILED
-    assert len(backend.calls) == 1
+    assert len(backend.calls) == 0
     assert backend.claim is not None
     assert backend.request_bytes is not None
     session = factory.sessions[0]
@@ -3211,10 +3263,10 @@ def test_unclassified_methods_validation_uses_generic_reason_code() -> None:
 
 
 def test_methods_preprocessing_rejects_failed_operation_before_success(
-    tmp_path: Path,
 ) -> None:
+    temporary = tempfile.TemporaryDirectory(prefix="pl-v1-retry-")
     runtime, job, factory, backend, _ = _public_fake_claiming_runtime(
-        tmp_path,
+        Path(temporary.name),
         "retry_then_completed",
     )
 
@@ -3222,7 +3274,7 @@ def test_methods_preprocessing_rejects_failed_operation_before_success(
 
     assert receipt.job_outcome.error is not None
     assert receipt.job_outcome.error.code is ErrorCode.LOGPARSE_OUTPUT_INVALID
-    assert len(backend.calls) == 1
+    assert len(backend.calls) == 0
     session = factory.sessions[0]
     assert session.closed is True  # type: ignore[attr-defined]
     assert session.close_calls == 1  # type: ignore[attr-defined]
@@ -3230,6 +3282,246 @@ def test_methods_preprocessing_rejects_failed_operation_before_success(
     records = runtime._execution_records
     assert isinstance(records, InMemoryExecutionRecordStore)
     assert records.read_audit_bytes(job.job_id, "methods_target_logs.json") is None
+    temporary.cleanup()
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected_retryable"),
+    [
+        (CancellationReason.USER_CANCEL, False),
+        (CancellationReason.SERVICE_SHUTDOWN, True),
+    ],
+)
+def test_direct_methods_preprocessing_rejects_precancel_without_opening_broker(
+    tmp_path: Path,
+    reason: CancellationReason,
+    expected_retryable: bool,
+) -> None:
+    runtime, job, factory, backend, _ = _public_fake_claiming_runtime(
+        tmp_path,
+        "success",
+    )
+
+    receipt = runtime.execute(
+        job,
+        InMemoryCancellationSignal(reason),
+    )
+
+    failure = receipt.job_outcome.error
+    assert failure is not None
+    assert failure.stage is ExecutionStage.BACKEND_EXECUTE
+    assert failure.code is ErrorCode.BACKEND_CANCELLED
+    assert failure.retryable is expected_retryable
+    assert factory.open_calls == []
+    assert backend.calls == []
+
+
+def test_direct_methods_preprocessing_hang_obeys_frozen_wall_time_and_closes_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, job, factory, backend, _ = _public_fake_claiming_runtime(
+        tmp_path,
+        "success",
+    )
+    workspace_scan_calls = 0
+    measure_workspace = diagnosis_runtime_module._temporary_workspace_bytes
+
+    def count_workspace_bytes(*args: Any, **kwargs: Any) -> int:
+        nonlocal workspace_scan_calls
+        workspace_scan_calls += 1
+        return measure_workspace(*args, **kwargs)
+
+    monkeypatch.setattr(
+        diagnosis_runtime_module,
+        "_temporary_workspace_bytes",
+        count_workspace_bytes,
+    )
+    runtime._backend_test_limits = BackendExecutionLimits(  # noqa: SLF001
+        wall_time_seconds=0.04,
+        stdout_stderr_bytes=1_000_000,
+        workspace_bytes=1_000_000,
+        poll_interval_seconds=0.005,
+        termination_grace_seconds=0.1,
+    )
+
+    def hang_until_runtime_stops(
+        _session: object,
+        _operation: str,
+        _request_path: str,
+        _result_path: str,
+    ) -> None:
+        signal = factory.open_calls[-1][3]
+        while not signal.is_cancelled():
+            signal.wait(0.002)
+        return None
+
+    factory.preprocessing_executor = hang_until_runtime_stops
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    failure = receipt.job_outcome.error
+    assert failure is not None
+    assert failure.stage is ExecutionStage.BACKEND_EXECUTE
+    assert failure.code is ErrorCode.BACKEND_TIMEOUT
+    assert failure.retryable is True
+    assert workspace_scan_calls >= 2
+    assert backend.calls == []
+    session = factory.sessions[0]
+    assert session.closed is True  # type: ignore[attr-defined]
+    assert session.close_calls == 1  # type: ignore[attr-defined]
+
+
+def test_direct_methods_preprocessing_observes_midprocess_user_cancellation(
+    tmp_path: Path,
+) -> None:
+    runtime, job, factory, backend, _ = _public_fake_claiming_runtime(
+        tmp_path,
+        "success",
+    )
+    runtime._backend_test_limits = BackendExecutionLimits(  # noqa: SLF001
+        wall_time_seconds=1.0,
+        stdout_stderr_bytes=1_000_000,
+        workspace_bytes=1_000_000,
+        poll_interval_seconds=0.005,
+        termination_grace_seconds=0.1,
+    )
+    cancellation = InMemoryCancellationSignal()
+    operation_started = threading.Event()
+
+    def wait_for_external_cancellation(
+        _session: object,
+        _operation: str,
+        _request_path: str,
+        _result_path: str,
+    ) -> None:
+        operation_started.set()
+        signal = factory.open_calls[-1][3]
+        while not signal.is_cancelled():
+            signal.wait(0.002)
+        return None
+
+    factory.preprocessing_executor = wait_for_external_cancellation
+    cancel_result: list[bool] = []
+
+    def cancel_after_operation_starts() -> None:
+        if operation_started.wait(1.0):
+            cancel_result.append(cancellation.cancel(CancellationReason.USER_CANCEL))
+
+    canceller = threading.Thread(target=cancel_after_operation_starts)
+    canceller.start()
+    try:
+        receipt = runtime.execute(job, cancellation)
+    finally:
+        canceller.join(timeout=1.0)
+
+    assert cancel_result == [True]
+    failure = receipt.job_outcome.error
+    assert failure is not None
+    assert failure.stage is ExecutionStage.BACKEND_EXECUTE
+    assert failure.code is ErrorCode.BACKEND_CANCELLED
+    assert failure.retryable is False
+    assert backend.calls == []
+    session = factory.sessions[0]
+    assert session.closed is True  # type: ignore[attr-defined]
+    assert session.close_calls == 1  # type: ignore[attr-defined]
+
+
+def test_direct_methods_preprocessing_allows_live_workspace_writes_below_limit(
+    tmp_path: Path,
+) -> None:
+    runtime, job, factory, backend, _ = _public_fake_claiming_runtime(
+        tmp_path,
+        "success",
+    )
+    runtime._backend_test_limits = BackendExecutionLimits(  # noqa: SLF001
+        wall_time_seconds=1.0,
+        stdout_stderr_bytes=1_000_000,
+        workspace_bytes=1_000_000,
+        poll_interval_seconds=0.001,
+        termination_grace_seconds=0.1,
+    )
+    complete_preprocessing = factory.preprocessing_executor
+    assert complete_preprocessing is not None
+
+    def write_while_runtime_scans(
+        session: object,
+        operation: str,
+        request_path: str,
+        result_path: str,
+    ) -> None:
+        workspace_root = Path(getattr(session, "workspace_root"))
+        live_path = workspace_root / "output/live-write.bin"
+
+        def writer() -> None:
+            with live_path.open("wb") as handle:
+                for _ in range(40):
+                    handle.write(b"x" * 128)
+                    handle.flush()
+                    time.sleep(0.001)
+
+        thread = threading.Thread(target=writer)
+        thread.start()
+        signal = factory.open_calls[-1][3]
+        while thread.is_alive():
+            assert signal.is_cancelled() is False
+            signal.wait(0.001)
+        thread.join(timeout=1.0)
+        complete_preprocessing(session, operation, request_path, result_path)
+        return None
+
+    factory.preprocessing_executor = write_while_runtime_scans
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.error is None
+    assert len(backend.calls) == 1
+    session = factory.sessions[0]
+    assert session.closed is True  # type: ignore[attr-defined]
+    assert session.close_calls == 1  # type: ignore[attr-defined]
+
+
+def test_direct_methods_preprocessing_workspace_overflow_stops_and_closes_session(
+    tmp_path: Path,
+) -> None:
+    runtime, job, factory, backend, _ = _public_fake_claiming_runtime(
+        tmp_path,
+        "success",
+    )
+    runtime._backend_test_limits = BackendExecutionLimits(  # noqa: SLF001
+        wall_time_seconds=1.0,
+        stdout_stderr_bytes=1_000_000,
+        workspace_bytes=64_000,
+        poll_interval_seconds=0.005,
+        termination_grace_seconds=0.1,
+    )
+
+    def expand_workspace_until_runtime_stops(
+        session: object,
+        _operation: str,
+        _request_path: str,
+        _result_path: str,
+    ) -> None:
+        workspace_root = Path(getattr(session, "workspace_root"))
+        (workspace_root / "output/overflow.bin").write_bytes(b"x" * 80_000)
+        signal = factory.open_calls[-1][3]
+        while not signal.is_cancelled():
+            signal.wait(0.002)
+        return None
+
+    factory.preprocessing_executor = expand_workspace_until_runtime_stops
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    failure = receipt.job_outcome.error
+    assert failure is not None
+    assert failure.stage is ExecutionStage.BACKEND_EXECUTE
+    assert failure.code is ErrorCode.WORKSPACE_LIMIT
+    assert failure.retryable is False
+    assert backend.calls == []
+    session = factory.sessions[0]
+    assert session.closed is True  # type: ignore[attr-defined]
+    assert session.close_calls == 1  # type: ignore[attr-defined]
 
 
 def test_logparse_broker_asset_failure_preserves_the_typed_v1_error(

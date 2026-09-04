@@ -357,6 +357,27 @@ class ClientAccessWorkflow:
         wait_for_job_id: str | None = None,
         wait_seconds: int = 0,
     ) -> CaseQueryResponse:
+        response, _artifact_views = self.get_case_with_artifact_views(
+            case_id,
+            wait_for_job_id=wait_for_job_id,
+            wait_seconds=wait_seconds,
+        )
+        return response
+
+    def get_case_with_artifact_views(
+        self,
+        case_id: str,
+        *,
+        wait_for_job_id: str | None = None,
+        wait_seconds: int = 0,
+    ) -> tuple[CaseQueryResponse, list[ArtifactView] | None]:
+        """Read a Case and preserve whether the server supplied inline descriptors.
+
+        ``None`` identifies an older compatible service and is the only state in
+        which a caller should fall back to ``list_artifacts``.  A present empty
+        list remains authoritative.
+        """
+
         data = _success_data(
             self._mcp.call_tool(
                 "problem_locator_get_case",
@@ -367,18 +388,58 @@ class ClientAccessWorkflow:
                 },
             )
         )
-        return _validate_model(
+        if not isinstance(data, Mapping):
+            raise ClientProtocolError("case response does not match S00")
+        expected = {"case_view", "wait_timed_out"}
+        accepted_shapes = {
+            frozenset(expected),
+            frozenset({*expected, "artifact_views"}),
+        }
+        if set(data) not in accepted_shapes:
+            raise ClientProtocolError("case response has unexpected fields")
+        response = _validate_model(
             CaseQueryResponse,
-            data,
+            {
+                "case_view": data["case_view"],
+                "wait_timed_out": data["wait_timed_out"],
+            },
             "case response does not match S00",
         )
+        views = (
+            None
+            if "artifact_views" not in data
+            else _validate_type(
+                list[ArtifactView],
+                data["artifact_views"],
+                "case artifact views do not match S00",
+            )
+        )
+        if views is not None:
+            summaries = {item.artifact_id: item for item in response.case_view.artifacts}
+            if (
+                len(views) != len(summaries)
+                or set(summaries) != {item.artifact_id for item in views}
+                or any(
+                    item.kind != summaries[item.artifact_id].kind
+                    or item.name != summaries[item.artifact_id].name
+                    or item.content_type != summaries[item.artifact_id].content_type
+                    or item.size != summaries[item.artifact_id].size
+                    or item.sha256 != summaries[item.artifact_id].sha256
+                    or item.created_at != summaries[item.artifact_id].created_at
+                    for item in views
+                )
+            ):
+                raise ClientProtocolError(
+                    "case artifact views do not match the Case summaries"
+                )
+        return response, views
 
     def resume_case(
         self,
         case_id: str,
         expected_case_revision: int,
         *,
-        wait_seconds: int = 0,
+        wait_seconds: int = 30,
     ) -> ApplicationResponse:
         data = _success_data(
             self._mcp.call_tool(
@@ -425,7 +486,7 @@ class ClientAccessWorkflow:
         expected_case_revision: int,
         inputs: Mapping[str, str],
         attachment_ids: Sequence[str] = (),
-        wait_seconds: int = 0,
+        wait_seconds: int = 30,
     ) -> ApplicationResponse:
         """Submit facts/READY attachments, refreshing one stale revision once."""
 
@@ -472,7 +533,7 @@ class ClientAccessWorkflow:
         requirement_inputs: Mapping[str, str],
         local_path: Path,
         content_type: str | None = None,
-        wait_seconds: int = 0,
+        wait_seconds: int = 30,
     ) -> ApplicationResponse:
         effective_content_type = (
             derive_attachment_content_type(local_path.name)
@@ -608,10 +669,23 @@ class ClientAccessWorkflow:
         case_id: str,
         artifact_id: str,
         destination: Path,
+        artifact_views: Sequence[ArtifactView] | None = None,
     ) -> ArtifactView:
         if destination.exists():
             raise FileExistsError("download destination already exists")
-        artifacts = self.list_artifacts(case_id)
+        if artifact_views is None:
+            _response, inline_artifacts = self.get_case_with_artifact_views(case_id)
+            artifacts = (
+                self.list_artifacts(case_id)
+                if inline_artifacts is None
+                else inline_artifacts
+            )
+        else:
+            artifacts = _validate_type(
+                list[ArtifactView],
+                list(artifact_views),
+                "supplied artifact views do not match S00",
+            )
         selected = next(
             (item for item in artifacts if item.artifact_id == artifact_id),
             None,

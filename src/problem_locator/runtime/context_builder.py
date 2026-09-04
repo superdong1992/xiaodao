@@ -391,6 +391,19 @@ def _previous_outcome_bytes(
     return tuple(encoded)
 
 
+def _is_methods_v1_specialist(
+    job: Job,
+    materials: ContextMaterials,
+) -> bool:
+    return (
+        materials.methods_evidence_graph is None
+        and materials.methods_evaluation_plan is None
+        and job.job_type is JobType.DIAGNOSE
+        and job.diagnosis_mode is DiagnosisMode.SPECIALIZED
+        and materials.manifest.resolved_logparse_plan is not None
+    )
+
+
 class ContextBuilder:
     """Build one deterministic ``BoundedContext`` from frozen inputs."""
 
@@ -403,6 +416,7 @@ class ContextBuilder:
             raise TypeError("manifest must be the frozen S00 WorkspaceInputManifest DTO")
 
         methods_v2 = materials.methods_evidence_graph is not None
+        methods_v1_specialist = _is_methods_v1_specialist(job, materials)
         if methods_v2 and job.methods_review_target is None:
             _validate_methods_specialist_manifest(job, materials.manifest)
         else:
@@ -410,9 +424,13 @@ class ContextBuilder:
         self._validate_role_materials(job, materials)
         self._validate_order_and_ownership(job, materials)
         _validate_evidence_manifest(materials.evidence, materials.manifest)
-        previous_bytes = _previous_outcome_bytes(
-            materials.previous_outcomes,
-            materials.manifest,
+        previous_bytes = (
+            ()
+            if methods_v1_specialist
+            else _previous_outcome_bytes(
+                materials.previous_outcomes,
+                materials.manifest,
+            )
         )
 
         instruction = validate_job_instruction_for_job(
@@ -425,7 +443,7 @@ class ContextBuilder:
             job,
         )
         frozen_snapshot = job.context_snapshot
-        if methods_v2:
+        if methods_v2 or methods_v1_specialist:
             # Declared user inputs have one model-visible source: request.json.
             # Keep the mandatory snapshot section but do not duplicate values
             # that a role is already required to read from that frozen file.
@@ -546,6 +564,9 @@ class ContextBuilder:
             True,
         )
 
+        exposed_previous_outcomes = (
+            () if methods_v1_specialist else materials.previous_outcomes
+        )
         previous = tuple(
             _SectionDraft(
                 ContextSectionKind.PREVIOUS_OUTCOME,
@@ -554,7 +575,7 @@ class ContextBuilder:
                 True,
             )
             for outcome, data in zip(
-                materials.previous_outcomes,
+                exposed_previous_outcomes,
                 previous_bytes,
                 strict=True,
             )
@@ -726,9 +747,12 @@ class ContextBuilder:
             materials.methods_evidence_graph is not None
             and job.methods_review_target is None
         )
+        methods_v1_specialist = _is_methods_v1_specialist(job, materials)
         expected_previous = (
             ()
-            if job.job_type is JobType.REVIEW or methods_specialist
+            if job.job_type is JobType.REVIEW
+            or methods_specialist
+            or methods_v1_specialist
             else tuple(job.previous_outcome_refs)
         )
         if tuple(outcome.outcome_id for outcome in materials.previous_outcomes) != expected_previous:

@@ -432,7 +432,7 @@ def validated_successful_broker_record(
 ) -> dict[str, Any]:
     """Parse one product-owned broker audit and return its unique success.
 
-    Methods Pass A sets ``require_single_operation`` because a failed operation
+    Methods preprocessing sets ``require_single_operation`` because a failed operation
     followed by a successful retry violates its no-retry execution boundary.
     Other broker consumers retain the existing unique-success audit contract.
     """

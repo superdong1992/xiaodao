@@ -1741,7 +1741,7 @@ class WorkspaceManager:
     ) -> FrozenMethodsWorkspaceInputs:
         """Atomically publish the server-owned Methods V1 input surface.
 
-        Pass A has already exited and its broker capability has been revoked.
+        Server preprocessing has completed and its broker capability has been revoked.
         The Specialist can inspect only these frozen copies; the input tree is
         locked read-only again before the Specialist starts.
         """
@@ -2026,7 +2026,7 @@ class WorkspaceManager:
         request_bytes: bytes,
         operation: Literal["parse-targets", "target-logs"],
     ) -> tuple[str, str]:
-        """Publish the product-owned request consumed by Pass A's sole tool call."""
+        """Publish the product-owned request consumed by the sole broker operation."""
 
         if not isinstance(request_bytes, bytes) or not request_bytes:
             raise TypeError("Logparse preprocessing request must be non-empty bytes")

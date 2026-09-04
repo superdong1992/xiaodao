@@ -336,6 +336,8 @@ class FileResourceStore:
     def _validate_stage_for_publish(
         self,
         staged_ref: StagedResourceRef | AttachmentStagedRef,
+        *,
+        validate_content: bool = True,
     ) -> Path:
         """Validate one complete stage and project failures to publish codes."""
 
@@ -354,7 +356,18 @@ class FileResourceStore:
                 "The staged resource path is invalid.",
             ) from None
         try:
-            return self._validate_staged_content(staged_ref)
+            if validate_content:
+                return self._validate_staged_content(staged_ref)
+            # Publisher owns the authoritative full read immediately before
+            # the atomic move.  Keep this outer boundary to the immutable
+            # marker, path, and content-node shape on the new-target path.
+            self._read_and_match_marker(directory, staged_ref)
+            content = self._content_path(directory, staged_ref.resource_kind)
+            if staged_ref.resource_kind is ResourceKind.DIRECTORY:
+                require_real_directory(content)
+            else:
+                require_ordinary_file(content)
+            return content
         except FileNotFoundError:
             raise _port_error(
                 ErrorCode.RESOURCE_NOT_FOUND,
@@ -865,7 +878,10 @@ class FileResourceStore:
         try:
             final_exists = final_path.exists() or final_path.is_symlink()
             if not final_exists:
-                content_path = self._validate_stage_for_publish(staged_ref)
+                content_path = self._validate_stage_for_publish(
+                    staged_ref,
+                    validate_content=False,
+                )
             else:
                 try:
                     marker = self._writer.read_marker(directory)

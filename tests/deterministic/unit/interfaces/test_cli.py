@@ -412,6 +412,25 @@ def test_uvicorn_runner_rejects_multiple_workers_before_startup() -> None:
         run_uvicorn("asgi-app", "127.0.0.1", 8000, 2)
 
 
+def test_uvicorn_runner_keeps_remote_mcp_connections_alive_between_polls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import uvicorn
+
+    observed: dict[str, object] = {}
+
+    def fake_run(app: object, **kwargs: object) -> None:
+        observed["app"] = app
+        observed.update(kwargs)
+
+    monkeypatch.setattr(uvicorn, "run", fake_run)
+
+    run_uvicorn("asgi-app", "127.0.0.1", 8000, 1)
+
+    assert observed["app"] == "asgi-app"
+    assert observed["timeout_keep_alive"] == 75
+
+
 def test_cli_argument_and_missing_composition_errors_are_safe(tmp_path: Path) -> None:
     stderr = io.BytesIO()
     assert main(["unknown"], stdout=io.BytesIO(), stderr=stderr) == (

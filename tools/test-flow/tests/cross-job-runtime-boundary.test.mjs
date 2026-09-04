@@ -15,16 +15,21 @@ import {
   parseLinuxClientBrowserExecution,
   phaseOnePrompt,
   phaseOneUserMessage,
+  phaseThreePrompt,
   phaseTwoPrompt,
   phaseTwoUserMessage,
+  restartPrompt,
   runCommandCapture,
+  validDirectMethodsServiceInvocations,
   validRouteMethodsPreflightEvidence,
   validLinuxClientBrowserExecution,
   validServerRuntimeInspection,
   validServiceAgentUsageReceipt,
   validSuccessfulInvocationReceipt,
   validatePhaseOne,
+  validatePhaseThree,
   validatePhaseTwo,
+  validateRestart,
 } from "../adapters/cross-job-core.mjs";
 import {
   crossJobBrowserCapabilityPolicy,
@@ -218,7 +223,6 @@ function twoTurnClientFixture() {
   const attachmentId = "00000000-0000-4000-8000-000000000103";
   const publicBaseUrl = "http://127.0.0.1:8080";
   const createRequestId = "generated-create";
-  const factsRequestId = "generated-facts";
   const prepareRequestId = "generated-prepare";
   const rawProblemText = phaseOneUserMessage();
   const inputRequirements = fixture.releaseCase.driver.initial_user_fact_names.map((name) => ({
@@ -270,7 +274,7 @@ function twoTurnClientFixture() {
           case_id: caseId,
           case_revision: 2,
           status: "WAITING_INPUT",
-          pending_requirements: inputRequirements,
+          pending_requirements: [...inputRequirements, attachmentRequirement],
           selected_skill_ref: {
             id: fixture.releaseCase.skill.runtime_ref_id,
             version: fixture.releaseCase.skill.version,
@@ -291,7 +295,7 @@ function twoTurnClientFixture() {
           case_id: caseId,
           case_revision: 2,
           status: "WAITING_INPUT",
-          pending_requirements: inputRequirements,
+          pending_requirements: [...inputRequirements, attachmentRequirement],
           selected_skill_ref: {
             id: fixture.releaseCase.skill.runtime_ref_id,
             version: fixture.releaseCase.skill.version,
@@ -303,42 +307,11 @@ function twoTurnClientFixture() {
       ordinal: 1,
       stream_ordinal: 4,
       result_stream_ordinal: 5,
-      tool_name: "problem_locator_submit_supplement",
-      input: {
-        request_id: factsRequestId,
-        case_id: caseId,
-        expected_case_revision: 2,
-        input_names: fixture.releaseCase.driver.initial_user_fact_names,
-        input_values: fixture.releaseCase.driver.initial_user_fact_values,
-        attachment_ids: [],
-        wait_seconds: 0,
-      },
-      result: success({ business_receipt: { case_id: caseId } }),
-    },
-    {
-      ordinal: 2,
-      stream_ordinal: 6,
-      result_stream_ordinal: 7,
-      tool_name: "problem_locator_get_case",
-      input: { case_id: caseId, wait_for_job_id: null, wait_seconds: 30 },
-      result: success({
-        case_view: {
-          case_id: caseId,
-          case_revision: 4,
-          status: "WAITING_ATTACHMENT",
-          pending_requirements: [attachmentRequirement],
-        },
-      }),
-    },
-    {
-      ordinal: 3,
-      stream_ordinal: 8,
-      result_stream_ordinal: 9,
       tool_name: "problem_locator_prepare_attachment",
       input: {
         request_id: prepareRequestId,
         case_id: caseId,
-        expected_case_revision: 4,
+        expected_case_revision: 2,
         name: fixture.archive.name,
         content_type: fixture.archive.content_type,
         declared_size: fixture.archive.size,
@@ -348,9 +321,9 @@ function twoTurnClientFixture() {
         application_response: {
           case_view: {
             case_id: caseId,
-            case_revision: 5,
-            status: "WAITING_ATTACHMENT",
-            pending_requirements: [attachmentRequirement],
+            case_revision: 3,
+            status: "WAITING_INPUT",
+            pending_requirements: [...inputRequirements, attachmentRequirement],
             selected_skill_ref: {
               id: fixture.releaseCase.skill.runtime_ref_id,
               version: fixture.releaseCase.skill.version,
@@ -387,11 +360,233 @@ function twoTurnClientFixture() {
       submit_inputs: "planned-facts",
       submit_attachment: "planned-attachment",
     },
-    actualRequestIds: { createRequestId, factsRequestId, prepareRequestId },
+    actualRequestIds: { createRequestId, prepareRequestId },
   };
 }
 
-test("the real two-turn boundary creates first, asks returned requirements, then supplements the same Case", () => {
+function terminalArtifactFixture() {
+  const caseId = "00000000-0000-4000-8000-000000000201";
+  const attachmentId = "00000000-0000-4000-8000-000000000202";
+  const jobId = "00000000-0000-4000-8000-000000000203";
+  const createdAt = "2026-09-04T00:00:00Z";
+  const publicBaseUrl = "http://127.0.0.1:43123";
+  const descriptors = [
+    {
+      artifact_id: "00000000-0000-4000-8000-000000000204",
+      kind: "USER_RESULT",
+      name: "diagnosis-result.json",
+      content_type: "application/json",
+      size: 41,
+      sha256: "a".repeat(64),
+      created_at: createdAt,
+    },
+    {
+      artifact_id: "00000000-0000-4000-8000-000000000205",
+      kind: "USER_RESULT_ARCHIVE",
+      name: "result.zip",
+      content_type: "application/zip",
+      size: 73,
+      sha256: "b".repeat(64),
+      created_at: createdAt,
+    },
+  ].map((item) => ({
+    ...item,
+    download_url: `${publicBaseUrl}/api/v1/artifacts/${item.artifact_id}/content?case_id=${caseId}`,
+  }));
+  const summaries = descriptors.map(({ download_url: _downloadUrl, ...item }) => ({
+    ...item,
+    created_by_job_id: jobId,
+  }));
+  const releaseCase = {
+    driver: {
+      initial_user_fact_names: ["problem_time"],
+      initial_user_fact_values: ["2026-09-04T00:00:00.000Z"],
+      supplement_input_names: [],
+      supplement_input_values: [],
+    },
+    result_expectation: { case_status: "RESOLVED", resolution_status: "RESOLVED" },
+    skill: { runtime_ref_id: "rpc-timeout", version: "1.0.0" },
+  };
+  const state = {
+    case_id: caseId,
+    attachment_id: attachmentId,
+    case_revision: 7,
+    resolved_case_revision: 9,
+    public_base_url: publicBaseUrl,
+    public_artifact: descriptors[0],
+    public_result_archive: descriptors[1],
+    request_ids: { submit_attachment: "submit-terminal-attachment", submit_inputs: "unused" },
+  };
+  const success = (data) => ({ ok: true, error: null, data });
+  const terminalView = {
+    case_id: caseId,
+    case_revision: 9,
+    diagnosis_state_revision: 4,
+    status: "RESOLVED",
+    pending_requirements: [],
+    methods_result: null,
+    selected_skill_ref: {
+      id: releaseCase.skill.runtime_ref_id,
+      version: releaseCase.skill.version,
+    },
+    final_result: {
+      status: "ACCEPTED",
+      resolution_status: "RESOLVED",
+      proposed_by_job_id: jobId,
+    },
+    artifacts: summaries,
+  };
+  return { caseId, descriptors, releaseCase, state, success, summaries, terminalView };
+}
+
+function phaseThreeRecords(fixture, { inline = true, list = false } = {}) {
+  const records = [
+    {
+      ordinal: 0,
+      tool_name: "problem_locator_submit_supplement",
+      input: {
+        request_id: fixture.state.request_ids.submit_attachment,
+        case_id: fixture.caseId,
+        expected_case_revision: fixture.state.case_revision,
+        input_names: fixture.releaseCase.driver.initial_user_fact_names,
+        input_values: fixture.releaseCase.driver.initial_user_fact_values,
+        attachment_ids: [fixture.state.attachment_id],
+        wait_seconds: 30,
+      },
+      result: fixture.success({ business_receipt: { case_id: fixture.caseId } }),
+    },
+    {
+      ordinal: 1,
+      tool_name: "problem_locator_get_case",
+      input: { case_id: fixture.caseId, wait_for_job_id: null, wait_seconds: 30 },
+      result: fixture.success({
+        case_view: { case_id: fixture.caseId, case_revision: 8, status: "REVIEWING" },
+        wait_timed_out: false,
+        artifact_views: [],
+      }),
+    },
+    {
+      ordinal: 2,
+      tool_name: "problem_locator_get_case",
+      input: { case_id: fixture.caseId, wait_for_job_id: null, wait_seconds: 30 },
+      result: fixture.success({
+        case_view: fixture.terminalView,
+        wait_timed_out: false,
+        ...(inline ? { artifact_views: fixture.descriptors } : {}),
+      }),
+    },
+  ];
+  if (list) {
+    records.push({
+      ordinal: 3,
+      tool_name: "problem_locator_list_artifacts",
+      input: { case_id: fixture.caseId },
+      result: fixture.success({ artifacts: fixture.descriptors }),
+    });
+  }
+  return records;
+}
+
+test("terminal client contract consumes get_case artifact_views without a list round trip", () => {
+  const fixture = terminalArtifactFixture();
+  const summary = validatePhaseThree(
+    { records: phaseThreeRecords(fixture) },
+    fixture.state,
+    fixture.releaseCase,
+  );
+  assert.equal(summary.artifact_projection_source, "GET_CASE");
+  assert.equal(summary.public_artifact.artifact_id, fixture.descriptors[0].artifact_id);
+  assert.doesNotMatch(phaseThreePrompt(fixture.state, fixture.releaseCase), /Call problem_locator_list_artifacts exactly once for this Case and stop/u);
+  assert.match(phaseThreePrompt(fixture.state, fixture.releaseCase), /Only when the member is completely absent/u);
+  assert.match(phaseThreePrompt(fixture.state, fixture.releaseCase), /one batched submission/u);
+
+  const unwaited = phaseThreeRecords(fixture);
+  unwaited[0].input.wait_seconds = 0;
+  assert.throws(
+    () => validatePhaseThree({ records: unwaited }, fixture.state, fixture.releaseCase),
+    (error) => error.code === "PHASE3_ATTACHMENT_INPUT",
+  );
+
+  const directTerminal = phaseThreeRecords(fixture);
+  directTerminal.splice(1, 1);
+  const directSummary = validatePhaseThree(
+    { records: directTerminal },
+    fixture.state,
+    fixture.releaseCase,
+  );
+  assert.deepEqual(directSummary.observed_statuses, ["RESOLVED"]);
+});
+
+test("direct Methods preprocessing leaves only Specialist and Reviewer Agent invocations", () => {
+  const direct = [
+    { job_type: "DIAGNOSE" },
+    { job_type: "REVIEW" },
+  ];
+  assert.equal(validDirectMethodsServiceInvocations(direct), true);
+  assert.equal(
+    validDirectMethodsServiceInvocations([
+      direct[0],
+      { job_type: "DIAGNOSE" },
+      direct[1],
+    ]),
+    false,
+  );
+  assert.equal(validDirectMethodsServiceInvocations([{ job_type: "DIAGNOSE" }]), false);
+});
+
+test("terminal client contract permits list_artifacts only when artifact_views is absent", () => {
+  const fixture = terminalArtifactFixture();
+  const legacy = validatePhaseThree(
+    { records: phaseThreeRecords(fixture, { inline: false, list: true }) },
+    fixture.state,
+    fixture.releaseCase,
+  );
+  assert.equal(legacy.artifact_projection_source, "LIST_ARTIFACTS");
+  assert.throws(
+    () => validatePhaseThree(
+      { records: phaseThreeRecords(fixture, { inline: true, list: true }) },
+      fixture.state,
+      fixture.releaseCase,
+    ),
+    (error) => error.code === "PHASE3_REDUNDANT_ARTIFACT_LIST",
+  );
+  const invalid = phaseThreeRecords(fixture);
+  invalid[2].result.data.artifact_views = [];
+  assert.throws(
+    () => validatePhaseThree({ records: invalid }, fixture.state, fixture.releaseCase),
+    (error) => error.code === "PHASE3_ARTIFACT_COUNT",
+  );
+});
+
+test("restart persistence check uses inline descriptors and keeps a strict legacy fallback", () => {
+  const fixture = terminalArtifactFixture();
+  const currentGet = {
+    ordinal: 0,
+    tool_name: "problem_locator_get_case",
+    input: { case_id: fixture.caseId, wait_for_job_id: null, wait_seconds: 0 },
+    result: fixture.success({ case_view: fixture.terminalView, wait_timed_out: false, artifact_views: fixture.descriptors }),
+  };
+  const current = validateRestart({ records: [currentGet] }, fixture.state, fixture.releaseCase);
+  assert.equal(current.artifact_projection_source, "GET_CASE");
+
+  const legacyGet = clone(currentGet);
+  delete legacyGet.result.data.artifact_views;
+  const list = {
+    ordinal: 1,
+    tool_name: "problem_locator_list_artifacts",
+    input: { case_id: fixture.caseId },
+    result: fixture.success({ artifacts: fixture.descriptors }),
+  };
+  const legacy = validateRestart({ records: [legacyGet, list] }, fixture.state, fixture.releaseCase);
+  assert.equal(legacy.artifact_projection_source, "LIST_ARTIFACTS");
+  assert.throws(
+    () => validateRestart({ records: [currentGet, list] }, fixture.state, fixture.releaseCase),
+    (error) => error.code === "RESTART_REDUNDANT_ARTIFACT_LIST",
+  );
+  assert.match(restartPrompt(fixture.state), /Only when the member is completely absent/u);
+});
+
+test("the two-turn boundary creates first and prepares the attachment before the batched supplement", () => {
   const fixture = twoTurnClientFixture();
   const phaseOneSummary = validatePhaseOne(
     {
@@ -423,7 +618,6 @@ test("the real two-turn boundary creates first, asks returned requirements, then
   assert.deepEqual(phaseTwoSummary.request_ids, {
     ...fixture.requestIds,
     create: fixture.actualRequestIds.createRequestId,
-    submit_inputs: fixture.actualRequestIds.factsRequestId,
     prepare: fixture.actualRequestIds.prepareRequestId,
   });
   assert.deepEqual(fixture.phaseOneRecords.map((item) => item.tool_name), [
@@ -432,13 +626,11 @@ test("the real two-turn boundary creates first, asks returned requirements, then
   ]);
   assert.deepEqual(fixture.phaseTwoRecords.map((item) => item.tool_name), [
     "problem_locator_get_case",
-    "problem_locator_submit_supplement",
-    "problem_locator_get_case",
     "problem_locator_prepare_attachment",
   ]);
 });
 
-test("the two-turn boundary rejects asking before observation and submitting before re-observation", () => {
+test("the two-turn boundary rejects asking or preparing before requirement observation", () => {
   const fixture = twoTurnClientFixture();
   assert.throws(
     () => validatePhaseOne(
@@ -468,11 +660,11 @@ test("the two-turn boundary rejects asking before observation and submitting bef
     fixture.releaseCase,
     fixture.requestIds,
   );
-  const submittedWithoutObservation = clone(fixture.phaseTwoRecords);
-  submittedWithoutObservation[0].result.data.case_view.status = "RUNNING";
+  const preparedWithoutObservation = clone(fixture.phaseTwoRecords);
+  preparedWithoutObservation[0].result.data.case_view.status = "RUNNING";
   assert.throws(
     () => validatePhaseTwo(
-      { records: submittedWithoutObservation, assistant_text_events: [] },
+      { records: preparedWithoutObservation, assistant_text_events: [] },
       phaseOneSummary,
       fixture.releaseCase,
       phaseOneSummary.request_ids,

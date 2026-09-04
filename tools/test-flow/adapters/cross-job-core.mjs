@@ -1666,7 +1666,8 @@ export function validatePhaseTwo(audit, state, releaseCase, requestIds, archive,
   const gets = records.filter((record) => record.tool_name === "problem_locator_get_case");
   const prepare = records.filter((record) => record.tool_name === "problem_locator_prepare_attachment");
   requireCondition(
-    creates.length === 0 && submits.length === 1 && gets.length >= 2 && prepare.length === 1,
+    creates.length === 0 && submits.length === 0 && gets.length === 1 && prepare.length === 1
+      && records.length === 2,
     "PHASE2_CALL_CARDINALITY",
     "FAIL",
     "CONTRACT",
@@ -1683,7 +1684,7 @@ export function validatePhaseTwo(audit, state, releaseCase, requestIds, archive,
   const inputView = gets
     .map((record) => ({ record, view: caseView(record) }))
     .find(({ record, view }) => (
-      record.ordinal < submits[0].ordinal
+      record.ordinal < prepare[0].ordinal
         && view?.case_id === state.case_id
         && view.status === "WAITING_INPUT"
         && canonicalJson(openRequirementNames(view, "INPUT")) === canonicalJson(expectedNames)
@@ -1703,38 +1704,17 @@ export function validatePhaseTwo(audit, state, releaseCase, requestIds, archive,
     "FAIL",
     "CONTRACT",
   );
-  const expectedValuesByName = new Map(releaseCase.driver.initial_user_fact_names.map(
-    (name, index) => [name, releaseCase.driver.initial_user_fact_values[index]],
-  ));
-  const expectedValues = expectedNames.map((name) => expectedValuesByName.get(name));
-  requireCondition(expectedValues.every((value) => typeof value === "string"), "PHASE2_USER_ANSWER_MISSING", "FAIL", "CONTRACT");
-  exactKeys(submits[0].input, ["request_id", "case_id", "expected_case_revision", "input_names", "input_values", "attachment_ids", "wait_seconds"], "PHASE2_INPUT_SUBMISSION_SHAPE");
   requireCondition(
-    submits[0].input.case_id === state.case_id
-      && submits[0].input.expected_case_revision === inputView.view.case_revision
-      && canonicalJson(submits[0].input.input_names) === canonicalJson(expectedNames)
-      && canonicalJson(submits[0].input.input_values) === canonicalJson(expectedValues)
-      && canonicalJson(submits[0].input.attachment_ids) === canonicalJson([])
-      && submits[0].input.wait_seconds === 0,
-    "PHASE2_INPUT_SUBMISSION",
+    canonicalJson(openRequirementNames(inputView.view, "ATTACHMENT"))
+      === canonicalJson([releaseCase.skill.attachment_requirement]),
+    "PHASE2_ATTACHMENT_REQUIREMENT_NOT_OBSERVED",
     "FAIL",
     "CONTRACT",
   );
-  const attachmentView = gets
-    .map((record) => ({ record, view: caseView(record) }))
-    .find(({ record, view }) => (
-      record.ordinal > submits[0].ordinal
-        && record.ordinal < prepare[0].ordinal
-        && view?.case_id === state.case_id
-        && view.status === "WAITING_ATTACHMENT"
-        && canonicalJson(openRequirementNames(view, "ATTACHMENT"))
-          === canonicalJson([releaseCase.skill.attachment_requirement])
-    ));
-  requireCondition(attachmentView, "PHASE2_ATTACHMENT_REQUIREMENT_NOT_OBSERVED", "FAIL", "CONTRACT");
   exactKeys(prepare[0].input, ["request_id", "case_id", "expected_case_revision", "name", "content_type", "declared_size", "declared_sha256"], "PHASE2_PREPARE_INPUT_SHAPE");
   requireCondition(
     prepare[0].input.case_id === state.case_id
-      && prepare[0].input.expected_case_revision === attachmentView.view.case_revision
+      && prepare[0].input.expected_case_revision === inputView.view.case_revision
       && prepare[0].input.name === archive.name
       && prepare[0].input.content_type === archive.content_type
       && prepare[0].input.declared_size === archive.size
@@ -1745,7 +1725,6 @@ export function validatePhaseTwo(audit, state, releaseCase, requestIds, archive,
   );
   const generatedRequestIds = [
     state.request_ids.create,
-    submits[0].input.request_id,
     prepare[0].input.request_id,
   ];
   requireCondition(
@@ -1760,7 +1739,7 @@ export function validatePhaseTwo(audit, state, releaseCase, requestIds, archive,
   const view = response?.case_view;
   const descriptor = prepareData.upload;
   requireCondition(
-    view?.status === "WAITING_ATTACHMENT"
+    view?.status === "WAITING_INPUT"
       && view.case_id === state.case_id
       && Number.isInteger(view.case_revision),
     "PHASE2_CASE_VIEW",
@@ -1769,7 +1748,8 @@ export function validatePhaseTwo(audit, state, releaseCase, requestIds, archive,
   );
   const attachmentRequirements = openRequirements(view, "ATTACHMENT");
   requireCondition(
-    canonicalJson(attachmentRequirements.map((item) => item.name))
+    canonicalJson(openRequirementNames(view, "INPUT")) === canonicalJson(expectedNames)
+      && canonicalJson(attachmentRequirements.map((item) => item.name))
         === canonicalJson([releaseCase.skill.attachment_requirement])
       && attachmentRequirements[0]?.requested_by_job_id === state.methods_preflight_job_id,
     "PHASE2_ATTACHMENT_REQUIREMENT",
@@ -1811,7 +1791,6 @@ export function validatePhaseTwo(audit, state, releaseCase, requestIds, archive,
     upload_descriptor: descriptor,
     request_ids: {
       ...requestIds,
-      submit_inputs: submits[0].input.request_id,
       prepare: prepare[0].input.request_id,
     },
   };
@@ -1931,7 +1910,7 @@ async function upload(label, bytes, descriptor) {
     && typeof failBrowser === "function") failBrowser("CHROME_UPLOAD_EXECUTION_FAILED");
   requireCondition(browserResult.ok === true && browserResult.body_kind === "Blob" && browserResult.byte_length === archiveBytes.length, "CHROME_UPLOAD_EXECUTION_FAILED", "FAIL", "BROWSER");
   requireCondition(browserResult.create?.status === 200 && browserResult.create.envelope?.ok === true && browserResult.create.envelope?.data?.business_receipt?.case_id === state.case_id, "CHROME_CREATE_REPLAY_INVALID", "FAIL", "CONTRACT");
-  requireCondition(browserResult.query_before?.status === 200 && browserResult.query_before.envelope?.data?.case_view?.status === "WAITING_ATTACHMENT", "CHROME_QUERY_BEFORE_UPLOAD_INVALID", "FAIL", "CONTRACT");
+  requireCondition(browserResult.query_before?.status === 200 && browserResult.query_before.envelope?.data?.case_view?.status === "WAITING_INPUT", "CHROME_QUERY_BEFORE_UPLOAD_INVALID", "FAIL", "CONTRACT");
   requireCondition(browserResult.prepare?.status === 200 && browserResult.prepare.envelope?.ok === true && browserResult.prepare.envelope?.data?.application_response?.business_receipt?.primary_resource_id === state.attachment_id, "CHROME_PREPARE_REPLAY_INVALID", "FAIL", "CONTRACT");
   const webDescriptor = browserResult.descriptor;
   exactKeys(webDescriptor, ["attachment_id", "method", "url", "required_headers", "expected_content_length", "max_bytes", "expires_at"], "CHROME_UPLOAD_DESCRIPTOR_SHAPE");
@@ -1941,7 +1920,7 @@ async function upload(label, bytes, descriptor) {
   requireCondition(sizeMismatch?.label === "size-mismatch" && sizeMismatch.status === 400 && sizeMismatch.error_code === "VALIDATION_ERROR", "CHROME_SIZE_MISMATCH_NOT_REJECTED", "FAIL", "CONTRACT");
   requireCondition(hashMismatch?.label === "hash-mismatch" && hashMismatch.status === 422 && hashMismatch.error_code === "RESOURCE_HASH_MISMATCH", "CHROME_HASH_MISMATCH_NOT_REJECTED", "FAIL", "CONTRACT");
   requireCondition(ready?.label === "ready" && ready.status === 200 && ready.data?.case_id === state.case_id && ready.data?.attachment_id === state.attachment_id && ready.data?.status === "READY" && Number.isInteger(ready.data.case_revision) && ready.data.case_revision > state.prepared_case_revision, "CHROME_UPLOAD_RESPONSE_INVALID", "FAIL", "CONTRACT");
-  requireCondition(browserResult.query_after?.status === 200 && browserResult.query_after.envelope?.data?.case_view?.case_revision === ready.data.case_revision, "CHROME_QUERY_AFTER_UPLOAD_INVALID", "FAIL", "CONTRACT");
+  requireCondition(browserResult.query_after?.status === 200 && browserResult.query_after.envelope?.data?.case_view?.status === "WAITING_INPUT" && browserResult.query_after.envelope?.data?.case_view?.case_revision === ready.data.case_revision, "CHROME_QUERY_AFTER_UPLOAD_INVALID", "FAIL", "CONTRACT");
   requireCondition(typeof ready.correlation_id === "string" && ready.correlation_id.length > 0, "CHROME_CORRELATION_HEADER_NOT_EXPOSED", "FAIL", "CONTRACT");
   const browserHeaders = webDescriptor.required_headers;
   const browserReceipt = {
@@ -1979,52 +1958,72 @@ async function upload(label, bytes, descriptor) {
   return { status: "READY", case_revision: ready.data.case_revision, browser_upload: browserReceipt };
 }
 
-function phaseThreePrompt(state, releaseCase) {
+export function phaseThreePrompt(state, releaseCase) {
   const supplement = releaseCase.driver.supplement_input_names.length > 0
-    ? `2. Poll problem_locator_get_case with non-empty case_id and wait_seconds 30 until WAITING_INPUT has exactly these OPEN INPUT requirements: ${canonicalJson(releaseCase.driver.supplement_input_names).trimEnd()}. Use wait_seconds 30 on every poll; do not rapid-poll.\n3. Call problem_locator_submit_supplement exactly once with request_id "${state.request_ids.submit_inputs}", the latest revision, input_names ${canonicalJson(releaseCase.driver.supplement_input_names).trimEnd()}, input_values ${canonicalJson(releaseCase.driver.supplement_input_values).trimEnd()}, attachment_ids [], wait_seconds 0.\n4.`
+    ? `2. Consume the progressed Case view returned by the attachment write. If it has not reached WAITING_INPUT with exactly these OPEN INPUT requirements, poll problem_locator_get_case with non-empty case_id and wait_seconds 30 until it does: ${canonicalJson(releaseCase.driver.supplement_input_names).trimEnd()}. Do not rapid-poll.\n3. Call problem_locator_submit_supplement exactly once with request_id "${state.request_ids.submit_inputs}", the latest revision, input_names ${canonicalJson(releaseCase.driver.supplement_input_names).trimEnd()}, input_values ${canonicalJson(releaseCase.driver.supplement_input_values).trimEnd()}, attachment_ids [], wait_seconds 30. Consume that write's progressed Case view before polling again.\n4.`
     : "2. Do not submit any ordinary inputs because this scenario declares none.\n3.";
   return `Perform phase 3 of the controlled Problem Locator journey. Use only the Skill tool and the seven problem_locator Remote MCP tools. Treat structured MCP results as authoritative. Case ${state.case_id}, attachment ${state.attachment_id}, and case_revision ${state.case_revision} are authoritative.
 
 0. First call Skill with exact input {"skill":"problem-locator-client"}; do not call MCP before it succeeds.
-1. Call problem_locator_submit_supplement exactly once with request_id "${state.request_ids.submit_attachment}", case_id "${state.case_id}", expected_case_revision ${state.case_revision}, input_names [], input_values [], attachment_ids ["${state.attachment_id}"], wait_seconds 0.
+1. Call problem_locator_submit_supplement exactly once with request_id "${state.request_ids.submit_attachment}", case_id "${state.case_id}", expected_case_revision ${state.case_revision}, input_names ${canonicalJson(releaseCase.driver.initial_user_fact_names).trimEnd()}, input_values ${canonicalJson(releaseCase.driver.initial_user_fact_values).trimEnd()}, attachment_ids ["${state.attachment_id}"], wait_seconds 30. This is the one batched submission for the initially requested facts and READY attachment. Consume the progressed Case view returned by this write before polling.
 ${fixedGetCasePollingInvariant(state.case_id)}
-${supplement} Poll with the same literal get-case input. Observe REVIEWING, then continue unchanged until a terminal case status with final_result.status ACCEPTED. Use wait_seconds 30 on every poll, do not rapid-poll, and do not skip REVIEWING.
-5. Call problem_locator_list_artifacts exactly once for this Case and stop. Do not call another tool.`;
+${supplement} Poll with the same literal get-case input until a terminal case status with final_result.status ACCEPTED. Use wait_seconds 30 on every poll and do not rapid-poll. Record REVIEWING when it is returned, but accept a direct terminal response when the finite wait spans that intermediate state; service-side invocation evidence proves the Reviewer ran.
+5. Read artifact_views from that terminal problem_locator_get_case success data. When the member is present, use it as authoritative and stop without calling problem_locator_list_artifacts. Only when the member is completely absent because the service is an older compatible version, call problem_locator_list_artifacts exactly once for this Case and then stop. A present but empty, invalid, or mismatched artifact_views member is a protocol failure and must not trigger fallback. Do not call another tool.`;
 }
 
-function validatePhaseThree(audit, state, releaseCase) {
+function terminalArtifactProjection(record, lists, codePrefix) {
+  const data = successData(record);
+  const inline = Object.hasOwn(data, "artifact_views");
+  if (inline) {
+    requireCondition(lists.length === 0, `${codePrefix}_REDUNDANT_ARTIFACT_LIST`, "FAIL", "CONTRACT");
+    requireCondition(Array.isArray(data.artifact_views), `${codePrefix}_ARTIFACT_VIEWS_INVALID`, "FAIL", "CONTRACT");
+    return { artifacts: data.artifact_views, source: "GET_CASE" };
+  }
+  requireCondition(lists.length === 1, `${codePrefix}_LEGACY_ARTIFACT_LIST_REQUIRED`, "FAIL", "CONTRACT");
+  const artifacts = successData(lists[0]).artifacts;
+  requireCondition(Array.isArray(artifacts), `${codePrefix}_ARTIFACT_VIEWS_INVALID`, "FAIL", "CONTRACT");
+  return { artifacts, source: "LIST_ARTIFACTS" };
+}
+
+export function validatePhaseThree(audit, state, releaseCase) {
   const records = audit.records;
   const successful = records.filter((record) => record.result?.ok === true);
   const submits = successful.filter((record) => record.tool_name === "problem_locator_submit_supplement");
   const gets = successful.filter((record) => record.tool_name === "problem_locator_get_case");
   const lists = successful.filter((record) => record.tool_name === "problem_locator_list_artifacts");
   const hasSupplement = releaseCase.driver.supplement_input_names.length > 0;
-  requireCondition(submits.length === (hasSupplement ? 2 : 1) && gets.length >= (hasSupplement ? 3 : 2) && lists.length === 1, "PHASE3_CALL_CARDINALITY", "FAIL", "CONTRACT");
-  requireCondition(records[0] === submits[0] && records.at(-1) === lists[0], "PHASE3_CALL_ORDER", "FAIL", "CONTRACT");
+  requireCondition(submits.length === (hasSupplement ? 2 : 1) && gets.length >= 1 && records.length === submits.length + gets.length + lists.length, "PHASE3_CALL_CARDINALITY", "FAIL", "CONTRACT");
   exactKeys(submits[0].input, ["request_id", "case_id", "expected_case_revision", "input_names", "input_values", "attachment_ids", "wait_seconds"], "PHASE3_ATTACHMENT_INPUT_SHAPE");
-  requireCondition(submits[0].input.request_id === state.request_ids.submit_attachment && submits[0].input.case_id === state.case_id && submits[0].input.expected_case_revision === state.case_revision && canonicalJson(submits[0].input.attachment_ids) === canonicalJson([state.attachment_id]), "PHASE3_ATTACHMENT_INPUT", "FAIL", "CONTRACT");
-  const views = gets.map((record) => ({ ordinal: record.ordinal, view: caseView(record) })).filter((entry) => entry.view?.case_id === state.case_id);
+  requireCondition(submits[0].input.request_id === state.request_ids.submit_attachment && submits[0].input.case_id === state.case_id && submits[0].input.expected_case_revision === state.case_revision && canonicalJson(submits[0].input.input_names) === canonicalJson(releaseCase.driver.initial_user_fact_names) && canonicalJson(submits[0].input.input_values) === canonicalJson(releaseCase.driver.initial_user_fact_values) && canonicalJson(submits[0].input.attachment_ids) === canonicalJson([state.attachment_id]) && submits[0].input.wait_seconds === 30, "PHASE3_ATTACHMENT_INPUT", "FAIL", "CONTRACT");
+  const getViews = gets.map((record) => ({ ordinal: record.ordinal, record, view: caseView(record) })).filter((entry) => entry.view?.case_id === state.case_id);
+  const stateViews = [...submits, ...gets]
+    .map((record) => ({ ordinal: record.ordinal, record, view: caseView(record) }))
+    .filter((entry) => entry.view?.case_id === state.case_id)
+    .sort((left, right) => left.ordinal - right.ordinal);
   let terminalPredecessor = submits[0];
   if (hasSupplement) {
-    const inputView = views.find((entry) => entry.view.status === "WAITING_INPUT" && canonicalJson(openRequirementNames(entry.view, "INPUT")) === canonicalJson(releaseCase.driver.supplement_input_names));
+    const inputView = stateViews.find((entry) => entry.ordinal >= submits[0].ordinal && entry.ordinal < submits[1].ordinal && entry.view.status === "WAITING_INPUT" && canonicalJson(openRequirementNames(entry.view, "INPUT")) === canonicalJson(releaseCase.driver.supplement_input_names));
     requireCondition(inputView, "PHASE3_INPUT_REQUIREMENT_NOT_OBSERVED", "FAIL", "CONTRACT");
     exactKeys(submits[1].input, ["request_id", "case_id", "expected_case_revision", "input_names", "input_values", "attachment_ids", "wait_seconds"], "PHASE3_INPUT_SHAPE");
-    requireCondition(submits[1].input.request_id === state.request_ids.submit_inputs && submits[1].input.case_id === state.case_id && submits[1].input.expected_case_revision === inputView.view.case_revision && canonicalJson(submits[1].input.input_names) === canonicalJson(releaseCase.driver.supplement_input_names) && canonicalJson(submits[1].input.input_values) === canonicalJson(releaseCase.driver.supplement_input_values) && canonicalJson(submits[1].input.attachment_ids) === canonicalJson([]), "PHASE3_INPUT", "FAIL", "CONTRACT");
+    requireCondition(submits[1].input.request_id === state.request_ids.submit_inputs && submits[1].input.case_id === state.case_id && submits[1].input.expected_case_revision === inputView.view.case_revision && canonicalJson(submits[1].input.input_names) === canonicalJson(releaseCase.driver.supplement_input_names) && canonicalJson(submits[1].input.input_values) === canonicalJson(releaseCase.driver.supplement_input_values) && canonicalJson(submits[1].input.attachment_ids) === canonicalJson([]) && submits[1].input.wait_seconds === 30, "PHASE3_INPUT", "FAIL", "CONTRACT");
     terminalPredecessor = submits[1];
   }
-  const reviewing = views.find((entry) => entry.ordinal > terminalPredecessor.ordinal && entry.view.status === "REVIEWING");
-  const resolved = [...views].reverse().find((entry) => entry.ordinal > (reviewing?.ordinal ?? Infinity) && entry.view.status === releaseCase.result_expectation.case_status);
-  requireCondition(reviewing && resolved && resolved.view.final_result?.status === "ACCEPTED", "PHASE3_REVIEW_RESOLUTION", "FAIL", "CONTRACT");
+  const reviewing = stateViews.find((entry) => entry.ordinal >= terminalPredecessor.ordinal && entry.view.status === "REVIEWING");
+  const resolvedAfter = reviewing?.ordinal ?? terminalPredecessor.ordinal;
+  const resolved = [...getViews].reverse().find((entry) => entry.ordinal > resolvedAfter && entry.view.status === releaseCase.result_expectation.case_status);
+  requireCondition(resolved && resolved.view.final_result?.status === "ACCEPTED", "PHASE3_REVIEW_RESOLUTION", "FAIL", "CONTRACT");
   requireCondition(resolved.view.methods_result === null || resolved.view.methods_result === undefined, "PHASE3_LEGACY_METHODS_RESULT_PRESENT", "FAIL", "CONTRACT");
   requireCondition(resolved.view.final_result?.resolution_status === releaseCase.result_expectation.resolution_status, "PHASE3_RESOLUTION_STATUS", "FAIL", "CONTRACT");
   requireCondition(resolved.view.selected_skill_ref?.id === releaseCase.skill.runtime_ref_id && resolved.view.selected_skill_ref?.version === releaseCase.skill.version, "PHASE3_SELECTED_SKILL", "FAIL", "CONTRACT");
-  const listData = successData(lists[0]);
-  const artifacts = listData.artifacts;
+  const projection = terminalArtifactProjection(resolved.record, lists, "PHASE3");
+  requireCondition(records[0] === submits[0] && records.at(-1) === (projection.source === "GET_CASE" ? resolved.record : lists[0]), "PHASE3_CALL_ORDER", "FAIL", "CONTRACT");
+  const artifacts = projection.artifacts;
   requireCondition(Array.isArray(artifacts) && artifacts.length === 2, "PHASE3_ARTIFACT_COUNT", "FAIL", "CONTRACT");
   const publicArtifact = artifacts.find((artifact) => artifact.kind === "USER_RESULT" && artifact.name === "diagnosis-result.json");
   const publicArchive = artifacts.find((artifact) => artifact.kind === "USER_RESULT_ARCHIVE" && artifact.name === "result.zip");
   for (const [artifact, contentType] of [[publicArtifact, "application/json"], [publicArchive, "application/zip"]]) {
-    requireCondition(UUID.test(artifact?.artifact_id ?? "") && Number.isInteger(artifact?.size) && artifact.size > 0 && SHA256.test(artifact?.sha256 ?? "") && artifact.content_type === contentType && artifact.created_by_job_id === resolved.view.final_result.proposed_by_job_id && artifact.download_url === `${state.public_base_url}/api/v1/artifacts/${artifact.artifact_id}/content?case_id=${state.case_id}`, "PHASE3_ARTIFACT_INVALID", "FAIL", "CONTRACT");
+    const summary = resolved.view.artifacts?.find((item) => item.artifact_id === artifact?.artifact_id);
+    requireCondition(UUID.test(artifact?.artifact_id ?? "") && Number.isInteger(artifact?.size) && artifact.size > 0 && SHA256.test(artifact?.sha256 ?? "") && artifact.content_type === contentType && summary?.created_by_job_id === resolved.view.final_result.proposed_by_job_id && summary.kind === artifact.kind && summary.name === artifact.name && summary.content_type === artifact.content_type && summary.size === artifact.size && summary.sha256 === artifact.sha256 && summary.created_at === artifact.created_at && artifact.download_url === `${state.public_base_url}/api/v1/artifacts/${artifact.artifact_id}/content?case_id=${state.case_id}`, "PHASE3_ARTIFACT_INVALID", "FAIL", "CONTRACT");
   }
   requireCondition(Array.isArray(resolved.view.artifacts) && canonicalJson(resolved.view.artifacts.map((item) => item.artifact_id).sort()) === canonicalJson(artifacts.map((item) => item.artifact_id).sort()), "PHASE3_CASE_ARTIFACT_MISMATCH", "FAIL", "CONTRACT");
   return {
@@ -2034,7 +2033,8 @@ function validatePhaseThree(audit, state, releaseCase) {
     diagnosis_state_revision: resolved.view.diagnosis_state_revision,
     selected_skill_ref: resolved.view.selected_skill_ref,
     final_result: resolved.view.final_result,
-    observed_statuses: views.map((entry) => entry.view.status),
+    observed_statuses: stateViews.map((entry) => entry.view.status),
+    artifact_projection_source: projection.source,
     public_artifact: publicArtifact,
     public_result_archive: publicArchive,
     rest_supplements: submits.map((record) => ({
@@ -2135,19 +2135,23 @@ async function digest(bytes) {
   return receipt;
 }
 
-function restartPrompt(state) {
+export function restartPrompt(state) {
   return `Perform one read-only post-restart persistence verification for Case ${state.case_id}. Treat only Remote MCP structured results as authoritative.
 0. First call Skill exactly once with {"skill":"problem-locator-client"}.
 1. Call problem_locator_get_case exactly once with case_id "${state.case_id}", wait_for_job_id null, wait_seconds 0.
-2. Call problem_locator_list_artifacts exactly once with case_id "${state.case_id}".
+2. Read artifact_views from that get-case success data. When the member is present, use it as authoritative and do not call problem_locator_list_artifacts. Only when the member is completely absent because the service is an older compatible version, call problem_locator_list_artifacts exactly once with case_id "${state.case_id}". A present but empty, invalid, or mismatched member is a protocol failure and must not trigger fallback.
 3. Stop. Do not create, prepare, submit, resume, cancel, upload, or call another tool.`;
 }
 
-function validateRestart(audit, state, releaseCase) {
+export function validateRestart(audit, state, releaseCase) {
   const records = audit.records;
-  requireCondition(records.length === 2 && records[0].tool_name === "problem_locator_get_case" && records[1].tool_name === "problem_locator_list_artifacts", "RESTART_CALL_SEQUENCE", "FAIL", "CONTRACT");
-  const view = caseView(records[0]);
-  const artifacts = successData(records[1]).artifacts;
+  const gets = records.filter((record) => record.result?.ok === true && record.tool_name === "problem_locator_get_case");
+  const lists = records.filter((record) => record.result?.ok === true && record.tool_name === "problem_locator_list_artifacts");
+  requireCondition(gets.length === 1 && records[0] === gets[0] && records.length === gets.length + lists.length, "RESTART_CALL_SEQUENCE", "FAIL", "CONTRACT");
+  const view = caseView(gets[0]);
+  const projection = terminalArtifactProjection(gets[0], lists, "RESTART");
+  requireCondition(records.at(-1) === (projection.source === "GET_CASE" ? gets[0] : lists[0]), "RESTART_CALL_SEQUENCE", "FAIL", "CONTRACT");
+  const artifacts = projection.artifacts;
   requireCondition(view?.case_id === state.case_id && view.status === releaseCase.result_expectation.case_status && view.case_revision === state.resolved_case_revision && view.final_result?.status === "ACCEPTED" && view.final_result?.resolution_status === releaseCase.result_expectation.resolution_status && (view.methods_result === null || view.methods_result === undefined), "RESTART_CASE_MISMATCH", "FAIL", "CONTRACT");
   requireCondition(view.selected_skill_ref?.id === releaseCase.skill.runtime_ref_id && view.selected_skill_ref?.version === releaseCase.skill.version, "RESTART_SELECTED_SKILL", "FAIL", "CONTRACT");
   requireCondition(Array.isArray(artifacts) && artifacts.length === 2, "RESTART_ARTIFACT_COUNT", "FAIL", "CONTRACT");
@@ -2155,7 +2159,7 @@ function validateRestart(audit, state, releaseCase) {
     const actual = artifacts.find((artifact) => artifact.artifact_id === expected.artifact_id);
     requireCondition(actual && actual.sha256 === expected.sha256 && actual.size === expected.size && actual.kind === expected.kind, "RESTART_ARTIFACT_MISMATCH", "FAIL", "CONTRACT");
   }
-  return { case_view: view, artifacts };
+  return { case_view: view, artifacts, artifact_projection_source: projection.source };
 }
 
 async function downloadArtifacts(configuration, state, stageRoot) {
@@ -3058,6 +3062,12 @@ export function validRouteMethodsPreflightEvidence(
     && receipt.job_id === expectedJobId;
 }
 
+export function validDirectMethodsServiceInvocations(invocations) {
+  if (!Array.isArray(invocations)) return false;
+  const jobTypes = invocations.map((invocation) => invocation?.job_type).sort();
+  return JSON.stringify(jobTypes) === JSON.stringify(["DIAGNOSE", "REVIEW"]);
+}
+
 function clientInvocation(configuration, phase, audit, caps) {
   const containerClient = configuration.topology === DUAL_LINUX_TOPOLOGY;
   return {
@@ -3527,9 +3537,8 @@ async function execute(configuration) {
     addUsage(state, audit.usage);
     atomicState(configuration.statePath, state);
     const correspondence = await stopService(configuration, state);
-    const jobTypes = correspondence.service_invocations.map((invocation) => invocation.job_type).sort();
     requireCondition(
-      JSON.stringify(jobTypes) === JSON.stringify(["DIAGNOSE", "DIAGNOSE", "REVIEW"]),
+      validDirectMethodsServiceInvocations(correspondence.service_invocations),
       "DIAGNOSE_SERVICE_AGENT_INVOCATIONS",
       "FAIL",
       "CONTRACT",
@@ -3558,7 +3567,7 @@ async function execute(configuration) {
     await docker(configuration.dockerContext, ["container", "stop", "--time", "10", state.initial_container]);
     await createContainer(configuration, state, state.restart_container, "restart", configuration.stage, true);
     await initializeContainer(configuration, state, state.restart_container, "restart", configuration.stage);
-    // This phase is deliberately read-only (get_case + list_artifacts), so the
+    // This phase is deliberately read-only (get_case, with legacy list fallback), so the
     // business Journey writer has no state transition to emit. Diagnostics
     // remain mandatory and are still used for exact MCP correspondence.
     await startService(configuration, state, "restart", { allowEmptyJourney: true });

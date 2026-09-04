@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from contextlib import contextmanager
 from copy import deepcopy
@@ -17,6 +18,7 @@ from problem_locator.contracts import (
     AssetCatalogPort,
     CancellationSignal,
     CaseAggregate,
+    CancellationReason,
     Clock,
     BoundedContext,
     DiagnosisOutcome,
@@ -101,7 +103,12 @@ from problem_locator.journey import (
     record_stage_started,
 )
 
-from .agent_backend import AgentBackend, BackendExecutionLimits
+from .agent_backend import (
+    AgentBackend,
+    BackendExecutionLimits,
+    _WorkspaceIdentity,
+    _temporary_workspace_bytes,
+)
 from .context_builder import ContextBuilder, ContextLimitExceeded, ContextMaterials
 from .context_policy import ResolvedJobAssets, RuntimeAssetResolver
 from .failures import RuntimeExecutionError, runtime_failure
@@ -368,6 +375,147 @@ def _broker_failure(*, retryable: bool = True) -> ExecutionFailure:
         retryable=retryable,
         details=[],
     )
+
+
+def _preprocessing_cancelled_failure(
+    reason: CancellationReason | None,
+) -> ExecutionFailure:
+    return ExecutionFailure(
+        stage=ExecutionStage.BACKEND_EXECUTE,
+        code=ErrorCode.BACKEND_CANCELLED,
+        message="Logparse preprocessing was cancelled.",
+        retryable=reason is CancellationReason.SERVICE_SHUTDOWN,
+        details=[],
+    )
+
+
+def _preprocessing_timeout_failure() -> ExecutionFailure:
+    return ExecutionFailure(
+        stage=ExecutionStage.BACKEND_EXECUTE,
+        code=ErrorCode.BACKEND_TIMEOUT,
+        message="Logparse preprocessing exceeded the fixed wall time.",
+        retryable=True,
+        details=[],
+    )
+
+
+def _preprocessing_workspace_limit_failure() -> ExecutionFailure:
+    return ExecutionFailure(
+        stage=ExecutionStage.BACKEND_EXECUTE,
+        code=ErrorCode.WORKSPACE_LIMIT,
+        message="Logparse preprocessing Workspace exceeded the fixed byte limit.",
+        retryable=False,
+        details=[],
+    )
+
+
+class _DirectPreprocessingCancellation:
+    """Add AgentBackend-equivalent limits to direct Logparse execution.
+
+    ``SubprocessExecutor`` observes this signal before spawning and at each
+    roughly 50 ms process wait.  A synthetic cancellation therefore travels
+    through the broker's existing process-tree termination path without an
+    extra monitor thread or a second Workspace walker.
+    """
+
+    def __init__(
+        self,
+        *,
+        source: CancellationSignal,
+        workspace: PreparedWorkspace,
+        limits: BackendExecutionLimits,
+    ) -> None:
+        self._source = source
+        self._workspace_root = workspace.root
+        self._workspace_identity = _WorkspaceIdentity(
+            root=(workspace.root_device, workspace.root_inode),
+            top_level=(
+                ("inputs", workspace.inputs_device, workspace.inputs_inode),
+                ("output", workspace.output_device, workspace.output_inode),
+                ("runtime", workspace.runtime_device, workspace.runtime_inode),
+            ),
+        )
+        self._limits = limits
+        self._deadline = time.monotonic() + limits.wall_time_seconds
+        self._next_workspace_scan = 0.0
+        self._failure: ExecutionFailure | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def reason(self) -> CancellationReason | None:
+        return self._source.reason
+
+    def _refresh(self, *, force_workspace_scan: bool = False) -> None:
+        with self._lock:
+            if self._failure is not None:
+                return
+            if self._source.is_cancelled():
+                self._failure = _preprocessing_cancelled_failure(
+                    self._source.reason
+                )
+                return
+            now = time.monotonic()
+            if now >= self._deadline:
+                self._failure = _preprocessing_timeout_failure()
+                return
+            if not force_workspace_scan and now < self._next_workspace_scan:
+                return
+            workspace_failure: ExecutionFailure | None = None
+            workspace_bytes = 0
+            try:
+                workspace_bytes = _temporary_workspace_bytes(
+                    self._workspace_root,
+                    limit=self._limits.workspace_bytes,
+                    deadline=self._deadline,
+                    cancellation=self._source,
+                    monotonic=time.monotonic,
+                    identity=self._workspace_identity,
+                    allow_transient_changes=not force_workspace_scan,
+                )
+            except RuntimeExecutionError as exc:
+                workspace_failure = exc.failure
+            except Exception:
+                workspace_failure = _preprocessing_workspace_limit_failure()
+            observed = time.monotonic()
+            self._next_workspace_scan = (
+                observed + self._limits.poll_interval_seconds
+            )
+            # Match AgentBackend's race precedence: explicit cancellation,
+            # then wall time, then Workspace measurement/size.
+            if self._source.is_cancelled():
+                self._failure = _preprocessing_cancelled_failure(
+                    self._source.reason
+                )
+            elif observed >= self._deadline:
+                self._failure = _preprocessing_timeout_failure()
+            elif workspace_failure is not None:
+                self._failure = workspace_failure
+            elif workspace_bytes > self._limits.workspace_bytes:
+                self._failure = _preprocessing_workspace_limit_failure()
+
+    def failure(
+        self,
+        *,
+        force_workspace_scan: bool = False,
+    ) -> ExecutionFailure | None:
+        self._refresh(force_workspace_scan=force_workspace_scan)
+        with self._lock:
+            return self._failure
+
+    def is_cancelled(self) -> bool:
+        return self.failure() is not None
+
+    def wait(self, timeout_seconds: float | None) -> bool:
+        if timeout_seconds is not None and timeout_seconds < 0:
+            raise ValueError("timeout_seconds must be non-negative or None")
+        if self.is_cancelled():
+            return True
+        remaining = max(0.0, self._deadline - time.monotonic())
+        bounded_wait = min(self._limits.poll_interval_seconds, remaining)
+        if timeout_seconds is not None:
+            bounded_wait = min(bounded_wait, timeout_seconds)
+        self._source.wait(bounded_wait)
+        return self.is_cancelled()
 
 
 def _append_diagnostic(
@@ -1091,13 +1239,26 @@ class DiagnosisRuntime:
                 message="The pinned Skill could not produce immutable verification bindings.",
             ) from None
         preparing = record_stage_started(ExecutionStage.WORKSPACE_PREPARE)
-        workspace = self._workspace_manager.prepare(
-            job,
-            aggregate,
-            self._resource_store,
-            resolved_logparse_plan=resolved_logparse_plan,
-            review_subject=review_subject,
-        )
+        if (
+            job.job_type is JobType.DIAGNOSE
+            and job.diagnosis_mode is DiagnosisMode.SPECIALIZED
+            and resolved_logparse_plan is not None
+        ):
+            workspace = (
+                self._workspace_manager.prepare_fresh_methods_specialist_main_metadata_only(
+                    job,
+                    aggregate,
+                    resolved_logparse_plan=resolved_logparse_plan,
+                )
+            )
+        else:
+            workspace = self._workspace_manager.prepare(
+                job,
+                aggregate,
+                self._resource_store,
+                resolved_logparse_plan=resolved_logparse_plan,
+                review_subject=review_subject,
+            )
         if job.job_type is JobType.REVIEW:
             assert prior_methods_diagnosis_bytes is not None
             assert prior_methods_audit_bytes is not None
@@ -1147,8 +1308,6 @@ class DiagnosisRuntime:
                     main_workspace=workspace,
                     assets=assets,
                     cancellation=cancellation,
-                    shared_log_sinks=shared_log_sinks,
-                    deterministic=False,
                 )
                 methods_skill = self._resolved_methods_skill(assets)
                 methods_skill_load = scan_method_markers(
@@ -1181,6 +1340,7 @@ class DiagnosisRuntime:
                     resource_limits=job.resource_limits,
                     broker_environment=None,
                     test_limits=self._backend_test_limits,
+                    backend_phase="METHODS_SPECIALIST",
                 )
             secrets = methods_preprocessing.secrets
             parse_request_bytes = methods_preprocessing.validated.request_bytes
@@ -2140,6 +2300,7 @@ class DiagnosisRuntime:
             resource_limits=job.resource_limits,
             broker_environment=None,
             test_limits=self._backend_test_limits,
+            backend_phase=f"METHODS_{role}",
         )
         return read_method_role_attempt_v2(
             workspace,
@@ -2563,8 +2724,6 @@ class DiagnosisRuntime:
                     main_workspace=workspace,
                     assets=assets,
                     cancellation=cancellation,
-                    shared_log_sinks=shared_log_sinks,
-                    deterministic=True,
                 )
                 limitations = self._methods_limitations_v2(preprocessing)
                 graph = scan_method_evidence_v2(
@@ -3894,7 +4053,7 @@ class DiagnosisRuntime:
     ) -> tuple[str, bytes]:
         plan = workspace.manifest.resolved_logparse_plan
         if plan is None:
-            raise ValueError("Methods Pass A requires a resolved Logparse plan")
+            raise ValueError("Methods preprocessing requires a resolved Logparse plan")
         anchors = [
             Anchor(
                 label=item.label,
@@ -4018,8 +4177,6 @@ class DiagnosisRuntime:
         main_workspace: PreparedWorkspace,
         assets: ResolvedJobAssets,
         cancellation: CancellationSignal,
-        shared_log_sinks: ExecutionLogSinks,
-        deterministic: bool,
     ) -> MethodsPreprocessingExecution:
         if self._logparse_broker_factory is None:
             raise runtime_failure(
@@ -4083,12 +4240,25 @@ class DiagnosisRuntime:
             ExecutionStage.TOOL_EXECUTE,
             data={"tool": "logparse", "pass": "PREPROCESS"},
         )
+        limits = self._backend_test_limits or BackendExecutionLimits.from_resource_limits(
+            job.resource_limits
+        )
+        preprocessing_cancellation = _DirectPreprocessingCancellation(
+            source=cancellation,
+            workspace=preprocessing_workspace,
+            limits=limits,
+        )
+        initial_limit_failure = preprocessing_cancellation.failure(
+            force_workspace_scan=True
+        )
+        if initial_limit_failure is not None:
+            raise RuntimeExecutionError(initial_limit_failure)
         try:
             session = self._logparse_broker_factory.open(
                 job,
                 preprocessing_workspace.root,
                 preprocessing_workspace.manifest,
-                cancellation,
+                preprocessing_cancellation,
             )
         except LogparseBrokerError as exc:
             raise RuntimeExecutionError(exc.failure) from None
@@ -4100,47 +4270,23 @@ class DiagnosisRuntime:
         accepted_request_bytes: bytes | None = None
         broker_audit_bytes: bytes | None = None
         try:
-            if deterministic:
+            primary = preprocessing_cancellation.failure()
+            if primary is None:
                 primary = session.execute_preprocessing(
                     operation,
                     request_path,
                     result_path,
-                )
-            else:
-                prompt = (
-                    "You are the product-owned Logparse preprocessing pass in "
-                    "SERVER_PREPROCESS mode.\n"
-                    "Your first action must be exactly one Skill tool call: "
-                    "Skill(logparse-diagnose)\n"
-                    "If that Helper is unavailable, rejected, or fails to load, stop "
-                    "immediately. Do not invoke the broker directly or use any fallback.\n"
-                    "Do not load or execute any other Skill, including the selected business "
-                    "diagnosis Skill. Do not read the request, broker result, or target logs; "
-                    "do not diagnose; and do not write a diagnosis or review draft.\n"
-                    "Only after the Helper loads successfully, follow its SERVER_PREPROCESS "
-                    "contract and run exactly this one job-scoped broker request:\n"
-                    f"problem-locator-logparse {operation} --request {request_path} "
-                    f"--result {result_path}\n"
-                    "The Runtime prewrote the request path. Do not edit or replace it. Wait "
-                    "for the one request to finish successfully, then exit without reading "
-                    "the result. Any failure ends this pass; never retry.\n"
-                )
-                broker_environment = session.agent_environment()
-                secrets = tuple(broker_environment.values())
-                self._backend_for_job(job).execute(
-                    prompt=prompt,
-                    workspace_root=preprocessing_workspace.root,
-                    cancellation=cancellation,
-                    log_sinks=_borrow_log_sinks(shared_log_sinks),
-                    resource_limits=job.resource_limits,
-                    broker_environment=broker_environment,
-                    test_limits=self._backend_test_limits,
                 )
         except RuntimeExecutionError as exc:
             primary = exc.failure
         except Exception:
             primary = _broker_failure()
         finally:
+            limit_failure = preprocessing_cancellation.failure(
+                force_workspace_scan=True
+            )
+            if limit_failure is not None:
+                primary = limit_failure
             primary, accepted_request_bytes, broker_audit_bytes = (
                 self._close_and_audit_broker(session, primary)
             )
@@ -4224,8 +4370,6 @@ class DiagnosisRuntime:
                 code=ErrorCode.LOGPARSE_OUTPUT_INVALID,
                 message="Frozen Logparse preprocessing evidence is invalid.",
             ) from None
-        for resource in validated.proposal_resources:
-            resource.verify_unchanged()
         self._publish_audit_bytes(job, "logparse_broker_audit.json", broker_audit_bytes)
         self._publish_audit_bytes(job, "methods_request.json", frozen.request_bytes)
         self._publish_audit_bytes(
@@ -4276,6 +4420,13 @@ class DiagnosisRuntime:
                 log_sinks=self._open_log_sinks(job),
                 resource_limits=job.resource_limits,
                 test_limits=self._backend_test_limits,
+                backend_phase=(
+                    "ROUTE"
+                    if job.job_type is JobType.ROUTE
+                    else "METHODS_REVIEWER"
+                    if job.job_type is JobType.REVIEW
+                    else "DIAGNOSE"
+                ),
             )
             return (), None, None, None
 
@@ -4316,6 +4467,13 @@ class DiagnosisRuntime:
                 resource_limits=job.resource_limits,
                 broker_environment=broker_environment,
                 test_limits=self._backend_test_limits,
+                backend_phase=(
+                    "ROUTE"
+                    if job.job_type is JobType.ROUTE
+                    else "METHODS_REVIEWER"
+                    if job.job_type is JobType.REVIEW
+                    else "DIAGNOSE"
+                ),
             )
         except RuntimeExecutionError as exc:
             primary = exc.failure

@@ -743,6 +743,65 @@ def test_publish_moves_then_adopts_without_old_staged_content(harness: Harness) 
     assert adopted == published
 
 
+def test_new_file_publish_performs_only_two_full_content_reads(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import problem_locator.storage.resource_files as resource_files_module
+    import problem_locator.storage.resource_store as resource_store_module
+
+    payload = b"one pre-move read and one final read"
+    staged = _stage_file(harness, payload)
+    target = _plan(harness, staged)
+    staged_path = proposal_stage_path(
+        harness.layout.data_root,
+        JOB_ID,
+        "artifact",
+    ) / "payload"
+    final_path = harness.layout.data_root / target.final_storage_key
+    reads: list[tuple[str, Path, bool, int]] = []
+    store_hash = resource_store_module.hash_file
+    publisher_hash = resource_files_module.hash_file
+
+    def record_store_hash(path: Path):
+        reads.append(
+            (
+                "resource_store",
+                Path(path),
+                is_read_only(Path(path)),
+                len(harness.sync.calls("sync_file")),
+            )
+        )
+        return store_hash(path)
+
+    def record_publisher_hash(path: Path):
+        reads.append(
+            (
+                "publisher",
+                Path(path),
+                is_read_only(Path(path)),
+                len(harness.sync.calls("sync_file")),
+            )
+        )
+        return publisher_hash(path)
+
+    monkeypatch.setattr(resource_store_module, "hash_file", record_store_hash)
+    monkeypatch.setattr(resource_files_module, "hash_file", record_publisher_hash)
+
+    with harness.guard.acquire():
+        harness.store.publish(staged, target.final_storage_key)
+
+    # This path previously read all bytes four times.  The remaining reads are
+    # the move-adjacent validation and the post-read-only/fsync validation.
+    assert [(owner, path) for owner, path, _, _ in reads] == [
+        ("publisher", staged_path),
+        ("publisher", final_path),
+    ]
+    assert reads[0][2] is False
+    assert reads[1][2] is True
+    assert reads[1][3] > reads[0][3]
+
+
 def test_publish_never_overwrites_a_conflicting_formal_target(harness: Harness) -> None:
     staged = _stage_file(harness, b"expected")
     target = _plan(harness, staged)

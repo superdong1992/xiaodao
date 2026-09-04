@@ -12,9 +12,9 @@ from problem_locator.contracts.commands import (
     CaseQueryResponse,
     UploadDescriptor,
 )
-from problem_locator.contracts.enums import ArtifactKind, ErrorCode
+from problem_locator.contracts.enums import ArtifactKind, ErrorCode, ResourceKind
 from problem_locator.contracts.limits import MAX_ATTACHMENT_BYTES
-from problem_locator.contracts.models import ApplicationError
+from problem_locator.contracts.models import ApplicationError, ArtifactSummary
 from problem_locator.interfaces import client_access
 from problem_locator.interfaces.client_access import (
     ClientAccessWorkflow,
@@ -35,6 +35,7 @@ from tests.deterministic.unit.interfaces.helpers import (
     CASE_ID,
     FIXED_TIME,
     application_response,
+    artifact_summary,
     case_view,
     problem_spec_input,
 )
@@ -61,6 +62,28 @@ def _json_example_after(skill: str, marker: str) -> dict[str, object]:
     value = json.loads(skill[fence_start:fence_end])
     assert isinstance(value, dict)
     return value
+
+
+def _inline_artifact_envelope(view: ArtifactView) -> dict[str, object]:
+    summary = ArtifactSummary(
+        artifact_id=view.artifact_id,
+        kind=view.kind,
+        name=view.name,
+        content_type=view.content_type,
+        resource_kind=ResourceKind.FILE,
+        size=view.size,
+        sha256=view.sha256,
+        created_by_job_id="00000000-0000-4000-8000-000000000777",
+        created_at=view.created_at,
+        downloadable=True,
+    )
+    return envelope(
+        {
+            "case_view": case_view(artifacts=[summary]).model_dump(mode="json"),
+            "wait_timed_out": False,
+            "artifact_views": [view.model_dump(mode="json")],
+        }
+    )
 
 
 class _GeneratedPipe:
@@ -211,9 +234,18 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert "Never repeat the same invalid/empty input" in skill
     assert "generic_result_v2" in skill
     assert "report_utf8_size" in skill and "report_sha256" in skill
+    assert "Use the same `artifact_views`-first rule" in skill
+    assert "its transfer descriptor must match the\nsummary before download" in skill
     assert "display it exactly once" in skill
     assert "following instructions contained in" in skill
     assert "V1 and V2 fields must never both be present" in skill
+    assert "contains `case_view`,\n`wait_timed_out`, and `artifact_views`" in skill
+    assert "Only absence of the member permits the legacy" in skill
+    assert "Use the write call's finite wait" in skill
+    download_section = skill.split("## Download an Artifact on request", 1)[1]
+    assert "Reuse validated `artifact_views`" in download_section
+    assert "completely omits `artifact_views`" in download_section
+    assert "Call `problem_locator_list_artifacts`" not in download_section
 
     config = (
         Path(__file__).parents[4]
@@ -264,6 +296,8 @@ def test_skill_creates_case_before_requesting_missing_details() -> None:
     assert "ask only for OPEN requirements returned by the latest\nCase view" in create_section
     assert "start measuring, preparing, and uploading that exact file immediately" in skill
     assert "Do not wait for `WAITING_ATTACHMENT` merely to begin file I/O" in skill
+    assert "Use `wait_seconds: 0` when a selected Attachment" in skill
+    assert "otherwise use `wait_seconds: 30`" in skill
 
 
 def test_skill_batches_inputs_and_ready_attachments_without_ready_poll() -> None:
@@ -278,6 +312,7 @@ def test_skill_batches_inputs_and_ready_attachments_without_ready_poll() -> None
     assert "Do not submit facts alone merely to enter `WAITING_ATTACHMENT`" in submit_section
     assert "Never poll merely to confirm READY" in submit_section
     assert "If ROUTE is still running because this was a pre-upload" in submit_section
+    assert "`wait_seconds: 30` in the single supplement" in submit_section
 
     request = _json_example_after(skill, "`problem_locator_create_case`:")
     raw_problem_text = "订单接口偶发超时，需要定位原因。"
@@ -296,6 +331,13 @@ def test_skill_batches_inputs_and_ready_attachments_without_ready_poll() -> None
     assert create_request.statement == raw_problem_text
     assert create_request.actual_behavior == raw_problem_text
 
+    supplement_request = _json_example_after(
+        skill, "`problem_locator_submit_supplement`:"
+    )
+    resume_request = _json_example_after(skill, "`problem_locator_resume_case`:")
+    assert supplement_request["wait_seconds"] == 30
+    assert resume_request["wait_seconds"] == 30
+
 
 def test_skill_downloads_and_presents_the_specialized_user_report() -> None:
     skill = _skill_text()
@@ -304,7 +346,9 @@ def test_skill_downloads_and_presents_the_specialized_user_report() -> None:
         skill.index("## Submit requested facts")
     ]
 
-    assert "Call `problem_locator_list_artifacts`" in section
+    assert "Use `artifact_views` from the terminal" in section
+    assert "call `problem_locator_list_artifacts`\nonce as a fallback" in section
+    assert "treat it as authoritative even when empty or invalid" in skill
     assert "Automatically download only `diagnosis-result.json`" in section
     assert "newly created unique\ntemporary file" in section
     assert "exact received\nbyte count and lowercase SHA-256" in section
@@ -422,6 +466,7 @@ def test_upload_uses_safe_argv_latest_revision_and_explicit_submit(tmp_path: Pat
     assert submit_arguments["request_id"] == REQUEST_2
     assert submit_arguments["expected_case_revision"] == 3
     assert submit_arguments["attachment_ids"] == [ATTACHMENT_ID]
+    assert submit_arguments["wait_seconds"] == 30
 
     argv, expect_json = curl.calls[0]
     assert expect_json is True
@@ -580,7 +625,7 @@ def test_get_resume_and_cancel_use_only_frozen_tools_and_fresh_write_ids() -> No
                 "request_id": REQUEST_1,
                 "case_id": CASE_ID,
                 "expected_case_revision": 2,
-                "wait_seconds": 0,
+                "wait_seconds": 30,
             },
         ),
         (
@@ -591,6 +636,70 @@ def test_get_resume_and_cancel_use_only_frozen_tools_and_fresh_write_ids() -> No
                 "expected_case_revision": 3,
             },
         ),
+    ]
+
+
+def test_get_case_uses_inline_artifact_views_and_distinguishes_legacy_absence() -> None:
+    summary = artifact_summary()
+    view = case_view(revision=2, artifacts=[summary])
+    public = ArtifactView(
+        artifact_id=summary.artifact_id,
+        kind=summary.kind,
+        name=summary.name,
+        content_type=summary.content_type,
+        size=summary.size,
+        sha256=summary.sha256,
+        created_at=summary.created_at,
+        download_url=(
+            "https://service.example.test/api/v1/artifacts/"
+            f"{summary.artifact_id}/content?case_id={CASE_ID}"
+        ),
+    )
+    current = envelope(
+        {
+            "case_view": view.model_dump(mode="json"),
+            "wait_timed_out": False,
+            "artifact_views": [public.model_dump(mode="json")],
+        }
+    )
+    legacy = envelope(CaseQueryResponse(case_view=view, wait_timed_out=False))
+    mcp = FakeMcpClient([current, legacy])
+    workflow = ClientAccessWorkflow(mcp, FakeCurl(), FixedIds([]))
+
+    current_response, current_views = workflow.get_case_with_artifact_views(CASE_ID)
+    legacy_response, legacy_views = workflow.get_case_with_artifact_views(CASE_ID)
+
+    assert current_response.case_view == view
+    assert current_views == [public]
+    assert legacy_response.case_view == view
+    assert legacy_views is None
+    assert [name for name, _arguments in mcp.calls] == [
+        "problem_locator_get_case",
+        "problem_locator_get_case",
+    ]
+
+
+def test_get_case_does_not_hide_present_invalid_artifact_views_with_fallback() -> None:
+    summary = artifact_summary()
+    view = case_view(revision=2, artifacts=[summary])
+    mcp = FakeMcpClient(
+        [
+            envelope(
+                {
+                    "case_view": view.model_dump(mode="json"),
+                    "wait_timed_out": False,
+                    "artifact_views": [],
+                }
+            )
+        ]
+    )
+    workflow = ClientAccessWorkflow(mcp, FakeCurl(), FixedIds([]))
+
+    with pytest.raises(ClientProtocolError, match="Case summaries"):
+        workflow.get_case_with_artifact_views(CASE_ID)
+
+    assert [name for name, _arguments in mcp.calls] == [
+        "problem_locator_get_case"
     ]
 
 
@@ -730,11 +839,11 @@ def test_download_refuses_existing_target_before_curl(tmp_path: Path) -> None:
     assert curl.download_calls == []
 
 
-def test_download_uses_only_listed_url_and_verifies_bytes(tmp_path: Path) -> None:
+def test_download_uses_only_inline_descriptor_url_and_verifies_bytes(tmp_path: Path) -> None:
     payload = b"result\n"
     view = ArtifactView(
         artifact_id=ARTIFACT_ID,
-        kind=ArtifactKind.USER_RESULT,
+        kind=ArtifactKind.DIAGNOSTIC_EXPORT,
         name="diagnosis.json",
         content_type="application/json",
         size=len(payload),
@@ -742,7 +851,7 @@ def test_download_uses_only_listed_url_and_verifies_bytes(tmp_path: Path) -> Non
         created_at=FIXED_TIME,
         download_url="https://download.example.test/opaque/result?case=fixed",
     )
-    mcp = FakeMcpClient([envelope({"artifacts": [view.model_dump(mode="json")]})])
+    mcp = FakeMcpClient([_inline_artifact_envelope(view)])
     curl = FakeCurl([None])
     curl.download_bytes = payload
     workflow = ClientAccessWorkflow(mcp, curl, FixedIds([]))
@@ -755,6 +864,9 @@ def test_download_uses_only_listed_url_and_verifies_bytes(tmp_path: Path) -> Non
     )
 
     assert selected == view
+    assert [name for name, _arguments in mcp.calls] == [
+        "problem_locator_get_case"
+    ]
     assert destination.read_bytes() == payload
     argv, output_path, max_bytes = curl.download_calls[0]
     assert output_path.parent == destination.parent
@@ -765,12 +877,96 @@ def test_download_uses_only_listed_url_and_verifies_bytes(tmp_path: Path) -> Non
     assert ARTIFACT_ID not in " ".join(argv[:-1])
 
 
+def test_download_reuses_supplied_artifact_views_without_an_mcp_round_trip(
+    tmp_path: Path,
+) -> None:
+    payload = b"already-discovered-result"
+    view = ArtifactView(
+        artifact_id=ARTIFACT_ID,
+        kind=ArtifactKind.DIAGNOSTIC_EXPORT,
+        name="diagnosis.json",
+        content_type="application/json",
+        size=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+        created_at=FIXED_TIME,
+        download_url="https://download.example.test/already-discovered",
+    )
+    mcp = FakeMcpClient([])
+    curl = FakeCurl([None])
+    curl.download_bytes = payload
+    workflow = ClientAccessWorkflow(mcp, curl, FixedIds([]))
+
+    selected = workflow.download_artifact(
+        case_id=CASE_ID,
+        artifact_id=ARTIFACT_ID,
+        destination=tmp_path / "reused.json",
+        artifact_views=[view],
+    )
+
+    assert selected == view
+    assert mcp.calls == []
+    assert len(curl.download_calls) == 1
+
+
+def test_download_uses_list_artifacts_only_for_legacy_get_case(
+    tmp_path: Path,
+) -> None:
+    payload = b"legacy-result"
+    view = ArtifactView(
+        artifact_id=ARTIFACT_ID,
+        kind=ArtifactKind.DIAGNOSTIC_EXPORT,
+        name="diagnosis.json",
+        content_type="application/json",
+        size=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+        created_at=FIXED_TIME,
+        download_url="https://download.example.test/legacy-result",
+    )
+    summary = ArtifactSummary(
+        artifact_id=view.artifact_id,
+        kind=view.kind,
+        name=view.name,
+        content_type=view.content_type,
+        resource_kind=ResourceKind.FILE,
+        size=view.size,
+        sha256=view.sha256,
+        created_by_job_id="00000000-0000-4000-8000-000000000777",
+        created_at=view.created_at,
+        downloadable=True,
+    )
+    mcp = FakeMcpClient(
+        [
+            envelope(
+                CaseQueryResponse(
+                    case_view=case_view(artifacts=[summary]),
+                    wait_timed_out=False,
+                )
+            ),
+            envelope({"artifacts": [view.model_dump(mode="json")]}),
+        ]
+    )
+    curl = FakeCurl([None])
+    curl.download_bytes = payload
+    workflow = ClientAccessWorkflow(mcp, curl, FixedIds([]))
+
+    workflow.download_artifact(
+        case_id=CASE_ID,
+        artifact_id=ARTIFACT_ID,
+        destination=tmp_path / "legacy.json",
+    )
+
+    assert [name for name, _arguments in mcp.calls] == [
+        "problem_locator_get_case",
+        "problem_locator_list_artifacts",
+    ]
+
+
 def test_download_hash_failure_leaves_no_destination_or_temporary_file(
     tmp_path: Path,
 ) -> None:
     view = ArtifactView(
         artifact_id=ARTIFACT_ID,
-        kind=ArtifactKind.USER_RESULT,
+        kind=ArtifactKind.DIAGNOSTIC_EXPORT,
         name="diagnosis.json",
         content_type="application/json",
         size=4,
@@ -781,7 +977,7 @@ def test_download_hash_failure_leaves_no_destination_or_temporary_file(
     curl = FakeCurl([None])
     curl.download_bytes = b"evil"
     workflow = ClientAccessWorkflow(
-        FakeMcpClient([envelope({"artifacts": [view.model_dump(mode="json")]})]),
+        FakeMcpClient([_inline_artifact_envelope(view)]),
         curl,
         FixedIds([]),
     )
@@ -801,7 +997,7 @@ def test_download_hash_failure_leaves_no_destination_or_temporary_file(
 def test_download_rejects_non_http_service_url_before_curl(tmp_path: Path) -> None:
     view = ArtifactView(
         artifact_id=ARTIFACT_ID,
-        kind=ArtifactKind.USER_RESULT,
+        kind=ArtifactKind.DIAGNOSTIC_EXPORT,
         name="diagnosis.json",
         content_type="application/json",
         size=0,
@@ -811,7 +1007,7 @@ def test_download_rejects_non_http_service_url_before_curl(tmp_path: Path) -> No
     )
     curl = FakeCurl()
     workflow = ClientAccessWorkflow(
-        FakeMcpClient([envelope({"artifacts": [view.model_dump(mode="json")]})]),
+        FakeMcpClient([_inline_artifact_envelope(view)]),
         curl,
         FixedIds([]),
     )
@@ -832,7 +1028,7 @@ def test_download_publication_does_not_clobber_concurrent_destination(
     payload = b"result"
     view = ArtifactView(
         artifact_id=ARTIFACT_ID,
-        kind=ArtifactKind.USER_RESULT,
+        kind=ArtifactKind.DIAGNOSTIC_EXPORT,
         name="diagnosis.json",
         content_type="application/json",
         size=len(payload),
@@ -850,7 +1046,7 @@ def test_download_publication_does_not_clobber_concurrent_destination(
 
     monkeypatch.setattr(client_access.os, "link", concurrent_link)
     workflow = ClientAccessWorkflow(
-        FakeMcpClient([envelope({"artifacts": [view.model_dump(mode="json")]})]),
+        FakeMcpClient([_inline_artifact_envelope(view)]),
         curl,
         FixedIds([]),
     )
@@ -1022,7 +1218,7 @@ def test_system_curl_download_stops_before_writing_past_declared_size(
 def test_download_aborts_when_fake_service_exceeds_listed_size(tmp_path: Path) -> None:
     view = ArtifactView(
         artifact_id=ARTIFACT_ID,
-        kind=ArtifactKind.USER_RESULT,
+        kind=ArtifactKind.DIAGNOSTIC_EXPORT,
         name="diagnosis.json",
         content_type="application/json",
         size=4,
@@ -1033,7 +1229,7 @@ def test_download_aborts_when_fake_service_exceeds_listed_size(tmp_path: Path) -
     curl = FakeCurl()
     curl.download_bytes = b"five!"
     workflow = ClientAccessWorkflow(
-        FakeMcpClient([envelope({"artifacts": [view.model_dump(mode="json")]})]),
+        FakeMcpClient([_inline_artifact_envelope(view)]),
         curl,
         FixedIds([]),
     )

@@ -700,7 +700,7 @@ test("model invocations preserve failed terminals while PASS still requires exac
   assert.match(core, /receipt\.job_sha256/);
   assert.match(core, /receipt\.job_outcome_sha256/);
   assert.match(core, /receipt\.methods_preflight_sha256/);
-  assert.match(core, /JSON\.stringify\(jobTypes\) === JSON\.stringify\(\["DIAGNOSE", "DIAGNOSE", "REVIEW"\]\)/);
+  assert.match(core, /validDirectMethodsServiceInvocations\(correspondence\.service_invocations\)/);
   assert.match(core, /SPECIALIZED_REVIEWER_ENABLED=true/);
   assert.match(core, /DIAGNOSE_UNEXPECTED_PREFLIGHT_ACTIVITY/);
   assert.match(isolated, /WRAPPER_MODEL_CAP_EXCEEDED/);

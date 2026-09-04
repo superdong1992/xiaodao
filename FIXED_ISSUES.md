@@ -2258,6 +2258,109 @@
   （752 files），worktree 与 materialized source verification 均为 PASS。本元数据行本身不宣称被其
   引用的源码快照覆盖。
 
+- **2026-09-04 回归受影响版本**：Problem Locator `6.0.0`，恢复 Methods V1 用户报告后的
+  `32f8db93b25970bdacbf6f8e0d1630c412a9c6b4`。该提交恢复了正确的最终报告，却把 fresh V1
+  专用诊断重新接回 Helper Agent 转发预处理，并让主 Workspace 再次完整物化附件；同时删掉了
+  ROUTE 期间预上传的真实 Journey。终态客户端仍固定追加 `list_artifacts`，每次发布新 FILE 又在
+  staging 后重复完整读取四次。Uvicorn 默认 5 秒 idle keep-alive 会在两次请求间的客户端思考或
+  调度空档较长时关闭可复用连接。Journey
+  遥测还会把同一 Job 的全部 `BACKEND_EXECUTE` 总和重复显示在每次 Agent 调用上，无法可靠定位
+  分钟级剩余耗时。
+- **再次修复后的不可回归行为**：
+  - fresh Methods V1 预处理必须直接调用一次 `LogparseBrokerSession.execute_preprocessing()`，不再
+    启动只加载 Helper 并转发固定命令的 Agent。独立预处理 Workspace、完整资源物化与哈希校验、
+    accepted request、唯一成功 audit、claim、target-log 校验、冻结回执和审计归档全部保留；broker
+    必须在唯一 Specialist Backend 启动前 close/revoke。直连执行仍受 Job 固定 wall time、Workspace
+    byte limit 和取消信号约束；运行中扫描允许正常写入的瞬时变化，退出后必须严格复核。恢复/Review
+    语义不变。
+  - direct preprocessing 不得创建仅供 Agent 使用的 loopback endpoint；`agent_environment()` 首次
+    调用才允许惰性启动，且并发只能创建一次。close-before-start、启动失败清理、HTTP 鉴权、子进程
+    回收和可重试 close 仍须 fail closed。session open、已接受 broker operation 和每个 Logparse
+    子进程前的完整资产指纹校验仍须保留。
+  - fresh V1 Specialist 主 Workspace 只冻结资源元数据，附件仍只在预处理 Workspace 完整物化一次。
+    模型从 `inputs/request.json` 读取用户事实；Context 不再重复嵌入完整 snapshot 和 ROUTE Outcome。
+    marker 扫描每行只做一次 casefold，多个 citation 对同一 source 只解码一次日志。
+  - 新 FILE 从 stage 到只读/fsync 后最终确认只允许两次完整内容读取：移动前权威校验一次，最终状态
+    再校验一次。marker、路径、节点类型、单链接 inode、同大小篡改、symlink/hardlink 和已存在目标
+    的冲突检查不得删除。正式 FILE 物化到预处理 Workspace 时，流式复制回执已经包含完整 SHA-256，
+    不得在复制前或 atomic move 前重复完整读取源文件/临时文件；复制过程必须核对预期摘要，移动后的
+    目标和复制后的正式源仍须完整复核。
+  - `problem_locator_get_case` 必须从同一 `CaseView` 投影 `artifact_views`，不得额外读取状态。客户端在
+    该字段存在时禁止再调用 `list_artifacts`；只有旧服务完全缺少字段才允许一次兼容回退。写调用的
+    有限等待应合并首次轮询，预选附件仍在 ROUTE 期间 prepare/PUT 并在 requirement 出现后一次提交。
+    PUT 成功回执给出的 READY 和新 revision 必须直接用于 supplement，不得为了确认 READY 再读一次
+    Case；下载 helper 接到调用方已验证的 `artifact_views` 时也不得自行重复查询。
+    公开 MCP 输入继续保持七工具、根层扁平结构。
+  - HTTP idle keep-alive 固定为 75 秒，只用于提高连续 MCP 请求复用连接的概率，不得把它解释为
+    活跃长轮询的超时保护。每次 Agent telemetry 必须带明确
+    `backend_phase` 和跨进程重启不碰撞的 `backend_invocation_id`；Journey 中每次调用只绑定自己的
+    `BACKEND_EXECUTE` span，缺少匹配 ID 时显示无证据，不能借用相邻调用或重复显示 Job 总和。
+    ROUTE Skill index 仍包含全部已验证 production Skill；Router profile 和 README 均不得再声称按
+    初始事实名预过滤。唯一候选也不得自动命中。
+- **再次修复历史**：2026-09-04，先在最新 `main` 复现一条专用 DIAGNOSE 含两个 Backend，并用
+  三轮本地完整链路拆出 ROUTE、Helper Pass、Specialist、MCP、状态提交、Workspace、Logparse 子进程
+  和产物查询。随后把固定预处理收回服务进程，恢复 metadata-only 主 Workspace，并精简 V1
+  Specialist Context。20 次小型零模型基准中，DIAGNOSE Backend 次数由 2 降为 1，代表性 Specialist
+  prompt 从 10,749 字节降为 7,980 字节（减少 25.76%）。接近真实文件和子进程的对照中，预处理
+  由约 998.63 ms 降为约 512.26 ms，终态长轮询由约 1,887.68 ms 降为约 1,433.32 ms；这些只证明
+  本地结构收益，不外推真实模型耗时。另将 direct broker 的 Agent-only endpoint 改为惰性启动；
+  隔离基准预计再省约 40–45 ms。客户端终态省去一次 MCP 列表往返，supplement/resume 默认把首轮
+  最多 30 秒等待并入写请求；服务端 keep-alive 固定为 75 秒。最后恢复 ROUTE 预上传 Journey，并把
+  Test Flow/quick-validation 改为校验 `artifact_views` 优先和严格旧服务回退。追加审查后删除了预处理
+  结果冻结与 Specialist 启动之间一次相邻的重复整树 hash，跨 Agent 边界的最终复核仍保留；大文件
+  物化也从“源预检、复制、临时重读、目标重读、源终检”五次完整读取收敛为“带摘要复制、目标重读、
+  源终检”三次。曾尝试
+  把同一 `parse-targets` 的完整资产指纹收敛到 operation 边界，但因违反既有“每个子进程前复核”合同
+  已在正式验证前撤回，不计入交付收益。终态本地链路直接从同一次 `get_case` 取得两个下载描述符，
+  额外 Artifact 列表调用为 0。
+- **追加专项回归测试**：
+  - `tests/deterministic/unit/runtime/test_diagnosis_runtime.py::test_methods_v1_specialist_publishes_candidate_json_and_log_archive`
+  - 同文件 `test_direct_methods_preprocessing_rejects_precancel_without_opening_broker`、
+    `test_direct_methods_preprocessing_hang_obeys_frozen_wall_time_and_closes_session`、
+    `test_direct_methods_preprocessing_observes_midprocess_user_cancellation`、
+    `test_direct_methods_preprocessing_allows_live_workspace_writes_below_limit` 和
+    `test_direct_methods_preprocessing_workspace_overflow_stops_and_closes_session`
+  - `tests/deterministic/unit/runtime/test_context_builder.py::test_three_roles_have_fixed_framing_order_and_required_core[DIAGNOSE]`
+  - `tests/deterministic/journey/test_rpc_timeout.py::test_attachment_preupload_during_route_batches_first_supplement`
+  - 同文件 `test_r01_r14_rpc_timeout_is_one_durable_cross_module_path` 与
+    `test_same_job_uses_initial_order_fact_and_survives_restart`
+  - `tests/deterministic/unit/integrations/test_logparse_fake_e2e.py::test_direct_preprocessing_never_starts_the_agent_endpoint`
+  - 同文件 `test_concurrent_agent_environment_calls_start_one_endpoint`、
+    `test_close_before_agent_environment_never_starts_an_endpoint` 和
+    `test_endpoint_start_failure_closes_socket_and_thread`；
+    `test_first_parse_dual_anchor_claim_audit_close_and_fixed_argv` 另锁定双 anchor 全部五个资产指纹边界
+  - `tests/deterministic/unit/storage/test_resource_store.py::test_new_file_publish_performs_only_two_full_content_reads`
+  - `tests/deterministic/unit/storage/test_resource_files.py::test_reader_reuses_copy_hash_and_defers_source_rehash_until_after_move`
+  - 同文件 `test_reader_deferred_source_rehash_rejects_drift_after_copy`
+  - `tests/deterministic/unit/storage/test_resource_files.py::test_publisher_rejects_hardlinked_staged_file_before_move`
+  - 同文件 `test_publisher_rejects_same_bytes_from_a_different_inode_after_move`、
+    `test_publisher_rejects_hardlink_created_during_move` 和
+    `test_publisher_final_hash_rejects_same_size_tamper_with_restored_mtime`
+  - `tests/deterministic/unit/interfaces/test_mcp_server.py::test_official_sdk_calls_all_seven_stateless_tools`
+  - `tests/deterministic/unit/interfaces/test_client_access_skill.py::test_get_case_uses_inline_artifact_views_and_distinguishes_legacy_absence`
+  - 同文件 `test_get_case_does_not_hide_present_invalid_artifact_views_with_fallback`
+  - 同文件 `test_download_reuses_supplied_artifact_views_without_an_mcp_round_trip`，并由
+    `test_skill_document_names_tools_and_safety_invariants` 锁定通用下载章节不得恢复无条件列表调用
+  - `tests/deterministic/unit/runtime/test_methods_output_pipeline.py::test_verify_method_diagnosis_decodes_each_cited_source_once`
+  - `tests/deterministic/unit/runtime/test_p0_semantic_assets.py::test_router_profile_does_not_claim_the_unfiltered_skill_index_was_prefiltered`
+  - `tests/deterministic/unit/test_journey_renderer.py::test_agent_telemetry_pairs_each_call_with_its_own_backend_span`
+  - 同文件 `test_agent_telemetry_uses_invocation_id_when_an_earlier_event_is_missing`、
+    `test_failed_backend_span_inherits_invocation_identity_from_start` 和
+    `test_current_telemetry_never_borrows_duration_from_a_different_invocation`
+  - `tools/test-flow/tests/cross-job-runtime-boundary.test.mjs` 的 inline descriptor、严格 legacy fallback、
+    restart 与 direct Methods 两 Agent invocation 四条专项测试
+  - `tools/test-flow/quick-validation/codex-luna/tests/macos-codex-luna-e2e-contract.test.mjs` 的
+    `Codex/Luna client audit removes the terminal list round trip and permits only a missing-field fallback` 和
+    `Codex/Luna client fixture uses the PUT receipt revision without a READY refresh`
+- **本轮最新 Test Flow verdict**：官方零模型 Dev `run-20260904T090357Z-e61b1d3c` 为
+  `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 因没有真实模型
+  基线为 `NOT_CALIBRATED`。冻结源码摘要为
+  `711eba4b035dcb9a6a66db20c79ba7b6e3878a46adc252a856533b85e50c1c52`（753 files，base
+  `32f8db93b25970bdacbf6f8e0d1630c412a9c6b4`）；完整确定性 Python 轨共 2,569 passed、68 skipped，
+  framework/static Gate 全部通过，模型调用、token 和费用均为 0。该 Dev verdict 只证明结构、状态机、
+  完整性和调用合同，不证明真实环境的分钟级降幅；同模型、网络、附件和服务负载下的 A/B 仍以新增
+  `backend_phase/backend_invocation_id` 遥测为准。本元数据段本身不宣称被其引用的源码快照覆盖。
+
 ## PL-FIX-054：专有定位终态只返回审计引用，缺少面向用户的具体报告
 
 - **状态**：修复完成；验证结论以本条“最新 Test Flow verdict”为准。

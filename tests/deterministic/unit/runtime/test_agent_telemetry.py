@@ -102,9 +102,16 @@ def test_stream_json_metadata_is_bounded_and_content_free() -> None:
         )
     )
 
-    snapshot = telemetry.snapshot(diagnosis_mode="GENERIC", backend_status="SUCCESS")
+    snapshot = telemetry.snapshot(
+        diagnosis_mode="GENERIC",
+        backend_status="SUCCESS",
+        backend_phase="GENERIC",
+        backend_invocation_id="call-1",
+    )
 
     assert snapshot["stream_status"] == "COMPLETE"
+    assert snapshot["backend_phase"] == "GENERIC"
+    assert snapshot["backend_invocation_id"] == "call-1"
     assert snapshot["stream_reason"] is None
     assert snapshot["prompt_write_ms"] == 25.0
     assert snapshot["cli_duration_ms"] == 720.0
