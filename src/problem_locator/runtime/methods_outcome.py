@@ -460,11 +460,21 @@ def _diagnosis_projection(
     )
     candidate: CandidateConclusionDraft | None = None
     if has_confirmed:
+        summaries_by_method = {
+            method_id: " ".join(
+                item.summary
+                for item in verified.draft.evidence
+                if item.method_id == method_id
+            )
+            for method_id in verified.draft.confirmed_methods
+        }
         causal_factors = [
             CausalFactorDraft(
                 factor_id=_factor_id(method_id),
                 role=CausalFactorRole.CAUSE,
-                statement=f"Grounded diagnosis method: {method_id}.",
+                statement=(
+                    f"已确认定位方法 {method_id}：{summaries_by_method[method_id]}"
+                ),
                 evidence_bindings=evidence_bindings_by_method[method_id],
                 required_rule_ids=evidence_rule_ids[method_id],
             )
@@ -474,7 +484,7 @@ def _diagnosis_projection(
             CausalFactorDraft(
                 factor_id=_factor_id(method_id),
                 role=CausalFactorRole.CONTRIBUTOR,
-                statement=f"Unconfirmed candidate diagnosis method: {method_id}.",
+                statement=f"待确认定位方法：{method_id}。",
                 evidence_bindings=list(all_bindings),
                 required_rule_ids=[candidate_rule_ids[method_id]],
             )
@@ -535,9 +545,9 @@ def _diagnosis_projection(
         requested_attachments=[],
         candidate_conclusion_draft=candidate,
         recommended_next_step=(
-            "Submit the grounded Candidate to an independent Methods review."
+            "请根据已确认的定位方法处理对应异常；实施变更前先核对安全说明，修复后按完成条件复验。"
             if candidate is not None
-            else "Collect additional target-log evidence and run a new diagnosis."
+            else "请补充覆盖证据缺口的目标日志，再创建新的定位任务。"
         ),
         limitations=list(verified.draft.limitations),
         safety_notes=list(verified.draft.safety_notes),

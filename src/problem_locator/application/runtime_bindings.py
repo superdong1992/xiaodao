@@ -95,6 +95,7 @@ def rebuild_runtime_bindings_for_role(
 def runtime_bindings_from_job_spec(spec: JobSpec) -> RuntimeBindings:
     return RuntimeBindings(
         diagnosis_mode=spec.diagnosis_mode,
+        review_policy=spec.review_policy,
         generic_skill_name=spec.generic_skill_name,
         agent_profile_ref=spec.agent_profile_ref,
         available_skill_refs=list(spec.available_skill_refs),

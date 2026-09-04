@@ -150,6 +150,7 @@ def test_route_no_capability_starts_isolated_generic_diagnosis() -> None:
     generic_bindings = rebuild(
         runtime_bindings(diagnose_job()),
         diagnosis_mode="GENERIC",
+        review_policy=None,
         generic_skill_name="generic-problem-locator-smoke",
         skill_ref=None,
         logparse_tool_ref=None,
@@ -207,6 +208,7 @@ def test_no_match_after_reroute_discards_specialized_history_for_generic_job() -
     generic_bindings = rebuild(
         runtime_bindings(diagnose_job()),
         diagnosis_mode=DiagnosisMode.GENERIC,
+        review_policy=None,
         generic_skill_name="generic-problem-locator-smoke",
         skill_ref=None,
         logparse_tool_ref=None,
@@ -241,6 +243,7 @@ def _generic_diagnose_job() -> Job:
     payload = specialized.model_dump(mode="python")
     payload.update(
         diagnosis_mode=DiagnosisMode.GENERIC,
+        review_policy=None,
         generic_skill_name="generic-problem-locator-smoke",
         generic_problem_text="原始多行问题\n第二行保持不变",
         context_snapshot=None,

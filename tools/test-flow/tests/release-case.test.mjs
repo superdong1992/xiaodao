@@ -136,7 +136,7 @@ test("v2 loader exposes only Wiki, registration, driver, and frozen attachments"
   assert.deepEqual(inputs.scenarios[0].driver.supplement_input_names, []);
   assert.deepEqual(inputs.scenarios[0].attachment_paths.map((value) => path.basename(value)), ["client.log", "server.log"]);
   assert.equal(inputs.scenarios[0].driver.problem.completion_criteria.some((item) => item.includes("超时不等于取消")), false);
-  assert.equal(Object.hasOwn(oracle.scenarios[0].oracle, "required_safety_phrases"), false);
+  assert.deepEqual(oracle.scenarios[0].oracle.required_safety_phrases, ["超时不等于取消"]);
 });
 
 test("registration and semantic oracle bind the same Wiki and Methods package", () => {
@@ -280,7 +280,7 @@ test("scenario evidence identities must resolve to distinct frozen log events", 
   );
 });
 
-test("Evidence V2 scenario oracle hard-cuts RESOLVED, exact semantic verdicts, and canonical markers", () => {
+test("Methods V1 scenario oracle hard-cuts RESOLVED, exact semantic verdicts, safety, and canonical markers", () => {
   const mutations = [
     {
       change: (oracle) => { oracle.expected_status = "CONFIRMED"; },
@@ -295,8 +295,8 @@ test("Evidence V2 scenario oracle hard-cuts RESOLVED, exact semantic verdicts, a
       expected: /not an exact method marker/,
     },
     {
-      change: (oracle) => { oracle.required_safety_phrases = ["超时不等于取消"]; },
-      expected: /fields are invalid/,
+      change: (oracle) => { oracle.required_safety_phrases = []; },
+      expected: /Release required safety phrases must contain valid strings/,
     },
   ];
   for (const { change, expected } of mutations) {

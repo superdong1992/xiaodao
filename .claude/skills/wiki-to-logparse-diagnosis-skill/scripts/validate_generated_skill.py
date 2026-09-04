@@ -119,52 +119,55 @@ OPTIONAL_PID_SENTENCE = (
 )
 REQUIRED_SKILL_PHRASES = (
     "request.json",
-    "evaluation_input",
-    "observations",
-    "markers",
-    "evaluations",
-    "events",
-    "evaluation_ref",
-    "verdict",
-    "supporting_event_refs",
-    "reason",
-    "UNKNOWN",
+    "target_logs.json",
+    "logparse-receipt.json",
+    "schema_version",
+    "status",
+    "confirmed_methods",
+    "candidate_methods",
+    "evidence",
+    "limitations",
+    "safety_notes",
+    "identity_tokens",
+    "source_id",
+    "line_number",
 )
 FORBIDDEN_SKILL_PHRASES = (
     "method-evidence-graph.json",
     "method-evaluation-plan.json",
+    "evaluation_input",
+    "supporting_event_refs",
 )
 REQUIRED_SKILL_SEMANTICS = (
     (
-        "read the frozen request and compact evaluation_input from runtime context",
+        "read the frozen request, target list, target logs, and Logparse receipt",
         re.compile(
-            r"(?:读取|消费).*request\.json.*(?:运行时上下文|runtime context).*evaluation_input"
-            r"|(?:read|consume).*request\.json.*evaluation_input.*(?:运行时上下文|runtime context)",
+            r"(?:读取|消费).*request\.json.*target_logs\.json.*logparse-receipt\.json"
+            r"|(?:read|consume).*request\.json.*target_logs\.json.*logparse-receipt\.json",
             re.IGNORECASE | re.DOTALL,
         ),
     ),
     (
-        "use evaluation_input as the only log evidence",
+        "use only the frozen target logs as log evidence",
         re.compile(
-            r"(?:日志证据).*(?:只能|仅能).*evaluation_input"
-            r"|(?:log evidence).*(?:only).*evaluation_input",
+            r"(?:日志证据).*(?:只能|仅能).*(?:目标日志|target logs)"
+            r"|(?:log evidence).*(?:only).*(?:target logs)",
             re.IGNORECASE | re.DOTALL,
         ),
     ),
     (
-        "avoid rescanning evidence markers",
+        "scan every method marker",
         re.compile(
-            r"(?:不|不得|不要).*重新扫描.*(?:marker|标记)"
-            r"|(?:do not|must not).*(?:rescan).*(?:marker|evidence)",
+            r"(?:扫描|检查).*(?:全部|所有|每个).*(?:marker|标记)"
+            r"|(?:scan|check).*(?:all|every).*(?:marker)",
             re.IGNORECASE | re.DOTALL,
         ),
     ),
     (
-        "evaluate every reference in evaluation_input evaluations order",
+        "evaluate every method",
         re.compile(
-            r"(?:按|依照).*evaluation_input.*evaluations.*(?:顺序).*(?:全部|所有|每个).*evaluation_ref"
-            r"|(?:in).*evaluation_input.*evaluations.*(?:order).*(?:all|every).*evaluation_ref"
-            r"|(?:evaluate).*(?:all|every).*evaluation_ref.*(?:in).*evaluation_input.*evaluations.*order",
+            r"(?:评估|检查).*(?:全部|所有|每个).*方法"
+            r"|(?:evaluate|check).*(?:all|every).*method",
             re.IGNORECASE | re.DOTALL,
         ),
     ),
@@ -177,15 +180,18 @@ REQUIRED_SKILL_SEMANTICS = (
         ),
     ),
     (
-        "return only evaluation_ref, verdict, supporting_event_refs, and reason",
+        "return only the seven Methods V1 fields",
         re.compile(
             r"(?:只输出|仅输出|只能包含|仅包含|只包含|"
             r"(?:only\s+(?:output|return|contain|contains))|"
             r"(?:(?:output|return|contain|contains)\s+only))"
-            r"[\s\S]{0,512}?evaluation_ref"
-            r"[\s\S]{0,256}?verdict"
-            r"[\s\S]{0,256}?supporting_event_refs"
-            r"[\s\S]{0,256}?reason",
+            r"[\s\S]{0,512}?schema_version"
+            r"[\s\S]{0,256}?status"
+            r"[\s\S]{0,256}?confirmed_methods"
+            r"[\s\S]{0,256}?candidate_methods"
+            r"[\s\S]{0,256}?evidence"
+            r"[\s\S]{0,256}?limitations"
+            r"[\s\S]{0,256}?safety_notes",
             re.IGNORECASE,
         ),
     ),

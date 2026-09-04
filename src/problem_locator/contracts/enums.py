@@ -1,4 +1,4 @@
-"""Frozen public enumerations for the Problem Locator V5 contract."""
+"""Frozen public enumerations for the Problem Locator V6 contract."""
 
 from __future__ import annotations
 
@@ -37,6 +37,11 @@ class JobType(StrEnum):
 class DiagnosisMode(StrEnum):
     SPECIALIZED = "SPECIALIZED"
     GENERIC = "GENERIC"
+
+
+class ReviewPolicy(StrEnum):
+    NONE = "NONE"
+    INDEPENDENT = "INDEPENDENT"
 
 
 class GenericResultStatus(StrEnum):

@@ -270,7 +270,7 @@ def test_skill_batches_inputs_and_ready_attachments_without_ready_poll() -> None
     skill = _skill_text()
     submit_section = skill[
         skill.index("## Submit requested facts") :
-        skill.index("## Download a reviewed Artifact")
+        skill.index("## Download an Artifact on request")
     ]
 
     assert "finish the uploads first" in submit_section
@@ -297,29 +297,39 @@ def test_skill_batches_inputs_and_ready_attachments_without_ready_poll() -> None
     assert create_request.actual_behavior == raw_problem_text
 
 
-def test_skill_presents_methods_v2_without_waiting_for_an_artifact() -> None:
+def test_skill_downloads_and_presents_the_specialized_user_report() -> None:
     skill = _skill_text()
     section = skill[
-        skill.index("### Present a terminal Methods V2 result") :
+        skill.index("### Present a terminal specialized result") :
         skill.index("## Submit requested facts")
     ]
 
-    assert "present that object directly" in section
-    assert "Methods V2 has no downloadable result Artifact" in section
-    assert "do not call\n`problem_locator_list_artifacts`" in section
+    assert "Call `problem_locator_list_artifacts`" in section
+    assert "Automatically download only `diagnosis-result.json`" in section
+    assert "newly created unique\ntemporary file" in section
+    assert "exact received\nbyte count and lowercase SHA-256" in section
+    assert "Delete the temporary JSON file" in section
+    assert "download it only when the\nuser asks" in section
+    assert "contains the original deliverable\ntarget logs" in section
+    assert "`status=INCONCLUSIVE`" in section
+    assert "Download the audit bundle only when the user asks" in section
     for field_name in (
-        "status",
-        "reason_code",
-        "diagnostic_id",
-        "confirmed_method_ids",
-        "confirmed_event_refs",
-        "confirmed_hit_refs",
+        "root_cause",
+        "findings",
+        "causal_factors",
+        "candidate_factors",
+        "excluded_factors",
+        "completion_criteria_mapping",
+        "verification_rules",
+        "time_relevance",
+        "evidence_gaps",
         "limitations",
-        "reasons",
+        "recommendations",
+        "safety_notes",
     ):
         assert f"`{field_name}`" in section
-    assert "Do not invent a narrative root cause" in section
-    assert "absent before a Methods evaluation reaches a terminal state" in section
+    assert "do not fabricate or search for a\nspecialized report" in section
+    assert "never uses `methods_result` as a client result source" in section
 
 
 def test_create_case_uses_one_stable_generated_request_id() -> None:

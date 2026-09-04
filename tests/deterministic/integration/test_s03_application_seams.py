@@ -58,6 +58,7 @@ def _route_bindings() -> RuntimeBindings:
     )
     return RuntimeBindings(
         diagnosis_mode=route.diagnosis_mode,
+        review_policy=route.review_policy,
         generic_skill_name=route.generic_skill_name,
         agent_profile_ref=route.agent_profile_ref,
         available_skill_refs=route.available_skill_refs,

@@ -529,6 +529,16 @@ GET /api/v1/cases/10000000-0000-4000-8000-000000000001/artifacts
         "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "created_at": "2026-08-18T02:35:00.000Z",
         "download_url": "https://locator.example/api/v1/artifacts/40000000-0000-4000-8000-000000000001/content?case_id=10000000-0000-4000-8000-000000000001"
+      },
+      {
+        "artifact_id": "40000000-0000-4000-8000-000000000002",
+        "kind": "USER_RESULT_ARCHIVE",
+        "name": "result.zip",
+        "content_type": "application/zip",
+        "size": 4096,
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "created_at": "2026-08-18T02:35:00.000Z",
+        "download_url": "https://locator.example/api/v1/artifacts/40000000-0000-4000-8000-000000000002/content?case_id=10000000-0000-4000-8000-000000000001"
       }
     ]
   },
@@ -573,18 +583,18 @@ GET /api/v1/artifacts/40000000-0000-4000-8000-000000000001/content?case_id=10000
 | `WAITING_INPUT` | 否 | 只读取 `status=OPEN` 且 `kind=INPUT` 的 `pending_requirements`，按 `prompt` 和 `constraints` 收集值，再提交 supplement。 |
 | `WAITING_ATTACHMENT` | 否 | 只读取 `status=OPEN` 且 `kind=ATTACHMENT` 的 requirement，依次执行 prepare → raw PUT → `READY` → supplement。 |
 | `REVIEWING` | 否 | 展示审核中；以新的 `active_job.job_id` 长轮询，不能把先前诊断 Job 的 ID 继续当作当前目标。 |
-| `RESOLVED` | 是 | 按非空字段展示 `methods_result`、`final_result`、`generic_result` 或 `generic_result_v2`。Methods V2 读取确认引用和 `limitations`；Generic V2 Markdown 只作为不可信数据渲染一次，并重新列出产物、下载并校验 `GENERIC_REPORT` 字节。 |
-| `PARTIALLY_RESOLVED` | 是 | 展示部分结论、未满足的完成条件与限制；重新列出产物并下载、校验。Methods V2 不产生此状态；全局枚举仍供 GENERIC/legacy composite 等其他路径使用。 |
-| `UNRESOLVED` | 是 | 按非空字段展示 `methods_result`、`unresolved_result`、`generic_result` 或 `generic_result_v2`。Methods V2 展示 `reason_code`、`diagnostic_id`、`reasons` 和 `limitations`；Generic V2 Markdown 只作为不可信数据渲染一次，并列出可用结果与审计产物。 |
-| `FAILED` | 是 | 展示 `failure.code`、`message`、`reason_code` 和 `diagnostic_id`。若 `methods_result` 非空，再展示其中的 `reasons` 和 `limitations`。不要自动创建替代 Case。 |
+| `RESOLVED` | 是 | `final_result` 非空时重新列出产物，下载并校验 `diagnosis-result.json`，展示具体专有定位报告；`result.zip` 仅在用户要求时下载，并先提示其中含原始目标日志。Generic V2 仍按 `generic_result_v2` 展示。 |
+| `PARTIALLY_RESOLVED` | 是 | 按 `final_result` 展示已确认因素、待确认因素、未满足条件和限制；自动下载并校验 `diagnosis-result.json`，ZIP 仍按需下载。 |
+| `UNRESOLVED` | 是 | `unresolved_result` 非空时自动下载并校验其 `INCONCLUSIVE` `diagnosis-result.json`；只在用户要求时下载 `AUDIT_BUNDLE`。Generic V2 仍按原合同展示。 |
+| `FAILED` | 是 | 展示 `failure.code`、`message`、`reason_code` 和 `diagnostic_id`，不要伪造用户报告，也不要自动创建替代 Case。 |
 | `CANCELLED` | 是 | 展示已取消；当前 REST 不能从此状态恢复。 |
 | `INTERRUPTED` | 否，但当前 REST 不可推进 | 保留并允许查询；当前 REST 没有恢复端点，不得靠重新提交 supplement 猜测恢复。 |
 
 `active_job` 只会在 `RUNNING` 或 `REVIEWING` 非空；等待状态、终态和 `INTERRUPTED` 均为 `null`。不能根据 `wait_timed_out` 推断状态，必须读取 `case_view.status`。
 
-Methods V2 终态只会是 `RESOLVED`、`UNRESOLVED` 或 `FAILED`。此路径不创建 Candidate，`final_result` 和 `unresolved_result` 始终为 `null`。服务端完成 Evidence V2 裁决后，客户端从 `methods_result` 读取终态；在此之前发生的执行失败只写入 `failure`，即使内部已经归档 Evidence Graph 和 Evaluation Plan，也不会用这些引用伪造 `methods_result`。Evidence V2 已分类的系统终态会同时给出 `failure.reason_code` 与 `failure.diagnostic_id`；上下文容量失败则保留 `failure.code=CONTEXT_LIMIT`，这两个可选字段缺省。全局 `CaseStatus`、`CandidateConclusion` 和 `final_result` 仍服务于其他路径，不能因为 Methods V2 的硬切而从客户端类型中删除。
+V9 专有路径使用 `Candidate → 可选 Review → USER_RESULT`。审核关闭时，服务端验证通过后直接公开；审核开启时，`REVIEWING` 阶段不公开任何结果产物，只有 PASS 后才同时公开 JSON 和 ZIP。非 PASS 会隐藏原 Candidate 产物，只公开重新生成的 `INCONCLUSIVE` JSON 和审计包。兼容字段 `methods_result` 在 V9 始终缺省，前端不得把它当结果来源。
 
-紧凑 `evaluation_input` 是服务端内部模型输入，不是 REST 字段。它由权威 Graph/Plan 机械派生，每条物理日志行和每个 marker 字面量各保存一次，同时保留全部 method-qualified 关系、event、identity 和 evaluation 顺序。角色 Workspace 不保存单独的 Graph/Plan 文件或 `runtime/context.txt`；服务端仍用 execution records 中的权威 Graph/Plan 校验角色输出和生成公共引用。投影不截断、不采样，正常路径仍只调用一次 Specialist。
+`diagnosis-result.json` 固定使用 `problem-locator-diagnosis-v3`。前端必须校验列表元数据、响应头、实际字节数和 SHA-256，再按固定结构展示根因、发现、因素、完成条件、验证结果、时间判断、证据缺口、限制、建议和安全说明。不得根据缺失字段补写结论。
 
 ## 6. 附件端到端流程
 
@@ -1249,11 +1259,28 @@ latestCaseRevision = ready.case_revision;
 | `CaseView` | `pending_requirements` | `PendingRequirement[]` | 所有待办记录；收集输入时只看 `OPEN`。 |
 | `CaseView` | `active_job` | `JobSummary \| null` | 仅 `RUNNING`/`REVIEWING` 存在。 |
 | `CaseView` | `selected_skill_ref` | `VersionedRef \| null` | 服务所选执行定义的固定版本引用；前端只展示，不提交。 |
-| `CaseView` | `final_result` | `CandidateConclusion \| null` | Candidate 路径接受的最终结果；Methods V2 始终为 `null`。 |
-| `CaseView` | `unresolved_result` | `UnresolvedResult \| null` | legacy specialized 路径的未解决结果；Methods V2 始终为 `null`。 |
+| `CaseView` | `final_result` | `CandidateConclusion \| null` | 专有定位在 `RESOLVED`/`PARTIALLY_RESOLVED` 的最终 Candidate。 |
+| `CaseView` | `unresolved_result` | `UnresolvedResult \| null` | 专有定位在 `UNRESOLVED` 的结果与产物绑定。 |
 | `CaseView` | `generic_result` | `GenericResult \| null` | 通用流程终态结果。 |
 | `CaseView` | `generic_result_v2` | `GenericResultV2 \| null` | Generic V2 终态 Markdown 结果；与 `generic_result` 互斥，正文是不可信数据。 |
-| `CaseView` | `methods_result` | `MethodsTerminalProjectionV2`，可省略 | Methods V2 的公开终态结果；只在 Methods 评估进入终态后出现。 |
+| `CaseView` | `methods_result` | `MethodsTerminalProjectionV2`，可省略 | 仅为 wire 兼容保留；V9 始终缺省，禁止作为结果来源。 |
+| `MethodsTerminalProjectionV2` | `schema_version` | `2` | 旧投影版本；V9 不产生。 |
+| `MethodsTerminalProjectionV2` | `case_id` | `uuid` | 旧投影所属 Case；V9 不产生。 |
+| `MethodsTerminalProjectionV2` | `source_job_id` | `uuid` | 旧投影来源 Job；V9 不产生。 |
+| `MethodsTerminalProjectionV2` | `status` | `RESOLVED \| UNRESOLVED \| FAILED` | 旧 Methods V2 终态；V9 不产生。 |
+| `MethodsTerminalProjectionV2` | `result_ref` | `text` | 旧 Methods V2 结果引用；V9 不产生。 |
+| `MethodsTerminalProjectionV2` | `evaluation_id` | `uuid` | 旧 Methods V2 评估标识；V9 不产生。 |
+| `MethodsTerminalProjectionV2` | `plan_ref` | `text` | 旧 Evaluation Plan 引用；V9 不产生。 |
+| `MethodsTerminalProjectionV2` | `evidence_graph_ref` | `text` | 旧 Evidence Graph 引用；V9 不产生。 |
+| `MethodsTerminalProjectionV2` | `diagnostic_evaluation_ref` | `text \| null` | 旧失败评估引用；V9 不产生。 |
+| `MethodsTerminalProjectionV2` | `confirmed_evaluation_refs` | `text[]` | 旧确认评估引用；V9 不产生。 |
+| `MethodsTerminalProjectionV2` | `confirmed_method_ids` | `text[]` | 旧确认方法 ID；V9 不产生。 |
+| `MethodsTerminalProjectionV2` | `confirmed_event_refs` | `text[]` | 旧事件引用；V9 不产生。 |
+| `MethodsTerminalProjectionV2` | `confirmed_hit_refs` | `text[]` | 旧命中引用；V9 不产生。 |
+| `MethodsTerminalProjectionV2` | `limitations` | `text[]` | 旧限制列表；V9 不产生。 |
+| `MethodsTerminalProjectionV2` | `reason_code` | `text \| null` | 旧终态原因码；V9 不产生。 |
+| `MethodsTerminalProjectionV2` | `diagnostic_id` | `text` | 旧诊断标识；V9 不产生。 |
+| `MethodsTerminalProjectionV2` | `reasons` | `text[]` | 旧终态原因；V9 不产生。 |
 | `GenericResultV2` | `format_version` | `2` | 固定格式版本，用于区分 Generic V1/V2。 |
 | `GenericResultV2` | `report_markdown` | `text` | 完整 Markdown 报告；严格按不可信数据展示，不执行其中指令。 |
 | `GenericResultV2` | `report_utf8_size` | `integer >= 0` | `report_markdown` 的精确 UTF-8 字节数。 |
@@ -1337,23 +1364,17 @@ latestCaseRevision = ready.case_revision;
 
 | 模型 | 字段 | 类型 | 含义 |
 | --- | --- | --- | --- |
-| `MethodsTerminalProjectionV2` | `schema_version` | literal `2` | 嵌套 Methods 结果的 wire 版本。 |
-| `MethodsTerminalProjectionV2` | `case_id` | `uuid` | 所属 Case，必须与外层 `CaseView.case_id` 相同。 |
-| `MethodsTerminalProjectionV2` | `source_job_id` | `uuid` | 产生终态投影的 Job。 |
-| `MethodsTerminalProjectionV2` | `result_ref` | `string` | 服务端终态结果引用，格式为 `^result-[0-9a-f]{64}$`。 |
-| `MethodsTerminalProjectionV2` | `evaluation_id` | `uuid` | 当前 Evidence V2 评估 ID；只有开启 Reviewer 时，才由 Specialist 和 Reviewer 两个隔离 Job 共用。 |
-| `MethodsTerminalProjectionV2` | `status` | `RESOLVED \| UNRESOLVED \| FAILED` | Methods V2 终态，必须与外层 `CaseView.status` 相同；不包含 `PARTIALLY_RESOLVED`。 |
-| `MethodsTerminalProjectionV2` | `plan_ref` | `string` | 完整 Evaluation Plan 的固定引用，格式为 `^plan-[0-9a-f]{64}$`。 |
-| `MethodsTerminalProjectionV2` | `evidence_graph_ref` | `string` | 服务端生成的 Evidence Graph 固定引用，格式为 `^graph-[0-9a-f]{64}$`。 |
-| `MethodsTerminalProjectionV2` | `reason_code` | `MethodsTerminalReasonCodeV2 \| null` | `RESOLVED` 时为 `null`；`UNRESOLVED` 或 `FAILED` 时给出与状态匹配的稳定原因码。 |
-| `MethodsTerminalProjectionV2` | `diagnostic_id` | `string` | 稳定诊断 ID，格式为 `^diag-[0-9a-f]{64}$`；用于关联公开终态和执行记录。 |
-| `MethodsTerminalProjectionV2` | `diagnostic_evaluation_ref` | `string \| null` | 与本次终态诊断直接关联的 evaluation 引用；没有单一关联项时为 `null`，非空格式为 `^eval-[0-9a-f]{64}$`。 |
-| `MethodsTerminalProjectionV2` | `confirmed_evaluation_refs` | `string[]` | 当前裁决路径确认的 evaluation 引用，格式为 `^eval-[0-9a-f]{64}$`；顺序与 `confirmed_method_ids` 一一对应。单评取 Specialist 结果，盲评取双角色共识。 |
-| `MethodsTerminalProjectionV2` | `confirmed_method_ids` | `string[]` | 当前裁决路径确认的 method ID，格式为 `^[a-z0-9]+(?:-[a-z0-9]+)*$`；顺序与 `confirmed_evaluation_refs` 一一对应。 |
-| `MethodsTerminalProjectionV2` | `confirmed_event_refs` | `string[]` | 已确认 evaluation 对应的 Evidence event 引用，格式为 `^event-[0-9a-f]{64}$`。 |
-| `MethodsTerminalProjectionV2` | `confirmed_hit_refs` | `string[]` | 已确认 evaluation 对应的 Evidence hit 引用，格式为 `^hit-[0-9a-f]{64}$`。 |
-| `MethodsTerminalProjectionV2` | `limitations` | `text[]` | 冻结证据采集阶段已知的限制；任何 Methods V2 终态都应保留并展示。 |
-| `MethodsTerminalProjectionV2` | `reasons` | `text[]` | 服务端固定的终态说明。`RESOLVED` 时为空；其他状态包含与 `reason_code` 对应的单条说明。 |
+| `UserResultPayloadV3` | `schema_version` | literal `3` | `diagnosis-result.json` 的固定 Schema 版本。 |
+| `UserResultPayloadV3` | `format_id` | literal `problem-locator-diagnosis-v3` | 固定报告格式。 |
+| `UserResultPayloadV3` | `status` | `COMPLETED \| PARTIAL \| INCONCLUSIVE` | 必须与 Case 终态分支一致。 |
+| `UserResultPayloadV3` | `root_cause` | `text \| null` | 完整解决时的具体根因；部分或未解决时不得补写。 |
+| `UserResultPayloadV3` | `findings` | `Finding[]` | 证据支持的具体发现。 |
+| `UserResultPayloadV3` | `causal_factors` / `candidate_factors` / `excluded_factors` | `ResultFactor[]` | 已确认、待确认和已排除因素。 |
+| `UserResultPayloadV3` | `completion_criteria_mapping` | `ResultCompletionCriterion[]` | 创建时完成条件及其证据状态。 |
+| `UserResultPayloadV3` | `verification_rules` | `ResultVerificationRule[]` | 服务端规则复核结果。 |
+| `UserResultPayloadV3` | `time_relevance` | `TimeRelevanceAssessment` | 日志与问题时间的关系。 |
+| `UserResultPayloadV3` | `evidence_gaps` / `limitations` | `text[]` | 证据缺口和已知限制。 |
+| `UserResultPayloadV3` | `recommendations` / `safety_notes` | `text[]` | 处置建议和安全说明。 |
 | `CandidateConclusion` | `conclusion_id` | `uuid` | 结论 ID。 |
 | `CandidateConclusion` | `revision` | `integer > 0` | 结论版本。 |
 | `CandidateConclusion` | `content_hash` | `sha256` | 结论内容散列。 |
@@ -1399,36 +1420,17 @@ latestCaseRevision = ready.case_revision;
 | `CaseFailure` | `source_job_id` | `uuid \| null` | 来源 Job。 |
 | `CaseFailure` | `source_outcome_id` | `uuid \| null` | 来源结果事件。 |
 | `CaseFailure` | `occurred_at` | `timestamp` | 故障时间。 |
-| `CaseFailure` | `reason_code` | `MethodsValidationReasonCode \| MethodsTerminalReasonCodeV2 \| null`，可省略 | 已分类的 Methods 故障原因；Methods V2 只使用 `FAILED` 组的三个原因码。 |
-| `CaseFailure` | `diagnostic_id` | `uuid \| ^diag-[0-9a-f]{64}$ \| null`，可省略 | 与 `reason_code` 同时出现或同时缺省。已有 `methods_result` 时两处 ID 相同；评估开始前失败时只在 `CaseFailure` 中出现。 |
+| `CaseFailure` | `reason_code` | `MethodsValidationReasonCode \| null`，可省略 | 服务端证据复核失败时的稳定原因码。 |
+| `CaseFailure` | `diagnostic_id` | `uuid \| ^diag-[0-9a-f]{64}$ \| null`，可省略 | 与 `reason_code` 同时出现或同时缺省，用于关联执行记录。 |
 
-已经产生 `methods_result` 的 Methods V2 终态遵循以下固定形态：
+专有结果下载规则：
 
-- `RESOLVED`：`reason_code=null`、`reasons=[]`，四组 `confirmed_*` 引用均非空；`confirmed_evaluation_refs` 与 `confirmed_method_ids` 等长并按位置对应。
-- `UNRESOLVED`：`reason_code` 属于下表的 `UNRESOLVED` 组，`reasons` 为对应的单条服务端说明，四组 `confirmed_*` 引用全部为空。
-- `FAILED`：`reason_code` 属于下表的 `FAILED` 组，`reasons` 为对应的单条服务端说明，四组 `confirmed_*` 引用全部为空；外层 `CaseView.failure` 同时存在。
+- `RESOLVED` / `PARTIALLY_RESOLVED`：必须各有一个 `USER_RESULT` 和 `USER_RESULT_ARCHIVE`，且来源 Job 等于 `final_result.proposed_by_job_id`。
+- `UNRESOLVED`：必须有一个 `INCONCLUSIVE` `USER_RESULT` 和一个 `AUDIT_BUNDLE`，分别匹配 `unresolved_result` 中的两个 Artifact ID；不得出现 `USER_RESULT_ARCHIVE`。
+- `REVIEWING`：结果产物不可列出或下载。
+- `FAILED` / `CANCELLED` / `INTERRUPTED`：不生成替代用户报告。
 
-`diagnostic_id` 在三个终态中都存在。前端应原样保存和展示，不要自行重算。`limitations` 与成功或失败无关：只要证据采集记录了限制，`RESOLVED` 也会保留这些内容。角色输出中的自由文本不会进入此投影，前端只读取 `reasons`。
-
-合法 Methods 终态形成前的执行失败不属于 `MethodsTerminalProjectionV2`。客户端以 `methods_result` 是否存在区分“已有完整评估终态”和“执行期间失败”，后一种情况读取外层 `CaseFailure`。即使服务端已生成 Graph/Plan，也不能据此假设存在 `methods_result`。
-
-Evidence V2 自身的冻结资源快照失败使用 `RESOURCE_SNAPSHOT_DRIFT`，机械不变量失败使用 `SERVER_INVARIANT_VIOLATION`，审计归档失败使用 `AUDIT_ARCHIVE_FAILED`。紧凑后的必需上下文仍超过固定字节预算时，`CaseFailure.code` 保持为 `CONTEXT_LIMIT`，`reason_code` 和 `diagnostic_id` 缺省；它不能映射为 `SERVER_INVARIANT_VIOLATION` 或 `OUTCOME_INVALID`。
-
-| `MethodsTerminalReasonCodeV2` | 对应状态 | 含义 |
-| --- | --- | --- |
-| `SPECIALIST_PROTOCOL_REPAIR_EXHAUSTED` | `UNRESOLVED` | Specialist 首次输出不符合结构或覆盖要求，唯一一次修复后仍不合格。 |
-| `REVIEWER_PROTOCOL_REPAIR_EXHAUSTED` | `UNRESOLVED` | Reviewer 首次输出不符合结构或覆盖要求，唯一一次修复后仍不合格。 |
-| `SPECIALIST_SEMANTIC_INVALID` | `UNRESOLVED` | Specialist 的评估不满足 Evaluation 合同。 |
-| `REVIEWER_SEMANTIC_INVALID` | `UNRESOLVED` | Reviewer 的评估不满足 Evaluation 合同。 |
-| `SPECIALIST_MODEL_EXECUTION_FAILED` | `UNRESOLVED` | Specialist 评估未完成。 |
-| `REVIEWER_MODEL_EXECUTION_FAILED` | `UNRESOLVED` | Reviewer 评估未完成。 |
-| `SPECIALIST_REVIEWER_DISAGREEMENT` | `UNRESOLVED` | Specialist 与 Reviewer 对至少一项 evaluation 的结论不一致。 |
-| `INCOMPLETE_EVALUATION` | `UNRESOLVED` | 至少一项 evaluation 的结论仍为 `UNKNOWN`。 |
-| `NO_CONFIRMED_METHOD` | `UNRESOLVED` | 当前裁决路径中没有 method 获得 `CONFIRMED` 结论。 |
-| `NO_MATCHING_METHOD_EVIDENCE` | `UNRESOLVED` | 已加载 method 中没有匹配到证据的项。 |
-| `RESOURCE_SNAPSHOT_DRIFT` | `FAILED` | 评估完成前，冻结的资源快照发生变化。 |
-| `SERVER_INVARIANT_VIOLATION` | `FAILED` | 服务端未能保持 Evidence V2 的机械不变量。 |
-| `AUDIT_ARCHIVE_FAILED` | `FAILED` | 评估审计归档未完成。 |
+前端自动下载的只有 `diagnosis-result.json`。`result.zip` 和审计包都由用户主动请求；ZIP 下载前必须提示包含原始目标日志。任何类型、来源 Job、大小、SHA-256、响应头或实际字节不一致，都应停止展示并报告协议错误。
 
 ### 8.7 附件描述与产物
 
@@ -1528,10 +1530,10 @@ Evidence V2 自身的冻结资源快照失败使用 `RESOURCE_SNAPSHOT_DRIFT`，
 | `413` | `RESOURCE_LIMIT_EXCEEDED` | `false` | 阻止上传/提交并展示限制。 |
 | `422` | `RESOURCE_HASH_MISMATCH` | `false` | 丢弃结果，重新计算原始字节散列。 |
 | `422` | `RESOURCE_SIZE_MISMATCH` | `false` | 丢弃结果，重新读取实际字节数。 |
-| `422` | `CONTEXT_LIMIT` | `false` | 紧凑后的必需上下文仍超过固定字节预算；展示容量超限，不要改写为 Evidence V2 不变量失败。 |
+| `422` | `CONTEXT_LIMIT` | `false` | 必需上下文超过固定字节预算；展示容量超限，不要改写成业务结论。 |
 | `422` | `ASSET_VERSION_UNAVAILABLE` | `false` | 服务端版本资源不可用，交给运维。 |
 | `422` | `OUTCOME_MISSING` | `false` | 后台输出缺失，展示失败信息。 |
-| `422` | `OUTCOME_INVALID` | `false` | 后台输出确实非法时展示失败信息；Evidence V2 上下文超限不使用此码。 |
+| `422` | `OUTCOME_INVALID` | `false` | 后台输出或服务端复核结果非法时展示失败信息。 |
 | `422` | `BACKEND_OUTPUT_LIMIT` | `false` | 后台输出超限。 |
 | `422` | `WORKSPACE_LIMIT` | `false` | 后台工作区超限。 |
 | `422` | `LOGPARSE_FAILED` | `false` | 证据解析失败。 |

@@ -162,7 +162,7 @@ def _parser() -> argparse.ArgumentParser:
 
     replay = subcommands.add_parser(
         "replay-job",
-        help="replay one State V8 Job in a new isolated installation",
+        help="replay one State V9 Job in a new isolated installation",
     )
     replay.add_argument("--source-data-root", type=Path, required=True)
     replay.add_argument("--job-id", required=True)

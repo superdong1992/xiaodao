@@ -192,8 +192,8 @@ def test_empty_directory_initializes_generation_one_canonical_state(
 
     snapshot = repository.read_snapshot()
     assert isinstance(repository, StateRepository)
-    assert snapshot.schema_version == SCHEMA_VERSION == 8
-    assert snapshot.contract_revision == CONTRACT_REVISION == "v8-contract-r1"
+    assert snapshot.schema_version == SCHEMA_VERSION == 9
+    assert snapshot.contract_revision == CONTRACT_REVISION == "v9-contract-r1"
     assert snapshot.generation == 1
     assert snapshot.created_at == INITIAL_TIME
     assert snapshot.updated_at == INITIAL_TIME
@@ -214,7 +214,7 @@ def test_empty_directory_initializes_generation_one_canonical_state(
     [
         (b'{"truncated":\n', ErrorCode.STATE_CORRUPT),
         (
-            _state_bytes_with_schema_version(7),
+            _state_bytes_with_schema_version(8),
             ErrorCode.STATE_SCHEMA_UNSUPPORTED,
         ),
         (
@@ -259,6 +259,40 @@ def test_startup_rejects_corrupt_or_unsupported_state_without_prev_fallback(
         ),
     )
     assert layout.state.read_bytes() == payload
+
+
+@pytest.mark.parametrize("legacy_version", range(1, 9))
+def test_v1_through_v8_state_is_read_only_and_unsupported(
+    tmp_path: Path,
+    legacy_version: int,
+) -> None:
+    layout = StorageLayout.at(tmp_path / f"state-v{legacy_version}")
+    layout.ensure_directories()
+    layout.data_format_marker.write_bytes(DATA_FORMAT_MARKER_BYTES)
+    payload = canonical_json_bytes(
+        {
+            "schema_version": legacy_version,
+            "contract_revision": f"v{legacy_version}-contract-r1",
+        }
+    )
+    layout.state.write_bytes(payload)
+    original_entries = tuple(sorted(path.name for path in layout.data_root.iterdir()))
+
+    _assert_port_error(
+        ErrorCode.STATE_SCHEMA_UNSUPPORTED,
+        lambda: JsonFileStateRepository(
+            layout.data_root,
+            StorageCoordinationLock(),
+            FixedClock(INITIAL_TIME),
+            DeterministicIdGenerator(seed=f"legacy-v{legacy_version}"),
+            execution_record_store=InMemoryExecutionRecordStore(),
+        ),
+    )
+
+    assert layout.state.read_bytes() == payload
+    assert tuple(sorted(path.name for path in layout.data_root.iterdir())) == (
+        original_entries
+    )
 
 
 def test_missing_state_with_previous_or_business_content_is_corrupt(

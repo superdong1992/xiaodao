@@ -1739,12 +1739,11 @@ class WorkspaceManager:
         target_logs: Sequence[tuple[str, str, bytes]],
         receipt_context: Mapping[str, Any],
     ) -> FrozenMethodsWorkspaceInputs:
-        """Freeze exact preprocessing bytes without exposing them to Pass B.
+        """Atomically publish the server-owned Methods V1 input surface.
 
         Pass A has already exited and its broker capability has been revoked.
-        Graph construction and execution-record publication consume the returned
-        immutable bytes directly; the Specialist Workspace remains metadata-only
-        until its final request is published.
+        The Specialist can inspect only these frozen copies; the input tree is
+        locked read-only again before the Specialist starts.
         """
 
         if not isinstance(workspace, PreparedWorkspace):
@@ -1824,11 +1823,37 @@ class WorkspaceManager:
                 }
             )
             request_bytes = canonical_json_bytes(request_value)
+            inputs_root.chmod(0o755)
+            target_root = inputs_root / "target-logs"
+            target_root.mkdir(mode=0o700)
+            for item in frozen:
+                _atomic_write(workspace.root / item.relative_path, item.content)
+            _atomic_write(inputs_root / "target_logs.json", target_logs_bytes)
+            _atomic_write(inputs_root / "logparse-receipt.json", receipt_bytes)
+            _atomic_write(inputs_root / "request.json", request_bytes)
         except (OSError, TypeError, ValueError, _UnsafeWorkspaceError) as exc:
             raise runtime_failure(
                 stage=ExecutionStage.WORKSPACE_PREPARE,
                 code=ErrorCode.WORKSPACE_PREPARE_FAILED,
-                message="Methods preprocessing inputs could not be frozen safely.",
+                message="Frozen Methods inputs could not be published safely.",
+                retryable=True,
+            ) from exc
+        finally:
+            _set_inputs_read_only(inputs_root)
+
+        try:
+            final_root, _ = _fallback_expected_directory(
+                workspace,
+                ("inputs",),
+                ((workspace.inputs_device, workspace.inputs_inode),),
+            )
+            if final_root != inputs_root:
+                raise _UnsafeWorkspaceError("workspace inputs identity changed")
+        except (OSError, _UnsafeWorkspaceError) as exc:
+            raise runtime_failure(
+                stage=ExecutionStage.WORKSPACE_PREPARE,
+                code=ErrorCode.WORKSPACE_PREPARE_FAILED,
+                message="Frozen Methods inputs could not be verified safely.",
                 retryable=True,
             ) from exc
         return FrozenMethodsWorkspaceInputs(

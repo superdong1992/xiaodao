@@ -69,14 +69,14 @@ description: Diagnose a test timeout from frozen evidence.
 
 # Test locator
 
-Read frozen `request.json` and the compact `evaluation_input` from runtime
-context. Use request values for declared inputs. Its `observations` catalog
-deduplicated physical log lines, `markers` catalog declared literals, and
-ordered `evaluations` contain the `events` available to each method. Log
-evidence comes only from `evaluation_input`; do not rescan markers or target
-logs. Evaluate every `evaluation_ref` in `evaluation_input.evaluations` order and return only
-`evaluation_ref`, `verdict`, `supporting_event_refs`, and `reason`; use
-`UNKNOWN` when the evidence cannot decide the rule.
+Read frozen `request.json`, `target_logs.json`, every listed target log, and
+`logparse-receipt.json`. Log evidence comes only from the frozen target logs.
+Scan every method marker and do not stop after the first confirmation. Return
+only `schema_version`, `status`, `confirmed_methods`, `candidate_methods`,
+`evidence`, `limitations`, and `safety_notes`. Confirmed evidence contains a
+specific summary, `identity_tokens`, and exact `source_id`, one-based
+`line_number`, declared marker, and complete source line. Use `PARTIAL` or
+`INSUFFICIENT` when the evidence cannot confirm a method.
 """,
         encoding="utf-8",
     )
@@ -611,7 +611,7 @@ def test_direct_skill_dir_rejects_noncanonical_method_heading_structure(
         load_specialized_skill_registration(registration)
 
 
-def test_production_loader_allows_v2_prose_that_mentions_v1_words(tmp_path: Path) -> None:
+def test_production_loader_allows_additional_v1_prose(tmp_path: Path) -> None:
     package = _write_package(tmp_path)
     skill_path = package / "SKILL.md"
     valid_text = skill_path.read_text(encoding="utf-8")
@@ -623,6 +623,25 @@ def test_production_loader_allows_v2_prose_that_mentions_v1_words(tmp_path: Path
     )
 
     assert load_methods_package(package).skill_name == package.name
+
+
+def test_production_loader_rejects_an_old_evidence_v2_package(tmp_path: Path) -> None:
+    package = _write_package(tmp_path)
+    skill_path = package / "SKILL.md"
+    skill_path.write_text(
+        """---
+name: diagnose-test-timeout
+description: Retired Evidence V2 package.
+---
+
+Read request.json and the evaluation_input. Return only evaluation_ref,
+verdict, supporting_event_refs, and reason.
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="must mention target_logs.json"):
+        load_methods_package(package)
 
 
 def test_marker_scan_loads_only_relevant_method_cards_before_context(

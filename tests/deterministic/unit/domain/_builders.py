@@ -149,6 +149,7 @@ def interrupted(job: Job) -> Job:
 def runtime_bindings(job: Job) -> RuntimeBindings:
     return RuntimeBindings(
         diagnosis_mode=job.diagnosis_mode,
+        review_policy=job.review_policy,
         generic_skill_name=job.generic_skill_name,
         agent_profile_ref=job.agent_profile_ref,
         available_skill_refs=job.available_skill_refs,

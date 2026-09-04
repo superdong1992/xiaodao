@@ -100,12 +100,12 @@ test("Release is fresh, binds an immutable source snapshot and exposes exact per
   assert.equal(built.plan.resume, "fresh");
   assert.equal(built.options.crossJobAdapter, path.join(REPO_ROOT, "tools", "test-flow", "adapters", "macos-linux-release.mjs"));
   assert.deepEqual(built.plan.budget, {
-    estimated_tokens: 6100000,
-    sum_of_per_invocation_caps_usd: 28,
+    estimated_tokens: 8100000,
+    sum_of_per_invocation_caps_usd: 31,
     hard_cap_tokens: 8500000,
     hard_cap_usd: 31,
-    normal_model_calls: 7,
-    repair_model_calls_max: 1,
+    normal_model_calls: 8,
+    repair_model_calls_max: 0,
     hard_max_model_calls: 8,
     cumulative_spending_cap: null,
     per_invocation_hard_enforced: true,
@@ -127,10 +127,10 @@ test("Release is fresh, binds an immutable source snapshot and exposes exact per
   ]);
   assert.deepEqual(diagnose.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count, entry.caps.max_total_tokens, entry.caps.max_budget_usd]), [
     ["host-client", 1, 1, 600000, 5],
-    ["server-agent", 1, 2, 2000000, 3],
+    ["server-agent", 2, 2, 2000000, 3],
   ]);
-  assert.deepEqual([diagnose.normal_model_calls, diagnose.repair_model_calls_max, diagnose.hard_max_model_calls], [2, 1, 3]);
-  assert.deepEqual(diagnose.normal_budget, { tokens: 2600000, cost_usd: 8 });
+  assert.deepEqual([diagnose.normal_model_calls, diagnose.repair_model_calls_max, diagnose.hard_max_model_calls], [3, 0, 3]);
+  assert.deepEqual(diagnose.normal_budget, { tokens: 4600000, cost_usd: 11 });
   assert.deepEqual(diagnose.hard_budget, { tokens: 4600000, cost_usd: 11 });
   assert.deepEqual(publish.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count, entry.caps.max_budget_usd]), [
     ["host-client", 1, 1, 1],
@@ -344,7 +344,7 @@ test("central P1 plan fixes the scenario and declares the Specialist-only topolo
   assert.equal(normalStage.gates.find((gate) => gate.id === "quick.claude-deepseek-e2e.contracts").required_evidence[0], "node-test.tap");
 });
 
-test("Dev CrossJob diagnosis uses the Evidence V2 Specialist-only service-call contract", () => {
+test("Dev CrossJob diagnosis uses the reviewed Methods V1 service-call contract", () => {
   const built = buildIsolatedRunPlan({
     track: "dev",
     goal: "dev.real",
@@ -352,11 +352,12 @@ test("Dev CrossJob diagnosis uses the Evidence V2 Specialist-only service-call c
     client: "windows",
     planOnly: true,
     allowRealModel: true,
-    reason: "验证 Evidence V2 正式定位路径",
+    reason: "验证 Methods V1 专有定位报告路径",
   });
   assert.equal(built.plan.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"), false);
   const declaration = built.plan.stages.find((stage) => stage.id === "journey.cross-job.diagnose").invocation_caps.find((item) => item.class === "server-agent");
-  assert.deepEqual([declaration.min_count, declaration.max_count, declaration.normal_count, declaration.repair_max_count], [1, 2, 1, 1]);
+  assert.deepEqual(declaration.phases, ["SPECIALIST", "REVIEWER"]);
+  assert.deepEqual([declaration.min_count, declaration.max_count, declaration.normal_count, declaration.repair_max_count], [2, 2, 2, 0]);
   assert.equal(built.plan.admission.status, "BLOCKED");
 });
 

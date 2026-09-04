@@ -1,4 +1,4 @@
-"""Pydantic models for the frozen Problem Locator V8 public contract.
+"""Pydantic models for the frozen Problem Locator V9 public contract.
 
 The module deliberately keeps all wire/persistence DTO definitions in one place;
 ``commands``, ``outcomes`` and ``errors`` provide responsibility-oriented exports.
@@ -56,6 +56,7 @@ from .enums import (
     RequirementStatus,
     ResourceKind,
     ResourceType,
+    ReviewPolicy,
     ReviewVerdict,
     RouteKind,
     RuleClaimResult,
@@ -1324,6 +1325,8 @@ class Case(ContractModel):
 
     @model_validator(mode="after")
     def validate_terminal_fields(self) -> Case:
+        if self.methods_result is not None:
+            raise ValueError("V9 Cases require methods_result=null")
         if (self.status is CaseStatus.FAILED) != (self.failure is not None):
             raise ValueError("failure must be present exactly for FAILED cases")
         if self.generic_result is not None and self.generic_result_v2 is not None:
@@ -1438,6 +1441,7 @@ class Job(ContractModel):
     case_id: OpaqueId
     job_type: JobType
     diagnosis_mode: DiagnosisMode | None
+    review_policy: ReviewPolicy | None = None
     generic_skill_name: SkillName | None
     generic_problem_text: NonEmptyText | None
     status: JobStatus
@@ -1502,6 +1506,8 @@ class Job(ContractModel):
             raise ValueError("only DIAGNOSE jobs may use logparse")
         if self.job_type is JobType.DIAGNOSE:
             if self.diagnosis_mode is DiagnosisMode.GENERIC:
+                if self.review_policy is not None:
+                    raise ValueError("GENERIC DIAGNOSE forbids review_policy")
                 if self.generic_problem_text is None:
                     raise ValueError("GENERIC DIAGNOSE requires its frozen raw problem text")
                 if any(
@@ -1515,14 +1521,21 @@ class Job(ContractModel):
                     raise ValueError(
                         "GENERIC DIAGNOSE forbids Evidence, Attachments, Artifacts, and history"
                     )
-            elif self.generic_problem_text is not None:
-                raise ValueError("SPECIALIZED DIAGNOSE forbids generic problem text")
+            else:
+                if self.generic_problem_text is not None:
+                    raise ValueError("SPECIALIZED DIAGNOSE forbids generic problem text")
+                if self.review_policy is None:
+                    raise ValueError("SPECIALIZED DIAGNOSE requires frozen review_policy")
         elif (
             self.diagnosis_mode is not None
             or self.generic_skill_name is not None
             or self.generic_problem_text is not None
         ):
             raise ValueError("only DIAGNOSE jobs may carry diagnosis-mode fields")
+        elif self.job_type is JobType.ROUTE and self.review_policy is not None:
+            raise ValueError("ROUTE jobs forbid review_policy")
+        elif self.job_type is JobType.REVIEW and self.review_policy is None:
+            raise ValueError("REVIEW jobs require frozen review_policy")
         if self.job_type is JobType.ROUTE:
             if self.review_target is not None or self.methods_review_target is not None:
                 raise ValueError("ROUTE jobs forbid review targets")
@@ -1999,6 +2012,7 @@ class ResolvedAsset(ContractModel):
 
 class RuntimeBindings(ContractModel):
     diagnosis_mode: DiagnosisMode | None
+    review_policy: ReviewPolicy | None = None
     generic_skill_name: SkillName | None
     agent_profile_ref: VersionedRef
     available_skill_refs: list[VersionedRef]
@@ -2022,10 +2036,19 @@ class RuntimeBindings(ContractModel):
         # pair itself is nevertheless exact and cannot describe an ambiguous
         # generic/specialized DIAGNOSE binding.
         if self.diagnosis_mode is DiagnosisMode.GENERIC:
-            if self.generic_skill_name is None or self.skill_ref is not None:
+            if (
+                self.generic_skill_name is None
+                or self.skill_ref is not None
+                or self.review_policy is not None
+            ):
                 raise ValueError("GENERIC bindings require only generic_skill_name")
         elif self.generic_skill_name is not None:
             raise ValueError("generic_skill_name is valid only for GENERIC bindings")
+        elif self.skill_ref is None:
+            if self.review_policy is not None:
+                raise ValueError("ROUTE bindings forbid review_policy")
+        elif self.review_policy is None:
+            raise ValueError("specialized bindings require frozen review_policy")
         return self
 
 
@@ -4317,9 +4340,12 @@ class CandidateMutation(ContractModel):
             if (
                 self.candidate_binding.accepted_candidate_proposal_key is None
                 or self.expected_status is not None
-                or self.target_status is not CandidateStatus.REVIEWING
+                or self.target_status
+                not in {CandidateStatus.REVIEWING, CandidateStatus.ACCEPTED}
             ):
-                raise ValueError("INSTALL must install an accepted proposal as REVIEWING")
+                raise ValueError(
+                    "INSTALL must install an accepted proposal as REVIEWING or ACCEPTED"
+                )
         else:
             if (
                 self.candidate_binding.existing_candidate_target is None
@@ -4344,6 +4370,7 @@ class JobLifecycleUpdate(ContractModel):
 class JobSpec(ContractModel):
     job_type: JobType
     diagnosis_mode: DiagnosisMode | None
+    review_policy: ReviewPolicy | None = None
     generic_skill_name: SkillName | None
     generic_problem_text: NonEmptyText | None
     goal: NonEmptyText
@@ -4398,6 +4425,8 @@ class JobSpec(ContractModel):
             raise ValueError("only DIAGNOSE JobSpec may use logparse")
         if self.job_type is JobType.DIAGNOSE:
             if self.diagnosis_mode is DiagnosisMode.GENERIC:
+                if self.review_policy is not None:
+                    raise ValueError("GENERIC JobSpec forbids review_policy")
                 if self.generic_problem_text is None:
                     raise ValueError("GENERIC JobSpec requires frozen raw problem text")
                 if any(
@@ -4411,14 +4440,21 @@ class JobSpec(ContractModel):
                     raise ValueError(
                         "GENERIC JobSpec forbids Evidence, Attachments, Artifacts, and history"
                     )
-            elif self.generic_problem_text is not None:
-                raise ValueError("SPECIALIZED JobSpec forbids generic problem text")
+            else:
+                if self.generic_problem_text is not None:
+                    raise ValueError("SPECIALIZED JobSpec forbids generic problem text")
+                if self.review_policy is None:
+                    raise ValueError("SPECIALIZED JobSpec requires frozen review_policy")
         elif (
             self.diagnosis_mode is not None
             or self.generic_skill_name is not None
             or self.generic_problem_text is not None
         ):
             raise ValueError("only DIAGNOSE JobSpec may carry diagnosis-mode fields")
+        elif self.job_type is JobType.ROUTE and self.review_policy is not None:
+            raise ValueError("ROUTE JobSpec forbids review_policy")
+        elif self.job_type is JobType.REVIEW and self.review_policy is None:
+            raise ValueError("REVIEW JobSpec requires frozen review_policy")
         if self.job_type is JobType.ROUTE:
             if (
                 self.review_target_binding is not None
@@ -4721,7 +4757,7 @@ class TransitionPlan(ContractModel):
     case_failure_update: CaseFailureUpdate | None
     candidate_mutation: CandidateMutation | None
     next_job_spec: JobSpec | None
-    final_result_target: CandidateTarget | None
+    final_result_target: CandidateTarget | ReviewTargetBinding | None
     unresolved_result_draft: UnresolvedResultDraft | None = None
     generic_result: GenericResult | None = None
     generic_result_v2_draft: GenericResultV2Draft | None = None
@@ -4849,8 +4885,13 @@ class TransitionPlan(ContractModel):
             ):
                 raise ValueError("INSTALL candidate mutation requires the accepted candidate proposal key")
         if self.candidate_mutation is not None and self.candidate_mutation.target_status is CandidateStatus.ACCEPTED:
-            target = self.candidate_mutation.candidate_binding.existing_candidate_target
-            if target is None or self.final_result_target != target:
+            target = self.candidate_mutation.candidate_binding
+            expected_final_target: CandidateTarget | ReviewTargetBinding | None = (
+                target.existing_candidate_target
+                if self.candidate_mutation.action is CandidateMutationAction.SET_STATUS
+                else target
+            )
+            if self.final_result_target != expected_final_target:
                 raise ValueError("ACCEPTED candidate mutation requires matching final_result_target")
             if self.target_case_status not in {
                 CaseStatus.RESOLVED,
@@ -5633,7 +5674,7 @@ class CaseAggregate(ContractModel):
 
 
 class StateFile(ContractModel):
-    schema_version: Literal[8]
+    schema_version: Literal[9]
     contract_revision: Literal[CONTRACT_REVISION]
     generation: NonNegativeInt
     installation_id: OpaqueId
@@ -5916,6 +5957,8 @@ class CaseView(ContractModel):
 
     @model_validator(mode="after")
     def validate_view(self) -> CaseView:
+        if self.methods_result is not None:
+            raise ValueError("V9 CaseView requires methods_result=null")
         if (self.status is CaseStatus.FAILED) != (self.failure is not None):
             raise ValueError("failure must be present exactly for FAILED case views")
         if self.generic_result is not None and self.generic_result_v2 is not None:
@@ -6656,8 +6699,8 @@ class StateExportResource(ContractModel):
 
 
 class StateExport(ContractModel):
-    export_schema_version: Literal[8]
-    schema_version: Literal[8]
+    export_schema_version: Literal[9]
+    schema_version: Literal[9]
     contract_revision: Literal[CONTRACT_REVISION]
     source_generation: NonNegativeInt
     installation_id: OpaqueId
@@ -6726,7 +6769,7 @@ class ContractManifestEntry(ContractModel):
 
 
 class ContractManifest(ContractModel):
-    schema_version: Literal[8]
+    schema_version: Literal[9]
     contract_revision: Literal[CONTRACT_REVISION]
     generator_version: NonEmptyText
     files: list[ContractManifestEntry]

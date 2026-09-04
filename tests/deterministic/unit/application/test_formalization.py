@@ -624,6 +624,7 @@ def test_builds_pending_job_from_final_state_and_projector() -> None:
     spec = JobSpec(
         job_type=JobType.DIAGNOSE,
         diagnosis_mode="SPECIALIZED",
+        review_policy="INDEPENDENT",
         generic_skill_name=None,
         generic_problem_text=None,
         goal="Continue the fixed diagnosis.",
@@ -677,6 +678,7 @@ def test_generic_job_skips_context_projection_and_freezes_only_raw_problem_text(
     spec = JobSpec(
         job_type=JobType.DIAGNOSE,
         diagnosis_mode="GENERIC",
+        review_policy=None,
         generic_skill_name="generic-problem-locator-smoke",
         generic_problem_text="原始问题第一行\n第二行逐字保留",
         goal="Run the configured generic problem locator.",
@@ -731,6 +733,7 @@ def test_build_job_orders_evidence_as_target_snapshot_subsequence() -> None:
     spec = JobSpec(
         job_type=JobType.DIAGNOSE,
         diagnosis_mode="SPECIALIZED",
+        review_policy="INDEPENDENT",
         generic_skill_name=None,
         generic_problem_text=None,
         goal="Continue with both accepted evidence records.",

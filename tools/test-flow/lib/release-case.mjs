@@ -18,7 +18,7 @@ const ANCHOR_FIELDS = ["label", "module", "pid", "process_name", "slot"];
 const SEMANTIC_ORACLE_FIELDS = ["author_note_markers_forbidden_in_product", "business_canaries", "expected_package", "oracle_visibility", "schema_version"];
 const EXPECTED_PACKAGE_FIELDS = ["forbidden_paths", "method_marker_sets", "required_artifacts", "required_log_derived_fields", "required_shared_markers", "required_user_inputs", "skill_name", "source_wiki_sha256"];
 const METHOD_MARKER_SET_FIELDS = ["activation_markers", "all_markers", "semantic_id"];
-const SCENARIO_ORACLE_FIELDS = ["expected_method_verdicts", "expected_status", "forbidden_evidence_terms", "oracle_visibility", "required_evidence_identities", "required_request_timeout", "scenario_id", "schema_version"];
+const SCENARIO_ORACLE_FIELDS = ["expected_method_verdicts", "expected_status", "forbidden_evidence_terms", "oracle_visibility", "required_evidence_identities", "required_request_timeout", "required_safety_phrases", "scenario_id", "schema_version"];
 const METHOD_VERDICT_FIELDS = ["semantic_id", "verdict"];
 const EVIDENCE_IDENTITY_FIELDS = ["identity_tokens", "marker", "semantic_id"];
 const REQUEST_TIMEOUT_FIELDS = ["decoy_api", "decoy_request_id", "decoy_service", "decoy_timeout_ms", "marker", "request_id", "timeout_ms", "unlinked_marker", "unlinked_timeout_ms"];
@@ -341,6 +341,7 @@ function loadScenarioOracle(scenario, loaded) {
     "Release request timeout expectation is invalid",
   );
   stringArray(oracle.forbidden_evidence_terms, "RELEASE_CASE_FORBIDDEN_EVIDENCE", "Release forbidden evidence terms");
+  stringArray(oracle.required_safety_phrases, "RELEASE_CASE_SAFETY_PHRASES", "Release required safety phrases", { nonempty: true });
   assertFlow(Array.isArray(oracle.required_evidence_identities), "RELEASE_CASE_EVIDENCE_IDENTITIES", "Release evidence identities must be an array");
   const { attachment_paths: attachmentPaths } = loadDriver(scenario, new Set(rolePathEntries(loaded).map(([, absolute]) => pathIdentity(absolute))));
   const attachmentLines = attachmentPaths.flatMap((absolute) => fs.readFileSync(absolute, "utf8")

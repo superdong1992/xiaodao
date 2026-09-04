@@ -1,3 +1,3 @@
 # Review context policy
 
-The final framed UTF-8 body is limited to 204800 bytes. Preserve the fixed review target, complete selected skill, and every mandatory section. Legacy Candidate review preserves its Candidate and supporting Evidence. Methods V2 review remains Candidate-free and preserves only the compact `evaluation_input` mechanically derived from the server-frozen Evidence Graph and Evaluation Plan, plus the exact selected method cards. The full Graph and Plan remain server execution records and must not appear in the role Workspace. Never replace these inputs with current case state.
+The final framed UTF-8 body is limited to 204800 bytes. Preserve the fixed Candidate review target, complete selected Skill, every required supporting Evidence item, the exact prior grounded Methods diagnosis, and its server grounding audit. Never replace these frozen inputs with current Case state or Specialist session data.

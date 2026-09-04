@@ -371,7 +371,7 @@ def test_methods_draft_still_rejects_ambiguous_or_invalid_json(
     assert draft_path.read_bytes() == invalid_payload
 
 
-def test_workspace_freezes_methods_audit_bytes_in_memory_without_workspace_io(
+def test_workspace_freezes_methods_v1_audit_and_target_bytes_read_only(
     tmp_path: Path,
 ) -> None:
     manifest = _contract("workspace-input-manifest.json", WorkspaceInputManifest)
@@ -440,11 +440,18 @@ def test_workspace_freezes_methods_audit_bytes_in_memory_without_workspace_io(
     assert frozen.receipt_bytes == expected_receipt_bytes
     assert frozen.receipt_sha256 == bytes_sha256(frozen.receipt_bytes)
     assert frozen.target_logs[0].content == target
+    assert input_files_before == {"inputs/manifest.json": workspace.manifest_bytes}
     assert {
         path.relative_to(workspace.root).as_posix(): path.read_bytes()
         for path in workspace.root.rglob("*")
         if path.is_file()
-    } == input_files_before == {"inputs/manifest.json": workspace.manifest_bytes}
+    } == {
+        "inputs/manifest.json": workspace.manifest_bytes,
+        "inputs/request.json": expected_request_bytes,
+        "inputs/target_logs.json": expected_target_logs_bytes,
+        "inputs/logparse-receipt.json": expected_receipt_bytes,
+        "inputs/target-logs/server.log": target,
+    }
     assert stat.S_IMODE((workspace.root / "inputs").stat().st_mode) == (
         inputs_mode_before
     )

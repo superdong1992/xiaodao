@@ -40,6 +40,7 @@ import {
   methodsV2CapturedFiles,
   validateMethodsV2ExecutionRecords,
 } from "./methods-oracle.mjs";
+import { validateMethodsGroundingExecutionRecord } from "./methods-v1-oracle.mjs";
 import {
   buildIsolatedAgentEnvironment,
   ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY,
@@ -1113,6 +1114,49 @@ export function validMethodsV2OracleEvidence(context, receipt, generatedSkill) {
       },
     });
     return sameIdentity(validated, receipt.methods_v2);
+  } catch {
+    return false;
+  }
+}
+
+export function validMethodsV1OracleEvidence(context, receipt, generatedSkill) {
+  try {
+    const caseRoot = discoverReleaseCaseRoot(path.join(context.repoRoot, "tests", "cases", "release"));
+    const inputs = loadReleaseCaseInputs(caseRoot);
+    const gateOracle = loadReleaseCaseOracle(caseRoot);
+    const scenario = inputs.scenarios.find((item) => item.scenario_id === inputs.journey_scenario);
+    const scenarioOracle = gateOracle.scenarios.find((item) => item.scenario_id === inputs.journey_scenario);
+    if (!scenario || !scenarioOracle || receipt?.methods_grounding?.schema_version !== 1) return false;
+    const methodsExpectation = generatedMethodsExpectation(context, generatedSkill, inputs, gateOracle, scenarioOracle);
+    const confirmed = new Set(methodsExpectation.confirmedMethods);
+    const evidenceCount = methodsExpectation.requiredEvidenceIdentities
+      .filter((identity) => confirmed.has(identity.method_id)).length;
+    const stageRoot = path.join(context.attemptRoot, "payload", "stages", "journey.cross-job.diagnose");
+    const validated = validateMethodsGroundingExecutionRecord({
+      jobBytes: fs.readFileSync(path.join(stageRoot, "methods-diagnose-job.json")),
+      auditBytes: fs.readFileSync(path.join(stageRoot, "methods-grounding-audit.json")),
+      logparseReceiptBytes: fs.readFileSync(path.join(stageRoot, "methods-logparse-receipt.json")),
+      expected: {
+        diagnosis_job_id: receipt.methods_grounding.diagnosis_job_id,
+        case_id: receipt.methods_grounding.case_id,
+        skill_ref: {
+          id: inputs.product_registration.runtime_ref_id,
+          version: inputs.product_registration.version,
+          content_hash: generatedSkill.combined_sha256,
+        },
+        logparse_product: inputs.product_registration.logparse_product,
+        registration_id: generatedSkill.registration_id,
+        registration_sha256: generatedSkill.registration_sha256,
+        package_tree_sha256: generatedSkill.package_tree_sha256,
+        combined_sha256: generatedSkill.combined_sha256,
+        status: "CONFIRMED",
+        confirmed_methods: methodsExpectation.confirmedMethods,
+        known_method_ids: methodsExpectation.methods.methods.map((method) => method.id),
+        source_ids: scenario.driver.attachment_anchor_names,
+        evidence_count: evidenceCount,
+      },
+    });
+    return sameIdentity(validated, receipt.methods_grounding);
   } catch {
     return false;
   }
@@ -3971,8 +4015,8 @@ async function crossJob(context, stage) {
   if (receipt.status === "PASS" && stage.id === "journey.cross-job.diagnose" && receipt.browser_api?.status !== "PASS") {
     return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CROSS_JOB_BROWSER_API_RECEIPT_INVALID" };
   }
-  if (receipt.status === "PASS" && stage.id === "journey.cross-job.diagnose" && !validMethodsV2OracleEvidence(context, receipt, generatedSkill)) {
-    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CROSS_JOB_METHODS_V2_ORACLE_EVIDENCE_INVALID" };
+  if (receipt.status === "PASS" && stage.id === "journey.cross-job.diagnose" && !validMethodsV1OracleEvidence(context, receipt, generatedSkill)) {
+    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CROSS_JOB_METHODS_V1_ORACLE_EVIDENCE_INVALID" };
   }
   if (result.status === "ERROR") return { ...result, failure_domain: "HARNESS", code: result.termination?.trigger ?? "CROSS_JOB_EVIDENCE_ERROR" };
   if (result.status === "INCONCLUSIVE") return { ...result, failure_domain: "EXTERNAL", code: result.termination?.trigger ?? "EXTERNAL_INCONCLUSIVE" };
@@ -4000,7 +4044,7 @@ async function crossJob(context, stage) {
         browser_api: receipt.browser_api ?? null,
         browser_capability: receipt.browser_capability ?? null,
         browser_failure: receipt.browser_failure ?? null,
-        methods_v2: receipt.methods_v2 ?? null,
+        methods_grounding: receipt.methods_grounding ?? null,
       },
     };
   }
@@ -4022,7 +4066,7 @@ async function crossJob(context, stage) {
       browser_api: receipt.browser_api ?? null,
       browser_capability: receipt.browser_capability ?? null,
       browser_failure: receipt.browser_failure ?? null,
-      methods_v2: receipt.methods_v2 ?? null,
+      methods_grounding: receipt.methods_grounding ?? null,
       topology: receipt.topology,
       runtime_images: receipt.runtime_images,
       runtime_resources: receipt.runtime_resources,

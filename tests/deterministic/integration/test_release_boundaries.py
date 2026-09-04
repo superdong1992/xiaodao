@@ -17,7 +17,7 @@ EXPECTED_ENV_KEYS = {
     "DFX_LOG_LEVEL",
     "GENERIC_SKILL_NAME",
     "DFX_LOG_DIR",
-    "EVIDENCE_V2_REVIEWER_ENABLED",
+    "SPECIALIZED_REVIEWER_ENABLED",
     "LOGPARSE_CONFIG_PATH",
     "LOGPARSE_PYTHON",
     "LOGPARSE_REPO",
@@ -69,7 +69,7 @@ def test_release_metadata_keeps_the_offline_database_boundary() -> None:
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     required_release_boundaries = (
-        "State、Job 和权威 Outcome 已硬切到 V8",
+        "State、Job 和权威 Outcome 已硬切到 V9",
         "Replay every durable, finalized but unconfirmed Job Outcome",
         "`state.json` approaches 16 MiB",
         "retained history approaches 500 Cases",

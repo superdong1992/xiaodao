@@ -51,7 +51,7 @@ def _load_module(path: Path, name: str) -> ModuleType:
     return module
 
 
-def test_two_generators_share_the_methods_v2_agent_surface() -> None:
+def test_two_generators_share_the_methods_v1_agent_surface() -> None:
     package_validator = _load_validator()
     registration_validator = _load_module(
         LAN_VALIDATOR,
@@ -78,10 +78,8 @@ def test_two_generators_share_the_methods_v2_agent_surface() -> None:
         for phrase in package_validator.FORBIDDEN_SKILL_PHRASES:
             assert phrase not in text
         assert "`activation_markers` 必填、非空且组内唯一" in text
-        assert "公共 RPC timeout 日志只能放在 `evidence_markers`" in text
-        assert "INSUFFICIENT_EVIDENCE" not in text
-        for old_json_field in ('"target_logs":', '"identity_tokens":', '"sources":'):
-            assert old_json_field not in text
+        assert "Methods V1" in text
+        assert "identity_tokens" in text
 
 
 def _write_package(
@@ -104,14 +102,13 @@ name: diagnose-rpc-timeout
 description: Diagnose one RPC timeout from frozen evidence.
 ---
 
-Read frozen request.json and the compact evaluation_input from runtime context.
-Use request values for declared inputs. Its observations catalog deduplicated
-physical log lines, markers catalog declared literals, and ordered evaluations
-contain the events available to each method. Log evidence comes only from
-evaluation_input; do not rescan markers or target logs. Evaluate every
-evaluation_ref in evaluation_input evaluations order and return only
-evaluation_ref, verdict, supporting_event_refs, and reason; use UNKNOWN when
-the evidence cannot decide the method rule.
+Read frozen request.json, target_logs.json, every listed target log, and
+logparse-receipt.json. Log evidence comes only from the frozen target logs.
+Scan every method marker and do not stop after the first confirmation. Return
+only schema_version, status, confirmed_methods, candidate_methods, evidence,
+limitations, and safety_notes. Confirmed evidence contains a specific summary,
+identity_tokens, and exact source_id, one-based line_number, declared marker,
+and complete source line. Use PARTIAL or INSUFFICIENT when evidence is incomplete.
 """,
         encoding="utf-8",
     )
@@ -216,7 +213,7 @@ def test_canonical_validator_independently_recomputes_source_wiki_identity(
     ]
 
 
-def test_generated_v2_skill_reads_compact_context_and_required_user_inputs(
+def test_generated_v1_skill_reads_frozen_logs_and_declares_exact_output(
     tmp_path: Path,
 ) -> None:
     wiki = tmp_path / "wiki.md"
@@ -246,16 +243,24 @@ def test_generated_v2_skill_reads_compact_context_and_required_user_inputs(
     assert all(
         field in skill_text
         for field in (
-            "evaluation_input",
-            "observations",
-            "markers",
-            "evaluations",
-            "events",
+            "target_logs.json",
+            "logparse-receipt.json",
+            "identity_tokens",
+            "source_id",
+            "line_number",
         )
     )
     assert all(
         field in skill_text
-        for field in ("evaluation_ref", "verdict", "supporting_event_refs", "reason")
+        for field in (
+            "schema_version",
+            "status",
+            "confirmed_methods",
+            "candidate_methods",
+            "evidence",
+            "limitations",
+            "safety_notes",
+        )
     )
 
 

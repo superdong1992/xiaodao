@@ -7,6 +7,8 @@ import logging
 import os
 import threading
 import shutil
+import tempfile
+import zipfile
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -46,7 +48,6 @@ from problem_locator.contracts import (
     LogparseBrokerError,
     LogparseParseClaim,
     MaterializedPath,
-    METHOD_PUBLIC_REASON_TEXT_V2,
     OutcomeResultType,
     ResolvedAsset,
     ResourceKind,
@@ -56,10 +57,10 @@ from problem_locator.contracts import (
     RuntimeExecutionReceipt,
     RuntimeInfrastructureError,
     StateFile,
+    UserResultPayloadV3,
     VersionedRef,
     WorkspaceInputManifest,
     canonical_json_bytes,
-    method_pre_evaluation_diagnostic_id_v2,
     parse_canonical_json_bytes,
 )
 from problem_locator.contracts.enums import MethodsValidationReasonCode
@@ -2899,6 +2900,66 @@ def _public_fake_claiming_runtime(
     return runtime, job, factory, backend, resources
 
 
+def test_methods_v1_specialist_publishes_candidate_json_and_log_archive() -> None:
+    temporary = tempfile.TemporaryDirectory(prefix="pl-v1-")
+    runtime, job, _, backend, resources = _public_fake_claiming_runtime(
+        Path(temporary.name), "success"
+    )
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    outcome = receipt.job_outcome
+    assert outcome.result_type is OutcomeResultType.COMPLETED
+    assert outcome.payload is not None
+    assert outcome.payload.candidate_conclusion_draft is not None
+    assert outcome.methods_terminal_projection is None
+    proposals = {item.artifact_kind: item for item in outcome.proposed_artifacts}
+    assert set(proposals) == {
+        ArtifactKind.LOGPARSE_RUN,
+        ArtifactKind.USER_RESULT,
+        ArtifactKind.USER_RESULT_ARCHIVE,
+    }
+    report_resource = resources._staged[  # noqa: SLF001
+        ("proposal", proposals[ArtifactKind.USER_RESULT].staged_resource_ref.staging_id)
+    ]
+    assert report_resource.payload is not None
+    report = parse_canonical_json_bytes(
+        report_resource.payload,
+        UserResultPayloadV3,
+    )
+    assert report.format_id == "problem-locator-diagnosis-v3"
+    assert report.status == "COMPLETED"
+    assert report.root_cause == (
+        "The frozen RPC logs contain the declared timeout markers."
+    )
+    assert report.findings
+    assert report.verification_rules
+    archive_resource = resources._staged[  # noqa: SLF001
+        (
+            "proposal",
+            proposals[
+                ArtifactKind.USER_RESULT_ARCHIVE
+            ].staged_resource_ref.staging_id,
+        )
+    ]
+    assert archive_resource.payload is not None
+    with zipfile.ZipFile(io.BytesIO(archive_resource.payload)) as archive:
+        assert archive.namelist() == [
+            "result.txt",
+            "archive-manifest.json",
+            "client__compact__slot_client__checkout-service.log",
+            "server__compact__slot_server__inventory-service.log",
+        ]
+        assert b"rpc deadline exceeded request_id=42" in archive.read(
+            "client__compact__slot_client__checkout-service.log"
+        )
+        assert b"connection pool wait request_id=42" in archive.read(
+            "server__compact__slot_server__inventory-service.log"
+        )
+    assert len(backend.calls) == 2
+    temporary.cleanup()
+
+
 @pytest.mark.parametrize("missing_binding", ("user_facts", "attachment"))
 def test_methods_preflight_publishes_waiting_without_backend_or_broker(
     missing_binding: str,
@@ -3071,7 +3132,7 @@ def test_default_product_survives_compiler_and_workspace_manifest(
     assert job.logparse_product == "default"
     assert receipt.job_outcome.error is not None
     assert receipt.job_outcome.error.code is ErrorCode.LOGPARSE_FAILED
-    assert backend.calls == []
+    assert len(backend.calls) == 1
     preprocessing_root = Path(factory.open_calls[0][1])
     manifest = parse_canonical_json_bytes(
         (preprocessing_root / "inputs/manifest.json").read_bytes(),
@@ -3136,7 +3197,7 @@ def test_public_broker_fake_closes_claimed_failed_execution(
 
     assert receipt.job_outcome.error is not None
     assert receipt.job_outcome.error.code is ErrorCode.LOGPARSE_FAILED
-    assert backend.calls == []
+    assert len(backend.calls) == 1
     assert backend.claim is not None
     assert backend.request_bytes is not None
     session = factory.sessions[0]
@@ -3161,7 +3222,7 @@ def test_methods_preprocessing_rejects_failed_operation_before_success(
 
     assert receipt.job_outcome.error is not None
     assert receipt.job_outcome.error.code is ErrorCode.LOGPARSE_OUTPUT_INVALID
-    assert backend.calls == []
+    assert len(backend.calls) == 1
     session = factory.sessions[0]
     assert session.closed is True  # type: ignore[attr-defined]
     assert session.close_calls == 1  # type: ignore[attr-defined]
@@ -3171,7 +3232,7 @@ def test_methods_preprocessing_rejects_failed_operation_before_success(
     assert records.read_audit_bytes(job.job_id, "methods_target_logs.json") is None
 
 
-def test_logparse_broker_asset_failure_is_classified_before_evaluation(
+def test_logparse_broker_asset_failure_preserves_the_typed_v1_error(
     tmp_path: Path,
 ) -> None:
     failure = ExecutionFailure(
@@ -3205,15 +3266,9 @@ def test_logparse_broker_asset_failure_is_classified_before_evaluation(
     assert error.code is failure.code
     assert error.details == failure.details
     assert error.retryable is False
-    assert error.reason_code == "RESOURCE_SNAPSHOT_DRIFT"
-    assert error.message == METHOD_PUBLIC_REASON_TEXT_V2[error.reason_code]
-    assert error.diagnostic_id == method_pre_evaluation_diagnostic_id_v2(
-        case_id=job.case_id,
-        source_job_id=job.job_id,
-        reason_code=error.reason_code,
-        source_stage=failure.stage.value,
-        source_error_code=failure.code.value,
-    )
+    assert error.reason_code is None
+    assert error.message == failure.message
+    assert error.diagnostic_id is None
     assert (
         records.read_audit_bytes(job.job_id, "methods-evidence-graph-v2.json")
         is None

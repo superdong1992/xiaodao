@@ -119,18 +119,16 @@
 
 frontmatter 只包含 `name` 和 `description`。入口保持简短，并明确：
 
-1. 读取冻结 `request.json` 和运行时上下文中的紧凑 `evaluation_input`。
-2. 方法规则需要用户输入时读取 `request.json` 中的冻结值。`evaluation_input.observations` 是去重
-   物理日志行目录，`markers` 是去重声明 marker 目录，`evaluations` 是完整有序待判定清单，每项的
-   `events` 给出 event ref 与 observation/marker 关联。
-3. 日志证据只能来自 `evaluation_input`；不读取目标日志、不重新扫描 marker、不读取独立 Graph/Plan
-   文件，也不重新选择日志。按 `evaluation_input.evaluations` 顺序评估全部 `evaluation_ref`；不能在
-   第一个确认项后停止。
-4. 每项只输出 `evaluation_ref`、`verdict`、`supporting_event_refs` 和 `reason`。
-   `CONFIRMED` 必须按计划顺序选择当前 evaluation 的非空 event ref 子集；`REJECTED` 或
-   `UNKNOWN` 必须使用空数组。
-5. `reason` 只概括方法规则判断，不回抄 marker、日志原文、行号、哈希或事件身份。
-6. 证据不足或受 Wiki 观测限制影响时使用 `UNKNOWN`，并在 `reason` 中说明边界。
+1. 读取冻结 `request.json`、`target_logs.json`、其中列出的全部目标日志和
+   `logparse-receipt.json`。
+2. 方法规则需要用户输入时读取 `request.json` 中的冻结值；扫描全部方法 marker，逐项评估全部方法，
+   不能在第一项确认后停止，也不能扩大目标日志范围。
+3. 每个 confirmed method 输出具体 evidence summary、`identity_tokens` 和 sources；每条 source
+   逐字复制准确 `source_id`、一基 `line_number`、声明 marker 和完整日志原文。
+4. 只输出根 JSON object 的七个字段：`schema_version`、`status`、`confirmed_methods`、
+   `candidate_methods`、`evidence`、`limitations`、`safety_notes`。
+5. 证据不足或受 Wiki 观测限制影响时使用 `PARTIAL` 或 `INSUFFICIENT`，并明确说明边界。
+6. Agent 不创建 Candidate、Outcome、USER_RESULT、ZIP 或权威结论。
 
 业务 `SKILL.md` 必须逐字包含以下两句，不改写，也不要补入具体命令名或文件名：
 
@@ -229,10 +227,8 @@ Wiki 的同义输入按以下规则合并：
   字段含义和观测边界可以只写一次共享引用，但共享解释不能替代方法索引；只存在于共享引用的 marker
   不会进入该方法的服务端证据集合。
 - `activation_markers` 必填、非空且组内唯一，并且必须是当前方法 `evidence_markers` 的保序子序列。
-  它只列“出现后值得为该方法创建 evaluation”的 marker；activation 命中不表示单条日志已经确认
-  原因，Agent 仍须使用当前 evaluation 的完整 `events` 和方法卡作出判定。公共症状只能作为 context，不能用于
-  激活所有原因；公共 RPC timeout 日志只能放在 `evidence_markers` 中作为判断上下文。同一 literal
-  确实会触发多个方法时，可以分别出现在这些方法的 `activation_markers` 中。
+  它只是包格式的辅助索引；Methods V1 Specialist 仍须检查全部方法和权威目标日志。activation 命中
+  不是确认结论，也不能缩减 evidence marker 范围。
 - 不能用日志缺失排除受抑制、限流或采样影响的原因。
 
 ## source identity v2 与固定模板清单
@@ -298,13 +294,13 @@ source identity 使用以下闭合结构：
 marker，或只把模板放入共享引用，都不能建立闭包。共享引用可以承载共同字段含义和观测边界，但
 不能替代这里的方法归属和索引。
 
-`activation_markers` 不改变“所需证据”闭包，也不要求另建方法卡段落。它只从已经闭合的
-`evidence_markers` 中选择触发项；未入选 activation 的 marker 仍会作为已激活 evaluation 的上下文。
+`activation_markers` 不改变“所需证据”闭包，也不要求另建方法卡段落。未入选 activation 的 marker
+仍必须由 Methods V1 Specialist 检查。
 
-“输出含义”必须说明：Server 会把同一方法的全部独立事件绑定到该方法的 `evaluation_ref`；Agent
-返回该引用、判定、从当前计划项选择的 `supporting_event_refs` 和简短原因。Agent 不复制 marker、
-日志原文、行号、哈希、identity token 或 hit ref；Server 从双方一致选择的 event ref 机械派生 hit。
-证据不足以判断事件关系时返回 `UNKNOWN`。
+“输出含义”必须说明：Specialist 为同一方法的每个独立事件保留具体 evidence summary 和可区分事件的
+`identity_tokens`，并逐条复制精确 source、marker、一基行号和完整日志原文。Server 重新读取权威
+目标日志，复核引用字节与哈希，再映射 Candidate、Outcome 和用户报告。证据不足时使用 `PARTIAL`
+或 `INSUFFICIENT`。
 
 其他共享引用只放多个方法共同遵守的 Wiki 内容，例如输入含义、证据作用域、共同日志的字段含义、
 观测限制和安全提醒。方法实际读取的日志模板仍须在相应方法卡与索引中列出。不要增加 Wiki 没有

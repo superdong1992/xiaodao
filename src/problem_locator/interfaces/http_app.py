@@ -521,7 +521,7 @@ _REST_FIELD_DESCRIPTIONS = {
     "max_bytes": "Maximum accepted attachment size in bytes for this API version.",
     "max_count": "Maximum number of attachments accepted for this requirement.",
     "max_utf8_bytes": "Maximum UTF-8 byte length accepted for the input value.",
-    "methods_result": "Public Evidence V2 terminal result, present only after a Methods evaluation reaches a terminal state.",
+    "methods_result": "Reserved compatibility field. It is absent on V9 Cases; specialized results use final_result or unresolved_result plus downloadable Artifacts.",
     "message": "Safe human-readable status or error message.",
     "method": "HTTP method required for the reserved upload.",
     "min_count": "Minimum number of attachments required.",

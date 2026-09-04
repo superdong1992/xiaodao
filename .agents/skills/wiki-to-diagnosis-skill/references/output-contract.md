@@ -17,19 +17,16 @@
 ## SKILL.md
 
 - frontmatter 只要求 `name` 和 `description`；`name` 必须与目录名及 `methods.json.skill_name` 相同。
-- 入口保持简短，说明读取冻结 `request.json` 和运行时上下文中的紧凑 `evaluation_input`，并按需
-  读取方法卡和共享引用。
+- 入口保持简短，说明读取冻结 `request.json`、`target_logs.json`、其中列出的目标日志、
+  `logparse-receipt.json`，并按需读取方法卡和共享引用。
 - 明确方法规则需要用户输入时读取 `request.json` 中的冻结值。
-- 明确 `evaluation_input.observations` 是去重物理日志行目录，`markers` 是去重声明 marker 目录，
-  `evaluations` 是完整有序待判定清单，每项的 `events` 给出 event ref 与 observation/marker 关联。
-- 明确日志证据只能来自 `evaluation_input`；不读取目标日志、不重新扫描 marker、不读取独立
-  Graph/Plan 文件，也不重新选择日志。
-- 明确按 `evaluation_input.evaluations` 顺序评估全部 `evaluation_ref`，不能在第一个确认项后停止。
-- 明确每项只输出 `evaluation_ref`、`verdict`、`supporting_event_refs` 和 `reason`。
-  `CONFIRMED` 必须按计划顺序选择当前 evaluation 的非空 event ref 子集；`REJECTED` 或
-  `UNKNOWN` 必须使用空数组。
-- `reason` 只概括方法规则判断，不回抄 marker、日志原文、行号、哈希或事件身份。
-- 证据不足或受 Wiki 观测限制影响时使用 `UNKNOWN`，并在 `reason` 中说明边界。
+- 明确扫描 `target_logs.json` 列出的全部目标日志和全部方法 marker，不能在第一项确认后停止。
+- 明确每个 confirmed method 的 evidence 要包含具体 summary、`identity_tokens` 和 sources；每条
+  source 逐字复制 `source_id`、一基 `line_number`、声明 marker 和完整日志原文。
+- 明确只输出根 JSON object 的七个字段：`schema_version`、`status`、`confirmed_methods`、
+  `candidate_methods`、`evidence`、`limitations`、`safety_notes`。
+- 证据不足或受 Wiki 观测限制影响时使用 `PARTIAL` 或 `INSUFFICIENT` 并明确限制，不补写事实。
+- 明确 Agent 不创建 Candidate、Outcome、USER_RESULT、ZIP 或权威结论。
 
 ## methods.json
 
@@ -104,10 +101,8 @@ Wiki `text` 日志模板使用 `{field_name}` 命名字段时，先按模板及�
   `API_COMPLETE service=`，不是 `API_COMPLETE`；`QUEUE_HISTORY print_time_ms={print_time_ms} ...`
   的 marker 是 `QUEUE_HISTORY print_time_ms=`，不是 `QUEUE_HISTORY`。
 - `activation_markers` 必填、非空且组内唯一，并且必须是当前方法 `evidence_markers` 的保序子序列。
-  它只列“出现后值得为该方法创建 evaluation”的 marker。activation 命中不表示单条日志足以确认
-  原因；Agent 仍须读取当前 evaluation 的完整 `events`，并按方法卡判断。公共症状只能作为 context，不能用于
-  激活所有原因；公共 RPC timeout 日志只能放在 `evidence_markers` 中作为判断上下文。同一 literal
-  如果确实会触发多个方法，可以分别出现在这些方法的 `activation_markers` 中。
+  它只是包格式的辅助索引；Methods V1 Specialist 仍须检查全部方法和全部权威目标日志。activation
+  命中不表示原因已确认，也不能缩减 evidence marker 范围。
 - 方法按 Wiki 给出的可能性或诊断顺序排列；不要把顺序解释成互斥。
 - 共同症状、失败入口或请求关联日志的解释可以只写一次共享引用；但只要某个方法会根据该日志是否
   出现、其中的字段或它与其他日志的关联作出判定，就必须把 canonical marker 写入该方法的
@@ -154,28 +149,30 @@ Wiki `text` 日志模板使用 `{field_name}` 命名字段时，先按模板及�
 marker，或只把模板放入共享引用，都不能建立闭包。共享引用可以承载共同字段含义和观测边界，但
 不能替代这里的方法归属和索引。
 
-`activation_markers` 不改变“所需证据”闭包，也不要求另建方法卡段落。它只从已经闭合的
-`evidence_markers` 中选择触发项；未入选 activation 的 marker 仍会作为已激活 evaluation 的上下文。
+`activation_markers` 不改变“所需证据”闭包，也不要求另建方法卡段落。未入选 activation 的 marker
+仍必须由 Methods V1 Specialist 检查。
 
 如果 Wiki 说明某条日志只有在对应阈值或条件已经满足时才会打印，把观测到该日志写入“确认条件”，不能只称为补充证据。
 
-“输出含义”必须说明：Server 会把同一方法的全部独立事件绑定到该方法的 `evaluation_ref`；Agent
-返回该引用、判定、从当前计划项选择的 `supporting_event_refs` 和简短原因。Agent 不复制 marker、
-日志原文、行号、哈希、identity token 或 hit ref；Server 从双方一致选择的 event ref 机械派生 hit。
+“输出含义”必须说明：Specialist 为同一方法的每个独立事件保留具体 evidence summary 和可区分事件的
+`identity_tokens`，并逐条复制精确 source、marker、一基行号和完整日志原文。Server 会重新读取权威
+目标日志，复核引用字节与哈希，再映射 Candidate、Outcome 和用户报告。
 
-## Methods V2 评估输出
+## Methods V1 Specialist 输出
 
-运行结果是一个根 JSON 数组，顺序与 `evaluation_input.evaluations` 完全一致。每项只能包含：
+运行结果是一个根 JSON object，字段固定为：
 
-- `evaluation_ref`：逐字复制对应计划项的引用。
-- `verdict`：`CONFIRMED`、`REJECTED` 或 `UNKNOWN`。
-- `supporting_event_refs`：`CONFIRMED` 时按计划顺序选择当前 evaluation 的非空 event ref 子集；
-  `REJECTED` 或 `UNKNOWN` 时使用空数组。
-- `reason`：非空的规则判断摘要。
+- `schema_version=1`。
+- `status`：`CONFIRMED`、`PARTIAL` 或 `INSUFFICIENT`。
+- `confirmed_methods`：有权威日志证据的方法 ID。
+- `candidate_methods`：尚未确认的方法 ID，与 confirmed 集合互斥。
+- `evidence`：每项包含 `method_id`、具体 `summary`、`identity_tokens` 和非空 `sources`；每条 source
+  包含 `source_id`、一基 `line_number`、声明 marker 和完整日志原文。
+- `limitations`：证据缺口和 Wiki 声明的观测限制。
+- `safety_notes`：副作用和安全边界。
 
-不得增加、遗漏、重复或重排计划项。不得输出 `method_id`、marker、日志原文、行号、哈希、
-`identity_tokens`、hit ref 或其他证据字段。Server 负责保存权威审计记录，并把双方一致选择的
-event ref 映射到最终结果。
+`CONFIRMED` 必须至少有一个 confirmed method。`INSUFFICIENT` 必须没有 confirmed method 和 evidence。
+Agent 不得输出 Candidate、Outcome、USER_RESULT、ZIP 或权威验证字段。
 
 ## 固定源日志模板引用
 
@@ -208,5 +205,5 @@ event ref 映射到最终结果。
 
 不要在共享引用中增加 Wiki 未提供的阈值或经验结论。
 
-当 `evaluation_input` 中同一方法包含多次相关调用时，按方法卡规则评估该 evaluation 覆盖的全部
-`events`；证据不足以证明事件关系时返回 `UNKNOWN`，不得自行重组事件关联。
+同一方法存在多次相关调用时，按方法卡规则分别保留每个独立事件的证据身份。证据不足以证明事件
+关系时保留 candidate 或报告 `INSUFFICIENT`，不得自行重组事件关联。

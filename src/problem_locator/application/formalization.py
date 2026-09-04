@@ -850,16 +850,21 @@ def apply_candidate_mutation(
 
 def resolve_final_result(
     candidate: CandidateConclusion | None,
-    final_result_target: CandidateTarget | None,
+    final_result_target: CandidateTarget | ReviewTargetBinding | None,
 ) -> CandidateConclusion | None:
     """Resolve an explicit final_result_target to the complete ACCEPTED candidate."""
 
     if final_result_target is None:
         return None
+    target = final_result_target
+    if isinstance(target, ReviewTargetBinding):
+        if target.accepted_candidate_proposal_key is None:
+            raise ValueError("final_result_target proposal binding is unavailable")
+        target = None
     if (
         candidate is None
         or candidate.status is not CandidateStatus.ACCEPTED
-        or not _target_matches(candidate, final_result_target)
+        or (target is not None and not _target_matches(candidate, target))
     ):
         raise ValueError("final_result_target does not resolve the ACCEPTED candidate")
     return candidate.model_copy(deep=True)
@@ -1293,6 +1298,7 @@ def build_job(
         case_id=case_id,
         job_type=spec.job_type,
         diagnosis_mode=spec.diagnosis_mode,
+        review_policy=spec.review_policy,
         generic_skill_name=spec.generic_skill_name,
         generic_problem_text=spec.generic_problem_text,
         status=JobStatus.PENDING,

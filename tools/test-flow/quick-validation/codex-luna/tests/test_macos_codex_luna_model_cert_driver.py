@@ -254,12 +254,10 @@ description: Test-owned release registration consumed by the production Runtime.
 
 # RPC timeout diagnosis
 
-Read request.json and the compact evaluation_input embedded in the context.
-Do not read separate Evidence Graph or Evaluation Plan files.
-Use sources, including zero-hit sources, and resolve the observations and markers
-catalogs through the ordered events in evaluations.
-Return only evaluation_ref, verdict, supporting_event_refs, and reason;
-UNKNOWN is allowed.
+Read request.json, target_logs.json, logparse-receipt.json, and the listed frozen
+logs. Only output schema_version, status, confirmed_methods, candidate_methods,
+evidence, limitations, and safety_notes. Each evidence item must include
+identity_tokens and sources with source_id and line_number.
 """,
         encoding="utf-8",
     )

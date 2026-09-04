@@ -455,7 +455,7 @@ test("the first-party adapter matrix is thin, platform-bound and shares one core
   assert.match(core, /configuration\.client === configuration\.expectedClient/);
   assert.match(core, /runChromePage/);
   assert.match(core, /content_length_control: "user-agent"/);
-  assert.match(core, /CHROME_METHODS_V2_ARTIFACT_LIST_INVALID/);
+  assert.match(core, /CHROME_ARTIFACT_LIST_INVALID/);
   assert.match(core, /CHROME_IDENTITY_DRIFT/);
   assert.match(core, /"--network-alias", "problem-locator-client"/);
   assert.match(core, /"--network-alias", "problem-locator-server"/);
@@ -465,14 +465,17 @@ test("the first-party adapter matrix is thin, platform-bound and shares one core
   assert.match(core, /RELEASE_CLIENT_IMAGE_IDENTITY_INVALID/);
   assert.match(core, /GENERATED_SKILL_ROOT_REQUIRED/);
   assert.match(core, /dst=\/run\/generated-specialized-skill,readonly/);
-  assert.doesNotMatch(core, /PARTIALLY_RESOLVED|result\.zip|diagnosis-result\.json|method-grounding-audit|methods_grounding|public_result_archive/);
+  assert.match(core, /diagnosis-result\.json/);
+  assert.match(core, /result\.zip/);
+  assert.match(core, /methods-grounding-audit\.json/);
+  assert.match(core, /public_result_archive/);
   const actions = fs.readFileSync(path.join(TOOL_ROOT, "lib", "actions.mjs"), "utf8");
   assert.match(actions, /--chrome-version/);
   assert.match(actions, /CROSS_JOB_BROWSER_UPLOAD_RECEIPT_INVALID/);
   assert.match(actions, /CROSS_JOB_BROWSER_API_RECEIPT_INVALID/);
-  assert.match(actions, /validMethodsV2OracleEvidence/);
-  assert.match(actions, /CROSS_JOB_METHODS_V2_ORACLE_EVIDENCE_INVALID/);
-  assert.doesNotMatch(actions, /methods_grounding|validMethodsGroundingOracleEvidence/);
+  assert.match(actions, /validMethodsV1OracleEvidence/);
+  assert.match(actions, /CROSS_JOB_METHODS_V1_ORACLE_EVIDENCE_INVALID/);
+  assert.match(actions, /methods_grounding/);
 });
 
 test("the dual Linux adapter fails closed on traversal, mutable Skills, proxy leakage and runtime replacement", () => {
@@ -502,11 +505,11 @@ test("the dual Linux adapter fails closed on traversal, mutable Skills, proxy le
   assert.match(core, /runtimeIdentity\.claude_cli_sha256 === RELEASE_CLAUDE_CLI_SHA256/);
   assert.match(core, /runtimeIdentity\.headless_shell_sha256 === RELEASE_CHROME_HEADLESS_SHELL_EXECUTABLE_SHA256/);
   assert.match(core, /"NO_PROXY=problem-locator-server,problem-locator-client,127\.0\.0\.1,localhost"/);
-  assert.match(core, /artifacts_verified: 0/);
+  assert.match(core, /artifacts_verified: expectedArtifacts\.length/);
   assert.match(initializer, /find \/opt\/e2e-skills -xdev -perm \/022/);
   assert.match(initializer, /runuser -u plagent -- find "\$tree" -xdev -writable/);
   assert.match(core, /GENERATED_SKILL_REGISTRATION_BYTES_DRIFT/);
-  assert.match(core, /validateMethodsV2ExecutionRecords/);
+  assert.match(core, /validateMethodsGroundingExecutionRecord/);
   assert.match(methodsOracle, /METHODS_V2_GRAPH_HIT_INVALID/);
   assert.doesNotMatch(methodsOracle, /hit\.line\.toLowerCase\(\)|observed\.line\.toLowerCase\(\)/);
   assert.match(methodsOracle, /METHODS_V2_PLAN_COVERAGE/);
@@ -697,9 +700,8 @@ test("model invocations preserve failed terminals while PASS still requires exac
   assert.match(core, /receipt\.job_sha256/);
   assert.match(core, /receipt\.job_outcome_sha256/);
   assert.match(core, /receipt\.methods_preflight_sha256/);
-  assert.match(core, /correspondence\.service_invocations\.length >= 1 && correspondence\.service_invocations\.length <= 2/);
-  assert.match(core, /diagnoseCalls\.length >= 1 && diagnoseCalls\.length <= 2/);
-  assert.match(core, /reviewCalls\.length === 0/);
+  assert.match(core, /JSON\.stringify\(jobTypes\) === JSON\.stringify\(\["DIAGNOSE", "DIAGNOSE", "REVIEW"\]\)/);
+  assert.match(core, /SPECIALIZED_REVIEWER_ENABLED=true/);
   assert.match(core, /DIAGNOSE_UNEXPECTED_PREFLIGHT_ACTIVITY/);
   assert.match(isolated, /WRAPPER_MODEL_CAP_EXCEEDED/);
   assert.match(isolated, /cache_creation_input_tokens/);

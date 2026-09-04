@@ -265,7 +265,7 @@ function handleMcp(message) {
       result: {
         protocolVersion: params?.protocolVersion ?? "2025-03-26",
         capabilities: { tools: {} },
-        serverInfo: { name: "problem-locator", version: "5.0.0" },
+        serverInfo: { name: "problem-locator", version: "6.0.0" },
       },
     };
   }

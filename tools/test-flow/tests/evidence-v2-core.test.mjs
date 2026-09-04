@@ -25,7 +25,7 @@ function fixture() {
   const gateRoot = path.join(root, "gate");
   fs.mkdirSync(path.join(sourceRoot, "schemas", "v2"), { recursive: true });
   fs.mkdirSync(gateRoot, { recursive: true });
-  fs.writeFileSync(path.join(sourceRoot, "schemas", "v2", "contract-manifest.json"), canonicalJson({ schema_version: 8 }));
+  fs.writeFileSync(path.join(sourceRoot, "schemas", "v2", "contract-manifest.json"), canonicalJson({ schema_version: 9 }));
   fs.writeFileSync(path.join(gateRoot, "pytest-summary.json"), canonicalJson({
     schema_version: 2,
     tests: 106,
@@ -73,7 +73,7 @@ test("det.evidence-v2-core is a zero-model pytest Gate in deterministic.full", (
 
 test("the Core selector list is fixed, unique, and points at existing production tests", () => {
   assert.equal(new Set(EVIDENCE_V2_CORE_SELECTORS).size, EVIDENCE_V2_CORE_SELECTORS.length);
-  assert.equal(EVIDENCE_V2_CORE_SELECTORS.length, 63);
+  assert.equal(EVIDENCE_V2_CORE_SELECTORS.length, 22);
   assert.match(evidenceV2CoreCasesDigest(), /^[a-f0-9]{64}$/);
   for (const selector of EVIDENCE_V2_CORE_SELECTORS) {
     const file = selector.split("::", 1)[0];
@@ -81,12 +81,12 @@ test("the Core selector list is fixed, unique, and points at existing production
   }
 });
 
-test("the Core suite pins the real SameJob entrance and source-overlay mutations", () => {
+test("the Core suite pins the real SameJob entrance and direct report publication", () => {
   assert.ok(EVIDENCE_V2_CORE_SELECTORS.includes(
-    "tests/deterministic/journey/test_rpc_timeout.py::test_rpc_timeout_methods_v2_is_one_durable_same_job_path",
+    "tests/deterministic/journey/test_rpc_timeout.py::test_r01_r14_rpc_timeout_is_one_durable_cross_module_path",
   ));
   assert.ok(EVIDENCE_V2_CORE_SELECTORS.includes(
-    "tests/deterministic/integration/test_evidence_v2_source_mutations.py::test_source_overlay_mutant_is_killed_by_exact_regression_test",
+    "tests/deterministic/unit/application/test_outcome_submission.py::test_candidate_outcome_without_review_atomically_publishes_json_and_zip",
   ));
 });
 
@@ -121,7 +121,7 @@ test("the Test Flow action writes one canonical Core sub-receipt bound to its ev
     const verdictPath = path.join(gateRoot, "core-verdict.json");
     assert.equal(fs.readFileSync(verdictPath, "utf8"), canonicalJson(verdict));
     assert.equal(verdict.source_snapshot_digest, SOURCE_DIGEST);
-    assert.equal(verdict.contract_manifest.sha256, sha256Bytes(canonicalJson({ schema_version: 8 })));
+    assert.equal(verdict.contract_manifest.sha256, sha256Bytes(canonicalJson({ schema_version: 9 })));
     assert.equal(verdict.core_cases.sha256, evidenceV2CoreCasesDigest());
     assert.deepEqual(verdict.pytest.counts, {
       tests: 106,

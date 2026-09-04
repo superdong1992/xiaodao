@@ -49,7 +49,7 @@ class Settings:
     logparse_python: Path
     dfx_log_level: str
     dfx_log_dir: Path | None
-    evidence_v2_reviewer_enabled: bool = False
+    specialized_reviewer_enabled: bool = False
     route_claude_command: str | None = None
     diagnose_claude_command: str | None = None
 
@@ -162,13 +162,14 @@ class Settings:
         if dfx_log_dir is not None and not dfx_log_dir.is_absolute():
             raise SettingsError("DFX_LOG_DIR must be an absolute path")
 
-        raw_reviewer_enabled = values.get(
-            "EVIDENCE_V2_REVIEWER_ENABLED",
-            "false",
-        )
+        if "EVIDENCE_V2_REVIEWER_ENABLED" in values:
+            raise SettingsError(
+                "EVIDENCE_V2_REVIEWER_ENABLED is not supported; use SPECIALIZED_REVIEWER_ENABLED"
+            )
+        raw_reviewer_enabled = values.get("SPECIALIZED_REVIEWER_ENABLED", "false")
         if raw_reviewer_enabled not in {"true", "false"}:
             raise SettingsError(
-                "EVIDENCE_V2_REVIEWER_ENABLED must be true or false"
+                "SPECIALIZED_REVIEWER_ENABLED must be true or false"
             )
 
         return cls(
@@ -184,7 +185,7 @@ class Settings:
             logparse_python=logparse_python,
             dfx_log_level=dfx_log_level,
             dfx_log_dir=dfx_log_dir,
-            evidence_v2_reviewer_enabled=raw_reviewer_enabled == "true",
+            specialized_reviewer_enabled=raw_reviewer_enabled == "true",
             route_claude_command=route_claude_command,
             diagnose_claude_command=diagnose_claude_command,
         )
@@ -202,8 +203,8 @@ class Settings:
             "logparse_python=<redacted>, "
             f"dfx_log_level={self.dfx_log_level!r}, "
             f"dfx_log_dir={self.dfx_log_dir!r}, "
-            "evidence_v2_reviewer_enabled="
-            f"{self.evidence_v2_reviewer_enabled!r})"
+            "specialized_reviewer_enabled="
+            f"{self.specialized_reviewer_enabled!r})"
         )
 
 

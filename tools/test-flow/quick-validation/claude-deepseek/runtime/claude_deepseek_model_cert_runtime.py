@@ -937,7 +937,7 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
         id_generator=DeterministicIdGenerator(seed="claude-deepseek-cert-specialist"),
         workspace_manager=WorkspaceManager(runtime_root / "specialist"),
         backend=specialist_backend,
-        evidence_v2_reviewer_enabled=reviewer_enabled,
+        specialized_reviewer_enabled=reviewer_enabled,
     )
     specialist_receipt = specialist_runtime.execute(
         source_job,
@@ -978,7 +978,7 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
             id_generator=DeterministicIdGenerator(seed="claude-deepseek-cert-reviewer"),
             workspace_manager=WorkspaceManager(runtime_root / "reviewer"),
             backend=_ReviewerBackend(reviewer_role),
-            evidence_v2_reviewer_enabled=reviewer_enabled,
+            specialized_reviewer_enabled=reviewer_enabled,
         )
         reviewer_receipt = reviewer_runtime.execute(
             review_job,

@@ -1,46 +1,52 @@
-# Methods V2 Specialist output contract
+# Methods V1 diagnosis output contract
 
-Write exactly one UTF-8 JSON array to
-`output/method-diagnosis.draft.json`. The array itself is the document root. Do
-not wrap it in an object or Markdown and do not write
-`output/job_outcome.draft.json`.
+Write exactly one canonical UTF-8 JSON object to
+`output/method-diagnosis.draft.json`. Do not write
+`output/job_outcome.draft.json` or any other Agent Outcome, create
+proposal drafts, generate a report, or run an outcome sealer.
 
-The Server has already scanned the logs once. Use only the server-produced
-`inputs/request.json` frozen user facts, the compact `evaluation_input` object
-in the required Evidence context section, and the pinned Methods package.
-`evaluation_input` is the complete model-visible projection of the authoritative
-Evidence Graph and Evaluation Plan. Its `sources` catalog includes every frozen
-target, including a source with no matching observation; `observations` contains
-only matching physical lines. Apply a request value only when the method
-rule names its required user input. Do not read or rescan target logs, rebuild
-evidence references, or load separate Graph/Plan files.
+Read only `inputs/request.json`, `inputs/target_logs.json`, the `log_path` files
+listed there, `inputs/logparse-receipt.json`, and the pinned Methods package.
+Scan every target log for every method's declared `evidence_markers`.
 
-Return one item for every Evaluation Plan item, in exact plan order:
+The top-level object has exactly these fields:
 
 ```json
-[
-  {
-    "evaluation_ref": "eval-<server value>",
-    "verdict": "CONFIRMED",
-    "supporting_event_refs": ["event-<server value>"],
-    "reason": "short method-rule evaluation"
-  }
-]
+{
+  "schema_version": 1,
+  "status": "CONFIRMED",
+  "confirmed_methods": ["method_id"],
+  "candidate_methods": [],
+  "evidence": [
+    {
+      "method_id": "method_id",
+      "summary": "specific evidence-based finding",
+      "identity_tokens": ["exact-token-from-cited-lines"],
+      "sources": [
+        {
+          "source_id": "server_source_id",
+          "line_number": 1,
+          "marker": "declared evidence marker",
+          "line": "exact complete frozen log line"
+        }
+      ]
+    }
+  ],
+  "limitations": [],
+  "safety_notes": []
+}
 ```
 
-Every item has exactly `evaluation_ref`, `verdict`, `supporting_event_refs`, and
-`reason`. `evaluation_ref` must equal the corresponding plan value. `verdict` is
-exactly one of `CONFIRMED`, `REJECTED`, or `UNKNOWN`. For `CONFIRMED`,
-`supporting_event_refs` is a non-empty subset of that evaluation item's event
-refs, retaining their evaluation order. For `REJECTED` or `UNKNOWN`,
-it is an empty array. Select only exact event refs issued in the Evaluation Plan.
-Do not return hit refs and do not copy or invent markers, raw log text, line
-numbers, hashes, identity values, or any other evidence fields. `reason` is
-non-empty and explains the rule decision without quoting those fields. Do not
-omit, add, duplicate, or reorder evaluations.
+`status` is exactly `CONFIRMED`, `PARTIAL`, or `INSUFFICIENT`.
+`confirmed_methods` and `candidate_methods` contain only IDs from `methods.json`
+and are disjoint. Every confirmed method has evidence. Evidence may name only a
+confirmed method. Each source copies the exact source ID, one-based line number,
+complete raw line, and a marker declared by that method. Every identity token
+must occur in the cited source lines, and each sorted `(method_id,
+identity_tokens)` pair must be unique.
 
-If the Server invokes this same SPECIALIST role once to repair a structure or
-coverage error, fix only the reported JSON shape, field set, plan coverage, plan
-order, exact evaluation or event reference, supporting-event relation, verdict
-enum, or empty reason. Return the same four fields for every item. Keep the
-evaluation meaning unchanged. There is no second repair.
+`CONFIRMED` requires a confirmed method. `INSUFFICIENT` requires empty
+`confirmed_methods` and `evidence`. Never infer an absent marker, invent a line,
+widen a target, or use narrative text as evidence. Publish only the canonical
+Methods draft named above. The Server rechecks every method, marker, line,
+source, identity, and hash before it creates Candidate, Outcome, JSON, or ZIP.

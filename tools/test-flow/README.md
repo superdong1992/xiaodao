@@ -23,7 +23,7 @@
 Windows、macOS 和显式 Linux Client 都有仓库内置 adapter。`--client auto` 在当前主机上选择对应 adapter；所有 Client 都通过 HTTP 直连 Linux Server。adapter 不是任意命令扩展点，调用方不能注入外部执行器。host-client 的 Web API 正式浏览器证明要求当前稳定版 Google Chrome，可通过 `TEST_FLOW_CHROME` 指定绝对可执行文件路径；Darwin 上显式 Linux Client 则只使用冻结在 Client image 中的官方 Chrome Headless Shell，不读取宿主浏览器。planning 会先在无网络临时容器中完成零模型 DOM smoke，CrossJob environment 再用正式 source-owned runner 做 loopback DOM roundtrip。
 
 `dev.default` 在 `deterministic.full` 内运行
-`det.evidence-v2-core`，并生成绑定 source snapshot、V8 contract manifest、固定 Core 用例和
+`det.evidence-v2-core`（保留旧 Gate ID），并生成绑定 source snapshot、V9 contract manifest、固定 Methods V1 Core 用例和
 JUnit 的 `core-verdict.json` 子收据；外层 `verdict.json` 仍是唯一权威结论。Release 认证始终在
 当前 attempt 重新运行 `deterministic.full`，不会复用历史 Core Stage。
 
@@ -31,7 +31,7 @@ P1 Claude/DeepSeek 和 P2 Codex/Luna Gate 已接入同一 `model-cert-input.json
 收据边界，并明确依赖 `deterministic.full` 和同一 attempt 的 `real.skill-generation`。provider runner
 是 `model-cert.json` 的唯一写入方；中央 action 只读取并按当前 source/Core 完整复核，绝不二次创建
 或改写该文件。adapter PASS 后由 Test Flow 统一复核 source snapshot、
-V8 manifest、Core verdict、调用/repair、usage、prompt/profile/tool policy 和最终
+V9 manifest、Core verdict、调用/repair、usage、prompt/profile/tool policy 和最终
 `methods_result` 身份。两家模型都只能使用 prompt 中由服务端 Graph/Plan 机械派生的紧凑
 `evaluation_input`、精确方法卡和按需读取的 `request.json`；完整 Graph/Plan 只留在 execution
 records，不进入模型工作区；
@@ -175,7 +175,7 @@ Windows 使用 `--client windows`，显式 Linux Client 使用 `--client linux`�
 
 `verdict.json` 会同时记录 snapshot digest、base Git SHA、branch 和 planning 时的 dirty 状态。Git 提交不是 Release admission 条件；推荐在全部 Proof 通过后再提交完全相同的快照。提交若改变任何 Git 可见 path 或字节，原 verdict 不再证明新内容，必须重新运行 Release。
 
-Release 从 GENESIS 和新的空 `DATA_ROOT` 开始，不复用业务 checkpoint。它执行一条 CrossJob：Environment、Route、Upload、Specialist-only Diagnose、Publish/Restart，并同时证明真实 Agent、真实 Logparse、七工具扁平 schema、服务端 DFX、安装分发、重启恢复和证据完整性。Upload Stage 使用真实浏览器运行体跨源重放 REST 创建/查询/附件准备，并以 `Blob` 覆盖长度与哈希失败后完成上传；Diagnose Stage 在终态幂等重放补参，再验证 REST 查询、公开产物列表和逐字节下载。host-client 绑定 Google Chrome；显式 Linux Client 绑定官方 Chrome Headless Shell 的 product、版本、归档和可执行文件 SHA-256。浏览器脚本不会设置 `Content-Length`，超时路径必须封口整个私有进程组并证明无残留。
+Release 从 GENESIS 和新的空 V9 `DATA_ROOT` 开始，不复用业务 checkpoint。它执行一条 CrossJob：Environment、Route、Upload、Methods V1 Specialist + 独立 Reviewer、Publish/Restart。Release 容器固定设置 `SPECIALIZED_REVIEWER_ENABLED=true`，必须实际观察 `REVIEWING`，只有 PASS 后才能同时公开 `diagnosis-result.json` 和 `result.zip`。同一链路还证明真实 Agent、真实 Logparse、七工具扁平 schema、服务端 DFX、安装分发、重启恢复和证据完整性。Upload Stage 使用真实浏览器运行体跨源重放 REST 创建/查询/附件准备，并以 `Blob` 覆盖长度与哈希失败后完成上传；Diagnose Stage 在终态幂等重放补参，再用真实浏览器验证 REST 查询、两项公开产物列表、Content-Length、SHA-256 和逐字节下载。Publish/Restart 再次核对同一 Case 和两项产物。host-client 绑定 Google Chrome；显式 Linux Client 绑定官方 Chrome Headless Shell 的 product、版本、归档和可执行文件 SHA-256。浏览器脚本不会设置 `Content-Length`，超时路径必须封口整个私有进程组并证明无残留。
 
 正式用例的日志归档不是假设外部 Logparse 已预装业务产品配置。容器初始化会从已审阅 Diagnosis Skill 的 `logparse_product`、anchors 和 journey driver 机械生成独立的只读运行时配置，并把每份原始附件无损投影为当前 Logparse loose-diagnostic 输入；初始化阶段先用冻结 Logparse 提交完成一次无模型 smoke parse，逐一证明 module/slot/process anchor 可解析。配置摘要、归档投影版本和归档摘要写入 Release case 与容器收据，服务只使用该独立配置，外部 Logparse Git 快照仍保持未修改。
 

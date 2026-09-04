@@ -27,5 +27,6 @@
     {"semantic_id": "server_receive_queueing", "marker": "QUEUE_HISTORY print_time_ms=", "identity_tokens": ["print_time_ms=6200", "ordinal=first"]},
     {"semantic_id": "server_receive_queueing", "marker": "QUEUE_HISTORY print_time_ms=", "identity_tokens": ["print_time_ms=6300", "ordinal=second"]}
   ],
-  "forbidden_evidence_terms": []
+  "forbidden_evidence_terms": [],
+  "required_safety_phrases": ["超时不等于取消"]
 }

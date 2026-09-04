@@ -2257,6 +2257,67 @@
   `git-visible-worktree-v1:3444c00ab0564c849dfbb2386be5ef7b24ee3416fbc92984619692cb425f4e60`
   （752 files），worktree 与 materialized source verification 均为 PASS。本元数据行本身不宣称被其
   引用的源码快照覆盖。
+
+## PL-FIX-054：专有定位终态只返回审计引用，缺少面向用户的具体报告
+
+- **状态**：修复完成；验证结论以本条“最新 Test Flow verdict”为准。
+- **症状**：当前专有定位被生产短路导向 Methods V2，Case 到达终态后
+  `final_result=null`、`artifacts=[]`，客户端只能读取 `methods_result` 中的内部评估引用，无法向
+  用户给出具体根因、分析依据、完成条件、证据、限制和处置建议，也无法下载原始目标日志包。
+- **受影响版本**：Problem Locator `5.0.0` 的 Evidence V2 生产链路，至少包括本轮修改前的当前
+  工作区；最后实际执行旧报告链路的参考提交为 `b7cbac5`。
+- **根因**：`DiagnosisRuntime._execute()` 对专有 DIAGNOSE 直接进入 `_execute_methods_v2`，绕过仍
+  存在的 `MethodDiagnosisDraftV1`、服务端 grounding、Candidate、`build_server_result_bundle()` 和
+  `build_result_archive()`。随后客户端 Skill 和 Test Flow 又把“专有终态零 Artifact”写成正向断言，
+  使缺少用户报告变成了被测试锁定的行为。
+- **不可回归行为**：
+  - V9 专有 DIAGNOSE 必须执行 `Candidate → 可选 Review → USER_RESULT`。服务端重新核对方法、
+    marker、日志来源、行号、原文和哈希；Agent 不得创建 Candidate、权威 Outcome、JSON 或 ZIP。
+  - `review_policy` 在 Job 创建时冻结。`NONE` 直接接受通过核验的 COMPLETE/PARTIAL Candidate；
+    `INDEPENDENT` 必须在 `REVIEWING` 阶段隐藏产物，只在 PASS 后同时公开。
+  - 已解决 Case 必须且只能公开一个 `diagnosis-result.json` 和一个 `result.zip`；JSON 使用
+    `problem-locator-diagnosis-v3`，ZIP 包含九节中文 `result.txt`、manifest 和按权威 plan 排序的
+    全部可交付目标日志。非 PASS 只能公开新的 INCONCLUSIVE JSON 与审计包，不得泄露原 Candidate
+    的 JSON/ZIP。
+  - 发布、Artifact 正式化与 Case 终态保持原子可见；同一 finalized Outcome 重放必须复用相同
+    Artifact ID、大小和 SHA-256。生成或发布失败不能提交 `RESOLVED`。
+  - 客户端必须自动下载、校验并按固定中文结构展示 JSON；`result.zip` 和审计包只在用户要求时
+    下载，ZIP 下载前必须提示包含原始目标日志。`methods_result` 在 V9 专有 Case 中始终为空，不能
+    作为结果来源。
+  - Problem Locator 版本为 `6.0.0`，State/Job/Outcome 使用 V9 / `v9-contract-r1`。只接受全新空
+    `DATA_ROOT`；V1–V8 数据只读保留且不得迁移。七个 MCP 工具名、REST 路径、附件协议和 MCP
+    根层扁平输入保持不变。
+- **修复历史**：2026-09-04，以 `b7cbac5` 的实际报告行为为参考，移除专有 DIAGNOSE 的 Methods
+  V2 生产短路，恢复 Methods V1 草稿、冻结目标日志、服务端 grounding、Candidate、可选独立审核和
+  V3 报告/归档生成；新增冻结审核策略与新配置开关，硬切 V9；同步客户端 Skill、两套 Wiki 生成
+  Skill、内置 profile/output contract、OpenAPI、浏览器指南、Release CrossJob 和真实 Chrome
+  list/download/restart 校验。旧 Evidence V2 package 由加载器明确拒绝，需从原 Wiki 重新生成。
+- **专项回归测试**：
+  - `tests/deterministic/unit/runtime/test_diagnosis_runtime.py::test_methods_v1_specialist_publishes_candidate_json_and_log_archive`
+  - `tests/deterministic/journey/test_rpc_timeout.py::test_r01_r14_rpc_timeout_is_one_durable_cross_module_path`
+  - 同文件 `test_same_job_uses_initial_order_fact_and_survives_restart`
+  - `tests/deterministic/unit/domain/test_coordinator_diagnosis.py::test_specialized_candidate_is_accepted_and_published_when_review_is_disabled`
+  - `tests/deterministic/unit/application/test_outcome_submission.py::test_candidate_outcome_formalizes_user_result_and_creates_review_job`
+  - 同文件 `test_candidate_outcome_without_review_atomically_publishes_json_and_zip`、
+    `test_candidate_result_retry_adopts_internal_first_file_before_state_commit` 和
+    `test_finalized_candidate_replay_adopts_consumed_file_and_directory`
+  - `tests/deterministic/unit/integrations/test_result_archive.py::test_result_archive_v3_is_deterministic_and_uses_plan_order`
+  - 同文件 `test_result_text_uses_the_locked_nine_chinese_sections` 和
+    `test_inconclusive_result_never_builds_result_zip`
+  - `tests/deterministic/contracts/test_user_result_v2.py::test_completed_candidate_server_final_requires_json_and_archive`
+  - 同文件 `test_inconclusive_server_final_requires_json_and_forbids_archive` 和
+    `test_non_pass_review_carries_json_but_pass_carries_no_new_result`
+  - `tests/deterministic/unit/interfaces/test_client_access_skill.py::test_skill_downloads_and_presents_the_specialized_user_report`
+  - `tests/deterministic/unit/runtime/test_methods_skill.py::test_production_loader_rejects_an_old_evidence_v2_package`
+  - `tests/deterministic/unit/storage/test_state_repository.py::test_v1_through_v8_state_is_read_only_and_unsupported`
+  - `tests/deterministic/contracts/test_mcp_input_schema_flatness.py::test_all_public_mcp_inputs_are_flat_without_exceptions`
+- **最新 Test Flow verdict**：Dev `run-20260904T054739Z-a7fd98c7` 为 `PASS_WITH_WARNINGS`，仅因
+  performance 为 `NOT_CALIBRATED`；functional、operation、verification 均为 `PASS`，模型调用、
+  token 和费用均为 0。`deterministic.full` 为 PASS：Methods V1 Core 30/30、contracts 576/576、
+  unit 1889 passed/68 skipped、integration 41/41、SameJob 4/4，全部 failure/error 为 0。验证源码
+  快照 `git-visible-worktree-v1:df2e4fb9a270a8b28c4c44be561ac3f393c641ac2990980019264faa848cd659`
+  （753 files），worktree 与 materialized source verification 均为 PASS。本元数据行本身不宣称被其
+  引用的源码快照覆盖；`release.full --plan-only` 的环境审查结果见本次交付说明。
   **本轮极限优化复验元数据**：Dev `run-20260903T135533Z-5c688ba5` 为
   `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为
   `NOT_CALIBRATED`（性能基线样本不足，无失败）。affected 906/906、Evidence V2 Core 116/116、

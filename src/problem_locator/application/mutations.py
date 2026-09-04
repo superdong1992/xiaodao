@@ -142,7 +142,10 @@ def apply_transition_plan_to_case(
             current.selected_skill_ref,
             plan.selected_skill_update,
         ),
-        final_result=resolve_final_result(candidate, plan.final_result_target),
+        final_result=resolve_final_result(
+            candidate,
+            plan.final_result_target,
+        ),
         unresolved_result=unresolved_result,
         generic_result=plan.generic_result,
         generic_result_v2=generic_result_v2,

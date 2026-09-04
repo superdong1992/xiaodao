@@ -126,7 +126,7 @@ class ReplayManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     schema_version: Literal[1]
-    state_schema_version: Literal[8]
+    state_schema_version: Literal[9]
     contract_revision: str
     replay_id: str
     mode: ReplayMode
@@ -502,7 +502,7 @@ def _decode_source_state(raw_bytes: bytes) -> StateFile:
     ):
         raise _fail(
             ErrorCode.STATE_SCHEMA_UNSUPPORTED,
-            "Replay accepts only the current State V8 contract.",
+            "Replay accepts only the current State V9 contract.",
             "SOURCE_STATE_SCHEMA_UNSUPPORTED",
         )
     try:
@@ -510,7 +510,7 @@ def _decode_source_state(raw_bytes: bytes) -> StateFile:
     except (TypeError, ValueError, ValidationError) as exc:
         raise _fail(
             ErrorCode.STATE_CORRUPT,
-            "Source State V8 violates its canonical contract.",
+            "Source State V9 violates its canonical contract.",
             "SOURCE_STATE_CORRUPT",
         ) from exc
 
@@ -577,6 +577,7 @@ def _rebind_pending_job(job: Job, bindings: Any) -> Job:
         finished_at=None,
         runtime_epoch=None,
         diagnosis_mode=bindings.diagnosis_mode,
+        review_policy=bindings.review_policy,
         generic_skill_name=bindings.generic_skill_name,
         agent_profile_ref=bindings.agent_profile_ref,
         available_skill_refs=bindings.available_skill_refs,
@@ -968,7 +969,7 @@ def _source_target_outcome(
     if expected is not None and published != expected:
         raise _fail(
             ErrorCode.STATE_CORRUPT,
-            "The source target Outcome does not match State V8.",
+            "The source target Outcome does not match State V9.",
             "SOURCE_EXECUTION_RECORD_INVALID",
         )
     if (

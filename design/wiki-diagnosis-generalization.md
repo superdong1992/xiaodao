@@ -1,58 +1,28 @@
-# Wiki 转 Methods Skill 与 Evidence V2 定位运行时
+# Wiki 转 Methods Skill 与 Methods V1 定位运行时
 
-状态：已实施；当前发布结论只以 Test Flow 的密封 `verdict.json` 为准
+状态：已实施；发布结论只认 Test Flow 为当前源码快照生成的密封 `verdict.json`
 
-当前版本：Problem Locator 5.0.0，State / Job / Outcome schema V8，
-`v8-contract-r1`
+当前版本：Problem Locator 6.0.0，State / Job / Outcome schema V9，`v9-contract-r1`
 
-## 目标与非目标
+## 目标与边界
 
-这条链路把一份已评审的故障定位 Wiki 转成一个闭合 Methods package。既有 `.agents`
-入口只生成 package，再由 Problem Locator 产品注册绑定路由与运行时；局域网 `.claude`
-入口直接生成包含同一 package 的完整生产 registration root。
-在一份固定日志快照上，系统只允许用服务端生成的正向证据确认方法；日志缺失、
-不可关联或证据不足必须保留为限制或不可定论，不能让模型补写证据身份。
+这条链路把已评审的故障定位 Wiki 转成闭合 Methods package。生成器保留 Wiki
+中的方法、正向日志模板、完成条件、限制和安全说明；产品 registration 再绑定路由、
+Logparse 计划与内置运行时资产。
 
-它不是持续监控系统，不在固定快照之外补采日志，也不让生成 Agent 或诊断
-Agent 决定部署范围、Logparse anchor、运行时资产或权威业务结果。
+系统只依据本次 Case 的冻结日志确认定位方法。日志缺失、无法关联或证据不足时，结果必须
+明确写成限制、证据缺口或 `INCONCLUSIVE`，不能让 Agent 补写日志身份、行号、原文或哈希。
 
-## 破坏兼容性边界
+V9 是破坏性升级：
 
-当前实现是一次明确的硬切：
-
-- 状态只接受 State V8 / `v8-contract-r1` 的新空 `DATA_ROOT`，不迁移或恢复
-  V1–V7 State、Job 或 Outcome。
-- 两个现行元 Skill 都不再生成 `GenerationSpec`、编译 manifest 或
-  `diagnosis-skill.json`。`.agents/skills/wiki-to-diagnosis-skill` 只生成 package；
-  `.claude/skills/wiki-to-logparse-diagnosis-skill` 生成当前 Server 可直接加载的
-  `registration-template.json` 与闭合 package。旧 `.claude/skills/wiki-to-diagnosis-skill`
-  生成器与旧生成 fixture 不是当前入口。
-- SPECIALIZED DIAGNOSE/REVIEW 不再接受 Agent 生成的 `AgentJobOutcomeDraftV2`，
-  不再依赖 manifest verification contract、`verification_contract.py` 或
-  `server_verifier.py`。这些旧文件已从当前源码删除。
-- Methods V2 不生成 Candidate、`DecisionAuditV2` 或 `PARTIALLY_RESOLVED`，也没有
-  Methods V1 的 diagnosis/review 草稿兼容入口。
-- GENERIC DIAGNOSE 仍是独立的黑盒回退路径，不读取专用 Methods package、
-  附件、Evidence 或 Review 状态。
-- 七个公开 MCP 工具仍只接受扁平根参数；Methods 接入没有引入嵌套
-  object、动态 Map、客户端 Hook、本地 MCP 或代理层。
-
-历史设计、旧版合同和实施过程只在 Git 历史中保留，不与本文的现行架构并列。
-
-## 所有权分层
-
-| 层 | 拥有的信息 | 不得越界的信息 |
-| --- | --- | --- |
-| 作者 Wiki | 诊断方法、字段含义、正向日志模板、阈值/单位、观测与安全边界 | 产品部署和运行时资产版本 |
-| `.agents` Wiki 元 Skill | 把 Wiki 忠实转为闭合 Methods package | 产品路由、Logparse 产品/anchor、Agent profile 和 output contract |
-| `.claude` 局域网部署元 Skill | 生成完整生产 registration root；固定内置运行时绑定、内部默认 product、作者确认的 module 和双端 USER_FACT anchor | 不得改变 Wiki 诊断语义、固定 slot 或引入客户端本地运行链路 |
-| 产品 registration | 能力描述、部署范围、package 绑定、DIAGNOSE/REVIEW 资产、Logparse plan | 不得改写生成 package 的 Wiki 语义 |
-| Runtime | no-plan preflight、Logparse 冻结、单次证据扫描、Graph/Plan、Specialist 单评、可选盲评和权威 Outcome | 不让模型扫描日志、自报证据或决定终态 |
-| Test Flow Gate | 身份、工具轨迹、canonical validator、模型不可见的语义 oracle、主机/服务器证明 | 不向生成 Agent 泄露 oracle 或 registration |
+- 只接受全新空 `DATA_ROOT`，V1–V8 数据只读保留，不迁移、不改写；
+- 旧 Evidence V2 package 不做静默兼容，必须从原 Wiki 重新生成；
+- 七个公开 MCP 工具和 REST 路径不变，MCP 输入仍保持根层扁平；
+- GENERIC V2 路径保持不变，不读取专用 Methods package。
 
 ## 闭合 Methods package
 
-`.agents/skills/wiki-to-diagnosis-skill` 只生成以下目录：
+生成目录固定为：
 
 ```text
 <skill-name>/
@@ -63,326 +33,92 @@ Agent 决定部署范围、Logparse anchor、运行时资产或权威业务结�
     `-- <shared-topic>.md
 ```
 
-package 根目录只能有这三类条目。`methods.json@1` 使用 exact-key 合同，声明：
+`methods.json@1` 固定原 Wiki SHA-256、用户输入、附件、日志派生字段、共享参考和有序方法索引。
+每张方法卡必须包含适用条件、所需证据、计算与判断、确认条件、未知边界和输出含义。
+`evidence_markers` 来自 Wiki 的正向日志模板；`activation_markers` 只是决定是否加载该方法，
+不代表单条命中已经证明根因。
 
-- `skill_name` 与原 Wiki SHA-256；
-- Wiki 明确要求的 `required_user_inputs` 和 `required_artifacts`；
-- 只能从日志中获得的 `log_derived_fields`；
-- 共享参考卡和有序方法索引；
-- 每种方法的独立 Markdown 卡、覆盖判断上下文的 `evidence_markers`，以及其中负责触发评估的
-  `activation_markers` 保序子集。
+Agent 不得创建 Candidate、`USER_RESULT`、ZIP 或权威 Outcome。生成 Skill 的
+`SKILL.md` 必须明确要求 Specialist 只写 `MethodDiagnosisDraftV1` 的七个字段：
+`schema_version`、`status`、`confirmed_methods`、`candidate_methods`、`evidence`、
+`limitations` 和 `safety_notes`。
 
-每张方法卡固定包含适用条件、所需证据、计算与判断、确认条件、未知边界和
-输出含义。相同原因的不同日志类型不拆成多个方法；多个原因可同时成立时，
-运行时必须扫描全部目标日志，不能在第一个 marker 命中后短路。抑制、限流、
-采样或条件打印只能形成未知边界，不能把日志缺失转换为排除证据。
+## Specialist 与服务端核验
 
-marker 的所有权属于声明它的方法。即使两个方法声明了相同字面量，服务端也会
-分别生成带各自 `method_id` 和 `marker_index` 的命中；后续 Plan 只能把命中分配给
-所属方法，不能因为 marker 文本相同而跨方法复用。
+材料齐备后，服务端先在独立 Workspace 调用固定 Logparse 计划，选择权威目标日志。Broker
+能力随预处理结束撤销。随后服务端把以下内容复制到 Specialist 的只读输入区：
 
-package-only 生成合同把原本可能由模型自由改写的表面表示机械化：`log_derived_fields` 按 Wiki `text`
-日志模板中命名占位符的首次出现顺序收集并排除用户输入；`evidence_markers` 使用第一个占位符前的
-完整稳定字面前缀（模板以占位符开头时使用最长稳定片段）。canonical validator 与 gate-only oracle
-必须遵循同一规则；`activation_markers` 则必须是非空、唯一的保序子集。它只表示该方法值得评估，
-不表示单条命中足以确认原因。相同 literal 可以在多个方法中负责激活。
+- `request.json`；
+- `target_logs.json`；
+- `logparse-receipt.json`；
+- `target-logs/<source_id>.log`。
 
-元 Skill 自带的 validator 校验目录、字段、frontmatter、Wiki hash、引用、方法卡标题和
-原文 marker，但不代替场景诊断。局域网部署元 Skill 还校验完整 registration、固定运行时
-绑定、双端动态 slot/process、可选 PID、作者确认 module 和生产部署范围；其日志模板提取版本
-同时识别 `text` fence 与无语言 fence。
+Specialist 可读取这些冻结文件和已加载的方法卡。每条 evidence 必须给出方法 ID、摘要、
+身份标记，以及精确的 `source_id`、行号、marker 和日志原文。
 
-## 产品 registration 与身份
+服务端收到草稿后重新完成全部权威核验：
 
-`SKILL_DIR` 的每个子目录是一个产品注册根：
+1. 方法必须来自固定 package，且确实被 marker 激活；
+2. `source_id` 必须出现在冻结目标清单；
+3. 行号、marker 和原文必须与冻结日志逐字一致；
+4. 日志字节、目标清单和 receipt 的大小及 SHA-256 必须一致；
+5. evidence 身份、完成条件映射和限制必须能机械映射为 Evidence、
+   `CandidateConclusionDraft`、`DecisionAuditV2` 和 `DiagnosisOutcome`。
 
-```text
-<SKILL_DIR>/
-`-- <registration-id>/
-    |-- registration-template.json
-    `-- package/
-        `-- <skill-name>/
-            |-- SKILL.md
-            |-- methods.json
-            `-- references/*.md
-```
+任一项不成立时，不得发布已解决结果。
 
-`registration-template.json@1` 绑定 capability、deployment scope、package 相对路径、
-`skill_name`、原 Wiki SHA-256、DIAGNOSE/REVIEW 的固定内置资产，以及可选的
-Logparse 产品、角色和 anchor plan。当前 SPECIALIZED runtime 要求注册使用内置
-Specialist/Reviewer profile、Methods-only tool bundle、context policy 与 output contract，不允许
-registration 指向任意运行时资产。
+## 审核策略
 
-Catalog 分别计算 registration SHA-256 和 package tree SHA-256，再计算 combined SHA-256。
-Job 的 `diagnosis-skill/<registration-id>` ref 绑定 registration version 与 combined hash；
-registration 或 package 任一字节变化都会改变身份，已冻结 Job 不能被当前 Catalog
-静默替换。生产 Catalog 拒绝 `TEST_ONLY` 注册。
+专有 DIAGNOSE Job 创建时冻结：
 
-局域网部署元 Skill 的输出目录名就是 `registration_id`，registration 使用 `version=1.0.0`、
-`deployment_scope=PRODUCTION` 和产品内置 DIAGNOSE/REVIEW 绑定。`logparse_product=default`
-表示 Broker 不向上游传 `--product`，不是一个用户参数；client/server 共用作者在生成时明确
-提供的 module，slot 与 process name 必须来自本次 Case 的 USER_FACT，PID 只在已提供时使用。
+- `review_policy=NONE`：服务端核验通过后，在同一状态提交中接受 Candidate，并同时公开
+  `USER_RESULT` 与 `USER_RESULT_ARCHIVE`；
+- `review_policy=INDEPENDENT`：Candidate 进入 `REVIEWING`，报告产物保持内部状态。
+  Reviewer 使用独立 Job 和 Workspace，只能核对已冻结的 Candidate、Evidence 和 grounding
+  audit。只有 PASS 才同时公开两项产物。
 
-## 服务端 no-plan preflight
+部署开关是 `SPECIALIZED_REVIEWER_ENABLED=false|true`，默认关闭。旧变量
+`EVIDENCE_V2_REVIEWER_ENABLED` 会触发配置错误。Job 中的策略是恢复和重放依据，服务重启后
+不受当前环境变量变化影响。
 
-ROUTE 只返回声明了全部已提供 USER_FACT 名称的专用 registration 匹配项。
-选中 SPECIALIZED 后，Runtime 用 registration 的 Logparse plan 与 Methods manifest 编译冻结
-Logparse 执行计划。若缺少 Methods 声明的用户输入或 `log_archive`，它不启动 Agent，而是由
-服务端直接生成 `NEED_INPUT` 或 `NEED_ATTACHMENT` Outcome 与
-`supplement_policy=MISSING_ONLY` requirement。
+Reviewer 返回 `REJECT` 或 `NEED_MORE_EVIDENCE` 时，原 Candidate 及其 JSON/ZIP 永远
+不可下载。服务端另行生成 `INCONCLUSIVE` 的 `diagnosis-result.json` 和
+`AUDIT_BUNDLE`，Case 收口为 `UNRESOLVED`。
 
-当前 Methods runtime 只支持特殊附件 ID `log_archive`。Methods manifest 可声明
-`problem_time`、进程名、service/API 等用户输入以及日志派生字段；Logparse
-product、module、slot、角色与 anchor 的取值来源由产品 registration 固定。这个
-preflight 是唯一能为 Methods 路径请求补充材料
-的边界；Agent 输出合同没有 requirement 字段。
+## 用户结果
 
-## 服务端单次证据构建
+`diagnosis-result.json` 固定使用 `problem-locator-diagnosis-v3`，包含：
 
-### Logparse 预处理与冻结
+- 具体 `root_cause` 和 findings；
+- 因素与完成条件；
+- 服务端验证结果和时间相关性；
+- 证据缺口、限制、处置建议和安全说明。
 
-材料齐备后，产品 Logparse 预处理仍使用独立 `<job-id>.logparse-preprocess`
-Workspace，只负责从上传包中选择 authoritative targets。服务端验证预处理结果后，
-冻结 `request.json`、目标日志身份、Logparse receipt 和目标日志字节；随后撤销 broker
-环境。模型角色不能重新解包、选择生命周期、调用 Logparse 或遍历其他日志。
+已解决结果的 `result.zip` 固定包含：
 
-冻结的目标日志只作为服务端证据构建输入。Specialist 和实际运行的 Reviewer Workspace
-都不包含 `target_logs.json`、`target-logs/`、上传附件、既有 Evidence/Artifact 或先前
-Outcome。
+1. `result.txt`；
+2. `archive-manifest.json`；
+3. 按权威 Logparse plan 顺序排列的全部可交付目标日志。
 
-### Evidence Graph 与 Evaluation Plan
+`result.txt` 固定为九节中文：定位结论、问题描述、分析依据、完成条件、服务端验证、
+时间相关性、证据缺口、处置建议、目标日志清单。ZIP 中日志字节必须等于冻结来源字节。
 
-服务端对每份冻结目标日志只解码和逐行扫描一次。在这一处先按 `casefold` 后的 marker 字面量
-去重，每行只匹配一次相同字面量，再展开成各方法的 method-qualified hit，同时保留 marker 原文
-和命中行原文。扫描结束后，只保留至少命中一个自身
-`activation_markers` 的方法；该方法在同一次扫描中得到的全部上下文命中都会保留。结果直接生成
-method-qualified Evidence Graph：
+`CaseView.methods_result` 仅保留为旧字段占位，V9 专有 Case 必须为空。网站和客户端只使用
+`final_result`、`unresolved_result` 及现有 artifact list/download 接口。
 
-- source 绑定 `source_id`、相对路径和内容 SHA-256；
-- hit 绑定 `method_id`、方法优先级、`marker_index`、source、行号、marker 和原始行；
-- event 只在同一方法内按日志派生身份字段分组；没有身份字段的命中各自成为独立事件；
-- `loaded_method_ids` 精确等于有 activation 命中的方法，并按方法优先级和 ID 排序；
-- Logparse 的观测 caveat 去重后写入 Graph 的 `limitations`。
+## 原子性与重放
 
-因此，同一 marker 字面量属于不同方法时会生成不同的 hit；不同方法、不同请求或
-无法可靠关联的事件不会因为文本相同被错误合并。
+报告暂存、Artifact 正式化和 Case 终态使用同一提交边界。物理文件可以先写入，但提交完成前
+不得出现在 CaseView、artifact 列表或下载入口。发布失败不能提交 `RESOLVED`。
 
-服务端随后只消费 Graph 中的 ref，生成完整 Evaluation Plan。每个已加载方法必须至少保留一个
-activation hit，并且恰好有
-一个 `evaluation_ref`，并精确覆盖该方法的全部 event/hit；整份 Plan 必须完整分区
-Graph。这个阶段不再读取原始行、不重新匹配 marker，也不全量比较由模型回抄的
-`SkillLoadReceiptV1`；Evidence V2 根本不把这份 V1 receipt 带入评估链路。没有任何
-方法被激活时，服务端直接进入 `UNRESOLVED`，不启动 Specialist。
+同一 finalized Outcome 重放时，系统必须复用相同 Artifact ID、大小和 SHA-256。失败、
+取消或中断只返回对应状态和 failure，不伪造用户报告。
 
-Graph/Plan 是服务端权威审计记录和后续机械校验依据，不再逐字内嵌到模型上下文。ContextBuilder
-先校验两者，再机械派生紧凑 `evaluation_input`：
+## 验证要求
 
-- `sources` 列出全部冻结目标，包括已扫描但没有 marker 命中的 source；
-- `observations` 按 source 和行号保存命中的物理日志行，每行恰好一次；
-- `markers` 保存去重后的精确 marker 字面量，每个字面量恰好一次；
-- `evaluations` 按 Plan 顺序保留 method ID、优先级、evaluation ref、event ref、identity token，
-  并用 observation/marker 索引表达全部 method-qualified match。
+确定性测试必须覆盖 Reviewer 关闭直出、Reviewer 开启时的隐藏与 PASS 发布、非 PASS 的
+INCONCLUSIVE、PARTIAL、失败、取消、中断、发布中断和重启重放；还要逐字节核对 JSON、
+九节 `result.txt`、manifest、ZIP 顺序、日志内容、Content-Length 和 SHA-256。
 
-这份投影不合并跨方法证据关系，也不截断或采样。它不是新的公开合同，不能替代 Graph/Plan
-进行终态校验或审计重放。方法卡只在上下文的必需 `SKILL` 区段出现一次，不再复制到角色输入。
-
-## Specialist 单评与可选 Reviewer 隔离评估
-
-Specialist 始终先独立评估完整 Plan。默认 `EVIDENCE_V2_REVIEWER_ENABLED=false`，服务端校验
-Specialist 输出后直接形成终态，不创建 REVIEW Job。没有 `UNKNOWN` 且至少一项为
-`CONFIRMED` 时进入 `RESOLVED`；出现 `UNKNOWN` 或全部为 `REJECTED` 时进入 `UNRESOLVED`。
-该开关只属于当前服务进程，不写入 Case、Job、State 或公开投影；已经进入
-`REVIEWER_PENDING` 的任务和已有 REVIEW Job 仍按原流程完成。
-
-显式设置 `EVIDENCE_V2_REVIEWER_ENABLED=true` 后，Specialist 和 Reviewer 使用同一选定模型身份，
-但分别运行在独立 Job、Workspace 和上下文中。实际运行的角色只读取：
-
-- 当前角色自己的 `request.json`；
-- 上下文中由同一权威 Graph/Plan 派生的紧凑 `evaluation_input`；
-- `loaded_method_ids` 对应的方法卡及其显式共享引用，且只来自 `SKILL` 区段。
-
-角色 Workspace 不再保存 `method-evidence-graph.json` 或 `method-evaluation-plan.json`，因此模型
-无法用完整文件绕过紧凑输入。服务端只在 execution records 中保存并读取权威 Graph/Plan，用于
-身份绑定、结果校验和审计重放。Methods 角色 Workspace 也不保存 `runtime/context.txt`；完整 prompt
-只直接交给 Backend，并在服务端 execution records 留一份审计副本，模型没有第二条重复读取路径。
-
-开启 Reviewer 后，Specialist 结果通过服务端生成的
-`methods_review_target` 只传递 Graph、Plan、Skill 和 evaluation 身份，Coordinator
-据此创建不含 Candidate 的 REVIEW Job。Reviewer 看不到 Specialist 的 verdict、reason、
-草稿、状态或上下文；Runtime 只在 Reviewer 模型调用返回后读取 Specialist 的已持久化
-评估，再执行机械共识。
-
-两个角色使用相同输出合同：Specialist 写
-`output/method-diagnosis.draft.json`，Reviewer 写
-`output/method-review.draft.json`。文件内容是一个 JSON 根数组，并按 Plan 顺序精确
-输出每个 evaluation。每项只能包含：
-
-```json
-  {
-    "evaluation_ref": "eval-...",
-    "verdict": "CONFIRMED",
-    "supporting_event_refs": ["event-..."],
-    "reason": "角色对该 evaluation 的判断理由"
-  }
-```
-
-`verdict` 的合法值只有 `CONFIRMED`、`REJECTED` 和 `UNKNOWN`。
-
-`CONFIRMED` 必须按 Plan 顺序选择当前 evaluation 的非空 `supporting_event_refs` 子集；
-`REJECTED` 或 `UNKNOWN` 必须使用空数组。模型不回抄 `method_id`、marker、日志原文、行号、
-hash、identity token、hit ref 或任何证据 receipt。服务端只接受与 Plan 数量、顺序和
-`evaluation_ref` 完全一致的数组。
-
-每个实际运行的角色第一次出现 JSON 结构或 Plan 覆盖错误时，最多获得一次 repair。repair 仍使用
-同一份紧凑 `evaluation_input` 和方法卡，只提示重新提交完整数组；第二次仍不合格就进入
-`UNRESOLVED`。已经归档 primary rejection 的重启只运行 repair；primary 和 repair 都已
-归档时直接恢复终态，绝不发起第三次模型调用。
-
-正常路径只构建一次紧凑投影并调用一次 Specialist；开启 Reviewer 后才增加一次隔离调用。用户事实
-只保存在必读 `request.json`，不再复制到 prompt 的 Context Snapshot。`context_bytes` 统计最终角色
-prompt 与 request 的 UTF-8 字节总和，不等同于模型的 token 上下文窗口。若紧凑后的必需输入仍
-超限，Runtime 在模型调用前原样返回 `CONTEXT_LIMIT`，不生成
-`MethodsTerminalProjectionV2`，也不把错误改写为 `SERVER_INVARIANT_VIOLATION` 或
-`OUTCOME_INVALID`。当前版本不实现分批、截断或采样。
-
-## 单评、共识与状态真值
-
-默认单评直接使用已通过完整合同校验的 Specialist 结果。开启 Reviewer 后，服务端只比较两个角色
-逐项提交的 `(evaluation_ref, verdict, supporting_event_refs)`，不比较自由文本 `reason`：
-
-| 条件 | Methods 状态 |
-| --- | --- |
-| 默认单评没有 `UNKNOWN`，且至少一个 `CONFIRMED` | `RESOLVED` |
-| 默认单评存在 `UNKNOWN`，或全部为 `REJECTED` | `UNRESOLVED` |
-| 两次评估逐项一致、没有 `UNKNOWN`，且至少一个 `CONFIRMED` | `RESOLVED` |
-| 任一项分歧、存在 `UNKNOWN`，或一致但没有确认原因 | `UNRESOLVED` |
-| 没有匹配方法、角色模型失败、输出语义无效或 repair 耗尽 | `UNRESOLVED` |
-| 冻结资源漂移、服务端不变量破坏或审计归档失败 | `FAILED` |
-| 角色执行被取消 | `INTERRUPTED`，保留待执行角色，不发布终态投影 |
-
-`RESOLVED` 只发布当前裁决路径确认的 evaluation、method、所选 event，以及由所选 event 机械派生的 hit ref。
-`UNRESOLVED` 与 `FAILED` 必须清空全部 confirmed ref，并发布固定 reason code、
-`diagnostic_id` 和公共原因文本。Methods V2 只有 `RESOLVED`、`UNRESOLVED`、`FAILED`
-三种终态，不产生 `PARTIALLY_RESOLVED`。
-
-只有 Reviewer 实际运行并完成机械共识后，Runtime 才会在该 Job 的 execution records 中写入一次不可变的
-`methods-consensus-attribution-v2.json`。它只用于内部分析，记录公开 reason code、evaluation
-数量、每项 event 数、激活方法数、package 总方法数，以及下列一个内部子因：
-
-- 任一侧出现 `UNKNOWN`：`UNKNOWN_PRESENT`；
-- 两侧 verdict 不同：`VERDICT_MISMATCH`；
-- verdict 全同但所选 event 集合不同：`EVIDENCE_SET_MISMATCH`；
-- 两侧完全一致但没有 `CONFIRMED`：`NO_CONFIRMED`。
-
-子因分类会同时检查 Specialist 和 Reviewer，但不改变现有公开 reason code 或共识判定。
-当前公开原因分类仍保留既有不对称：`_consensus_reason` 只把 Reviewer 侧 `UNKNOWN` 映射为
-`INCOMPLETE_EVALUATION`；若只有 Specialist 侧为 `UNKNOWN`，公开原因仍可能是
-`SPECIALIST_REVIEWER_DISAGREEMENT`，内部子因则稳定记录为 `UNKNOWN_PRESENT`。本轮只观测，
-不借此调整裁决语义。只读工具 `tools/methods-consensus-attribution-report.py` 从
-`methods-state-v2.json` 汇总全部公开终态原因，再从归因文件汇总共识子因和规模分布。
-归因字段不得进入 MCP、REST、Case 或 `MethodsTerminalProjectionV2`。
-
-若资源解析、Workspace、Logparse 预处理、上下文构建或 execution-record 在形成合法 Methods
-终态前失败，不得构造 `MethodsTerminalProjectionV2`。即使 Graph/Plan 已经生成并归档，Case
-也直接以 `FAILED` 收口，`methods_result` 缺省，公共接口读取 `CaseFailure`，不靠内部引用填满
-DTO。Evidence V2 已分类的系统终态仍携带固定 reason code 和稳定 `diag-*` ID；上下文容量失败
-则保留 `CONTEXT_LIMIT`，不附加 Methods reason code 或 diagnostic ID。
-
-## limitations、公共投影与重放
-
-`limitations` 是服务端拥有的数据。它从 Logparse authoritative target caveat 进入
-Evidence Graph，同时写入独立 limitations record，经紧凑输入传到实际运行的角色，并原样进入最终
-`MethodsTerminalProjectionV2`。无论诊断最终是确认、不可定论还是系统失败，已记录的
-观测限制都不能在跨 Job、重启或终态映射时丢失。
-
-服务端先构造并校验完整 `MethodTerminalResultV2`、Outcome 和公共投影，再提交不可变
-终态。公开 MCP/REST Case 只包含稳定的 result/evaluation/plan/graph/diagnostic 身份、
-确认 ref、limitations、reason code 和固定公共原因；不包含 Specialist/Reviewer 的
-verdict 数组、自由文本 reason、被拒草稿、marker、日志原文或行号。
-
-内部 execution record 以 append-only 方式保存 Graph、Plan、State、limitations、每次
-精确 prompt，以及被拒的 primary/repair 原始响应。Methods V2 不生成公共审计产物。
-归档失败属于 `FAILED`，不能假装成证据不足。
-
-validation-only replay 只读取已持久化的 Graph、Plan、State 和指定被拒响应，并调用
-当前生产 parser 复现原拒绝原因。它不扫描日志、不创建 Workspace，也不调用模型或
-backend。正常重启同样优先恢复已持久化记录：已有 Graph 时不再扫描日志；只有 Graph
-而缺 Plan 时从 Graph 机械重建 Plan；已有 pending 或 terminal State 时按该状态继续或
-直接发布结果。
-
-正式入口是 `python -m problem_locator replay-method-rejection`。调用者只需指定当前
-`DATA_ROOT`、`job_id`、角色和 PRIMARY/REPAIR attempt；成功与失败都返回稳定 JSON，且不会
-写回 State 或 execution records。
-
-## 自包含 Release case 与 Test Flow
-
-当前 release case 使用 schema v2，业务专有材料全部收口在
-`tests/cases/release/rpc-timeout-anonymized/`：
-
-- 一份普通 Markdown Wiki；
-- 一份产品 `registration-template.json`；
-- 一份只对 Gate 可见的 Methods package 语义 oracle；
-- 一条 `multiple-rpc-timeouts` CrossJob 场景及其 driver/oracle。
-
-仓库不预存一份“批准的生成 package”。真实 Wiki→Methods Gate 只向生成 Agent 提供元
-Skill、Wiki、由该 Wiki 原始字节生成并预先校验的 source-identity v2 sidecar，以及元 Skill直接链接的
-output contract；v2 identity 除 Wiki digest 外，还提供从 Wiki 机械提取、按源顺序保留重复项的日志
-模板清单。Agent 必须把该清单逐字写入固定 `references/source-log-templates.md`，并将它列为
-`methods.json.shared_references[0]`。Agent 直接写完整 package，然后 Gate 审计 Skill/Read/Write v5
-轨迹、运行独立重算 Wiki/模板的 canonical validator 和模型不可见的语义 oracle。验证通过后
-Test Flow 才在 package 外复制产品 registration，以同一 package 字节身份供 fresh CrossJob
-消费。
-
-测试活动只从 `tools/test-flow/run.sh|run.ps1` 进入：
-
-1. Dev 默认执行 affected + full deterministic，不调用真实模型。正向测试中的 Graph、Plan、
-   State、Outcome、Case 和 verdict 必须由生产代码生成；fixture 只手写用户输入、Wiki、日志、
-   附件和原始不可信模型响应。
-2. Core 必须从真实 Case 入口覆盖 no-plan preflight、Logparse 冻结、单次扫描、casefold、
-   跨 method 相同 literal 的单次匹配与完整展开、Plan 全覆盖、紧凑投影的无损去重、默认 Specialist 单评、显式开启后的两个隔离角色、每个实际角色一次 repair、两种裁决真值、
-   limitations、上下文容量错误分类、公共 MCP/REST 投影、重启恢复和 validation-only replay。
-3. 负向用例从生产生成的合法基线开始，每次只修改一个字段。删除关键校验、恢复 receipt
-   全量比较、重新匹配 marker 或允许第三次调用时，对应 mutation 必须失败。
-4. Release 先用 `--plan-only` 审查 Proof、Stage、Gate、身份、模型预算、成本与
-   admission blockers；Core PASS 之前不运行真实模型探针，同一失败身份不得盲目重试。
-5. 默认真实模型认证只运行 Specialist；显式选择盲评认证时才运行 Reviewer。各 provider cert 必须绑定相同 source snapshot、Evidence V2
-   contract digest 和 Core verdict digest，并记录模型 revision、prompt/profile、调用次数、
-   repair 次数和预算。只有 Core 与全部要求的 cert 都 PASS，最终 Release verdict 才成立。
-6. Release planning 冻结 Git 可见工作树；只有与该 source snapshot 精确绑定、最后原子写入且
-   可重新校验的 `verdict.json` 能声明通过。
-
-Fast E2E 只能消费精确绑定的 registration/package 缓存，经公开 HTTP MCP 跑完 Case、
-ROUTE、LOGPARSE、DIAGNOSE、显式盲评和 `methods_result` 投影。它的 standalone verdict
-只证明自身声明的短路径，不替代中央 Test Flow 或 Release。
-
-模型名称、预算、超时、执行平台、可执行文件 hash 和缓存 admission 条件由 Test Flow
-版本化配置管理；本文不把某次运行的 run ID 或 snapshot digest 固化为“最新结论”。
-
-## 完成判据
-
-- 普通 Markdown Wiki 能由 `.agents` 入口生成闭合 Methods package，也能由局域网 `.claude`
-  入口生成包含该 package 的完整生产 registration root；固定模板引用精确绑定 Wiki 的机械清单。
-- registration 与 package 的三层 hash 身份在 Catalog、Job、generation receipt 和 Test Flow 中一致。
-- Client 收到问题描述后先创建 Case；只有建案后的服务端 no-plan preflight 可以返回
-  `MISSING_ONLY` requirements，模型不能在建案前自行追问。
-- 材料齐备后只运行一次服务端日志扫描。只有自身 activation marker 命中的 method 才进入 Graph，
-  且它的全部上下文 hit 都会保留；Plan 精确覆盖全部 Graph event/hit。后续流程只按 ref 映射，
-  不再扫描日志或匹配 marker。
-- Graph/Plan 继续作为服务端权威记录；模型只接收一次无损紧凑投影。每条物理日志行和每个 marker
-  字面量只保存一次，跨方法关系、event、evaluation 和 identity 仍完整；方法卡只在 `SKILL`
-  区段出现一次。模型不得读取单独的 Graph/Plan 文件。
-- 默认只运行 Specialist；无 `UNKNOWN` 且至少确认一个方法时直接 `RESOLVED`，含 `UNKNOWN`
-  或全部拒绝时进入 `UNRESOLVED`。
-- 显式开启后，Specialist 与 Reviewer 使用隔离 Job、Workspace 和上下文，Reviewer 在提交盲评前
-  看不到 Specialist 结论；两者只提交完整的 `evaluation_ref + verdict + supporting_event_refs + reason` 数组。
-- 每个实际运行的角色最多一次 repair，重启不能增加已开始角色的调用次数；盲评路径只有两次
-  评估逐项一致、无 `UNKNOWN` 且至少确认一个方法时才 `RESOLVED`。
-- Methods V2 不生成 Candidate、`DecisionAuditV2` 或 `PARTIALLY_RESOLVED`；Methods 终态中的
-  `FAILED` reason 只用于资源漂移、服务端不变量破坏和审计归档失败，取消则保留 `INTERRUPTED`。
-- 合法 Methods 终态形成前失败时不得伪造评估引用，`methods_result` 必须缺省。紧凑上下文仍
-  超限时，Case、MCP 和 REST 必须保留 `CONTEXT_LIMIT`，不能显示成 Evidence V2 不变量失败或
-  `OUTCOME_INVALID`。
-- limitations 从预处理一直保留到公共投影；Methods V2 不生成公共审计产物，MCP/REST 不包含
-  被拒草稿、角色自由文本 reason 或原始日志，内部拒绝记录可以由 validation-only replay 重放。
-- 发布结论只引用当前源码快照对应的 Test Flow `verdict.json`，未执行、skip 或
-  只有半成品目录的真实项不得声称通过。
+正式结论只能来自 `tools/test-flow/run.sh` 或 `run.ps1`。Release 必须先查看
+`--plan-only`，再从全新 V9 数据根执行 Reviewer 开启的最长链路。

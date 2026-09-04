@@ -57,6 +57,7 @@ from problem_locator.contracts import (
     RouteDecision,
     RouteKind,
     ReviewTargetBinding,
+    ReviewPolicy,
     RuntimeBindings,
     SelectedSkillUpdate,
     StateFile,
@@ -202,6 +203,7 @@ def _running_generic_state() -> StateFile:
     job = _load("job-diagnose.json")
     job.update(
         diagnosis_mode=DiagnosisMode.GENERIC,
+        review_policy=None,
         generic_skill_name="generic-problem-locator-smoke",
         generic_problem_text=_GENERIC_RAW_PROBLEM,
         status=JobStatus.RUNNING,
@@ -297,6 +299,7 @@ def _generic_bindings() -> RuntimeBindings:
     ).model_dump(mode="python")
     specialized.update(
         diagnosis_mode=DiagnosisMode.GENERIC,
+        review_policy=None,
         generic_skill_name="generic-problem-locator-smoke",
         skill_ref=None,
         logparse_tool_ref=None,
@@ -581,6 +584,7 @@ def _route_to_diagnose_plan(snapshot, trigger) -> TransitionPlan:
         next_job_spec=JobSpec(
             job_type=JobType.DIAGNOSE,
             diagnosis_mode=bindings.diagnosis_mode,
+            review_policy=bindings.review_policy,
             generic_skill_name=bindings.generic_skill_name,
             generic_problem_text=None,
             goal="Diagnose the routed RPC timeout.",
@@ -648,6 +652,7 @@ def _diagnosis_to_review_plan(snapshot, trigger) -> TransitionPlan:
         next_job_spec=JobSpec(
             job_type=JobType.REVIEW,
             diagnosis_mode=bindings.diagnosis_mode,
+            review_policy=bindings.review_policy,
             generic_skill_name=bindings.generic_skill_name,
             generic_problem_text=None,
             goal=review_template.goal,
@@ -1742,8 +1747,15 @@ def test_candidate_outcome_formalizes_user_result_and_creates_review_job() -> No
         outcome.job_id,
         canonical_json_bytes(outcome),
     )
-    review_bindings = runtime_bindings_from_job(
-        Job.model_validate(_load("job-review.json"))
+    review_bindings = RuntimeBindings.model_validate(
+        {
+            **runtime_bindings_from_job(
+                Job.model_validate(_load("job-review.json"))
+            ).model_dump(mode="python"),
+            # Simulate a restart after the deployment default changed. The active
+            # DIAGNOSE Job must keep its frozen INDEPENDENT policy.
+            "review_policy": ReviewPolicy.NONE,
+        }
     )
     assert source.skill_ref is not None
     catalog = FakeAssetCatalog(
@@ -1807,11 +1819,14 @@ def test_candidate_outcome_formalizes_user_result_and_creates_review_job() -> No
     assert candidate.status is CandidateStatus.REVIEWING
     assert candidate.supporting_evidence_refs == [EVIDENCE_ID]
     assert aggregate.case.status is CaseStatus.REVIEWING
+    assert receipt.case_view.artifacts == []
     assert aggregate.case.diagnosis_state.revision == 3
     assert aggregate.jobs[source.job_id].status is JobStatus.SUCCEEDED
     assert processing.created_job_id is not None
     review_job = aggregate.jobs[processing.created_job_id]
     assert review_job.job_type is JobType.REVIEW
+    assert source.review_policy is ReviewPolicy.INDEPENDENT
+    assert review_job.review_policy is ReviewPolicy.INDEPENDENT
     assert review_job.review_target is not None
     assert review_job.review_target.candidate_conclusion_id == candidate.conclusion_id
     assert review_job.review_target.candidate_revision == candidate.revision
@@ -1823,6 +1838,67 @@ def test_candidate_outcome_formalizes_user_result_and_creates_review_job() -> No
     assert guard.acquire_calls == guard.release_calls == 1
     assert notifier.notify_calls == [(CASE_ID, 3)]
     assert len(coordinator.calls) == 1
+
+
+def test_candidate_outcome_without_review_atomically_publishes_json_and_zip() -> None:
+    state_payload = _running_diagnosis_candidate_state().model_dump(mode="python")
+    state_payload["cases"][CASE_ID]["jobs"][DIAGNOSE_JOB_ID][
+        "review_policy"
+    ] = ReviewPolicy.NONE
+    state = StateFile.model_validate(state_payload)
+    source = state.cases[CASE_ID].jobs[DIAGNOSE_JOB_ID]
+    guard = InMemoryPublicationCommitGuard()
+    resources = InMemoryResourceStore(publication_guard=guard)
+    staged_results, result_bodies = _stage_server_result_files(
+        resources,
+        source.job_id,
+    )
+    outcome_payload = _load("job-outcome-diagnosis.json")
+    _bind_staged_result_files(outcome_payload, staged_results)
+    outcome = JobOutcome.model_validate(outcome_payload)
+    records = InMemoryExecutionRecordStore()
+    file_ref = records.publish_outcome_bytes(
+        outcome.job_id,
+        canonical_json_bytes(outcome),
+    )
+    service, repository, resources, guard, dispatcher, _, _ = _service(
+        state,
+        DomainCoordinator(),
+        records,
+        resources=resources,
+        guard=guard,
+        ids=DeterministicIdGenerator(seed="candidate-direct-result"),
+    )
+
+    receipt = service.submit_outcome(outcome, file_ref)
+
+    assert receipt.disposition is OutcomeDisposition.APPLIED
+    aggregate = repository.read_snapshot().cases[CASE_ID]
+    assert aggregate.case.status is CaseStatus.RESOLVED
+    assert aggregate.case.final_result is not None
+    assert aggregate.case.final_result.status is CandidateStatus.ACCEPTED
+    assert aggregate.case.active_job_id is None
+    assert aggregate.case.methods_result is None
+    assert dispatcher.submit_calls == []
+    public = {item.kind: item for item in receipt.case_view.artifacts}
+    assert set(public) == {
+        ArtifactKind.USER_RESULT,
+        ArtifactKind.USER_RESULT_ARCHIVE,
+    }
+    for kind, proposal_key in (
+        (ArtifactKind.USER_RESULT, "user_result"),
+        (ArtifactKind.USER_RESULT_ARCHIVE, "user_result_archive"),
+    ):
+        assert public[kind].size == len(result_bodies[proposal_key])
+        assert public[kind].sha256 == hashlib.sha256(
+            result_bodies[proposal_key]
+        ).hexdigest()
+
+    duplicate = service.submit_outcome(outcome, file_ref)
+    assert duplicate.disposition is OutcomeDisposition.DUPLICATE
+    assert [item.artifact_id for item in duplicate.case_view.artifacts] == [
+        item.artifact_id for item in receipt.case_view.artifacts
+    ]
 
 
 def test_candidate_result_retry_adopts_internal_first_file_before_state_commit() -> None:

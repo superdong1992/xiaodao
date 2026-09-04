@@ -1040,6 +1040,7 @@ def _assemble(
             logparse_tool=logparse_asset,
             logparse_broker_factory=broker_factory,
             generic_skill_name=settings.generic_skill_name,
+            specialized_reviewer_enabled=settings.specialized_reviewer_enabled,
             allow_test_skills=allow_test_skills,
         )
     except (OSError, TypeError, ValueError) as exc:
@@ -1206,7 +1207,7 @@ def _assemble(
             backend=diagnose_backend,
             route_backend=route_backend,
             diagnose_backend=diagnose_backend,
-            evidence_v2_reviewer_enabled=settings.evidence_v2_reviewer_enabled,
+            specialized_reviewer_enabled=settings.specialized_reviewer_enabled,
         )
         scheduler = SchedulerService(
             repository,

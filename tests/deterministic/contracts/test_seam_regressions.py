@@ -87,6 +87,7 @@ def _model(name: str, model_type: type[Any]) -> Any:
 def _runtime_bindings(job: Job) -> RuntimeBindings:
     return RuntimeBindings(
         diagnosis_mode=job.diagnosis_mode,
+        review_policy=job.review_policy,
         generic_skill_name=job.generic_skill_name,
         agent_profile_ref=job.agent_profile_ref,
         available_skill_refs=job.available_skill_refs,
@@ -480,6 +481,7 @@ def test_installed_candidate_requires_next_review_job_to_bind_the_new_proposal()
         return JobSpec(
             job_type=JobType.REVIEW,
             diagnosis_mode=review_job.diagnosis_mode,
+            review_policy=review_job.review_policy,
             generic_skill_name=review_job.generic_skill_name,
             generic_problem_text=review_job.generic_problem_text,
             goal=review_job.goal,

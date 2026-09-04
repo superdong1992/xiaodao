@@ -126,7 +126,7 @@ test("restoring legacy provider evidence fails configuration validation", () => 
   }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_MODEL_CERT_EVIDENCE");
 });
 
-test("release.full has one isolated Wiki generation Gate followed by one fresh five-stage Specialist-only CrossJob closure", () => {
+test("release.full has one isolated Wiki generation Gate followed by one fresh five-stage reviewed Methods V1 CrossJob closure", () => {
   const config = loadConfiguration(REPO_ROOT);
   const expected = [
     "journey.cross-job.environment",

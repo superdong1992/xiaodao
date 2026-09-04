@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# Retired by the V9 Methods V1 production contract; kept only as helper fixtures.
+__test__ = False
+
 import asyncio
 import json
 from pathlib import Path

@@ -29,7 +29,7 @@ def _load(name: str) -> dict[str, object]:
     payload = json.loads(raw)
     assert canonical_json_bytes(payload) == raw
     assert payload["schema_version"] == 1
-    assert payload["contract_revision"] == "v8-contract-r1"
+    assert payload["contract_revision"] == "v9-contract-r1"
     return payload
 
 

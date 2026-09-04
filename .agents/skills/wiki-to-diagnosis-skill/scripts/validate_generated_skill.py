@@ -50,28 +50,35 @@ METHOD_OUTPUT_CONTRACT_PATTERN = re.compile(
     r"(?:只输出|仅输出|只能包含|仅包含|只包含|"
     r"(?:only\s+(?:output|return|contain|contains))|"
     r"(?:(?:output|return|contain|contains)\s+only))"
-    r"[\s\S]{0,512}?evaluation_ref"
-    r"[\s\S]{0,256}?verdict"
-    r"[\s\S]{0,256}?supporting_event_refs"
-    r"[\s\S]{0,256}?reason",
+    r"[\s\S]{0,512}?schema_version"
+    r"[\s\S]{0,256}?status"
+    r"[\s\S]{0,256}?confirmed_methods"
+    r"[\s\S]{0,256}?candidate_methods"
+    r"[\s\S]{0,256}?evidence"
+    r"[\s\S]{0,256}?limitations"
+    r"[\s\S]{0,256}?safety_notes",
     re.IGNORECASE,
 )
 REQUIRED_SKILL_PHRASES = (
     "request.json",
-    "evaluation_input",
-    "observations",
-    "markers",
-    "evaluations",
-    "events",
-    "evaluation_ref",
-    "verdict",
-    "supporting_event_refs",
-    "reason",
-    "UNKNOWN",
+    "target_logs.json",
+    "logparse-receipt.json",
+    "schema_version",
+    "status",
+    "confirmed_methods",
+    "candidate_methods",
+    "evidence",
+    "limitations",
+    "safety_notes",
+    "identity_tokens",
+    "source_id",
+    "line_number",
 )
 FORBIDDEN_SKILL_PHRASES = (
     "method-evidence-graph.json",
     "method-evaluation-plan.json",
+    "evaluation_input",
+    "supporting_event_refs",
 )
 
 
@@ -434,7 +441,7 @@ def validate(skill_dir: Path, wiki: Path) -> dict[str, object]:
                     errors.append(f"SKILL.md must not mention {forbidden_phrase}")
             if METHOD_OUTPUT_CONTRACT_PATTERN.search(skill_text) is None:
                 errors.append(
-                    "SKILL.md must state the exact four-field Methods evaluation output"
+                    "SKILL.md must state the exact seven-field Methods V1 output"
                 )
 
     manifest = _read_json(skill_dir / "methods.json", errors)

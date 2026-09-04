@@ -927,7 +927,7 @@ def run_production_model_cert(
         id_generator=DeterministicIdGenerator(seed="p2-model-cert-specialist"),
         workspace_manager=WorkspaceManager(work_root / "specialist-runtime"),
         backend=backend,
-        evidence_v2_reviewer_enabled=reviewer_enabled,
+        specialized_reviewer_enabled=reviewer_enabled,
     )
     specialist_receipt = specialist_runtime.execute(
         source_job,
@@ -973,7 +973,7 @@ def run_production_model_cert(
             id_generator=DeterministicIdGenerator(seed="p2-model-cert-reviewer"),
             workspace_manager=WorkspaceManager(work_root / "reviewer-runtime"),
             backend=backend,
-            evidence_v2_reviewer_enabled=reviewer_enabled,
+            specialized_reviewer_enabled=reviewer_enabled,
         )
         reviewer_receipt = reviewer_runtime.execute(
             review_job,

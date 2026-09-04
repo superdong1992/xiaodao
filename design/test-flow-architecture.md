@@ -42,22 +42,22 @@ cross-validator 对未知字段、悬空引用、DAG 环、孤儿、不可达 cl
 
 ## 3. Goal 与发布证明闭包
 
-公开 Goal 由配置冻结。Evidence V2 当前入口如下：
+公开 Goal 由配置冻结。当前主发布入口如下：
 
-- `dev.default`：framework/config、仓库静态检查、affected、Evidence V2 Core 子收据与 full deterministic；不使用真实模型。
+- `dev.default`：framework/config、仓库静态检查、affected、Methods V1 Core 子收据与 full deterministic；不使用真实模型。
 - `dev.real`：完整 Dev 确定性闭包，加一个显式选择的真实 Proof/Stage。
 - `dev.macos-codex-luna-methods`：Darwin arm64 上恰好一次 Codex CLI + `gpt-5.6-luna`/medium 调用，独立生成并校验 Methods package，再按完整 producer identity 写入不可变缓存；不执行诊断旅程。
 - `dev.macos-codex-luna-e2e` 与 `dev.macos-claude-deepseek-e2e`：默认运行 P2/P1 Specialist-only model cert，正常一次调用，最多一次 repair。
 - 名称含 `blind-review-e2e` 的两个 Dev Goal：显式运行可选 Reviewer，保留双角色 2–4 次调用合同。
-- `release.full`：从空数据根运行默认关闭 Reviewer 的五阶段 CrossJob，并验证终态重启。
+- `release.full`：从全新空 V9 数据根运行 Reviewer 开启的五阶段 CrossJob，并验证 JSON/ZIP 发布、真实浏览器下载与终态重启。
 - `release.evidence-v2-certification`：聚合同一快照下默认 Specialist-only 的 Core、P1 和 P2。
 - `release.evidence-v2-blind-review-certification`：仅在显式选择时聚合双角色 P1/P2，不是默认 Release 依赖。
 
-`det.evidence-v2-core` 是 `deterministic.full` 内的零模型 Gate。它执行固定生产链用例并生成
-`core-verdict.json`，绑定 source snapshot digest、V8 contract manifest digest、用例清单 digest、
+`det.evidence-v2-core` 是 `deterministic.full` 内保留旧 ID 的零模型 Gate。它执行固定 Methods V1 生产链用例并生成
+`core-verdict.json`，绑定 source snapshot digest、V9 contract manifest digest、用例清单 digest、
 pytest summary 和 JUnit。该文件只是 Gate 子收据，最终结论仍由外层 `verdict.json` 给出。
 
-Release 的真实 Agent、ROUTE、默认 Specialist-only DIAGNOSE 与 Logparse claim 由同一 fresh CrossJob 给出，不重复运行隔离真实 Gate。通用 `real.review` 仍是独立合同，不代表 Evidence V2 默认会创建 REVIEW Job。编译、锁文件和 Git whitespace 是正式 cheap Gate，而不是文档外的人工附加步骤。
+Release 的真实 Agent、ROUTE、Methods V1 Specialist、独立 Reviewer 与 Logparse claim 由同一 fresh CrossJob 给出，不重复运行隔离真实 Gate。编译、锁文件和 Git whitespace 是正式 cheap Gate，而不是文档外的人工附加步骤。
 
 Provider model-cert Goal 使用同一套 built-in adapter，并由 Gate 的 `evaluation_mode` 冻结单评或盲评。Methods cache key 显式绑定 Wiki、元 Skill tree、输出合同、validator、registration template、模型运行时、prompt/runner 合同；`--scenario` 只能选择仓库固定场景，不能接受路径或命令。
 
@@ -72,10 +72,10 @@ CrossJob 有五个逻辑 Stage：
 1. Environment
 2. Route
 3. Upload（真实浏览器运行体跨源重放 REST 创建/查询/准备，并用 `Blob` 验证上传）
-4. Diagnose（默认只运行 Specialist，真实浏览器运行体重放补参并验证查询、列表和下载）
+4. Diagnose（运行 Specialist 与独立 Reviewer，真实浏览器运行体重放补参并验证查询、JSON/ZIP 列表和下载）
 5. Publish/Restart
 
-共有四个 checkpoint boundary：Route→Upload、Upload→Diagnose、Diagnose→Publish/Restart、Publish/Restart→end。Environment 不产生 checkpoint；Diagnose 必须证明只出现 DIAGNOSE 模型调用、没有 REVIEW Job，才封存下一边界。
+共有四个 checkpoint boundary：Route→Upload、Upload→Diagnose、Diagnose→Publish/Restart、Publish/Restart→end。Environment 不产生 checkpoint；Diagnose 必须证明出现预期的 Specialist 与 Reviewer 调用、观察到 `REVIEWING`，并且 JSON/ZIP 已同时公开，才封存下一边界。
 
 Dev 可按 identity 使用普通 receipt 或 checkpoint-chain。恢复前必须重新验证 source verdict、payload seal、当前扫描器、事件合同和 checkpoint 分类 receipt，并解包到新的空根。复用只能直接引用原始 `EXECUTED` receipt；禁止从 `REUSED` stub 再复用。
 
@@ -164,7 +164,7 @@ Server Gate evidence contract 要求：
 2. 文档只有本架构和操作说明两处当前 Test Flow 权威，且职责不重复；
 3. 旧迁移 runner、静态 bundle、重复摘要和一次性实施文档从当前树移除；
 4. planning 冻结当前 Git 可见工作树的 exact source snapshot；
-5. Evidence V2 的 P1/P2 model-cert adapter 完成并移除显式 blocker 后，对该快照、实际平台和冻结 runtime/external inputs 执行 fresh `release.full`；
+5. 对该快照、实际平台和冻结 runtime/external inputs 执行 Reviewer 开启的 fresh `release.full`；
 6. 最后生成且可重新验证的 verdict 满足全部 Proof；
 7. 如需 Git 持久化，在测试完成后提交完全相同的 path/字节；提交前后 snapshot digest 必须一致，提交动作本身不构成新的测试证明。
 

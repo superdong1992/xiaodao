@@ -63,6 +63,7 @@ from problem_locator.contracts import (
     RequirementStatus,
     ResumeInterruptedTriggerPayload,
     ReviewAssessment,
+    ReviewPolicy,
     ReviewOutcomeTriggerPayload,
     ReviewTargetBinding,
     ReviewVerdict,
@@ -275,6 +276,7 @@ def _dedupe_evidence_bindings(
 def _runtime_from_job(job: Job) -> RuntimeBindings:
     return RuntimeBindings(
         diagnosis_mode=job.diagnosis_mode,
+        review_policy=job.review_policy,
         generic_skill_name=job.generic_skill_name,
         agent_profile_ref=job.agent_profile_ref,
         available_skill_refs=job.available_skill_refs,
@@ -682,60 +684,6 @@ class DomainCoordinator:
             )
         if active.diagnosis_mode is not DiagnosisMode.SPECIALIZED:
             return _validation("A DIAGNOSE Job must have a frozen diagnosis mode.")
-        methods_review_target = outcome.methods_review_target
-        if methods_review_target is None and outcome.result_type not in {
-            OutcomeResultType.NEED_INPUT,
-            OutcomeResultType.NEED_ATTACHMENT,
-        }:
-            return _validation(
-                "Methods V2 specialized diagnosis requires a server-created review target after preflight."
-            )
-        if methods_review_target is not None:
-            if (
-                active.skill_ref is None
-                or methods_review_target.source_job_id != active.job_id
-                or methods_review_target.skill_ref != active.skill_ref
-                or methods_review_target.reviewed_state_revision
-                != snapshot.case.diagnosis_state.revision
-            ):
-                return _validation(
-                    "Methods V2 Specialist handoff does not match the active Job skill/state."
-                )
-            next_job = self._job_spec(
-                trigger,
-                JobType.REVIEW,
-                target_state_revision=snapshot.case.diagnosis_state.revision,
-                goal=_REVIEW_GOAL,
-                evidence_bindings=[],
-                attachment_refs=[],
-                previous_outcome_refs=[],
-                artifact_bindings=[],
-                selected_skill_ref=snapshot.case.selected_skill_ref,
-                methods_review_target=methods_review_target,
-            )
-            if isinstance(next_job, ApplicationError):
-                return next_job
-            return TransitionPlan(
-                accepted_state_delta=_empty_delta(),
-                target_case_status=CaseStatus.REVIEWING,
-                job_updates=[
-                    _job_update(active, JobStatus.SUCCEEDED, trigger.occurred_at)
-                ],
-                outcome_disposition=OutcomeDisposition.APPLIED,
-                accepted_evidence_proposal_keys=[],
-                accepted_artifact_proposal_keys=[],
-                accepted_candidate_proposal_key=None,
-                selected_skill_update=None,
-                case_failure_update=None,
-                candidate_mutation=None,
-                next_job_spec=next_job,
-                final_result_target=None,
-                clear_active_job=True,
-                reason=(
-                    "Complete the Methods V2 Specialist Job and start a Candidate-free "
-                    "blind REVIEW Job."
-                ),
-            )
         diagnosis = outcome.payload
         assert isinstance(diagnosis, DiagnosisOutcome)
         candidate = diagnosis.candidate_conclusion_draft
@@ -904,9 +852,55 @@ class DomainCoordinator:
                 for proposal in outcome.proposed_artifacts
                 if proposal.artifact_kind is ArtifactKind.USER_RESULT_ARCHIVE
             ]
+            if len(archive_keys) != 1:
+                return _validation(
+                    "An accepted Candidate requires exactly one USER_RESULT_ARCHIVE Artifact."
+                )
             artifact_keys = _dedupe(
                 [*dependency_artifact_keys, user_result_keys[0], *archive_keys]
             )
+            candidate_binding = ReviewTargetBinding(
+                existing_candidate_target=None,
+                accepted_candidate_proposal_key=candidate.proposal_key,
+            )
+            if active.review_policy is ReviewPolicy.NONE:
+                target_case_status = (
+                    CaseStatus.RESOLVED
+                    if candidate.resolution_status
+                    is DiagnosisResolutionStatus.COMPLETE
+                    else CaseStatus.PARTIALLY_RESOLVED
+                )
+                return TransitionPlan(
+                    accepted_state_delta=accepted_delta,
+                    target_case_status=target_case_status,
+                    job_updates=[
+                        _job_update(active, JobStatus.SUCCEEDED, trigger.occurred_at)
+                    ],
+                    outcome_disposition=OutcomeDisposition.APPLIED,
+                    accepted_evidence_proposal_keys=evidence_keys,
+                    accepted_artifact_proposal_keys=artifact_keys,
+                    accepted_candidate_proposal_key=candidate.proposal_key,
+                    selected_skill_update=None,
+                    case_failure_update=None,
+                    candidate_mutation=CandidateMutation(
+                        action=CandidateMutationAction.INSTALL,
+                        candidate_binding=candidate_binding,
+                        expected_status=None,
+                        target_status=CandidateStatus.ACCEPTED,
+                        reason=None,
+                    ),
+                    next_job_spec=None,
+                    final_result_target=candidate_binding,
+                    clear_active_job=True,
+                    reason=(
+                        "Accept and publish the server-verified Candidate because the "
+                        "frozen review policy is NONE."
+                    ),
+                )
+            if active.review_policy is not ReviewPolicy.INDEPENDENT:
+                return _validation(
+                    "A specialized DIAGNOSE Job has no supported frozen review policy."
+                )
             review_evidence = [
                 *_existing_bindings(snapshot.case.diagnosis_state.evidence_refs),
                 *[_proposal_binding(key) for key in evidence_keys],
@@ -926,10 +920,7 @@ class DomainCoordinator:
                 previous_outcome_refs=[outcome.outcome_id],
                 artifact_bindings=review_resources[2],
                 selected_skill_ref=snapshot.case.selected_skill_ref,
-                review_target_binding=ReviewTargetBinding(
-                    existing_candidate_target=None,
-                    accepted_candidate_proposal_key=candidate.proposal_key,
-                ),
+                review_target_binding=candidate_binding,
             )
             if isinstance(next_job, ApplicationError):
                 return next_job
@@ -945,10 +936,7 @@ class DomainCoordinator:
                 case_failure_update=None,
                 candidate_mutation=CandidateMutation(
                     action=CandidateMutationAction.INSTALL,
-                    candidate_binding=ReviewTargetBinding(
-                        existing_candidate_target=None,
-                        accepted_candidate_proposal_key=candidate.proposal_key,
-                    ),
+                    candidate_binding=candidate_binding,
                     expected_status=None,
                     target_status=CandidateStatus.REVIEWING,
                     reason=None,
@@ -2059,6 +2047,7 @@ class DomainCoordinator:
         return JobSpec(
             job_type=job_type,
             diagnosis_mode=bindings.diagnosis_mode,
+            review_policy=bindings.review_policy,
             generic_skill_name=bindings.generic_skill_name,
             generic_problem_text=generic_problem_text,
             goal=goal,

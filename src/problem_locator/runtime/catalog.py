@@ -23,6 +23,7 @@ from problem_locator.contracts import (
     PORT_ERROR_CODES,
     ResolvedAsset,
     RuntimeBindings,
+    ReviewPolicy,
     VersionedRef,
     default_resource_limits,
 )
@@ -84,8 +85,8 @@ class _SkillDescriptor:
 
 _BUILTIN_SPECS = (
     _BuiltinSpec("profiles/router", AssetKind.AGENT_PROFILE, "agent-profile/router"),
-    _BuiltinSpec("profiles/specialist", AssetKind.AGENT_PROFILE, "agent-profile/specialist", "6.0.0"),
-    _BuiltinSpec("profiles/reviewer", AssetKind.AGENT_PROFILE, "agent-profile/reviewer", "6.0.0"),
+    _BuiltinSpec("profiles/specialist", AssetKind.AGENT_PROFILE, "agent-profile/specialist", "7.0.0"),
+    _BuiltinSpec("profiles/reviewer", AssetKind.AGENT_PROFILE, "agent-profile/reviewer", "7.0.0"),
     _BuiltinSpec("profiles/generic-locator", AssetKind.AGENT_PROFILE, "agent-profile/generic-locator", "2.0.0"),
     _BuiltinSpec("tool-bundles/router", AssetKind.TOOL_BUNDLE, "tool-bundle/router", "3.0.0"),
     _BuiltinSpec("tool-bundles/diagnose", AssetKind.TOOL_BUNDLE, "tool-bundle/diagnose", "4.0.0"),
@@ -93,11 +94,11 @@ _BUILTIN_SPECS = (
     _BuiltinSpec("tool-bundles/generic-locator", AssetKind.TOOL_BUNDLE, "tool-bundle/generic-locator"),
     _BuiltinSpec("context-policies/route", AssetKind.CONTEXT_POLICY, "context-policy/route"),
     _BuiltinSpec("context-policies/diagnose", AssetKind.CONTEXT_POLICY, "context-policy/diagnose"),
-    _BuiltinSpec("context-policies/review", AssetKind.CONTEXT_POLICY, "context-policy/review", "2.0.0"),
+    _BuiltinSpec("context-policies/review", AssetKind.CONTEXT_POLICY, "context-policy/review", "3.0.0"),
     _BuiltinSpec("context-policies/generic-locator", AssetKind.CONTEXT_POLICY, "context-policy/generic-locator"),
     _BuiltinSpec("output-contracts/route", AssetKind.OUTPUT_CONTRACT, "output-contract/route", "5.0.0"),
-    _BuiltinSpec("output-contracts/diagnose", AssetKind.OUTPUT_CONTRACT, "output-contract/diagnose", "9.0.0"),
-    _BuiltinSpec("output-contracts/review", AssetKind.OUTPUT_CONTRACT, "output-contract/review", "9.0.0"),
+    _BuiltinSpec("output-contracts/diagnose", AssetKind.OUTPUT_CONTRACT, "output-contract/diagnose", "10.0.0"),
+    _BuiltinSpec("output-contracts/review", AssetKind.OUTPUT_CONTRACT, "output-contract/review", "10.0.0"),
     _BuiltinSpec("output-contracts/generic-locator", AssetKind.OUTPUT_CONTRACT, "output-contract/generic-locator", "2.0.0"),
 )
 _BUILTIN_SPECS_BY_ID = {item.asset_id: item for item in _BUILTIN_SPECS}
@@ -207,10 +208,13 @@ class VersionedAssetCatalog:
         logparse_tool: ResolvedAsset | None = None,
         logparse_broker_factory: LogparseBrokerFactory | None = None,
         generic_skill_name: str,
+        specialized_reviewer_enabled: bool = False,
         allow_test_skills: bool = False,
     ) -> None:
         if type(allow_test_skills) is not bool:
             raise TypeError("allow_test_skills must be boolean")
+        if type(specialized_reviewer_enabled) is not bool:
+            raise TypeError("specialized_reviewer_enabled must be boolean")
         if (
             not isinstance(generic_skill_name, str)
             or len(generic_skill_name) > 64
@@ -231,6 +235,11 @@ class VersionedAssetCatalog:
         self._logparse_tool_ref: VersionedRef | None = None
         self._logparse_broker_factory = logparse_broker_factory
         self._generic_skill_name = generic_skill_name
+        self._specialized_review_policy = (
+            ReviewPolicy.INDEPENDENT
+            if specialized_reviewer_enabled
+            else ReviewPolicy.NONE
+        )
 
         root = Path(assets_root)
         for spec in _BUILTIN_SPECS:
@@ -406,6 +415,7 @@ class VersionedAssetCatalog:
                 raise ValueError
             bindings = RuntimeBindings(
                 diagnosis_mode=None,
+                review_policy=None,
                 generic_skill_name=None,
                 agent_profile_ref=self._builtin_ref("agent-profile/router"),
                 available_skill_refs=[_clone(ref) for ref in self._route_skill_refs],
@@ -462,6 +472,7 @@ class VersionedAssetCatalog:
         try:
             bindings = RuntimeBindings(
                 diagnosis_mode=DiagnosisMode.SPECIALIZED,
+                review_policy=self._specialized_review_policy,
                 generic_skill_name=None,
                 agent_profile_ref=self._builtin_ref(registration.diagnose.agent_profile_id),
                 available_skill_refs=[],
@@ -487,6 +498,7 @@ class VersionedAssetCatalog:
         try:
             bindings = RuntimeBindings(
                 diagnosis_mode=DiagnosisMode.GENERIC,
+                review_policy=None,
                 generic_skill_name=self._generic_skill_name,
                 agent_profile_ref=self._builtin_ref("agent-profile/generic-locator"),
                 available_skill_refs=[],
@@ -512,6 +524,7 @@ class VersionedAssetCatalog:
         try:
             bindings = RuntimeBindings(
                 diagnosis_mode=None,
+                review_policy=self._specialized_review_policy,
                 generic_skill_name=None,
                 agent_profile_ref=self._builtin_ref(registration.review.agent_profile_id),
                 available_skill_refs=[],

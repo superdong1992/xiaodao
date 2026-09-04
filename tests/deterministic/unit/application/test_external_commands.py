@@ -112,6 +112,7 @@ def _job(name: str) -> Job:
 def _bindings(job: Job) -> RuntimeBindings:
     return RuntimeBindings(
         diagnosis_mode=job.diagnosis_mode,
+        review_policy=job.review_policy,
         generic_skill_name=job.generic_skill_name,
         agent_profile_ref=job.agent_profile_ref,
         available_skill_refs=job.available_skill_refs,
@@ -153,6 +154,7 @@ def _job_spec(
     return JobSpec(
         job_type=template.job_type,
         diagnosis_mode=template.diagnosis_mode,
+        review_policy=template.review_policy,
         generic_skill_name=template.generic_skill_name,
         generic_problem_text=template.generic_problem_text,
         goal=template.goal,
@@ -999,6 +1001,7 @@ def _waiting_state(requirement_name: str = "rpc_method") -> StateFile:
         output_contract_ref=diagnose_template.output_contract_ref,
         logparse_tool_ref=diagnose_template.logparse_tool_ref,
         logparse_product=diagnose_template.logparse_product,
+        review_policy=diagnose_template.review_policy,
         review_target=None,
         replacement_for_job_id=None,
         resource_limits=diagnose_template.resource_limits,

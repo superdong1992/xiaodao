@@ -98,15 +98,15 @@ def _production_plan() -> MethodEvaluationPlanV2:
     return build_method_evaluation_plan_v2(skill=skill, evidence=graph)
 
 
-def test_methods_v2_asset_versions_match_the_builtin_catalog() -> None:
+def test_methods_v1_asset_versions_match_the_builtin_catalog() -> None:
     expected = {
         "tool-bundle/router": "3.0.0",
         "output-contract/route": "5.0.0",
-        "agent-profile/specialist": "6.0.0",
-        "agent-profile/reviewer": "6.0.0",
-        "context-policy/review": "2.0.0",
-        "output-contract/diagnose": "9.0.0",
-        "output-contract/review": "9.0.0",
+        "agent-profile/specialist": "7.0.0",
+        "agent-profile/reviewer": "7.0.0",
+        "context-policy/review": "3.0.0",
+        "output-contract/diagnose": "10.0.0",
+        "output-contract/review": "10.0.0",
     }
 
     for asset_id, version in expected.items():
@@ -126,68 +126,51 @@ def test_router_writes_one_server_finalized_draft_without_a_tool_round_trip() ->
     assert "independently parses, validates" in contract
 
 
-def test_specialist_assets_require_methods_v2_evaluation_output() -> None:
+def test_specialist_assets_require_grounded_methods_v1_output() -> None:
     profile_meta, profile = _asset("profiles/specialist")
     contract_meta, contract = _asset("output-contracts/diagnose")
     tool_meta, tool_bundle = _asset("tool-bundles/diagnose")
 
-    assert profile_meta["version"] == "6.0.0"
-    assert contract_meta["version"] == "9.0.0"
+    assert profile_meta["version"] == "7.0.0"
+    assert contract_meta["version"] == "10.0.0"
     assert tool_meta["version"] == "4.0.0"
-    assert "same configured model identity" in profile
     assert "SPECIALIST" in profile
-    assert "inputs/request.json" in profile
+    assert "authoritative target logs" in profile
     assert "output/method-diagnosis.draft.json" in contract
     assert "inputs/request.json" in contract
-    assert "evaluation_input" in contract
-    assert "`sources` catalog includes every frozen" in contract
-    assert "inputs/method-evidence-graph.json" not in contract
-    assert "inputs/method-evaluation-plan.json" not in contract
-    assert "evaluation_ref" in contract
-    assert "supporting_event_refs" in contract
-    assert "evaluation order" in contract
-    assert "Do not return hit refs" in contract
-    assert "four fields" in profile
+    assert "inputs/target_logs.json" in contract
+    assert "inputs/logparse-receipt.json" in contract
+    assert "confirmed_methods" in contract
+    assert "candidate_methods" in contract
+    assert "identity_tokens" in contract
+    assert "line_number" in contract
     assert "CONFIRMED" in contract
-    assert "REJECTED" in contract
-    assert "UNKNOWN" in contract
-    assert "There is no second repair" in contract
-    assert "INSUFFICIENT_EVIDENCE" not in contract
+    assert "PARTIAL" in contract
+    assert "INSUFFICIENT" in contract
     assert "output/job_outcome.draft.json" in contract
+    assert "Candidate, Outcome, JSON, or ZIP" in contract
     assert "problem-locator-logparse" not in tool_bundle
     assert "problem-locator-seal-outcome-draft" not in tool_bundle
 
 
-def test_reviewer_assets_require_blind_methods_v2_evaluation() -> None:
+def test_reviewer_assets_require_independent_methods_v1_review() -> None:
     profile_meta, profile = _asset("profiles/reviewer")
     contract_meta, contract = _asset("output-contracts/review")
     policy_meta, policy = _asset("context-policies/review")
     tool_meta, tool_bundle = _asset("tool-bundles/review")
 
-    assert profile_meta["version"] == "6.0.0"
-    assert contract_meta["version"] == "9.0.0"
-    assert policy_meta["version"] == "2.0.0"
+    assert profile_meta["version"] == "7.0.0"
+    assert contract_meta["version"] == "10.0.0"
+    assert policy_meta["version"] == "3.0.0"
     assert tool_meta["version"] == "3.0.0"
-    assert "same configured model identity" in profile
     assert "REVIEWER" in profile
-    assert "inputs/request.json" in profile
-    assert "SPECIALIST response, verdicts, reasons" in profile
+    assert "Do not continue the Specialist" in profile
     assert "output/method-review.draft.json" in contract
-    assert "inputs/request.json" in contract
-    assert "evaluation_input" in contract
-    assert "`sources` catalog includes every frozen" in contract
-    assert "inputs/method-evidence-graph.json" not in contract
-    assert "inputs/method-evaluation-plan.json" not in contract
-    assert "not inputs" in contract
-    assert "Do not use `inputs/method-diagnosis.json`" in contract
-    assert "supporting_event_refs" in contract
-    assert "evaluation order" in contract
-    assert "Do not return hit refs" in contract
-    assert "four fields" in profile
-    assert "compact `evaluation_input`" in policy
-    assert "must not appear in the role Workspace" in policy
-    assert "There is no second repair" in contract
-    assert "INSUFFICIENT_EVIDENCE" not in contract
+    assert "inputs/method-diagnosis.json" in contract
+    assert "inputs/method-grounding-audit.json" in contract
+    assert "identity_tokens" in contract
+    assert "NEED_MORE_EVIDENCE" in contract
+    assert "fixed Candidate review target" in policy
     assert "problem-locator-logparse" not in tool_bundle
     assert "problem-locator-seal-outcome-draft" not in tool_bundle
 

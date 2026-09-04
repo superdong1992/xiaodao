@@ -448,28 +448,21 @@ def test_production_output_contract_materializes_the_role_specific_protocol(
     assert content == production_contract.encode("utf-8")
     assert b"<<<BEGIN S00 AGENT JOB OUTCOME DRAFT SCHEMA>>>" not in content
     assert b"output/job_outcome.draft.json" in content
-    assert b"do not write" in content.lower()
+    assert b"Do not write" in content
     if job_type is JobType.DIAGNOSE:
         assert b"output/method-diagnosis.draft.json" in content
         assert b"inputs/request.json" in content
-        assert b"evaluation_input" in content
-        assert b"inputs/method-evidence-graph.json" not in content
-        assert b"inputs/method-evaluation-plan.json" not in content
-        assert (
-            b"Every item has exactly `evaluation_ref`, `verdict`, `supporting_event_refs`, and"
-            in content
-        )
-        assert b"Do not return hit refs" in content
-        assert b"Server has already scanned the logs once" in content
+        assert b"inputs/target_logs.json" in content
+        assert b"inputs/logparse-receipt.json" in content
+        assert b"confirmed_methods" in content
+        assert b"identity_tokens" in content
+        assert b"line_number" in content
     else:
         assert job_type is JobType.REVIEW
         assert b"output/method-review.draft.json" in content
-        assert b"inputs/request.json" in content
-        assert b"evaluation_input" in content
-        assert b"inputs/method-evidence-graph.json" not in content
-        assert b"inputs/method-evaluation-plan.json" not in content
-        assert b"SPECIALIST response, verdicts, reasons" in content
-        assert b"not inputs" in content
+        assert b"inputs/method-diagnosis.json" in content
+        assert b"inputs/method-grounding-audit.json" in content
+        assert b"NEED_MORE_EVIDENCE" in content
 
 
 def test_previous_outcome_is_full_canonical_dto_and_manifest_hash_is_checked() -> None:

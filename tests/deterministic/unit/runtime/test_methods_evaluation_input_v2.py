@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# Retired by the V9 Methods V1 production contract; kept as historical helpers.
+__test__ = False
+
 import hashlib
 import json
 from collections.abc import Iterator

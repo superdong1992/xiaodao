@@ -7,7 +7,7 @@ from problem_locator import __version__
 
 
 ROOT = Path(__file__).resolve().parents[3]
-RELEASE_VERSION = "5.0.0"
+RELEASE_VERSION = "6.0.0"
 
 
 def test_runtime_project_and_lock_publish_one_v4_release_version() -> None:

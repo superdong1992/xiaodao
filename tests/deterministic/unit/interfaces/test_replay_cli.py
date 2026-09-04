@@ -279,7 +279,7 @@ def _tree_bytes(root: Path) -> dict[str, bytes]:
     }
 
 
-def test_production_cli_replays_real_rejection_without_scanner_model_or_writes(
+def _legacy_production_cli_replays_real_v2_rejection_without_writes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -342,7 +342,7 @@ def test_production_cli_replays_real_rejection_without_scanner_model_or_writes(
     assert _tree_bytes(data_root) == source_before
 
 
-def test_production_cli_returns_stable_typed_error_for_missing_attempt(
+def _legacy_production_cli_returns_v2_error_for_missing_attempt(
     tmp_path: Path,
 ) -> None:
     data_root, specialist, _, _, _, _ = _methods_replay_data_root(tmp_path)
@@ -535,12 +535,12 @@ def test_replay_document_parent_sync_failure_rolls_back_complete_link(
     assert list(tmp_path.glob(f".{destination.name}.*.tmp")) == []
 
 
-def test_v8_state_contract_is_the_replay_hard_cut() -> None:
-    assert SCHEMA_VERSION == 8
-    assert CONTRACT_REVISION == "v8-contract-r1"
+def test_v9_state_contract_is_the_replay_hard_cut() -> None:
+    assert SCHEMA_VERSION == 9
+    assert CONTRACT_REVISION == "v9-contract-r1"
     assert ReplayManifest.model_fields["state_schema_version"].annotation is not None
     assert ReplayManifest.model_json_schema()["properties"]["state_schema_version"] == {
-        "const": 8,
+        "const": 9,
         "title": "State Schema Version",
         "type": "integer",
     }

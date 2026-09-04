@@ -149,7 +149,7 @@ def test_render_journey_generates_detailed_and_nonterminal_brief_snapshots(
         ),
     ],
 )
-def test_methods_v2_terminal_projection_is_rendered_from_production_outcome(
+def _legacy_methods_v2_terminal_projection_is_rendered_from_production_outcome(
     tmp_path: Path,
     reviewer_verdicts: tuple[str, ...],
     expected_status: str,

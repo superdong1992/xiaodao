@@ -40,6 +40,7 @@ from problem_locator.contracts import (
     ResourceRef,
     ResourceKind,
     ResourceType,
+    ReviewPolicy,
     ReviewOutcomeTriggerPayload,
     RouteKind,
     RouteOutcomeTriggerPayload,
@@ -652,6 +653,13 @@ class OutcomeSubmissionService:
             if next_job_type is JobType.REVIEW
             else self._asset_catalog.diagnose_bindings(skill_ref)
         )
+        if job.job_type is not JobType.ROUTE:
+            bindings = RuntimeBindings.model_validate(
+                {
+                    **bindings.model_dump(mode="python"),
+                    "review_policy": job.review_policy,
+                }
+            )
         return {
             next_job_type: _validate_catalog_bindings(
                 next_job_type,
@@ -1777,6 +1785,11 @@ def _expected_next_job_type(
             and isinstance(payload, DiagnosisOutcome)
             and job.skill_ref is not None
         ):
+            if (
+                payload.candidate_conclusion_draft is not None
+                and job.review_policy is ReviewPolicy.NONE
+            ):
+                return None
             return (
                 JobType.DIAGNOSE
                 if payload.candidate_conclusion_draft is None

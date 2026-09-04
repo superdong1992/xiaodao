@@ -478,12 +478,9 @@ class MethodsUserInputProjection:
 
 
 def _is_methods_v2_job(job: Job) -> bool:
-    """Return whether the frozen Job belongs to the hard-cut Evidence V2 path."""
+    """Identify only persisted pre-V9 REVIEW jobs from the retired V2 path."""
 
     return (
-        job.job_type is JobType.DIAGNOSE
-        and job.diagnosis_mode is DiagnosisMode.SPECIALIZED
-    ) or (
         job.job_type is JobType.REVIEW
         and job.methods_review_target is not None
     )
@@ -857,7 +854,7 @@ class DiagnosisRuntime:
         context_builder: ContextBuilder | None = None,
         backend_test_limits: BackendExecutionLimits | None = None,
         generic_locator_executor: GenericLocatorExecutor | None = None,
-        evidence_v2_reviewer_enabled: bool = False,
+        specialized_reviewer_enabled: bool = False,
     ) -> None:
         self._state_repository = state_repository
         self._resource_store = resource_store
@@ -873,7 +870,7 @@ class DiagnosisRuntime:
         self._backend_test_limits = backend_test_limits
         self._clock = clock
         self._id_generator = id_generator
-        self._evidence_v2_reviewer_enabled = evidence_v2_reviewer_enabled
+        self._specialized_reviewer_enabled = specialized_reviewer_enabled
         self._publisher = OutcomePublisher(execution_records, clock, id_generator)
         self._generic_locator_executor = generic_locator_executor or GenericLocatorExecutor(
             backend=self._diagnose_backend,
@@ -1026,13 +1023,6 @@ class DiagnosisRuntime:
         if job.job_type is JobType.ROUTE and not job.available_skill_refs:
             return self._publish_no_capability(job)
         aggregate = self._read_case(job)
-        if _is_methods_v2_job(job):
-            return self._execute_methods_v2(
-                job=job,
-                aggregate=aggregate,
-                assets=assets,
-                cancellation=cancellation,
-            )
         prior_methods_diagnosis: VerifiedMethodDiagnosisV1 | None = None
         prior_methods_diagnosis_bytes: bytes | None = None
         prior_methods_audit_bytes: bytes | None = None
@@ -2742,7 +2732,7 @@ class DiagnosisRuntime:
             if isinstance(evaluated, RuntimeExecutionReceipt):
                 return evaluated
             evaluated_state, evaluation = evaluated
-            if not self._evidence_v2_reviewer_enabled:
+            if not self._specialized_reviewer_enabled:
                 try:
                     terminal_state = finalize_specialist_evaluation_v2(
                         state=evaluated_state,

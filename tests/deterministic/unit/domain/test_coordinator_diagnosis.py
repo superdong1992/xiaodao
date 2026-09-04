@@ -25,6 +25,7 @@ from problem_locator.contracts import (
     RequirementKind,
     RequirementStatus,
     ResourceKind,
+    ReviewPolicy,
     StagedResourceRef,
     SupplementPolicy,
     TreeManifest,
@@ -161,6 +162,36 @@ def _logparse_proposals(
         staged_resource_ref=None,
     )
     return evidence, artifact
+
+
+def test_specialized_candidate_is_accepted_and_published_when_review_is_disabled() -> None:
+    source = rebuild(diagnose_job(), review_policy=ReviewPolicy.NONE)
+    outcome = diagnosis_outcome()
+    snapshot = snapshot_with_active(source)
+    request = trigger(
+        snapshot,
+        trigger_type=TriggerType.DIAGNOSIS_OUTCOME,
+        payload=DiagnosisOutcomeTriggerPayload(job_outcome=outcome),
+        continuation_resources=continuation(
+            incoming_outcome_id=outcome.outcome_id,
+            job=source,
+        ),
+        occurred_at=outcome.produced_at,
+    )
+
+    plan = DomainCoordinator().plan(snapshot, request)
+
+    assert not isinstance(plan, ApplicationError)
+    assert plan.target_case_status is CaseStatus.RESOLVED
+    assert plan.next_job_spec is None
+    assert plan.candidate_mutation is not None
+    assert plan.candidate_mutation.target_status.value == "ACCEPTED"
+    assert plan.final_result_target == plan.candidate_mutation.candidate_binding
+    assert plan.accepted_artifact_proposal_keys == [
+        "user_result",
+        "user_result_archive",
+    ]
+    assert validate_transition_plan_for_outcome(plan, outcome) is plan
 
 
 def test_need_input_accepts_requirement_and_ends_the_job() -> None:

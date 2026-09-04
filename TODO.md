@@ -1,22 +1,19 @@
 # TODO
 
-更新时间：2026-09-02
+更新时间：2026-09-04
 
 本文件是仓库活跃待办的唯一清单。已完成事项由代码、当前设计与 Git 历史证明，不在这里保留关闭项。
 
-## P0：Evidence V2 双 Provider model cert 与 Release
+## P0：Methods V1 Reviewer 最长链路 Release
 
-- 零模型 Core、CrossJob 和两套 provider adapter 已接入 Evidence V2；旧 Codex/Luna 直接 Methods V1
-  定位 Goal、Stage、Gate 和 action 路由已删除。正式结论仍须等待当前源码快照的真实 P1/P2 认证。
-- P1 Claude Code + DeepSeek 与 P2 Codex + Luna 默认各自运行生产 DiagnosisRuntime 的
-  Specialist-only 路径：正常调用数为 1，最多一次 repair，硬上限为 2。显式选择名称含
-  `blind-review` 的 Goal 时，才运行 Reviewer 并恢复每家 2–4 次调用合同。
-- 两份 `model-cert.json` 必须绑定同一 attempt 中的 production registration、source snapshot、V8 contract manifest 和
-  `core-verdict.json`，并记录 provider/model/revision、prompt/profile/tool policy、调用/repair 次数、
-  usage 与最终 `methods_result` 身份。
-- `release.evidence-v2-certification` 必须从同一 attempt 的 Core、默认 Specialist-only P1、P2 生成
-  `release-verdict.json`。`release.evidence-v2-blind-review-certification` 只验证可选盲评，不阻塞默认
-  Release。当前待办是完成 plan-only 审核、真实模型调用和最终权威 verdict；在此之前不得登记为已修复。
+- 当前零模型 Core 和 SameJob 已恢复 Methods V1 报告验证；`release.full` 也已切到
+  `SPECIALIZED_REVIEWER_ENABLED=true`，要求实际观察 `REVIEWING`，并由真实浏览器核对
+  `diagnosis-result.json`、`result.zip`、Content-Length、SHA-256、原始日志字节和重启重放。
+- 旧 Evidence V2 provider model-cert 不代表 Problem Locator 6.0.0 的专有运行时，不能作为 V9 发布
+  结论或复用来源。后续若保留这些工具，必须明确标为历史实验；若要成为正式认证入口，需按当前
+  Methods V1 草稿、Candidate、可选 Review 和用户报告合同重新实现。
+- 当前待办是审阅 `release.full --plan-only` 的模型身份、调用数、预算、外部源码和环境 blocker，
+  然后在依赖齐备的受支持主机上执行 fresh Release，取得绑定当前源码快照的权威 `verdict.json`。
 
 ## P0：Generic V2 最终集成与生产验收
 
@@ -31,20 +28,13 @@
 - 条件参数若已作为初始 USER_FACT 提供，应直接固定并复用，不得重复询问；若未提供，分支激活后才创建一次可补充的 OPEN requirement。
 - 生成器、manifest/合同、Catalog、Coordinator、服务端验证器和正反向测试必须共同覆盖“命中分支才询问、未命中分支不询问且不阻塞”。
 
-## P1：Evidence V2 UNRESOLVED 真实归因基线
+## P1：Methods V1 UNRESOLVED 真实分布
 
-- Runtime 已具备内部共识归因记录：保留公开 reason code，并把共识型 `UNRESOLVED` 细分为
-  `UNKNOWN_PRESENT`、`VERDICT_MISMATCH`、`EVIDENCE_SET_MISMATCH` 和 `NO_CONFIRMED`；同时记录
-  evaluation 数、每项 event 数、激活方法数和 package 总方法数。归因数据只存在于 execution
-  records，不进入 MCP、REST、Case 或 `MethodsTerminalProjectionV2`。
-- `tools/methods-consensus-attribution-report.py` 会从 `methods-state-v2.json` 统计全部公开终态原因，
-  并从 `methods-consensus-attribution-v2.json` 统计共识子因和规模分布。当前确定性验收样本刻意让
-  四个子因各出现 1 次，因此样本内各占 25%；这是覆盖证明，不是生产流量结论，不能据此放松共识
-  或实施部分重叠 event 的新语义。
-- 下一步要在显式盲评 P1/P2 认证或启用 Reviewer 的同身份生产运行中收集新的 execution records，再按 reason、子因、
-  N、每项 event 数和激活率联合判断主因。若 `EVIDENCE_SET_MISMATCH` 主导，再单独评估证据交集规则；
-  若 `INCOMPLETE_EVALUATION`、`NO_MATCHING_METHOD_EVIDENCE` 或 `*_SEMANTIC_INVALID` 主导，则分别处理
-  UNKNOWN 全局门、marker 激活精度或模型输出合同，不能用放松共识替代。
+- 当前确定性测试已覆盖 Reviewer `REJECT`、`NEED_MORE_EVIDENCE`、证据不足和发布失败的收口行为，
+  但这些覆盖样本不能代表生产分布。
+- 后续在显式启用 Reviewer 的同身份生产运行中，只统计已脱敏的终态类别、证据缺口类别和方法数；
+  不收集报告正文、原始日志、路径或身份 token。任何语义调整都必须先有足够样本和专项回归，不能
+  用放宽核验或跳过 Reviewer 来降低 `UNRESOLVED` 比例。
 
 ## P1：日志抑制、限流与采样规则
 

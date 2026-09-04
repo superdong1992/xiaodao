@@ -234,7 +234,7 @@ function writeReleaseRegistrationInput(root) {
     })),
   };
   fs.writeFileSync(path.join(packageRoot, "methods.json"), `${JSON.stringify(methods, null, 2)}\n`);
-  fs.writeFileSync(path.join(packageRoot, "SKILL.md"), "---\nname: diagnose-rpc-timeout\ndescription: Test-owned production Runtime fixture.\n---\n\nRead request.json and the evaluation_input embedded in the runtime context. Use evaluation_input.observations and evaluation_input.markers through each item in evaluation_input.evaluations and its events. Return only evaluation_ref, verdict, supporting_event_refs, and reason; UNKNOWN is allowed.\n");
+  fs.writeFileSync(path.join(packageRoot, "SKILL.md"), "---\nname: diagnose-rpc-timeout\ndescription: Test-owned production Runtime fixture.\n---\n\nRead request.json, target_logs.json, logparse-receipt.json, and the listed frozen logs. Only output schema_version, status, confirmed_methods, candidate_methods, evidence, limitations, and safety_notes. Each evidence item must include identity_tokens and sources with source_id and line_number.\n");
   const templates = [];
   let inFence = false;
   for (const rawLine of wiki.split(/\r?\n/u)) {

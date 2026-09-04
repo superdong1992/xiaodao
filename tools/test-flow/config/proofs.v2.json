@@ -244,7 +244,7 @@
       "stages": ["journey.cross-job.upload"]
     },
     "proof.dev-cross-job-diagnose": {
-      "description": "The Specialist-only DIAGNOSE stage completes and seals its continuation boundary without creating a REVIEW Job.",
+      "description": "The Methods V1 DIAGNOSE and independent REVIEW stages complete, publish JSON/ZIP, and seal the continuation boundary.",
       "acceptance": "all",
       "stages": ["journey.cross-job.diagnose"]
     },
@@ -276,7 +276,7 @@
       ]
     },
     "proof.real-agent-cross-job": {
-      "description": "The fresh CrossJob journey supplies the Release real Agent, ROUTE and Specialist-only DIAGNOSE claims.",
+      "description": "The fresh CrossJob journey supplies the Release real Agent, ROUTE, Methods V1 Specialist and independent Reviewer claims.",
       "acceptance": "all",
       "stages": [
         "journey.cross-job.route",
