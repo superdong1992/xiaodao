@@ -355,11 +355,37 @@ class AgentBackend:
         started = 0.0
         backend_execution_observed: float | None = None
         workspace_bytes = 0
+        workspace_scan_count = 0
+        workspace_scan_duration_ms = 0.0
         tree_released = False
         readers: tuple[threading.Thread, ...] = ()
         lifecycle_threads: tuple[threading.Thread, ...] = ()
         io_stop = threading.Event()
         pipes = (managed.stdin, managed.stdout, managed.stderr)
+
+        def measure_workspace(*, allow_transient_changes: bool) -> int:
+            nonlocal workspace_scan_count, workspace_scan_duration_ms
+            scan_started = time.perf_counter()
+            try:
+                return _temporary_workspace_bytes(
+                    root,
+                    limit=limits.workspace_bytes,
+                    deadline=started + limits.wall_time_seconds,
+                    cancellation=cancellation,
+                    monotonic=self._monotonic,
+                    identity=workspace_identity,
+                    failure_probe=lambda: _background_io_failure(
+                        input_state,
+                        output_state,
+                    ),
+                    allow_transient_changes=allow_transient_changes,
+                )
+            finally:
+                workspace_scan_count += 1
+                workspace_scan_duration_ms += (
+                    time.perf_counter() - scan_started
+                ) * 1000
+
         try:
             try:
                 stdin_fd, stdout_fd, stderr_fd = tuple(
@@ -453,18 +479,8 @@ class AgentBackend:
                     )
                     break
                 try:
-                    workspace_bytes = _temporary_workspace_bytes(
-                        root,
-                        limit=limits.workspace_bytes,
-                        deadline=started + limits.wall_time_seconds,
-                        cancellation=cancellation,
-                        monotonic=self._monotonic,
-                        identity=workspace_identity,
-                        failure_probe=lambda: _background_io_failure(
-                            input_state,
-                            output_state,
-                        ),
-                        allow_transient_changes=True,
+                    workspace_bytes = measure_workspace(
+                        allow_transient_changes=True
                     )
                 except RuntimeExecutionError as exc:
                     primary_failure = exc.failure
@@ -600,14 +616,7 @@ class AgentBackend:
 
         if primary_failure is not None:
             raise RuntimeExecutionError(primary_failure)
-        workspace_bytes = _temporary_workspace_bytes(
-            root,
-            limit=limits.workspace_bytes,
-            deadline=started + limits.wall_time_seconds,
-            cancellation=cancellation,
-            monotonic=self._monotonic,
-            identity=workspace_identity,
-        )
+        workspace_bytes = measure_workspace(allow_transient_changes=False)
         if workspace_bytes > limits.workspace_bytes:
             raise runtime_failure(
                 stage=ExecutionStage.BACKEND_EXECUTE,
@@ -629,6 +638,8 @@ class AgentBackend:
                 "stdout_stderr_bytes": result.stdout_stderr_bytes,
                 "workspace_bytes": result.workspace_bytes,
                 "elapsed_seconds": result.elapsed_seconds,
+                "workspace_scan_count": workspace_scan_count,
+                "workspace_scan_duration_ms": workspace_scan_duration_ms,
             },
         )
         try:
@@ -639,6 +650,8 @@ class AgentBackend:
                 stdout_stderr_bytes=result.stdout_stderr_bytes,
                 workspace_bytes=result.workspace_bytes,
                 elapsed_seconds=result.elapsed_seconds,
+                workspace_scan_count=workspace_scan_count,
+                workspace_scan_duration_ms=workspace_scan_duration_ms,
             )
         except Exception:
             # Observability must never change successful Agent execution.

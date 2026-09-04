@@ -55,6 +55,7 @@ from problem_locator.contracts.serialization import (
     canonical_json_bytes,
     parse_canonical_json_bytes,
 )
+from problem_locator.storage.platform import chmod_no_follow
 
 from .failures import RuntimeExecutionError, runtime_failure
 from .methods_grounding import FrozenTargetLogV1
@@ -113,7 +114,7 @@ class PreparedWorkspace:
 
 @dataclass(frozen=True, slots=True)
 class FrozenMethodsWorkspaceInputs:
-    """Exact server-owned inputs handed only to the Methods Agent pass."""
+    """Exact server-owned preprocessing inputs frozen only in memory."""
 
     request_bytes: bytes
     target_logs_bytes: bytes
@@ -1056,9 +1057,10 @@ _METHODS_RECEIPT_CONTEXT_FIELDS = frozenset(
 _METHODS_REQUEST_INPUT = "request.json"
 _METHODS_GRAPH_INPUT = "method-evidence-graph.json"
 _METHODS_PLAN_INPUT = "method-evaluation-plan.json"
-_METHODS_PREPROCESS_INPUTS = (
+_METHODS_TRANSIENT_INPUTS = (
     "target_logs.json",
     "logparse-receipt.json",
+    "target-logs",
 )
 
 
@@ -1134,45 +1136,234 @@ def _validate_methods_graph_plan_for_job_v2(
         raise ValueError("Methods V2 Graph and Plan do not describe one method set")
 
 
-def _remove_methods_preprocess_inputs(inputs_root: Path) -> None:
-    for name in _METHODS_PREPROCESS_INPUTS:
-        path = inputs_root / name
-        if not path.is_file():
-            raise ValueError("Methods preprocessing input is missing")
-        path.chmod(0o644)
-        path.unlink()
-    target_root = inputs_root / "target-logs"
-    if not target_root.is_dir():
-        raise ValueError("Methods target-log directory is missing")
-    target_root.chmod(0o755)
-    for path in target_root.iterdir():
-        if not path.is_file():
-            raise ValueError("Methods target-log input shape is invalid")
-        path.chmod(0o644)
-        path.unlink()
-    target_root.rmdir()
-
-
-def _remove_methods_legacy_input_trees(inputs_root: Path) -> None:
+def _remove_methods_legacy_input_trees(
+    inputs_root: Path,
+    *,
+    input_names: set[str],
+    workspace_device: int,
+) -> None:
     for name in ("attachments", "evidence", "artifacts", "outcomes"):
-        root = inputs_root / name
-        if not root.exists():
+        if name not in input_names:
             continue
-        if not root.is_dir():
-            raise ValueError("Methods legacy input root is not a directory")
-        root.chmod(0o755)
-        for path in sorted(
-            root.rglob("*"),
-            key=lambda item: len(item.parts),
-            reverse=True,
+        root = inputs_root / name
+        try:
+            root_metadata = root.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise _UnsafeWorkspaceError("Methods legacy inputs changed") from exc
+        if (
+            _is_link_or_reparse(root_metadata)
+            or not stat.S_ISDIR(root_metadata.st_mode)
+            or root_metadata.st_dev != workspace_device
         ):
-            if path.is_dir():
-                path.chmod(0o755)
-                path.rmdir()
-            else:
-                path.chmod(0o644)
-                path.unlink()
+            raise _UnsafeWorkspaceError("Methods legacy input root is unsafe")
+        candidates: list[tuple[Path, os.stat_result]] = []
+
+        def collect(directory: Path) -> None:
+            try:
+                with os.scandir(directory) as iterator:
+                    entries = sorted(iterator, key=lambda item: item.name)
+            except OSError as exc:
+                raise _UnsafeWorkspaceError("Methods legacy inputs changed") from exc
+            for entry in entries:
+                path = directory / entry.name
+                try:
+                    entry.name.encode("utf-8", errors="strict")
+                    # ``DirEntry.stat`` reports placeholder device/link values
+                    # on Windows.  Path.stat preserves the identity fields used
+                    # by the cross-platform Workspace boundary checks below.
+                    metadata = path.stat(follow_symlinks=False)
+                except (OSError, UnicodeEncodeError) as exc:
+                    raise _UnsafeWorkspaceError("Methods legacy inputs changed") from exc
+                if (
+                    _is_link_or_reparse(metadata)
+                    or metadata.st_dev != workspace_device
+                    or (
+                        not stat.S_ISDIR(metadata.st_mode)
+                        and (
+                            not stat.S_ISREG(metadata.st_mode)
+                            or metadata.st_nlink != 1
+                        )
+                    )
+                ):
+                    raise _UnsafeWorkspaceError("Methods legacy input node is unsafe")
+                if stat.S_ISDIR(metadata.st_mode):
+                    collect(path)
+                candidates.append((path, metadata))
+
+        collect(root)
+        directories = [
+            (path, metadata)
+            for path, metadata in candidates
+            if stat.S_ISDIR(metadata.st_mode)
+        ]
+        files = [
+            (path, metadata)
+            for path, metadata in candidates
+            if stat.S_ISREG(metadata.st_mode)
+        ]
+
+        # Validate the complete tree before changing any node.  Then make only
+        # the already-validated directories writable so POSIX unlink/rmdir can
+        # proceed without chmod-ing file inodes that might be externally shared.
+        for path, metadata in [(root, root_metadata), *directories]:
+            try:
+                current = path.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise _UnsafeWorkspaceError("Methods legacy inputs changed") from exc
+            if (
+                _is_link_or_reparse(current)
+                or current.st_dev != workspace_device
+                or _identity(current) != _identity(metadata)
+                or not stat.S_ISDIR(current.st_mode)
+            ):
+                raise _UnsafeWorkspaceError("Methods legacy inputs changed")
+            chmod_no_follow(path, 0o755)
+
+        for path, metadata in files:
+            try:
+                current = path.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise _UnsafeWorkspaceError("Methods legacy inputs changed") from exc
+            if (
+                _is_link_or_reparse(current)
+                or current.st_dev != workspace_device
+                or _identity(current) != _identity(metadata)
+                or not stat.S_ISREG(current.st_mode)
+                or current.st_nlink != 1
+                or _metadata_fingerprint(current)
+                != _metadata_fingerprint(metadata)
+            ):
+                raise _UnsafeWorkspaceError("Methods legacy input file changed")
+            # Windows refuses to unlink a read-only file.  Every node in the
+            # complete tree was already validated above, including nlink==1,
+            # before this permission-changing deletion phase begins.
+            chmod_no_follow(path, 0o644)
+            path.unlink()
+
+        for path, metadata in directories:
+            try:
+                current = path.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise _UnsafeWorkspaceError("Methods legacy inputs changed") from exc
+            if (
+                _is_link_or_reparse(current)
+                or current.st_dev != workspace_device
+                or _identity(current) != _identity(metadata)
+                or not stat.S_ISDIR(current.st_mode)
+            ):
+                raise _UnsafeWorkspaceError("Methods legacy inputs changed")
+            path.rmdir()
+        try:
+            current_root = root.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise _UnsafeWorkspaceError("Methods legacy input root changed") from exc
+        if (
+            _is_link_or_reparse(current_root)
+            or not stat.S_ISDIR(current_root.st_mode)
+            or current_root.st_dev != workspace_device
+            or _identity(current_root) != _identity(root_metadata)
+        ):
+            raise _UnsafeWorkspaceError("Methods legacy input root changed")
         root.rmdir()
+
+
+def _read_exact_workspace_file(
+    workspace: PreparedWorkspace,
+    path: Path,
+    expected_bytes: bytes,
+) -> None:
+    root_resolved = _fallback_root(workspace)
+    try:
+        named_metadata = path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise _UnsafeWorkspaceError("Methods role input changed") from exc
+    if (
+        _is_link_or_reparse(named_metadata)
+        or not stat.S_ISREG(named_metadata.st_mode)
+        or named_metadata.st_nlink != 1
+        or named_metadata.st_dev != workspace.root_device
+        or named_metadata.st_size != len(expected_bytes)
+    ):
+        raise _UnsafeWorkspaceError("Methods role input is not an ordinary file")
+    _fallback_assert_beneath(path, root_resolved)
+    descriptor = -1
+    data = bytearray()
+    try:
+        descriptor = os.open(path, _fallback_file_flags())
+        opened_metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened_metadata.st_mode)
+            or opened_metadata.st_nlink != 1
+            or opened_metadata.st_dev != workspace.root_device
+            or _identity(opened_metadata) != _identity(named_metadata)
+        ):
+            raise _UnsafeWorkspaceError("Methods role input changed")
+        while len(data) <= len(expected_bytes):
+            chunk = os.read(
+                descriptor,
+                min(_READ_CHUNK_BYTES, len(expected_bytes) + 1 - len(data)),
+            )
+            if not chunk:
+                break
+            data.extend(chunk)
+        final_metadata = os.fstat(descriptor)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    try:
+        final_named_metadata = path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise _UnsafeWorkspaceError("Methods role input changed") from exc
+    if (
+        bytes(data) != expected_bytes
+        or _is_link_or_reparse(final_named_metadata)
+        or _metadata_fingerprint(final_metadata)
+        != _metadata_fingerprint(opened_metadata)
+        or _metadata_fingerprint(final_named_metadata)
+        != _metadata_fingerprint(named_metadata)
+    ):
+        raise _UnsafeWorkspaceError("Methods role input content changed")
+    _fallback_assert_beneath(path, root_resolved)
+
+
+def _verify_methods_role_input_boundary(
+    workspace: PreparedWorkspace,
+    *,
+    expected_bytes: Mapping[str, bytes],
+) -> None:
+    inputs_root, inputs_metadata = _fallback_expected_directory(
+        workspace,
+        ("inputs",),
+        ((workspace.inputs_device, workspace.inputs_inode),),
+    )
+    expected_names = sorted(expected_bytes)
+    if expected_names != sorted(["manifest.json", _METHODS_REQUEST_INPUT]):
+        raise ValueError("Methods role input expectations are invalid")
+    if _fallback_names(inputs_root) != expected_names:
+        raise _UnsafeWorkspaceError("Methods role inputs contain an unexpected node")
+    for name in expected_names:
+        _read_exact_workspace_file(
+            workspace,
+            inputs_root / name,
+            expected_bytes[name],
+        )
+    final_inputs_root, final_inputs_metadata = _fallback_expected_directory(
+        workspace,
+        ("inputs",),
+        ((workspace.inputs_device, workspace.inputs_inode),),
+    )
+    if (
+        final_inputs_root != inputs_root
+        or _identity(final_inputs_metadata) != _identity(inputs_metadata)
+        or _fallback_names(final_inputs_root) != expected_names
+    ):
+        raise _UnsafeWorkspaceError("Methods role inputs changed during inspection")
+
+
+def _set_methods_role_inputs_read_only(inputs_root: Path) -> None:
+    for name in ("manifest.json", _METHODS_REQUEST_INPUT):
+        chmod_no_follow(inputs_root / name, 0o444)
+    chmod_no_follow(inputs_root, 0o555)
 
 
 def _methods_specialist_manifest_v2(job: Job) -> WorkspaceInputManifest:
@@ -1207,6 +1398,70 @@ class WorkspaceManager:
         methods_evaluation_plan: MethodEvaluationPlanV2 | None = None,
         workspace_phase: Literal["logparse-preprocess"] | None = None,
     ) -> PreparedWorkspace:
+        """Prepare a fully materialized Job workspace."""
+
+        if resource_store is None:
+            raise TypeError("resource_store is required for a materialized Workspace")
+        return self._prepare(
+            job,
+            aggregate,
+            resource_store,
+            resolved_logparse_plan=resolved_logparse_plan,
+            review_subject=review_subject,
+            methods_evaluation_plan=methods_evaluation_plan,
+            workspace_phase=workspace_phase,
+            materialize_payloads=True,
+        )
+
+    def prepare_fresh_methods_specialist_main_metadata_only(
+        self,
+        job: Job,
+        aggregate: CaseAggregate,
+        *,
+        resolved_logparse_plan: ResolvedLogparsePlanInput,
+    ) -> PreparedWorkspace:
+        """Prepare the fresh Specialist main workspace without resource payloads.
+
+        The caller must have established that no recoverable Evidence V2 records
+        exist.  The product-owned preprocessing workspace remains responsible for
+        materializing and hash-verifying every referenced resource before any
+        Specialist Agent starts.
+        """
+
+        if (
+            job.job_type is not JobType.DIAGNOSE
+            or job.diagnosis_mode is not DiagnosisMode.SPECIALIZED
+            or job.methods_review_target is not None
+            or not isinstance(resolved_logparse_plan, ResolvedLogparsePlanInput)
+        ):
+            raise ValueError(
+                "metadata-only Workspace requires a fresh specialized DIAGNOSE main pass"
+            )
+        return self._prepare(
+            job,
+            aggregate,
+            None,
+            resolved_logparse_plan=resolved_logparse_plan,
+            review_subject=None,
+            methods_evaluation_plan=None,
+            workspace_phase=None,
+            materialize_payloads=False,
+        )
+
+    def _prepare(
+        self,
+        job: Job,
+        aggregate: CaseAggregate,
+        resource_store: ResourceStore | None,
+        *,
+        resolved_logparse_plan: ResolvedLogparsePlanInput | None,
+        review_subject: ReviewSubjectV2 | None,
+        methods_evaluation_plan: MethodEvaluationPlanV2 | None,
+        workspace_phase: Literal["logparse-preprocess"] | None,
+        materialize_payloads: bool,
+    ) -> PreparedWorkspace:
+        if materialize_payloads and resource_store is None:
+            raise TypeError("materialized Workspace requires a ResourceStore")
         if aggregate.case.case_id != job.case_id or aggregate.jobs.get(job.job_id) != job:
             raise runtime_failure(
                 stage=ExecutionStage.OUTCOME_VALIDATE,
@@ -1265,8 +1520,10 @@ class WorkspaceManager:
                 attachment.attachment_id,
                 filename_suffix,
             )
-            destination = _safe_destination(root, relative)
-            _verify_materialized(resource_store, reference, destination)
+            if materialize_payloads:
+                assert resource_store is not None
+                destination = _safe_destination(root, relative)
+                _verify_materialized(resource_store, reference, destination)
             entries.append(
                 WorkspaceAttachmentInput(
                     input_kind="ATTACHMENT",
@@ -1288,11 +1545,13 @@ class WorkspaceManager:
                 resource_kind = item.resource_ref.resource_kind
                 leaf = "payload" if resource_kind is ResourceKind.FILE else "tree"
                 relative = f"inputs/evidence/{item.evidence_id}/{leaf}"
-                _verify_materialized(
-                    resource_store,
-                    item.resource_ref,
-                    _safe_destination(root, relative),
-                )
+                if materialize_payloads:
+                    assert resource_store is not None
+                    _verify_materialized(
+                        resource_store,
+                        item.resource_ref,
+                        _safe_destination(root, relative),
+                    )
                 size = item.resource_ref.size
                 sha256 = item.resource_ref.sha256
             entries.append(
@@ -1314,11 +1573,13 @@ class WorkspaceManager:
             reference = _artifact_ref(artifact)
             leaf = "payload" if artifact.resource_kind is ResourceKind.FILE else "tree"
             relative = f"inputs/artifacts/{artifact.artifact_id}/{leaf}"
-            _verify_materialized(
-                resource_store,
-                reference,
-                _safe_destination(root, relative),
-            )
+            if materialize_payloads:
+                assert resource_store is not None
+                _verify_materialized(
+                    resource_store,
+                    reference,
+                    _safe_destination(root, relative),
+                )
             entries.append(
                 WorkspaceArtifactInput(
                     input_kind="ARTIFACT",
@@ -1337,16 +1598,17 @@ class WorkspaceManager:
         for outcome in materialized_outcomes:
             data = canonical_json_bytes(outcome)
             relative = f"inputs/outcomes/{outcome.outcome_id}/job_outcome.json"
-            path = _safe_destination(root, relative)
-            try:
-                _atomic_write(path, data)
-            except OSError as exc:
-                raise runtime_failure(
-                    stage=ExecutionStage.WORKSPACE_PREPARE,
-                    code=ErrorCode.WORKSPACE_PREPARE_FAILED,
-                    message="A previous Outcome could not be materialized.",
-                    retryable=True,
-                ) from exc
+            if materialize_payloads:
+                path = _safe_destination(root, relative)
+                try:
+                    _atomic_write(path, data)
+                except OSError as exc:
+                    raise runtime_failure(
+                        stage=ExecutionStage.WORKSPACE_PREPARE,
+                        code=ErrorCode.WORKSPACE_PREPARE_FAILED,
+                        message="A previous Outcome could not be materialized.",
+                        retryable=True,
+                    ) from exc
             entries.append(
                 WorkspacePreviousOutcomeInput(
                     input_kind="PREVIOUS_OUTCOME",
@@ -1477,12 +1739,12 @@ class WorkspaceManager:
         target_logs: Sequence[tuple[str, str, bytes]],
         receipt_context: Mapping[str, Any],
     ) -> FrozenMethodsWorkspaceInputs:
-        """Atomically add the minimal server-owned Methods input surface.
+        """Freeze exact preprocessing bytes without exposing them to Pass B.
 
         Pass A has already exited and its broker capability has been revoked.
-        The input directory is temporarily made writable only by this server
-        code, populated with copies of the reread target bytes, and locked
-        read-only again before Pass B starts.
+        Graph construction and execution-record publication consume the returned
+        immutable bytes directly; the Specialist Workspace remains metadata-only
+        until its final request is published.
         """
 
         if not isinstance(workspace, PreparedWorkspace):
@@ -1509,32 +1771,21 @@ class WorkspaceManager:
 
         inputs_root = workspace.root / "inputs"
         try:
-            metadata = inputs_root.stat(follow_symlinks=False)
-            if (
-                inputs_root.is_symlink()
-                or not stat.S_ISDIR(metadata.st_mode)
-                or _identity(metadata)
-                != (workspace.inputs_device, workspace.inputs_inode)
-            ):
-                raise _UnsafeWorkspaceError("workspace inputs identity changed")
-            reserved = {
-                "request.json",
-                "target_logs.json",
-                "target-logs",
-                "logparse-receipt.json",
-            }
-            if any((inputs_root / name).exists() for name in reserved):
+            inputs_root, _ = _fallback_expected_directory(
+                workspace,
+                ("inputs",),
+                ((workspace.inputs_device, workspace.inputs_inode),),
+            )
+            input_names = set(_fallback_names(inputs_root))
+            reserved = {"request.json", *_METHODS_TRANSIENT_INPUTS}
+            if input_names & reserved:
                 raise _UnsafeWorkspaceError("Methods inputs already exist")
 
-            inputs_root.chmod(0o755)
-            target_root = inputs_root / "target-logs"
-            target_root.mkdir(mode=0o700)
             frozen: list[FrozenTargetLogV1] = []
             target_rows: list[dict[str, Any]] = []
             for source_id, label, content in entries:
                 relative_path = f"inputs/target-logs/{source_id}.log"
                 digest = bytes_sha256(content)
-                _atomic_write(workspace.root / relative_path, content)
                 frozen.append(
                     FrozenTargetLogV1(
                         source_id=source_id,
@@ -1573,31 +1824,11 @@ class WorkspaceManager:
                 }
             )
             request_bytes = canonical_json_bytes(request_value)
-            _atomic_write(inputs_root / "target_logs.json", target_logs_bytes)
-            _atomic_write(inputs_root / "logparse-receipt.json", receipt_bytes)
-            _atomic_write(inputs_root / "request.json", request_bytes)
         except (OSError, TypeError, ValueError, _UnsafeWorkspaceError) as exc:
             raise runtime_failure(
                 stage=ExecutionStage.WORKSPACE_PREPARE,
                 code=ErrorCode.WORKSPACE_PREPARE_FAILED,
-                message="Frozen Methods inputs could not be published safely.",
-                retryable=True,
-            ) from exc
-        finally:
-            _set_inputs_read_only(inputs_root)
-
-        try:
-            final_metadata = inputs_root.stat(follow_symlinks=False)
-            if _identity(final_metadata) != (
-                workspace.inputs_device,
-                workspace.inputs_inode,
-            ):
-                raise _UnsafeWorkspaceError("workspace inputs identity changed")
-        except (OSError, _UnsafeWorkspaceError) as exc:
-            raise runtime_failure(
-                stage=ExecutionStage.WORKSPACE_PREPARE,
-                code=ErrorCode.WORKSPACE_PREPARE_FAILED,
-                message="Frozen Methods inputs could not be verified safely.",
+                message="Methods preprocessing inputs could not be frozen safely.",
                 retryable=True,
             ) from exc
         return FrozenMethodsWorkspaceInputs(
@@ -1616,7 +1847,7 @@ class WorkspaceManager:
         evidence_graph: MethodEvidenceGraphV2,
         evaluation_plan: MethodEvaluationPlanV2,
     ) -> MethodsRoleWorkspaceReceiptV2:
-        """Replace preprocessing files with the Specialist's final model inputs."""
+        """Publish the minimal Specialist inputs and reject transient nodes."""
 
         if not isinstance(workspace, PreparedWorkspace) or not isinstance(job, Job):
             raise TypeError("workspace and job must be frozen production DTOs")
@@ -1684,47 +1915,58 @@ class WorkspaceManager:
             else workspace.manifest
         )
         model_manifest_bytes = canonical_json_bytes(model_manifest)
+        expected_role_input_bytes = {
+            "manifest.json": model_manifest_bytes,
+            _METHODS_REQUEST_INPUT: request_bytes,
+        }
         request_path = inputs_root / _METHODS_REQUEST_INPUT
-        graph_path = inputs_root / _METHODS_GRAPH_INPUT
-        plan_path = inputs_root / _METHODS_PLAN_INPUT
         manifest_path = inputs_root / "manifest.json"
         try:
-            metadata = inputs_root.stat(follow_symlinks=False)
-            if (
-                inputs_root.is_symlink()
-                or not stat.S_ISDIR(metadata.st_mode)
-                or _identity(metadata)
-                != (workspace.inputs_device, workspace.inputs_inode)
-            ):
-                raise _UnsafeWorkspaceError("workspace inputs identity changed")
-            if graph_path.exists() or plan_path.exists():
+            inputs_root, _ = _fallback_expected_directory(
+                workspace,
+                ("inputs",),
+                ((workspace.inputs_device, workspace.inputs_inode),),
+            )
+            input_names = set(_fallback_names(inputs_root))
+            if {_METHODS_GRAPH_INPUT, _METHODS_PLAN_INPUT} & input_names:
                 raise ValueError("Methods V2 role inputs already exist")
-            inputs_root.chmod(0o755)
             if remove_preprocessing:
-                preprocess_paths = (
-                    request_path,
-                    inputs_root / "target_logs.json",
-                    inputs_root / "logparse-receipt.json",
-                    inputs_root / "target-logs",
+                allowed = {
+                    "manifest.json",
+                    "attachments",
+                    "evidence",
+                    "artifacts",
+                    "outcomes",
+                }
+                if input_names - allowed or "manifest.json" not in input_names:
+                    raise ValueError("Methods transient inputs are forbidden")
+                _read_exact_workspace_file(
+                    workspace,
+                    manifest_path,
+                    workspace.manifest_bytes,
                 )
-                present = tuple(path.exists() for path in preprocess_paths)
-                if any(present) and not all(present):
-                    raise ValueError("Methods preprocessing inputs are incomplete")
-                if all(present):
-                    request_path.chmod(0o644)
-                    _atomic_write(request_path, request_bytes)
-                    _remove_methods_preprocess_inputs(inputs_root)
-                else:
-                    _atomic_write(request_path, request_bytes)
-                _remove_methods_legacy_input_trees(inputs_root)
-                manifest_path.chmod(0o644)
+                inputs_root.chmod(0o755)
+                _atomic_write(request_path, request_bytes)
+                _remove_methods_legacy_input_trees(
+                    inputs_root,
+                    input_names=input_names,
+                    workspace_device=workspace.root_device,
+                )
+                chmod_no_follow(manifest_path, 0o644)
                 _atomic_write(manifest_path, model_manifest_bytes)
-            elif request_path.read_bytes() != request_bytes:
-                raise ValueError("Methods Reviewer request does not match its own Job")
             # Graph and Plan stay in the server-owned execution records.  Their
             # lossless compact projection is embedded once in the bounded role
             # context, so publishing either full record here would give the
             # model a second, unbudgeted path to load the duplicated log text.
+            _verify_methods_role_input_boundary(
+                workspace,
+                expected_bytes=expected_role_input_bytes,
+            )
+            _set_methods_role_inputs_read_only(inputs_root)
+            _verify_methods_role_input_boundary(
+                workspace,
+                expected_bytes=expected_role_input_bytes,
+            )
         except (OSError, TypeError, ValueError, _UnsafeWorkspaceError) as exc:
             raise runtime_failure(
                 stage=ExecutionStage.WORKSPACE_PREPARE,
@@ -1732,8 +1974,6 @@ class WorkspaceManager:
                 message="Methods V2 role inputs could not be published.",
                 retryable=True,
             ) from exc
-        finally:
-            _set_inputs_read_only(inputs_root)
         model_workspace = replace(
             workspace,
             manifest=model_manifest,

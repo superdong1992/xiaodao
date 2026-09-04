@@ -41,6 +41,7 @@ from problem_locator.contracts.ports import (
     ApplicationQueryPort,
     StateAdminPort,
 )
+from problem_locator.contracts.serialization import canonical_json_bytes
 from problem_locator.interfaces.mcp_server import McpAdapter, create_mcp_transport
 from tests.deterministic.unit.interfaces.fakes import FakeApplicationService, FakeQuery, FakeStateAdmin
 from tests.deterministic.unit.interfaces.helpers import (
@@ -989,12 +990,25 @@ def test_official_sdk_calls_all_seven_stateless_tools(caplog) -> None:
                             }
                         )
                         output_validators: dict[str, Draft202012Validator] = {}
+                        output_schema_bytes: list[int] = []
                         for tool in listed.tools:
                             schema = tool.outputSchema
                             assert schema is not None
                             assert schema.get("type") == "object"
-                            assert "$defs" in schema
-                            assert len(schema.get("anyOf", [])) == 2
+                            assert "$defs" not in schema
+                            assert len(schema.get("oneOf", [])) == 2
+                            assert schema.get("additionalProperties") is False
+                            assert schema.get("required") == ["ok", "data", "error"]
+                            output_schema_bytes.append(
+                                len(
+                                    json.dumps(
+                                        schema,
+                                        ensure_ascii=False,
+                                        sort_keys=True,
+                                        separators=(",", ":"),
+                                    ).encode("utf-8")
+                                )
+                            )
                             Draft202012Validator.check_schema(schema)
                             validator = Draft202012Validator(schema)
                             assert validator.is_valid([]) is False
@@ -1006,6 +1020,8 @@ def test_official_sdk_calls_all_seven_stateless_tools(caplog) -> None:
                                 {"ok": False, "data": None, "error": None}
                             ) is False
                             output_validators[tool.name] = validator
+                        assert max(output_schema_bytes) <= 512
+                        assert sum(output_schema_bytes) <= 4 * 1024
                         assert get_session_id() is None
 
                         create = await session.call_tool(
@@ -1095,6 +1111,20 @@ def test_official_sdk_calls_all_seven_stateless_tools(caplog) -> None:
                         assert public_artifact["download_url"].endswith(
                             f"/api/v1/artifacts/{ARTIFACT_ID}/content?case_id={CASE_ID}"
                         )
+                        for result in (
+                            create,
+                            prepare,
+                            submit,
+                            get_case,
+                            resume,
+                            cancel,
+                            artifacts,
+                        ):
+                            assert len(result.content) == 1
+                            assert result.content[0].type == "text"
+                            assert result.content[0].text == canonical_json_bytes(
+                                _structured(result)
+                            ).decode("utf-8")
 
                         at_limit = await session.call_tool(
                             TOOL_NAMES[1],
@@ -1171,3 +1201,61 @@ def test_official_sdk_calls_all_seven_stateless_tools(caplog) -> None:
     assert "$defs" not in create_schema
     assert create_schema["properties"]["statement"]["type"] == "string"
     assert create_schema["properties"]["goals"]["items"]["type"] == "string"
+
+
+def test_official_sdk_marks_invalid_top_level_output_envelope_as_error(
+    monkeypatch,
+) -> None:
+    async def invalid_call(
+        _adapter: McpAdapter,
+        _name: str,
+        _arguments: dict[str, object],
+    ) -> dict[str, object]:
+        return {"ok": True, "data": None, "error": None}
+
+    monkeypatch.setattr(McpAdapter, "call", invalid_call)
+    transport = create_mcp_transport(
+        FakeApplicationService(),
+        FakeQuery(),
+        public_base_url="http://127.0.0.1:8000",
+    )
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        async with transport.session_manager.run():
+            yield
+
+    app = Starlette(
+        routes=[
+            Route(
+                "/mcp",
+                endpoint=transport.asgi_application,
+                methods=["GET", "POST", "DELETE"],
+            )
+        ],
+        lifespan=lifespan,
+    )
+
+    async def scenario() -> None:
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://127.0.0.1:8000",
+            ) as http_client:
+                async with streamable_http_client(
+                    "http://127.0.0.1:8000/mcp",
+                    http_client=http_client,
+                ) as (read_stream, write_stream, _get_session_id):
+                    async with ClientSession(read_stream, write_stream) as session:
+                        await session.initialize()
+                        result = await session.call_tool(
+                            TOOL_NAMES[3],
+                            {"case_id": CASE_ID},
+                        )
+
+        assert result.isError is True
+        assert result.structuredContent is None
+        assert len(result.content) == 1
+        assert "Output validation error" in result.content[0].text
+
+    asyncio.run(scenario())

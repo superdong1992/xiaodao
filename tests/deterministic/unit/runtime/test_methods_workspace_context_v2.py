@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from dataclasses import replace
 from pathlib import Path
 
@@ -19,6 +21,8 @@ from problem_locator.contracts import (
     MethodEvidenceGraphV2,
     MethodEvaluationPlanV2,
     MethodsReviewTargetV2,
+    ResolvedLogparseAnchor,
+    ResolvedLogparsePlanInput,
     StateFile,
     VersionedRef,
     canonical_json_bytes,
@@ -270,6 +274,59 @@ def _user_fact() -> dict[str, object]:
     }
 
 
+def test_fresh_specialist_main_workspace_freezes_metadata_without_payloads(
+    tmp_path: Path,
+) -> None:
+    value = _fixture("job-diagnose.json", Job).model_dump(mode="json")
+    value["previous_outcome_refs"] = [PREVIOUS_OUTCOME_ID]
+    job = Job.model_validate(value)
+    plan = ResolvedLogparsePlanInput(
+        schema_version=2,
+        attachment_id=ATTACHMENT_ID,
+        artifact_id=None,
+        problem_time="2026-07-31T00:00:00.000Z",
+        anchors=[
+            ResolvedLogparseAnchor(
+                label="client",
+                module="client",
+                slot="main",
+                process_name="client",
+                pid=None,
+            )
+        ],
+    )
+
+    workspace = WorkspaceManager(
+        tmp_path / "metadata-only-data"
+    ).prepare_fresh_methods_specialist_main_metadata_only(
+        job,
+        _aggregate(job),
+        resolved_logparse_plan=plan,
+    )
+
+    assert [entry.input_kind for entry in workspace.manifest.entries] == [
+        "ATTACHMENT",
+        "EVIDENCE",
+        "ARTIFACT",
+        "PREVIOUS_OUTCOME",
+    ]
+    assert tuple(item.attachment_id for item in workspace.attachments) == (
+        ATTACHMENT_ID,
+    )
+    assert tuple(item.evidence_id for item in workspace.evidence) == (EVIDENCE_ID,)
+    assert tuple(item.artifact_id for item in workspace.artifacts) == (ARTIFACT_ID,)
+    assert tuple(item.outcome_id for item in workspace.previous_outcomes) == (
+        PREVIOUS_OUTCOME_ID,
+    )
+    assert {
+        path.relative_to(workspace.root).as_posix()
+        for path in workspace.root.rglob("*")
+        if path.is_file()
+    } == {"inputs/manifest.json"}
+    for category in ("attachments", "evidence", "artifacts", "outcomes"):
+        assert not (workspace.root / "inputs" / category).exists()
+
+
 def _jobs(
     tmp_path: Path,
     *,
@@ -445,12 +502,12 @@ def test_role_workspaces_hide_graph_plan_and_publish_compact_context_once(
         specialist_workspace,
         graph,
         plan,
-        target_bytes,
+        _,
     ) = _jobs(tmp_path)
     inputs = specialist_workspace.root / "inputs"
-    assert (inputs / "target_logs.json").exists()
-    assert (inputs / "logparse-receipt.json").exists()
-    assert (inputs / "target-logs/server.log").read_bytes() == target_bytes
+    assert not (inputs / "target_logs.json").exists()
+    assert not (inputs / "logparse-receipt.json").exists()
+    assert not (inputs / "target-logs").exists()
     assert (
         inputs / f"attachments/{ATTACHMENT_ID}/payload"
     ).read_bytes() == PRIVATE_ATTACHMENT_SENTINEL
@@ -971,15 +1028,14 @@ def test_fresh_restart_keeps_recorded_graph_plan_out_of_model_workspace(
         assert private not in context.body
 
 
-def test_specialist_publish_rejects_one_missing_preprocess_input(
+def test_specialist_publish_rejects_unexpected_transient_preprocess_input(
     tmp_path: Path,
 ) -> None:
     _, _, specialist, _, workspace, graph, plan, _ = _jobs(tmp_path)
     inputs = workspace.root / "inputs"
-    missing = inputs / "logparse-receipt.json"
     inputs.chmod(0o755)
-    missing.chmod(0o644)
-    missing.unlink()
+    (inputs / "logparse-receipt.json").write_bytes(b"tampered")
+    (inputs / "logparse-receipt.json").chmod(0o444)
     inputs.chmod(0o555)
 
     with pytest.raises(RuntimeExecutionError) as caught:
@@ -992,8 +1048,51 @@ def test_specialist_publish_rejects_one_missing_preprocess_input(
 
     assert caught.value.failure.stage is ExecutionStage.WORKSPACE_PREPARE
     assert caught.value.failure.code is ErrorCode.WORKSPACE_PREPARE_FAILED
-    assert (inputs / "request.json").exists()
-    assert (inputs / "target_logs.json").exists()
-    assert (inputs / "target-logs/server.log").exists()
+    assert not (inputs / "request.json").exists()
+    assert (inputs / "logparse-receipt.json").read_bytes() == b"tampered"
     for category in ("attachments", "evidence", "artifacts", "outcomes"):
         assert (inputs / category).exists()
+
+
+@pytest.mark.parametrize("link_kind", ["dangling-symlink", "hardlink"])
+def test_specialist_publish_rejects_unsafe_lexical_input_without_touching_external(
+    tmp_path: Path,
+    link_kind: str,
+) -> None:
+    _, _, specialist, _, workspace, graph, plan, _ = _jobs(
+        tmp_path / "source"
+    )
+    inputs = workspace.root / "inputs"
+    external = tmp_path / "external"
+    external.mkdir()
+    sentinel = external / "sentinel.bin"
+    sentinel.write_bytes(b"external-sentinel")
+    sentinel.chmod(0o640)
+    original_mode = stat.S_IMODE(sentinel.stat().st_mode)
+    inputs.chmod(0o755)
+    if link_kind == "dangling-symlink":
+        if os.name == "nt":
+            pytest.skip("creating a dangling directory link needs Windows privilege")
+        (inputs / "target-logs").symlink_to(
+            external / "missing",
+            target_is_directory=True,
+        )
+    else:
+        legacy = inputs / "attachments"
+        legacy.chmod(0o755)
+        os.link(sentinel, legacy / "payload")
+        legacy.chmod(0o555)
+    inputs.chmod(0o555)
+
+    with pytest.raises(RuntimeExecutionError) as caught:
+        WorkspaceManager.publish_methods_specialist_inputs_v2(
+            workspace,
+            specialist,
+            evidence_graph=graph,
+            evaluation_plan=plan,
+        )
+
+    assert caught.value.failure.stage is ExecutionStage.WORKSPACE_PREPARE
+    assert caught.value.failure.code is ErrorCode.WORKSPACE_PREPARE_FAILED
+    assert sentinel.read_bytes() == b"external-sentinel"
+    assert stat.S_IMODE(sentinel.stat().st_mode) == original_mode

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,8 @@ from problem_locator.contracts import (
     OutcomeResultType,
     ResumeCase,
     StateFile,
+    bytes_sha256,
+    canonical_json_bytes,
     parse_canonical_json_bytes,
 )
 from problem_locator.domain import DomainCoordinator, PureContextSnapshotProjector
@@ -754,6 +757,188 @@ def test_specialist_scans_once_hard_cuts_logs_and_publishes_handoff(
         attempt="PRIMARY",
     )
     assert prompt == backend.role_prompts[0].encode("utf-8")
+
+
+def test_fresh_specialist_materializes_attachment_only_in_preprocessing_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="problem_locator.dfx")
+    runtime, job, backend, records = _runtime(tmp_path, ("VALID",))
+    resources = runtime._resource_store  # noqa: SLF001 - production seam regression
+    materialize = resources.materialize_read_only
+    materialized_destinations: list[Path] = []
+
+    def counted_materialize(resource_ref: Any, destination: Path):
+        materialized_destinations.append(Path(destination))
+        return materialize(resource_ref, destination)
+
+    monkeypatch.setattr(resources, "materialize_read_only", counted_materialize)
+    manager = runtime._workspace_manager  # noqa: SLF001 - production seam regression
+    prepare_metadata_only = (
+        manager.prepare_fresh_methods_specialist_main_metadata_only
+    )
+    prepared_main_files: list[set[str]] = []
+
+    def observed_prepare(
+        prepared_job: Job,
+        aggregate: CaseAggregate,
+        *,
+        resolved_logparse_plan: Any,
+    ):
+        workspace = prepare_metadata_only(
+            prepared_job,
+            aggregate,
+            resolved_logparse_plan=resolved_logparse_plan,
+        )
+        names = {
+            path.relative_to(workspace.root).as_posix()
+            for path in workspace.root.rglob("*")
+            if path.is_file()
+        }
+        prepared_main_files.append(names)
+        assert workspace.manifest.entries
+        assert workspace.attachments
+        for category in ("attachments", "evidence", "artifacts", "outcomes"):
+            assert not (workspace.root / "inputs" / category).exists()
+        return workspace
+
+    monkeypatch.setattr(
+        manager,
+        "prepare_fresh_methods_specialist_main_metadata_only",
+        observed_prepare,
+    )
+    freeze_inputs = manager.freeze_methods_inputs
+    frozen_inputs: list[Any] = []
+
+    def observed_freeze(
+        workspace: Any,
+        *,
+        request: Any,
+        target_logs: Any,
+        receipt_context: Any,
+    ):
+        frozen = freeze_inputs(
+            workspace,
+            request=request,
+            target_logs=target_logs,
+            receipt_context=receipt_context,
+        )
+        assert {
+            path.relative_to(workspace.root).as_posix()
+            for path in workspace.root.rglob("*")
+            if path.is_file()
+        } == {"inputs/manifest.json"}
+        frozen_inputs.append(frozen)
+        return frozen
+
+    monkeypatch.setattr(manager, "freeze_methods_inputs", observed_freeze)
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.result_type is OutcomeResultType.COMPLETED
+    assert prepared_main_files == [{"inputs/manifest.json"}]
+    assert len(materialized_destinations) == 1
+    assert materialized_destinations[0].is_relative_to(
+        tmp_path
+        / "runtime-data"
+        / "tmp"
+        / "workspaces"
+        / f"{job.job_id}.logparse-preprocess"
+    )
+    assert backend.role_workspace_files == [
+        {"inputs/manifest.json", "inputs/request.json"}
+    ]
+    assert len(frozen_inputs) == 1
+    frozen = frozen_inputs[0]
+    broker_audit_bytes = records.read_audit_bytes(
+        job.job_id, "logparse_broker_audit.json"
+    )
+    assert broker_audit_bytes is not None
+    assert records.read_audit_bytes(job.job_id, "methods_request.json") == (
+        frozen.request_bytes
+    )
+    assert records.read_audit_bytes(job.job_id, "methods_target_logs.json") == (
+        frozen.target_logs_bytes
+    )
+    assert records.read_audit_bytes(
+        job.job_id, "methods_logparse_receipt.json"
+    ) == frozen.receipt_bytes
+    frozen_receipt = parse_canonical_json_bytes(frozen.receipt_bytes)
+    assert frozen_receipt["broker_audit_sha256"] == bytes_sha256(
+        broker_audit_bytes
+    )
+    assert frozen.receipt_sha256 == bytes_sha256(frozen.receipt_bytes)
+    assert frozen.target_logs_bytes == canonical_json_bytes(
+        {
+            "schema_version": 1,
+            "target_logs": [
+                {
+                    "source_id": source_id,
+                    "label": source_id,
+                    "log_path": f"inputs/target-logs/{source_id}.log",
+                    "size": len(content),
+                    "content_sha256": bytes_sha256(content),
+                }
+                for source_id, content in backend.target_contents.items()
+            ],
+        }
+    )
+    request = parse_canonical_json_bytes(frozen.request_bytes)
+    assert request["consumed_artifacts"][0]["resource_type"] == "ATTACHMENT"
+    assert request["consumed_artifacts"][0]["resource_id"] == job.attachment_refs[0]
+    materialization = next(
+        record
+        for record in caplog.records
+        if getattr(record, "dfx_event", "")
+        == "runtime.methods.preprocessing_workspace.completed"
+    )
+    assert materialization.dfx_fields["job_id"] == job.job_id
+    assert materialization.dfx_fields["attachment_count"] == 1
+    assert materialization.dfx_fields["artifact_count"] == 0
+    assert materialization.dfx_fields["manifest_bytes"] > 0
+    assert materialization.dfx_fields["duration_ms"] >= 0
+
+
+def test_fresh_specialist_resource_drift_fails_in_preprocessing_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, job, backend, _ = _runtime(tmp_path, ("VALID",))
+    resources = runtime._resource_store  # noqa: SLF001 - drift injection
+    materialize = resources.materialize_read_only
+    materialized_destinations: list[Path] = []
+
+    def drift_after_materialize(resource_ref: Any, destination: Path):
+        receipt = materialize(resource_ref, destination)
+        target = Path(destination)
+        materialized_destinations.append(target)
+        payload = bytearray(target.read_bytes())
+        payload[0] ^= 1
+        target.chmod(0o644)
+        target.write_bytes(payload)
+        target.chmod(0o444)
+        return receipt
+
+    monkeypatch.setattr(resources, "materialize_read_only", drift_after_materialize)
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.result_type is OutcomeResultType.FAILED
+    assert receipt.job_outcome.error is not None
+    assert receipt.job_outcome.error.stage is ExecutionStage.WORKSPACE_PREPARE
+    assert receipt.job_outcome.error.code is ErrorCode.RESOURCE_HASH_MISMATCH
+    assert receipt.job_outcome.error.retryable is False
+    assert len(materialized_destinations) == 1
+    assert materialized_destinations[0].is_relative_to(
+        tmp_path
+        / "runtime-data"
+        / "tmp"
+        / "workspaces"
+        / f"{job.job_id}.logparse-preprocess"
+    )
+    assert backend.calls == []
 
 
 def test_specialist_context_limit_preserves_classified_failure_without_terminal_projection(

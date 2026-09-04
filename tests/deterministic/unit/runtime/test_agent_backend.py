@@ -352,6 +352,8 @@ def test_success_logs_bounded_agent_completion_metrics(
     assert completed.dfx_fields["stdout_stderr_bytes"] == 12
     assert completed.dfx_fields["workspace_bytes"] == result.workspace_bytes
     assert completed.dfx_fields["elapsed_seconds"] == result.elapsed_seconds
+    assert completed.dfx_fields["workspace_scan_count"] >= 1
+    assert completed.dfx_fields["workspace_scan_duration_ms"] >= 0
     assert "argv" not in completed.dfx_fields
     assert "environment" not in completed.dfx_fields
 

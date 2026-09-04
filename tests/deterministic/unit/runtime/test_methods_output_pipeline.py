@@ -9,6 +9,7 @@ import pytest
 
 from problem_locator.contracts import (
     ErrorCode,
+    ExecutionStage,
     Job,
     WorkspaceInputManifest,
     bytes_sha256,
@@ -212,6 +213,8 @@ def _prepared_workspace(
     _empty_workspace(root)
     manifest_bytes = canonical_json_bytes(manifest)
     (root / "inputs/manifest.json").write_bytes(manifest_bytes)
+    (root / "inputs/manifest.json").chmod(0o444)
+    (root / "inputs").chmod(0o555)
     root_stat = root.stat(follow_symlinks=False)
     inputs_stat = (root / "inputs").stat(follow_symlinks=False)
     runtime_stat = (root / "runtime").stat(follow_symlinks=False)
@@ -368,7 +371,7 @@ def test_methods_draft_still_rejects_ambiguous_or_invalid_json(
     assert draft_path.read_bytes() == invalid_payload
 
 
-def test_workspace_freezes_minimal_methods_boundary_and_server_receipt(
+def test_workspace_freezes_methods_audit_bytes_in_memory_without_workspace_io(
     tmp_path: Path,
 ) -> None:
     manifest = _contract("workspace-input-manifest.json", WorkspaceInputManifest)
@@ -382,6 +385,12 @@ def test_workspace_freezes_minimal_methods_boundary_and_server_receipt(
         "broker_request_sha256": "a" * 64,
         "broker_audit_sha256": "b" * 64,
     }
+    input_files_before = {
+        path.relative_to(workspace.root).as_posix(): path.read_bytes()
+        for path in workspace.root.rglob("*")
+        if path.is_file()
+    }
+    inputs_mode_before = stat.S_IMODE((workspace.root / "inputs").stat().st_mode)
 
     frozen = WorkspaceManager.freeze_methods_inputs(
         workspace,
@@ -394,6 +403,30 @@ def test_workspace_freezes_minimal_methods_boundary_and_server_receipt(
         receipt_context=receipt_context,
     )
 
+    target_rows = [
+        {
+            "source_id": "server",
+            "label": "server",
+            "log_path": "inputs/target-logs/server.log",
+            "size": len(target),
+            "content_sha256": bytes_sha256(target),
+        }
+    ]
+    expected_request_bytes = canonical_json_bytes(
+        {
+            "schema_version": 1,
+            "job_id": manifest.job_id,
+            "case_id": manifest.case_id,
+            "target_logs_path": "inputs/target_logs.json",
+            "logparse_receipt_path": "inputs/logparse-receipt.json",
+        }
+    )
+    expected_target_logs_bytes = canonical_json_bytes(
+        {"schema_version": 1, "target_logs": target_rows}
+    )
+    expected_receipt_bytes = canonical_json_bytes(
+        {"schema_version": 1, **receipt_context, "target_logs": target_rows}
+    )
     request = json.loads(frozen.request_bytes)
     target_manifest = json.loads(frozen.target_logs_bytes)
     receipt = json.loads(frozen.receipt_bytes)
@@ -402,16 +435,81 @@ def test_workspace_freezes_minimal_methods_boundary_and_server_receipt(
     assert target_manifest["target_logs"][0]["source_id"] == "server"
     assert target_manifest["target_logs"][0]["content_sha256"] == bytes_sha256(target)
     assert receipt["broker_audit_sha256"] == "b" * 64
+    assert frozen.request_bytes == expected_request_bytes
+    assert frozen.target_logs_bytes == expected_target_logs_bytes
+    assert frozen.receipt_bytes == expected_receipt_bytes
     assert frozen.receipt_sha256 == bytes_sha256(frozen.receipt_bytes)
     assert frozen.target_logs[0].content == target
-    for path in (
-        workspace.root / "inputs/request.json",
-        workspace.root / "inputs/target_logs.json",
-        workspace.root / "inputs/logparse-receipt.json",
-        workspace.root / "inputs/target-logs/server.log",
-    ):
-        assert stat.S_IMODE(path.stat().st_mode) == 0o444
-    assert stat.S_IMODE((workspace.root / "inputs").stat().st_mode) == 0o555
+    assert {
+        path.relative_to(workspace.root).as_posix(): path.read_bytes()
+        for path in workspace.root.rglob("*")
+        if path.is_file()
+    } == input_files_before == {"inputs/manifest.json": workspace.manifest_bytes}
+    assert stat.S_IMODE((workspace.root / "inputs").stat().st_mode) == (
+        inputs_mode_before
+    )
+
+
+def test_workspace_freeze_rejects_server_owned_request_paths_without_writes(
+    tmp_path: Path,
+) -> None:
+    manifest = _contract("workspace-input-manifest.json", WorkspaceInputManifest)
+    workspace = _prepared_workspace(tmp_path / "reserved-request", manifest)
+
+    with pytest.raises(RuntimeExecutionError) as caught:
+        WorkspaceManager.freeze_methods_inputs(
+            workspace,
+            request={
+                "schema_version": 1,
+                "target_logs_path": "attacker-controlled.json",
+            },
+            target_logs=(("server", "server", b"safe\n"),),
+            receipt_context={
+                "job_id": manifest.job_id,
+                "case_id": manifest.case_id,
+                "registration_id": "test-timeout",
+                "operation": "target-logs",
+                "broker_request_sha256": "a" * 64,
+                "broker_audit_sha256": "b" * 64,
+            },
+        )
+
+    assert caught.value.failure.stage is ExecutionStage.WORKSPACE_PREPARE
+    assert caught.value.failure.code is ErrorCode.WORKSPACE_PREPARE_FAILED
+    assert {
+        path.relative_to(workspace.root).as_posix()
+        for path in workspace.root.rglob("*")
+        if path.is_file()
+    } == {"inputs/manifest.json"}
+
+
+def test_workspace_freeze_rejects_replaced_inputs_directory(
+    tmp_path: Path,
+) -> None:
+    manifest = _contract("workspace-input-manifest.json", WorkspaceInputManifest)
+    workspace = _prepared_workspace(tmp_path / "replaced-inputs", manifest)
+    original_inputs = workspace.root / "inputs"
+    original_inputs.chmod(0o755)
+    original_inputs.rename(workspace.root / "original-inputs")
+    original_inputs.mkdir()
+
+    with pytest.raises(RuntimeExecutionError) as caught:
+        WorkspaceManager.freeze_methods_inputs(
+            workspace,
+            request={"schema_version": 1},
+            target_logs=(("server", "server", b"safe\n"),),
+            receipt_context={
+                "job_id": manifest.job_id,
+                "case_id": manifest.case_id,
+                "registration_id": "test-timeout",
+                "operation": "target-logs",
+                "broker_request_sha256": "a" * 64,
+                "broker_audit_sha256": "b" * 64,
+            },
+        )
+
+    assert caught.value.failure.stage is ExecutionStage.WORKSPACE_PREPARE
+    assert caught.value.failure.code is ErrorCode.WORKSPACE_PREPARE_FAILED
 
 
 def test_optional_role_is_omitted_until_any_binding_activates_the_group(

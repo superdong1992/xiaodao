@@ -2167,6 +2167,10 @@
   代表性 ROUTE 输入为 38,413 字节，其中共享 `AgentJobOutcomeDraftV2` schema 为 33,213
   字节，模型还必须在写完草稿后调用一次封装工具。客户端即使已经拿到本地日志，也会等到
   `WAITING_ATTACHMENT` 后才开始上传，并把事实和附件拆成串行补充。
+  继续拆解当前源码后还确认：七个 MCP `outputSchema` 合计 173,697 字节，每次初始化重复发送
+  四份相同的 28,179 字节 `ApplicationResponse` 深层 schema；fresh Specialist 又把同一日志附件
+  先复制到主 Workspace、再复制到 `.logparse-preprocess`，随后还把已验证 target logs 写入主
+  Workspace，构图后立即删除。以上都是可在线性放大附件 I/O 或客户端启动负担的重复工作。
 - **受影响版本**：Problem Locator `5.0.0`，本轮基线
   `5723e96cf537f3aaf33bb36c0418a3b5d0d98746`。
 - **根因**：ROUTE 只需要输出 `MATCHED` 或 `NO_CAPABILITY`，却内嵌了 DIAGNOSE、REVIEW 等
@@ -2174,6 +2178,10 @@
   `CLAUDE_COMMAND`，部署者无法让低复杂度 ROUTE 与高复杂度 DIAGNOSE 采用不同延迟配置。
   附件 prepare/PUT 本来允许在非终态 Case 上执行，PUT 回执也已经权威确认 READY，但客户端流程
   没有把这段文件 I/O 与 ROUTE 重叠，也没有优先合并同批事实和附件。
+  MCP 适配器把服务端已经由 Pydantic DTO 约束的完整数据结构再次展开成七份深层输出 schema，
+  官方 SDK 又为同一返回值生成缩进 JSON 文本和 `structuredContent`。Evidence V2 则沿用通用
+  Workspace 的“先物化全部资源”入口，没有区分只供服务端预处理的 payload 与模型最终可见输入；
+  `freeze_methods_inputs()` 也保留了旧版中间落盘流程，尽管 Graph 只读取其返回的内存字节。
 - **不可回归行为**：
   - ROUTE 模型上下文只保留角色专用的十二字段、两个合法分支和完整 Skill ref 规则；服务端仍按
     完整 `AgentJobOutcomeDraftV2`、Job/Case 绑定、秘密扫描、稳定快照和 Workspace 边界复验。
@@ -2193,6 +2201,16 @@
   - 不放宽 Agent Workspace 的 50ms 安全扫描、Methods `request.json` 单一用户事实来源、Evidence
     校验、状态恢复和唯一 repair。它们不是本次分钟级耗时的已证实来源；不得用未经 A/B 的删减换取
     不可审计的表面提速。
+  - 七个公开 MCP 输入 schema 继续保持扁平，实际 success/error 数据、内部 DTO 和 REST OpenAPI
+    不变；精简后的输出 schema 仍严格校验顶层 `ok/data/error` 及互斥分支，官方 SDK 必须拒绝非法
+    envelope。文本结果必须是同一 `structuredContent` 的完整 canonical UTF-8 JSON，不能只返回摘要。
+  - 只有没有可恢复 Graph/Plan 的 fresh SPECIALIZED DIAGNOSE 可使用 metadata-only 主 Workspace；
+    `.logparse-preprocess` 仍须完整物化并校验固定附件/Artifact，资源同大小篡改必须在 Backend 启动前
+    fail closed。恢复路径仍完整物化，模型启动前 `inputs/` 必须精确收敛为 `manifest.json` 和
+    `request.json`，symlink、reparse、跨设备节点和 hardlink 均不得越过该边界。
+  - target logs、预处理 request 和 receipt 可以只在服务进程内冻结，但完整 canonical 字节、哈希及
+    execution-record 审计必须保持不变。Agent Workspace 的 50ms 扫描频率和 Logparse 每个子进程前
+    的资产指纹校验均保持原样；只新增扫描次数/累计耗时和预处理 Workspace 物化耗时 DFX。
 - **修复历史**：2026-09-03，先按实际 Journey 拆分 730 秒墙钟并测量 ROUTE 输入，确认三段主导
   96.2% 耗时。将 ROUTE output contract 从共享 schema 改为 2,811 字节的角色专用合同，代表性
   完整上下文从 38,413 字节降至 4,318 字节，减少 88.76%；Router tool bundle 改为空，封装迁到
@@ -2200,6 +2218,15 @@
   立即预上传、等待 requirement 后一次合并提交。审查期间撤回了把 Workspace 递归扫描从 50ms
   降到 1 秒的方案，也没有把 Specialist request 复制进 prompt；前者会扩大瞬时越界节点窗口，
   后者会破坏 PL-FIX-052 的事实来源和大请求完整读取合同。
+  同日继续按当前源码做零模型拆解：MCP 输出 schema 总量降至 2,590 字节（减少 98.51%），并把 SDK
+  自动生成的缩进/ASCII 转义文本改成与 `structuredContent` 等值的 canonical UTF-8 JSON；代表性
+  `ApplicationResponse` 文本由 1,579 字节降至 1,165 字节（减少 26.22%）。fresh Specialist 主
+  Workspace 改为只冻结资源 DTO/manifest 元数据，正式附件仅在预处理 Workspace 物化一次；已验证
+  target logs、request 和 receipt 直接以内存字节构图并归档，不再落入随后删除的模型 Workspace。
+  20 次小型本地零模型基准中，预处理均值由 30.480 ms 降至 24.953 ms（减少 18.13%），完整服务端
+  流程由 66.988 ms 降至 61.389 ms（减少 8.36%）；该结果只证明本地框架/I/O 改进，不外推真实
+  模型墙钟。审查期间再次撤回了 1 秒 Workspace 扫描和 operation 结束后才校验 Logparse 指纹的
+  方案：前者扩大瞬时非法节点窗口，后者可能先执行漂移代码再失败。
 - **专项回归测试**：
   - `tests/deterministic/unit/runtime/test_context_builder.py::test_production_output_contract_materializes_the_role_specific_protocol[ROUTE]`
   - `tests/deterministic/unit/runtime/test_p0_semantic_assets.py::test_router_writes_one_server_finalized_draft_without_a_tool_round_trip`
@@ -2213,6 +2240,14 @@
   - `tests/deterministic/journey/test_rpc_timeout.py::test_attachment_preupload_during_route_batches_first_supplement`
   - `tests/deterministic/unit/interfaces/test_client_access_skill.py::test_skill_batches_inputs_and_ready_attachments_without_ready_poll`
   - `tests/real/agent/test_real_route_agent_contract_gate.py::test_real_route_agent_synthesizes_valid_outcome_from_production_contract`
+  - `tests/deterministic/unit/interfaces/test_mcp_server.py::test_official_sdk_calls_all_seven_stateless_tools`
+  - 同文件 `test_official_sdk_marks_invalid_top_level_output_envelope_as_error`
+  - `tests/deterministic/unit/runtime/test_diagnosis_runtime_methods_v2.py::test_fresh_specialist_materializes_attachment_only_in_preprocessing_workspace`
+  - 同文件 `test_fresh_specialist_resource_drift_fails_in_preprocessing_workspace`
+  - `tests/deterministic/unit/runtime/test_methods_output_pipeline.py::test_workspace_freezes_methods_audit_bytes_in_memory_without_workspace_io`
+  - `tests/deterministic/unit/runtime/test_methods_workspace_context_v2.py::test_fresh_specialist_main_workspace_freezes_metadata_without_payloads`
+  - 同文件 `test_specialist_publish_rejects_unsafe_lexical_input_without_touching_external`
+  - `tests/deterministic/unit/runtime/test_agent_backend.py::test_success_logs_bounded_agent_completion_metrics`
 - **最新 Test Flow verdict**：待本轮官方 `dev.default` 复验；零模型 Dev 只能证明结构与行为回归，
   不证明真实环境墙钟降幅。12 分 10 秒场景必须在相同模型、网络和日志附件下重新 A/B 测量。
   **最终复验元数据**：Dev `run-20260903T090251Z-66b9e1e4` 为 `PASS_WITH_WARNINGS`，仅因性能基线
@@ -2220,5 +2255,13 @@
   `deterministic.full` 为 PASS：Evidence V2 Core 116/116、contracts 602/602、unit 1991 passed/68
   skipped、integration 70/70、SameJob 4/4，全部 failure/error 为 0。验证源码快照
   `git-visible-worktree-v1:3444c00ab0564c849dfbb2386be5ef7b24ee3416fbc92984619692cb425f4e60`
+  （752 files），worktree 与 materialized source verification 均为 PASS。本元数据行本身不宣称被其
+  引用的源码快照覆盖。
+  **本轮极限优化复验元数据**：Dev `run-20260903T135533Z-5c688ba5` 为
+  `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为
+  `NOT_CALIBRATED`（性能基线样本不足，无失败）。affected 906/906、Evidence V2 Core 116/116、
+  contracts 602/602、unit 2000 passed/69 skipped、integration 70/70、SameJob 4/4，全部
+  failure/error 为 0。验证源码快照
+  `git-visible-worktree-v1:5f72aab29bc22eaac1d56f67ae66825f6b9b302507265919c3d83095da1b2e44`
   （752 files），worktree 与 materialized source verification 均为 PASS。本元数据行本身不宣称被其
   引用的源码快照覆盖。

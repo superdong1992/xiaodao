@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
+import time
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterator
@@ -2533,12 +2534,22 @@ class DiagnosisRuntime:
             ) from None
 
         preparing = record_stage_started(ExecutionStage.WORKSPACE_PREPARE)
-        workspace = self._workspace_manager.prepare(
-            job,
-            aggregate,
-            self._resource_store,
-            resolved_logparse_plan=resolved_logparse_plan,
-        )
+        if recovered_records:
+            workspace = self._workspace_manager.prepare(
+                job,
+                aggregate,
+                self._resource_store,
+                resolved_logparse_plan=None,
+            )
+        else:
+            assert resolved_logparse_plan is not None
+            workspace = (
+                self._workspace_manager.prepare_fresh_methods_specialist_main_metadata_only(
+                    job,
+                    aggregate,
+                    resolved_logparse_plan=resolved_logparse_plan,
+                )
+            )
         record_stage_completed(
             ExecutionStage.WORKSPACE_PREPARE,
             preparing,
@@ -4027,14 +4038,47 @@ class DiagnosisRuntime:
                 message="The fixed logparse broker asset is unavailable.",
             )
         skill = self._resolved_methods_skill(assets)
-        preprocessing_workspace = self._workspace_manager.prepare(
-            job,
-            aggregate,
-            self._resource_store,
-            resolved_logparse_plan=main_workspace.manifest.resolved_logparse_plan,
-            review_subject=None,
-            workspace_phase="logparse-preprocess",
-        )
+        preprocessing_workspace_started = time.perf_counter()
+        try:
+            preprocessing_workspace = self._workspace_manager.prepare(
+                job,
+                aggregate,
+                self._resource_store,
+                resolved_logparse_plan=main_workspace.manifest.resolved_logparse_plan,
+                review_subject=None,
+                workspace_phase="logparse-preprocess",
+            )
+        except BaseException:
+            try:
+                log_event(
+                    "runtime.methods.preprocessing_workspace.failed",
+                    job_id=job.job_id,
+                    job_type=job.job_type,
+                    duration_ms=round(
+                        (time.perf_counter() - preprocessing_workspace_started) * 1000,
+                        3,
+                    ),
+                    attachment_count=len(job.attachment_refs),
+                    artifact_count=len(job.artifact_refs),
+                )
+            except Exception:
+                pass
+            raise
+        try:
+            log_event(
+                "runtime.methods.preprocessing_workspace.completed",
+                job_id=job.job_id,
+                job_type=job.job_type,
+                duration_ms=round(
+                    (time.perf_counter() - preprocessing_workspace_started) * 1000,
+                    3,
+                ),
+                attachment_count=len(preprocessing_workspace.attachments),
+                artifact_count=len(preprocessing_workspace.artifacts),
+                manifest_bytes=len(preprocessing_workspace.manifest_bytes),
+            )
+        except Exception:
+            pass
         operation, product_request_bytes = self._preprocessing_request(
             preprocessing_workspace
         )

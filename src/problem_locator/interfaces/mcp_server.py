@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 from mcp import types as mcp_types
 from mcp.server.lowlevel import Server
@@ -17,27 +18,22 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    TypeAdapter,
     ValidationError,
     model_validator,
 )
 
 from problem_locator import __version__
 from problem_locator.contracts.commands import (
-    ApplicationResponse,
-    ArtifactView,
     CancelCase,
     CaseQueryResponse,
     CreateCase,
     PrepareAttachment,
     ResumeCase,
     SubmitSupplement,
-    UploadDescriptor,
 )
 from problem_locator.contracts.errors import ApplicationPortError
 from problem_locator.contracts.limits import MAX_INITIAL_USER_FACTS
 from problem_locator.contracts.models import (
-    ApplicationError,
     ContractName,
     ContentType,
     NonEmptyText,
@@ -50,6 +46,7 @@ from problem_locator.contracts.models import (
     WaitSeconds,
 )
 from problem_locator.contracts.ports import ApplicationCommandPort, ApplicationQueryPort
+from problem_locator.contracts.serialization import canonical_json_bytes
 from problem_locator.diagnostics import bind_diagnostics, log_event
 
 from .error_mapping import (
@@ -220,31 +217,6 @@ class ListArtifactsRequest(_RequestModel):
     case_id: OpaqueId
 
 
-class _PrepareData(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    application_response: ApplicationResponse
-    upload: UploadDescriptor
-
-
-class _ArtifactData(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    artifacts: list[ArtifactView]
-
-
-class _SuccessEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    ok: Literal[True]
-    data: Any
-    error: None
-
-
-class _FailureEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    ok: Literal[False]
-    data: None
-    error: ApplicationError
-
-
 _REQUESTS: dict[str, type[_RequestModel]] = {
     "problem_locator_create_case": CreateCaseRequest,
     "problem_locator_prepare_attachment": PrepareAttachmentRequest,
@@ -277,28 +249,36 @@ _DESCRIPTIONS = {
 }
 
 
-def _output_schema(data_type: Any) -> dict[str, Any]:
-    success = type(
-        f"Success_{getattr(data_type, '__name__', 'Data')}",
-        (_SuccessEnvelope,),
-        {"__annotations__": {"data": data_type}},
-    )
-    schema = TypeAdapter(success | _FailureEnvelope).json_schema(mode="serialization")
-    root_type = schema.get("type")
-    if root_type not in (None, "object"):
-        raise RuntimeError("MCP output envelope schema must have an object root.")
-    schema["type"] = "object"
-    return schema
-
+_OUTPUT_ENVELOPE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "ok": {"type": "boolean"},
+        "data": {"type": ["object", "null"]},
+        "error": {"type": ["object", "null"]},
+    },
+    "required": ["ok", "data", "error"],
+    "additionalProperties": False,
+    "oneOf": [
+        {
+            "properties": {
+                "ok": {"const": True},
+                "data": {"type": "object"},
+                "error": {"type": "null"},
+            }
+        },
+        {
+            "properties": {
+                "ok": {"const": False},
+                "data": {"type": "null"},
+                "error": {"type": "object"},
+            }
+        },
+    ],
+}
 
 _OUTPUT_SCHEMAS = {
-    "problem_locator_create_case": _output_schema(ApplicationResponse),
-    "problem_locator_prepare_attachment": _output_schema(_PrepareData),
-    "problem_locator_submit_supplement": _output_schema(ApplicationResponse),
-    "problem_locator_get_case": _output_schema(CaseQueryResponse),
-    "problem_locator_resume_case": _output_schema(ApplicationResponse),
-    "problem_locator_cancel_case": _output_schema(ApplicationResponse),
-    "problem_locator_list_artifacts": _output_schema(_ArtifactData),
+    name: copy.deepcopy(_OUTPUT_ENVELOPE_SCHEMA)
+    for name in _REQUESTS
 }
 
 
@@ -559,8 +539,16 @@ def create_mcp_transport(
         return tools
 
     @server.call_tool(validate_input=False)
-    async def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        return await adapter.call(name, arguments)
+    async def call_tool(
+        name: str,
+        arguments: dict[str, Any],
+    ) -> tuple[list[mcp_types.TextContent], dict[str, Any]]:
+        structured = await adapter.call(name, arguments)
+        content = mcp_types.TextContent(
+            type="text",
+            text=canonical_json_bytes(structured).decode("utf-8"),
+        )
+        return [content], structured
 
     manager = StreamableHTTPSessionManager(
         app=server,

@@ -18,6 +18,8 @@ from problem_locator.contracts import (
     Job,
     LogparseParseClaim,
     MaterializedPath,
+    ResolvedLogparseAnchor,
+    ResolvedLogparsePlanInput,
     ResourceRef,
     StateFile,
     VersionedRef,
@@ -291,6 +293,38 @@ def test_workspace_manager_prepares_main_and_product_owned_logparse_workspaces(
     finally:
         _restore_inputs_permissions(main.root)
         _restore_inputs_permissions(logparse.root)
+
+
+@pytest.mark.parametrize("fixture_name", ["job-route.json", "job-review.json"])
+def test_metadata_only_main_api_rejects_non_specialist_jobs(
+    tmp_path: Path,
+    fixture_name: str,
+) -> None:
+    job = Job.model_validate_json((CONTRACT_FIXTURES / fixture_name).read_bytes())
+    plan = ResolvedLogparsePlanInput(
+        schema_version=2,
+        attachment_id=ATTACHMENT_ID,
+        artifact_id=None,
+        problem_time="2026-07-31T00:00:00.000Z",
+        anchors=[
+            ResolvedLogparseAnchor(
+                label="client",
+                module="client",
+                slot="main",
+                process_name="client",
+                pid=None,
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="fresh specialized DIAGNOSE main pass"):
+        WorkspaceManager(
+            tmp_path / "data"
+        ).prepare_fresh_methods_specialist_main_metadata_only(
+            job,
+            cast(CaseAggregate, object()),
+            resolved_logparse_plan=plan,
+        )
 
 
 def _attachment_ref_for_test(attachment: Attachment) -> ResourceRef:
