@@ -23,6 +23,8 @@
 - 明确扫描 `target_logs.json` 列出的全部目标日志和全部方法 marker，不能在第一项确认后停止。
 - 明确每个 confirmed method 的 evidence 要包含具体 summary、`identity_tokens` 和 sources；每条
   source 逐字复制 `source_id`、一基 `line_number`、声明 marker 和完整日志原文。
+- 把下文“逐条引用自查”的规则写入业务入口，要求提交前检查当前方法的 marker 归属和当前引用行的
+  连续子串匹配；匹配忽略大小写，输出保留声明的原始拼写。
 - 明确只输出根 JSON object 的七个字段：`schema_version`、`status`、`confirmed_methods`、
   `candidate_methods`、`evidence`、`limitations`、`safety_notes`。
 - 证据不足或受 Wiki 观测限制影响时使用 `PARTIAL` 或 `INSUFFICIENT` 并明确限制，不补写事实。
@@ -173,6 +175,23 @@ marker，或只把模板放入共享引用，都不能建立闭包。共享引�
 
 `CONFIRMED` 必须至少有一个 confirmed method。`INSUFFICIENT` 必须没有 confirmed method 和 evidence。
 Agent 不得输出 Candidate、Outcome、USER_RESULT、ZIP 或权威验证字段。
+
+### 逐条引用自查
+
+提交草稿前，对每条 source 同时检查：`marker` 原样取自当前 `method_id` 的 `evidence_markers`，
+且 `marker.casefold() in line.casefold()` 成立。这里的 `line` 必须是该 source ID 和行号对应的完整
+冻结日志原文。不能只检查 marker 是否在其他行出现过，也不能借用其他方法的 marker、跳过中间字段、
+拼接片段或把 marker 当作正则表达式。匹配时忽略大小写，输出时保留声明 marker 和日志原文各自的拼写。
+
+例如，客户端模板 `Rpc call SNO %u timeout` 的 marker 是 `Rpc call SNO`；服务端模板
+`Rpc call %s:%s SNO %u proc timeout` 的 marker 是 `Rpc call`。引用服务端原文
+`Rpc call Inventory:Reserve SNO 42 proc timeout` 时，`Rpc call SNO` 不连续出现，不能使用；只有
+当前方法已声明 `Rpc call` 时，才能选用它。`{service}:{api}` 形式也按相同的 canonical 提取规则处理。
+这只是引用示例，不是额外的 RPC 诊断规则。
+
+需要引用的日志行没有合法 marker 时，把缺口写入 `limitations`，按现有证据使用 `PARTIAL` 或
+`INSUFFICIENT`。不能自行新增、截短或改写 marker，也不能省略方法判断所需的证据后仍将其列为
+confirmed method。合法 marker 只证明引用命中，方法是否确认仍取决于 Wiki 的完整判断条件。
 
 ## 固定源日志模板引用
 

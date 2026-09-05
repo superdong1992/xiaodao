@@ -1,8 +1,12 @@
 # TODO
 
-更新时间：2026-09-04
+更新时间：2026-09-05
 
 本文件是仓库活跃待办的唯一清单。已完成事项由代码、当前设计与 Git 历史证明，不在这里保留关闭项。
+
+2026-09-05 仓库分析的核对基线为 `main@443ca21` / Problem Locator `6.0.0` / State V9。
+本次补充记录已由代码路径确认的实现边界及待评估风险，尚未执行性能压测或新的 Test Flow。
+后续是否修复、采用何种方案，仍需结合届时的当前版本、复现证据和实际使用需求决定。
 
 ## P0：Methods V1 Reviewer 最长链路 Release
 
@@ -23,6 +27,8 @@
 
 ## P0：Diagnosis Skill 条件性可选参数
 
+- 现状核对：`runtime/diagnosis_runtime.py::_methods_user_input_projection` 按角色是否必需、是否已提供
+  角色事实激活输入，包内其余声明输入仍按必需项处理；尚未形成按诊断分支激活参数的通用合同。
 - Diagnosis Skill 必须支持条件性可选参数。参数未命中其声明的诊断分支时，不得成为 OPEN requirement，也不得阻塞路由、诊断、Review 或结果交付；只有进入指定分支且该分支确实依赖该参数时，Runtime 才向用户索要。
 - 分支激活条件必须由 Skill 显式声明、可机读，并写入审计与 replay 输入；不得由 Agent 临时发明分支、用空字符串或隐藏默认值冒充未提供参数，也不得依赖客户端 Hook 修正语义。
 - 条件参数若已作为初始 USER_FACT 提供，应直接固定并复用，不得重复询问；若未提供，分支激活后才创建一次可补充的 OPEN requirement。
@@ -41,8 +47,25 @@
 - 当前调度器仍只有一个 active worker。多用户时，短 ROUTE 会排在其他 Case 的长 DIAGNOSE 后面，
   单 Case 本地基准无法暴露这类队头阻塞。后续若拆分 ROUTE lane 或开放并发，必须先冻结 CPU、内存、
   Logparse 子进程、状态提交和取消/恢复的资源隔离合同，再用多 Case Linux 压测给出 P50/P95/P99。
-- 长期运行时，单体 StateFile 的提交耗时会随 Case 数增长。后续应单独评估按 Case 分片或 append-only
-  日志；不得在没有崩溃恢复、幂等和源码快照证明的情况下，把该存储改造混入模型热路径优化。
+- 2026-09-05 已核对 [`InProcessDispatcher`](src/problem_locator/dispatch/dispatcher.py)：所有 Case
+  共用一个 FIFO worker。当前预处理已直接调用 Logparse，但正常专有链路通常仍需 ROUTE 和
+  Specialist 两次 Agent 启动。后续压测应分别统计排队、状态提交、Logparse 和模型执行耗时。
+- 单体 StateFile 与资源复核带来的跨 Case 开销单列在下方“状态提交与全库资源校验开销”，与调度
+  队头阻塞分别评估。
+
+## P1：状态提交与全库资源校验开销（待评估）
+
+- 已确认的代码路径：[`JsonFileStateRepository.commit`](src/problem_locator/storage/state_repository.py)
+  在共享协调锁内生成完整 StateFile、校验全部外部引用、重写 `state.json`，再调用
+  `_decode_and_validate` 复核落盘结果；后者再次校验全部外部引用。每轮都遍历全部 Case 的
+  Job、Outcome 和资源，并由 [`validate_formal_resource`](src/problem_locator/storage/resource_files.py)
+  读取资源的完整内容计算哈希。
+- 待验证影响：提交成本可能随历史资源总量增长，一个 Case 的大附件可能拖慢其他 Case 的状态
+  查询和更新。代码路径已确认，具体延迟、I/O 量和容量拐点尚未压测。
+- 后续分别增加 Case 数、Job/Outcome 数和归档总字节数，测量资源校验次数、读取字节数、锁等待、
+  提交延迟及多 Case P50/P95/P99；区分冷缓存与热缓存，避免只用小样本推断长期运行表现。
+- 取得基线后，再评估按 Case 分片、增量核验或 append-only 日志。方案必须保留资源篡改检测、
+  原子发布、幂等、崩溃恢复和源码快照证明；不能仅以 mtime/size 缓存替代最终内容校验。
 
 ## P1：专用定位单响应模型合同与 Logparse 批处理
 
@@ -61,6 +84,21 @@
   和企业网络都支持更长请求后，才考虑把上限提高到 90–300 秒；否则应使用连接稳定的进度流协议，
   不能单纯延长超时导致远端 MCP 请求被 Host 提前中断。
 
+## P1：证据核验与诊断语义的保证范围（待评估）
+
+- 已确认的实现边界：[`verify_method_diagnosis`](src/problem_locator/runtime/methods_grounding.py)
+  核对方法归属、marker、来源、行号、原文和 identity token，并绑定冻结日志与回执；这些机械
+  校验确认引用来源，summary 是否正确解释日志、因果关系和方法规则是否成立仍依赖模型判断。
+- 专有 Job 默认冻结 `review_policy=NONE`，核验后的 Candidate 可直接交付；显式开启
+  `INDEPENDENT` 后才由独立 Job/Workspace 的 Reviewer 复核。后续应明确产品对两种模式的质量
+  承诺，并用相同输入比较误判、未解决率、耗时和模型成本，再决定是否调整审核策略。
+- 建议补充“日志引用真实，但诊断规则或因果解释不成立”的反例，分别评估机械校验和语义审核。
+  若业务需要更强的确定性保证，再设计可机读的方法规则及专项回归；不得把引用校验通过当成
+  对全部诊断语义的机械证明。
+- [`GenericLocatorExecutor`](src/problem_locator/runtime/generic_locator.py) 将原始问题交给预装
+  Skill，校验结果格式、大小和哈希，不复用专有链路的逐行证据核验。其质量验收继续归入上方
+  “Generic V2 最终集成与生产验收”，需要单独评估实际报告语义。
+
 ## P1：Methods V1 UNRESOLVED 真实分布
 
 - 当前确定性测试已覆盖 Reviewer `REJECT`、`NEED_MORE_EVIDENCE`、证据不足和发布失败的收口行为，
@@ -74,3 +112,15 @@
 - 当前版本只支持普通事件时间窗，不声明或推断日志抑制、限流或采样语义。
 - 后续若业务 Skill 需要 75 秒或其他抑制机制，应新增显式、可机读的规则类型，并由 Skill 自己声明允许窗口方向、开闭边界、抑制键、最大间隔以及无日志时的可验证行为。
 - 框架不得硬编码 75 秒，也不得在 Skill 未声明时自行放宽时间窗口。
+
+## P2：核心大模块与历史实现的维护成本（待评估）
+
+- 2026-09-05 基线中，[`contracts/models.py`](src/problem_locator/contracts/models.py) 约 6900 行，
+  [`runtime/diagnosis_runtime.py`](src/problem_locator/runtime/diagnosis_runtime.py) 约 4600 行，合同
+  校验和运行时流程集中在少数模块。生产主链路已采用 Methods V1，仓库仍保留大量 Evidence V2
+  实现、测试和命名，后续修改容易混淆实际入口与历史路径。
+- 后续先梳理生产入口、调用关系、历史或实验用途，以及它们对应的测试和文档，再决定是否拆分
+  模块、统一命名或收敛旧路径。不能仅凭文件名中的 V2 判断代码无用，也不能把历史认证结果当成
+  当前 V9 的发布证明；认证入口的收口继续归入上方“Methods V1 Reviewer 最长链路 Release”。
+- 若实施重构，需保持公开扁平 MCP schema、当前合同版本、状态转换、冻结资产身份、权威产物和
+  重启恢复行为，并用当前 Test Flow 验证同一源码快照。

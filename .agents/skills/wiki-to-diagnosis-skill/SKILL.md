@@ -65,8 +65,12 @@ Specialist 只能读取 `request.json`、`target_logs.json`、其中列出的目
 - 扫描每个目标日志中的每个方法 marker，不能在第一个确认项后停止，也不能扩大目标范围。
 - `CONFIRMED` 方法必须给出具体 evidence summary；每条 source 必须逐字复制准确 `source_id`、一基
   `line_number`、该方法声明的 marker 和完整日志原文。每个 `identity_tokens` 值必须出现在引用行中。
+- 生成的业务 Skill 必须要求 Specialist 在提交前逐条自查：`source.marker` 原样取自当前方法的
+  `evidence_markers`，且忽略大小写后是当前引用行的连续子串。不得跨行拼接、跳过中间字段或套用
+  另一种日志模板的 marker；具体示例见输出合同中的“逐条引用自查”。
 - 证据不足时使用 `PARTIAL` 或 `INSUFFICIENT`，把证据缺口写入 `limitations`，把副作用和安全边界
-  写入 `safety_notes`。不得补写 Wiki 未提供的事实。
+  写入 `safety_notes`。必要日志没有合法 marker 时，也必须记录缺口，不能删掉必要证据后仍确认该
+  方法。不得补写 Wiki 未提供的事实。
 - 只输出根 JSON object，固定字段为 `schema_version`、`status`、`confirmed_methods`、
   `candidate_methods`、`evidence`、`limitations`、`safety_notes`。Agent 不创建 Candidate、Outcome、
   `USER_RESULT`、ZIP 或权威结论；Server 复核方法、marker、行号、原文和哈希后统一生成。

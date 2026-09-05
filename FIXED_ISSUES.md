@@ -2429,3 +2429,37 @@
   `git-visible-worktree-v1:5f72aab29bc22eaac1d56f67ae66825f6b9b302507265919c3d83095da1b2e44`
   （752 files），worktree 与 materialized source verification 均为 PASS。本元数据行本身不宣称被其
   引用的源码快照覆盖。
+
+## PL-FIX-055：Methods V1 引用提示未明确 marker 必须在当前日志行中连续出现
+
+- **状态**：提示约束修复已实现；验证结论以本条“最新 Test Flow verdict”为准。
+- **症状**：Agent 引用 `Rpc call Inventory:Reserve SNO 42 proc timeout` 时选用当前方法声明的
+  `Rpc call SNO`，服务端因该 marker 不在当前引用行中连续出现而返回 `METHOD_VALIDATION_FAILED`。
+  当前工作区已用合成双端日志复现此机制；用户内网生成 Skill 的完整 marker 列表未核实。
+- **受影响版本**：Problem Locator `6.0.0` / `main@443ca21` 中的两套 Wiki 生成说明、Specialist
+  profile 和诊断输出合同。此项是引用提示缺口，与 PL-FIX-043 的大小写比较修复分别记录。
+- **根因**：提示要求引用当前方法声明的 marker 和完整原文，但没有明确要求该 marker 同时是
+  当前引用行的连续子串；声明归属与实际命中被 Agent 混为一谈。现有 canonical 提取与 grounding
+  校验正确，此次不调整其实现。
+- **不可回归行为**：
+  - 业务 Skill 的生成规范与服务端提示都要求提交前逐条核对：marker 原样取自当前方法的
+    `evidence_markers`，且 `marker.casefold() in line.casefold()` 成立；日志原文保持完整准确。
+  - 不得跨行或跨方法借 marker、跳过中间字段、拼接片段或使用正则匹配。只有方法已声明且当前行
+    实际命中的 marker 才能引用；必要证据缺少合法 marker 时，记录缺口，按现有规则使用
+    `PARTIAL` 或 `INSUFFICIENT`，不能删掉必要证据后仍确认方法。
+  - 既有 Skill 的后续诊断调用会收到完整服务端提示；不修改已有 Skill 内容、加载规则、草稿字段、
+    MCP 接口或 grounding 行为。提示约束不保证模型始终遵守，也不代表内网现场已恢复。
+- **修复历史**：2026-09-05，同步补齐两套生成 Skill 及输出合同、服务端 Specialist profile 和
+  诊断输出合同，加入客户端与服务端模板差异示例及逐条引用自查。新增回归使用合成 registration、
+  两套生成校验器、生产加载器、冻结日志、marker 扫描和 grounding，覆盖 `%s` 与命名占位符。
+- **专项回归测试**：
+  - `tests/deterministic/unit/integrations/test_lan_logparse_meta_skill.py::test_rpc_citation_requires_its_own_lines_contiguous_marker`
+    的两组参数直接覆盖错误 marker 被拒绝、正确 marker 通过，以及双端来源、行号、原文和回执绑定。
+  - `tests/deterministic/unit/runtime/test_diagnosis_runtime.py::test_methods_v1_specialist_publishes_candidate_json_and_log_archive`
+    新增实际 Specialist prompt 完整包含服务端 profile 和输出合同的断言。
+  - 复用 `tests/deterministic/unit/runtime/test_methods_skill.py` 中的
+    `test_grounding_matches_declared_marker_without_case_sensitivity`、
+    `test_grounding_rejects_marker_owned_only_by_another_method` 和
+    `test_grounding_rejects_a_receipt_that_does_not_match_injected_marker_cards`，以及
+    `test_grounding_rejects_ungrounded_claims` 中的来源行号、marker 与 identity 反例。
+- **最新 Test Flow verdict**：Dev `run-20260905T085215Z-585bef47` 为 `PASS_WITH_WARNINGS`，仅因 performance 为 `NOT_CALIBRATED`；functional、operation、verification 均为 `PASS`，模型调用、token 和费用均为 0。affected 531 passed/24 skipped；完整确定性轨中 Methods V1 Core 30/30、contracts 576/576、unit 1919 passed/68 skipped、integration 41/41、SameJob 5/5，failure/error 均为 0。上述两组 RPC 专项、实际 Specialist prompt 注入检查及复用的 grounding 专项均通过且未跳过。源码快照为 `git-visible-worktree-v1:8324719eb24e4c1288a63660c19234ca5b7ee4a60f5da85d3349432e6a6bbba4`（753 files），工作树与物化源码核验均为 PASS。首轮 `run-20260905T084514Z-ff321bd0` 因借用包路径未加载 `pywintypes` 而在测试收集阶段失败；随后按锁文件创建独立虚拟环境，记录新的 reason、hypothesis 和 expected evidence 后完成本轮验证，两轮证据均保留。本元数据行本身不宣称被其引用的源码快照覆盖；本结论不代表真实模型或内网现场验收。

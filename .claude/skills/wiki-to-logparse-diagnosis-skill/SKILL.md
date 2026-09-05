@@ -56,9 +56,13 @@ registration root。生成物只包含产品 registration 和闭合 Methods pack
 7. Server 完成 Logparse 预处理并冻结 `request.json`、`target_logs.json`、全部目标日志和
    `logparse-receipt.json`。业务 `SKILL.md` 指导 Specialist 扫描每个方法 marker，为 confirmed method
    输出具体 summary、`identity_tokens` 和逐字准确的 source ID、一基行号、marker、完整日志原文。
+   必须要求提交前逐条自查：`source.marker` 原样取自当前方法的 `evidence_markers`，且忽略大小写后
+   是当前引用行的连续子串。不得跨行拼接、跳过中间字段或套用另一种日志模板的 marker；具体示例见
+   输出合同中的“逐条引用自查”。
 8. 输出根 JSON object 的固定七个字段：`schema_version`、`status`、`confirmed_methods`、
    `candidate_methods`、`evidence`、`limitations`、`safety_notes`。证据不足时使用 `PARTIAL` 或
-   `INSUFFICIENT`。Agent 不创建 Candidate、Outcome、USER_RESULT、ZIP 或权威结论；Server 重新核对
+   `INSUFFICIENT`。必要日志没有合法 marker 时，把缺口写入 `limitations`，不能删掉必要证据后仍
+   确认该方法。Agent 不创建 Candidate、Outcome、USER_RESULT、ZIP 或权威结论；Server 重新核对
    方法、marker、行号、日志原文和哈希后生成。
 
 ## 校验

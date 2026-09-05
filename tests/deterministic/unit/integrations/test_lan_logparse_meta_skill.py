@@ -8,6 +8,13 @@ from pathlib import Path
 
 import pytest
 
+from problem_locator.contracts.enums import MethodsValidationReasonCode
+from problem_locator.runtime.diagnosis_runtime import _method_validation_reason_code
+from problem_locator.runtime.methods_grounding import (
+    FrozenTargetLogV1,
+    scan_method_markers,
+    verify_method_diagnosis,
+)
 from problem_locator.runtime.methods_skill import load_specialized_skill_registration
 
 
@@ -339,6 +346,125 @@ def test_marker_starting_with_placeholder_keeps_stable_trailing_suffix() -> None
         validator._canonical_evidence_marker("{request_id} trailing-only")
         == "trailing-only"
     )
+
+
+@pytest.mark.parametrize(
+    ("client_template", "server_template", "log_derived_fields"),
+    [
+        ("Rpc call SNO %u timeout", "Rpc call %s:%s SNO %u proc timeout", []),
+        (
+            "Rpc call SNO {sno} timeout",
+            "Rpc call {service}:{api} SNO {sno} proc timeout",
+            ["sno"],
+        ),
+    ],
+    ids=["printf-placeholders", "named-placeholders"],
+)
+def test_rpc_citation_requires_its_own_lines_contiguous_marker(
+    tmp_path: Path,
+    client_template: str,
+    server_template: str,
+    log_derived_fields: list[str],
+) -> None:
+    registration, wiki, _ = _write_valid_registration(tmp_path)
+    _replace_wiki_templates(
+        registration,
+        wiki,
+        templates=[client_template, server_template],
+        markers=["Rpc call SNO", "Rpc call"],
+        log_derived_fields=log_derived_fields,
+    )
+    package = _methods_path(registration).parent
+    package_validator = _load(
+        Path(
+            os.environ.get(
+                "TEST_WIKI_DIAGNOSIS_VALIDATOR",
+                ROOT / ".agents/skills/wiki-to-diagnosis-skill/scripts/validate_generated_skill.py",
+            )
+        ),
+        "rpc_citation_package_validator",
+    )
+    # Both generator validators and the production loader derive the shorter
+    # server prefix from complete templates, without a runtime compatibility rule.
+    assert _validate(registration, wiki)["ok"] is True
+    assert package_validator.validate(package, wiki)["ok"] is True
+    skill = load_specialized_skill_registration(registration)
+    method = skill.methods.methods[0]
+    assert method.evidence_markers == ("Rpc call SNO", "Rpc call")
+
+    lines = {
+        "client": "Rpc call SNO 42 timeout",
+        "server": "Rpc call Inventory:Reserve SNO 42 proc timeout",
+    }
+    targets = tuple(
+        FrozenTargetLogV1(
+            source_id=source_id,
+            relative_path=f"inputs/target-logs/{source_id}.log",
+            content_sha256=hashlib.sha256((line + "\n").encode()).hexdigest(),
+            content=(line + "\n").encode(),
+        )
+        for source_id, line in lines.items()
+    )
+    receipt = scan_method_markers(skill=skill, target_logs=targets)
+    assert ("client", "Rpc call SNO", 1) in receipt.marker_hits
+    assert ("server", "Rpc call", 1) in receipt.marker_hits
+    assert ("server", "Rpc call SNO", 1) not in receipt.marker_hits
+    draft = {
+        "schema_version": 1,
+        "status": "CONFIRMED",
+        "confirmed_methods": [method.id],
+        "candidate_methods": [],
+        "evidence": [
+            {
+                "method_id": method.id,
+                "summary": "客户端超时与服务端处理超时日志都引用 SNO 42。",
+                "identity_tokens": ["SNO 42"],
+                "sources": [
+                    {
+                        "source_id": source_id,
+                        "line_number": 1,
+                        "marker": "Rpc call SNO",
+                        "line": line,
+                    }
+                    for source_id, line in lines.items()
+                ],
+            }
+        ],
+        "limitations": [],
+        "safety_notes": [],
+    }
+    with pytest.raises(
+        ValueError, match="evidence marker is absent from the cited line"
+    ) as captured:
+        verify_method_diagnosis(
+            skill=skill,
+            draft=draft,
+            target_logs=targets,
+            logparse_receipt_sha256="a" * 64,
+            skill_load=receipt,
+        )
+    assert (
+        _method_validation_reason_code(captured.value)
+        is MethodsValidationReasonCode.VALIDATION_FAILED
+    )
+
+    draft["evidence"][0]["sources"][1]["marker"] = "Rpc call"
+    verified = verify_method_diagnosis(
+        skill=skill,
+        draft=draft,
+        target_logs=targets,
+        logparse_receipt_sha256="a" * 64,
+        skill_load=receipt,
+    )
+    assert verified.audit.confirmed_methods == (method.id,)
+    assert verified.audit.skill_load == receipt
+    assert [
+        (source.source_id, source.line_number, source.marker, source.line)
+        for source in verified.draft.evidence[0].sources
+    ] == [
+        ("client", 1, "Rpc call SNO", lines["client"]),
+        ("server", 1, "Rpc call", lines["server"]),
+    ]
 
 
 def test_validator_rejects_shortened_event_name_marker(tmp_path: Path) -> None:

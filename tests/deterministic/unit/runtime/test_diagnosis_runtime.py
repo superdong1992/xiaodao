@@ -3004,6 +3004,13 @@ def test_methods_v1_specialist_publishes_candidate_json_and_log_archive() -> Non
     )
     prompt = specialist_call["prompt"]
     assert problem_time == "2026-07-31T00:00:00.000Z"
+    # Existing business packages receive both complete server-owned instruction
+    # layers, including citation self-checks, without regeneration or truncation.
+    for instruction_path in (
+        BUILTIN_ASSET_ROOT / "profiles/specialist/profile.md",
+        BUILTIN_ASSET_ROOT / "output-contracts/diagnose/output-contract.md",
+    ):
+        assert instruction_path.read_text(encoding="utf-8").strip() in prompt
     assert (
         '<<<SECTION 4 CONTEXT_SNAPSHOT>>>\n{"schema_version":2}\n'
         "<<<END SECTION>>>\n"
