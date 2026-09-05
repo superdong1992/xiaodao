@@ -86,6 +86,8 @@ class AgentStreamTelemetry:
         self._line_limited = False
         self._internal_failure = False
         self._terminal_result = False
+        self._final_result: str | None = None
+        self._result_count = 0
         self._system_observed_ms: float | None = None
         self._result_observed_ms: float | None = None
         self._cli_duration_ms: float | None = None
@@ -231,6 +233,13 @@ class AgentStreamTelemetry:
             self._tool_max_ms[name] = max(self._tool_max_ms.get(name, 0.0), duration)
 
     def _observe_result(self, payload: Mapping[str, Any], observed_ms: float) -> None:
+        self._result_count += 1
+        value = payload.get("result")
+        self._final_result = (
+            value if self._result_count == 1 and isinstance(value, str)
+            and payload.get("subtype") == "success" and payload.get("is_error") is False
+            else None
+        )
         self._terminal_result = True
         self._result_observed_ms = observed_ms
         self._cli_duration_ms = _nonnegative_number(payload.get("duration_ms"))
@@ -248,6 +257,19 @@ class AgentStreamTelemetry:
                 count = _nonnegative_integer(usage.get(source_name))
                 if count is not None:
                     self._usage_counts[safe_name] = count
+
+    @property
+    def final_result(self) -> str | None:
+        """The single successful CLI result; never included in diagnostic events."""
+        self.finish()
+        with self._lock:
+            return self._final_result if not self._internal_failure else None
+
+    def permits_file_access(self, policy: str) -> bool:
+        self.finish()
+        with self._lock:
+            allowed = set() if policy == 'none' else {'Read'}
+            return set(self._tool_counts).issubset(allowed)
 
     def snapshot(
         self,

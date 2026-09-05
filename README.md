@@ -1,14 +1,14 @@
-# Problem Locator V6
+# Problem Locator 7.0 预览版
 
 ## Methods V1 专有定位报告
 
-当前冻结版本如下；这些版本共同定义本次 V6 行为，不应只按其中某一个版本判断兼容性：
+当前冻结版本如下；这些版本共同定义本次预览版行为：
 
 | 合同或资产 | 当前版本 |
 | --- | --- |
-| Problem Locator package | `6.0.0` |
-| State / Job / Outcome schema | `9` |
-| S00 contract revision | `v9-contract-r1` |
+| Problem Locator package | `7.0.0` |
+| State / Job / Outcome schema | `10` |
+| S00 contract revision | `v10-contract-r1` |
 | Methods package | `SKILL.md` + `methods.json@1` + `references/*.md` |
 | Product registration | `registration-template.json@1` |
 | Methods evaluation protocol | `Methods V1` |
@@ -17,7 +17,7 @@
 | Specialist / Reviewer profile | `7.0.0` / `7.0.0` |
 | Router / Diagnose / Review tool bundle | `3.0.0` / `4.0.0` / `3.0.0` |
 
-State、Job 和权威 Outcome 已硬切到 V9。Problem Locator 6.0.0 只接受路径尚不存在或目录完全为空的全新 `DATA_ROOT`，首次启动会写入 canonical `data-format.json`；已有非空但无 marker、使用旧 marker 或 marker 被篡改的目录都会启动失败，服务不会迁移、改写或删除其中任何内容。升级前必须先备份旧目录，再使用新的 `DATA_ROOT`；V1–V8 State、Job 和 Outcome 只能作为只读历史材料另行处理。
+State、Job 和权威 Outcome 已切换到 V10。升级必须使用全新 `DATA_ROOT`；服务首次启动会写入 `data-format.json` 和 `completed.sqlite3`。旧数据目录原样保留，不迁移、不双写、不兼容读取。活动任务只保存在内存，服务退出后需要重新创建；已交付的终态报告、资源索引和归档任务保存在 SQLite 与资源目录中。
 
 本仓库将故障定位能力分为四层：
 
@@ -41,8 +41,8 @@ Agent 不直接产生权威 Outcome 或公开用户产物。SPECIALIZED DIAGNOSE
 evidence summary 和精确日志来源，但不能创建 Evidence、Candidate、Artifact、USER_RESULT、ZIP、
 requirement 或权威 Outcome。
 
-默认配置只运行 Specialist：服务端验证通过的 COMPLETE/PARTIAL Candidate 直接接受，并原子公开
-`diagnosis-result.json` 和 `result.zip`。设置 `SPECIALIZED_REVIEWER_ENABLED=true` 后，Reviewer 才会在
+默认配置只运行 Specialist：服务端验证通过的 COMPLETE/PARTIAL Candidate 直接接受，持久化后立即公开
+`diagnosis-result.json`，再在后台生成 `result.zip`。设置 `SPECIALIZED_REVIEWER_ENABLED=true` 后，Reviewer 才会在
 独立 Job、Workspace 和上下文中复核；`REVIEWING` 阶段不公开产物，只有 PASS 后才公开。非 PASS
 进入 `UNRESOLVED`，只公开 `INCONCLUSIVE` JSON 和审计包。详细语义见下文“Methods V1、可选审核与报告”。
 
@@ -55,12 +55,12 @@ requirement 或权威 Outcome。
 真实模型认证只能在零模型 Core PASS 后单独执行。默认 P1/P2 只认证 Specialist；可选盲评认证
 必须显式选择。Provider cert 必须绑定同一 source snapshot、
 Methods V1 contract digest 和 Core verdict digest；旧 Evidence V2 Fast E2E 或缓存结果不能作为
-V9 认证复用。任何 standalone verdict 只证明它声明的短路径，不代表完整 Test Flow、
+当前版本的认证证据复用。任何 standalone verdict 只证明它声明的短路径，不代表完整 Test Flow、
 Release 或物理局域网部署验收。
 
 Problem Locator 是一个单实例故障诊断服务。它接收结构化问题，收集事实与附件，执行固定版本的路由和诊断任务；Reviewer 默认关闭。专有定位以服务端验证后的 `diagnosis-result.json` 为用户报告，并按需提供含原始目标日志的 `result.zip`。Generic V2 终态继续发布 Markdown 结果。
 
-Problem Locator 6.0.0 使用本地 JSON 状态文件和文件系统资源实现持久化；所有业务写操作都通过应用服务及其仓储端口完成。
+Problem Locator 7.0 的活动 Case、Job 和幂等记录保存在内存中，每个 Case 有独立锁和 revision。终态提交使用 SQLite WAL + FULL 同步：先持久化报告及引用资源，再提交数据库，最后通知客户端。历史 Case 按需读取，不在每次写操作中复制全库或重新读取历史附件。
 
 ## 环境要求与安装
 
@@ -92,28 +92,32 @@ uv lock --check
 | `LOGPARSE_CONFIG_PATH` | 是 | 无 | Logparse 工作区内的配置文件 |
 | `BIND_HOST` | 否 | `127.0.0.1` | Uvicorn 监听地址 |
 | `PORT` | 否 | `8000` | Uvicorn 监听端口 |
-| `CLAUDE_COMMAND` | 否 | `claude` | 默认 Agent 命令，会原样解析为 argv 参数模板；服务不会自动追加 stream-json 参数 |
+| `CLAUDE_COMMAND` | 否 | `claude` | 默认 Agent 命令；原生 Claude 的 ROUTE/Specialist 调用由服务固定 stream-json、最终响应及文件工具权限，保留模型和 settings 参数 |
 | `ROUTE_CLAUDE_COMMAND` | 否 | `CLAUDE_COMMAND` | ROUTE Agent 命令；可单独选择低延迟模型，不影响 DIAGNOSE 和 REVIEW |
 | `DIAGNOSE_CLAUDE_COMMAND` | 否 | `CLAUDE_COMMAND` | SPECIALIZED、GENERIC DIAGNOSE 和 REVIEW Agent 命令；专用诊断的 Logparse 预处理由服务进程直接执行，不使用该命令 |
 | `LOGPARSE_PYTHON` | 否 | 当前 Python | Logparse 使用的 Python 启动命令 |
 | `DFX_LOG_LEVEL` | 否 | `INFO` | 结构化诊断日志级别：`DEBUG`、`INFO`、`WARNING`、`ERROR` 或 `CRITICAL` |
 | `DFX_LOG_DIR` | 否 | 无 | 服务端可观测日志目录的绝对路径；配置后生成 `debug.jsonl`、`journey.jsonl` 和按 Case 渲染的人类可读日志 |
 | `SPECIALIZED_REVIEWER_ENABLED` | 否 | `false` | 只接受小写 `true` 或 `false`；开启后，新完成的 Specialist Candidate 才进入独立审核 |
+| `ROUTE_WORKERS` | 否 | `1` | 独立 ROUTE 队列的 worker 数 |
+| `DIAGNOSE_WORKERS` | 否 | `2` | DIAGNOSE/REVIEW 队列的 worker 数 |
+| `LOGPARSE_CONCURRENCY` | 否 | `1` | 同时执行的 Logparse 子进程数 |
+| `ARCHIVE_WORKERS` | 否 | `1` | ZIP 后台 worker 数 |
 
 追求最低端到端延迟时，可让 `ROUTE_CLAUDE_COMMAND` 使用低延迟模型和最小必要推理预算，
 让 `DIAGNOSE_CLAUDE_COMMAND` 保留诊断所需能力。ROUTE 的上下文只携带角色专用输出形状，
-也不再要求模型调用结果封装工具；Agent 退出后由服务进程在本地完成规范化、marker 封装和复验。
+ROUTE 只返回 `skill_id`、简短 `reason` 和 `confidence`；无匹配时返回 `skill_id=null`。服务端从启动快照补全 Skill ref 和 Outcome。非法 JSON、未知 Skill 或异常退出直接失败，不自动修复。
 Reviewer 必须继续复用 `DIAGNOSE_CLAUDE_COMMAND`，以保持与 Specialist 相同的模型身份。
 
-专用定位在输入齐备后的默认热路径只启动一个 Specialist Agent；固定 Logparse 请求由服务进程直接
-执行。Specialist 主 Workspace 只保留资源元数据，附件只在预处理 Workspace 物化一次；模型上下文
-也不再重复携带完整 Case snapshot 和 ROUTE Outcome。客户端应在写调用中使用最多 30 秒的有限等待，
-并优先读取 `problem_locator_get_case.data.artifact_views` 下载终态结果。只有旧服务完全没有该字段时，
-才回退 `problem_locator_list_artifacts`。服务默认把 HTTP keep-alive 保持 75 秒，可覆盖连续长轮询之间
-的空档，减少局域网连接重建。大文件物化会复用流式复制时已经计算的 SHA-256，不再在复制前预读
-整个源文件，也不在 atomic move 前重复读取临时文件；移动后的目标和复制后的正式源仍会完整复核。
+Specialist 完整输入不超过 128 KiB 时，请求、方法卡和目标日志直接放入上下文，不必调用 Read/Write；超过上限时完整列出允许读取的输入文件，不静默裁剪。模型返回最终 JSON，服务端继续核验 marker、source、行号、日志原文和身份信息。
 
-运行时限制是冻结的契约常量，不属于可配置项。6.0.0 会拒绝 `JOB_CONCURRENCY` 以及未知的 limit、max、retention 覆盖项，避免运维人员误以为某项实际上无效的限制已经生效。
+MCP 的写操作和默认查询返回紧凑进度及 `artifact_views`，完整事实和结果元数据使用 `get_case(include_details=true)` 查询。写操作等待后已完成时，直接使用同一响应的下载信息。客户端合同不兼容缺少下载字段的旧服务。HTTP keep-alive 保持 75 秒。
+
+上传时合并小块，每次跨线程最多读取 1 MiB，每路应用自有缓冲最多 2 MiB；接收时计算一次长度和 SHA-256。后续状态提交复用已校验的资源记录，不重新读取历史附件。自定义 Claude wrapper 须遵循 `PROBLEM_LOCATOR_AGENT_FILE_ACCESS=none|read-only`，使用 stream-json 最终响应，并限制大输入的 Read 仅访问当前 Workspace 的 `inputs/**`。
+
+上述四个并发配置接受正整数，默认值面向 4 核、8 GB Server。同一 Case 串行，不同 Case 可并行；取消只终止所属 Job。其他上下文、资源和保留期限限制保持固定，`JOB_CONCURRENCY` 及未知覆盖项仍被拒绝。
+
+Skill registration、方法卡、内置提示词和输出合同在启动时形成不可变快照。更新后重启才能生效。Logparse 源码、配置和解释器放在按发布版本区分的固定目录中，运行期间不要原地覆盖；身份只在启动时确认。
 
 不要配置或持久化 `PROBLEM_LOCATOR_LOGPARSE_ENDPOINT` 和 `PROBLEM_LOCATOR_LOGPARSE_TOKEN`。
 当前专用热路径不会把它们交给 Agent；只有兼容的委托流程显式请求 Agent broker 环境时，Runtime 才会
@@ -310,7 +314,7 @@ Windows/macOS 默认跟随当前 Host；Linux Client 必须显式启用。当前
 
 所有新增或修改的 MCP 输入必须继续保持扁平：根 object 属性只能是标量、nullable 标量或标量数组，不得新增 `$ref/$defs`、嵌套 object、动态 Map 或对象数组；合同测试不设白名单。
 
-`/live` 表示 HTTP 进程正在提供服务。`/ready` 还会检查配置、实例锁、状态有效性、数据目录和启动恢复过程。在恢复期间，或出现致命状态/worker 故障后，服务可能仍然存活，但尚未就绪。
+`/live` 表示 HTTP 进程正在提供服务。`/ready` 检查启动结果、实例锁、运行状态和已知存储故障，不扫描全库或重新计算历史资源的 hash。显式管理命令仍可校验或导出完整终态历史。
 
 ### DFX 诊断日志
 
@@ -383,14 +387,12 @@ SPECIALIZED 定位恢复 `Candidate → 可选 Review → USER_RESULT`：
    marker、一基行号、完整日志原文、限制和安全说明。
 3. 服务端重新核对方法、marker、行号、原文和哈希，并映射 Evidence、CandidateConclusionDraft、
    DecisionAuditV2 和 DiagnosisOutcome。Agent 不能创建 Candidate、Outcome、USER_RESULT 或 ZIP。
-4. 默认 `review_policy=NONE`。COMPLETE/PARTIAL Candidate 在同一状态提交中接受并公开
-   `diagnosis-result.json` 与 `result.zip`。
+4. 默认 `review_policy=NONE`。COMPLETE/PARTIAL Candidate 持久化后立即公开 `diagnosis-result.json`，并在同一事务中保存待归档任务。
 5. 设置 `SPECIALIZED_REVIEWER_ENABLED=true` 后，新 DIAGNOSE Job 冻结
    `review_policy=INDEPENDENT`。Candidate 先进入 `REVIEWING`，结果产物保持内部不可下载；只有
-   `MethodReviewV1` PASS 后才同时公开。REJECT/NEED_MORE_EVIDENCE 进入 `UNRESOLVED`，原 Candidate
+   `MethodReviewV1` PASS 后才公开 JSON，并开始后台生成 ZIP。REJECT/NEED_MORE_EVIDENCE 进入 `UNRESOLVED`，原 Candidate
    JSON/ZIP 永不公开，只发布新的 `INCONCLUSIVE` JSON 和审计包。
-6. 报告生成、资源正式化和 Case 终态原子可见。重放同一 finalized Outcome 会复用 Artifact ID、大小
-   和 SHA-256；发布失败不会提交 RESOLVED。
+6. 报告发布失败不会提交 RESOLVED。ZIP 使用 DEFLATE level 1 流式写临时文件，完成后发布；`archive_status=PENDING|READY|FAILED` 反映归档进度，`NOT_REQUIRED` 表示无需归档。ZIP 失败不撤销 JSON，重启会恢复已持久化的待归档任务。
 
 `diagnosis-result.json` 固定使用 `problem-locator-diagnosis-v3`，包含具体根因、发现、原因与候选因素、
 完成条件、服务端验证、时间相关性、证据缺口、限制、处置建议和安全说明。`result.zip` 固定包含九段式
@@ -398,11 +400,11 @@ SPECIALIZED 定位恢复 `Candidate → 可选 Review → USER_RESULT`：
 下载、校验并展示 JSON；只有用户要求时才下载 ZIP，并先提示其中包含原始目标日志。
 
 INCONCLUSIVE 专有结果只包含 JSON 和 `AUDIT_BUNDLE`，不生成 `result.zip`。FAILED、CANCELLED 和
-INTERRUPTED 不伪造用户报告。V9 兼容字段 `methods_result` 始终为空，不能作为客户端结果来源。
+INTERRUPTED 不伪造用户报告。`methods_result` 不属于当前客户端结果合同。
 
 ## 隔离重放指定 Job
 
-`replay-job` 是普通本地 CLI，不引入管理员角色、管理 API、认证或权限模型。它只接受当前 State V9 / `v9-contract-r1` 的 State/Job/Outcome 闭包，并在新的隔离安装中按当前固定资产执行指定阶段：
+`replay-job` 是普通本地 CLI，不引入管理员角色、管理 API、认证或权限模型。它只接受当前 State V10 / `v10-contract-r1` 的已持久化 State/Job/Outcome 闭包，并在新的隔离安装中按当前固定资产执行指定阶段。活动任务不会在停服后保留，不能用这个命令恢复：
 
 - `diagnose-only`：源 Job 必须是 DIAGNOSE；执行服务端终结，但不向隔离 State 提交诊断 Outcome。
 - `review-only`：源 Job 必须是 REVIEW；执行服务端终结，但不向隔离 State 提交 Review Outcome。
@@ -429,30 +431,24 @@ uv run python -m problem_locator replay-job \
 `WorkspaceAttachmentInput.filename_suffix` 为必填字段，但允许值为 `null`。归档文件后缀及 content-type 的校验使用冻结的公共契约辅助函数；路径形式、包含大写字母的别名以及不匹配的后缀都会被拒绝。
 
 默认只列出可下载的公开产物。专有 `RESOLVED/PARTIALLY_RESOLVED` 结果各公开一个
-`USER_RESULT` 和 `USER_RESULT_ARCHIVE`；`UNRESOLVED` 各公开一个 `INCONCLUSIVE` `USER_RESULT`
+`USER_RESULT`，ZIP 完成后再公开 `USER_RESULT_ARCHIVE`；`UNRESOLVED` 各公开一个 `INCONCLUSIVE` `USER_RESULT`
 和 `AUDIT_BUNDLE`，不生成 `result.zip`。GENERIC V2
 终态会公开一份 `text/markdown` `GENERIC_REPORT`，其内容必须与
 `generic_result_v2.report_markdown` 的 UTF-8 bytes、size 和 SHA-256 完全一致。下载内容必须
 与声明的字节数和 SHA-256 一致。内部 `LOGPARSE_RUN` 目录会作为后续任务的持久化输入，但永远
 不可下载。
 
-## 启动恢复与重试语义
+## 重启与交付语义
 
-启动恢复只适用于同一 `schema_version=9`、`contract_revision=v9-contract-r1` 的数据。读取 `state.json` 时会先严格校验 V9 envelope 和全部引用；V1–V8 State、Job、Outcome 或混合版本闭包都会以 `STATE_SCHEMA_UNSUPPORTED`/状态损坏拒绝，调度器不会尝试兼容、迁移或运行其中的旧 Job。
+每次启动创建新的运行时 epoch，不重放活动任务或未确认的 Outcome，不重新投递旧 PENDING Job。服务退出后，活动 Case、Job、幂等记录和中间状态不恢复，需要重新创建 Case。已经返回终态的 JSON 报告、引用资源、查询索引和幂等记录持久化保留。
 
-对于已经由当前 State V9 服务创建的数据，每次启动时调度器都会创建新的运行时 epoch，并在接受新任务之前完成以下恢复流程：
+进程存活期间，Outcome 提交遇到允许重试的错误，仍复用同一份结果，不重新调用 Agent。终态 SQLite 提交失败时不会通知客户端报告已交付。已知存储故障会使 readiness 失败，但不会主动撤销已经交付的报告。
 
-1. 逐字节重放所有已持久化、已最终确定但尚未确认的 Job Outcome。
-2. 完成重放后，才会把没有最终 Outcome 的同合同 `RUNNING` 任务标记为 `INTERRUPTED`。
-3. 重新调度已经持久化的 `PENDING` 任务。
+写响应中的业务回执表示请求已生效。活动请求的回执不承诺跨进程恢复；终态报告才具有持久化交付保证。提交后视图读取失败时，响应可携带回执及 `case_view=null`，客户端保留请求 ID 并稍后刷新。
 
-重试提交 Outcome 时会复用同一份最终回执，不会再次运行 Agent。资源或配置错误，以及带类型的状态读取错误，会使 worker 停止接单并导致就绪检查失败。恢复后的任务会保留所有冻结的运行时绑定，当前 Catalog 不能用新版本替换这些绑定。被中断的 `REVIEW` 任务会继续执行 `REVIEW`，不会退回 `DIAGNOSE`。
+## 校验、导出与备份
 
-如果一条命令的业务变更已经提交，但提交后的 Case 再读取失败，服务会返回持久化回执，并令 `case_view=null`。应将该响应视为持久化成功，随后重新查询 Case；不要创建第二个逻辑请求。
-
-## 校验、导出、备份与恢复
-
-以下管理命令会获取与服务相同的独占实例锁，因此只能在对应 `DATA_ROOT` 的服务停止后执行：
+以下管理命令获取与服务相同的独占实例锁，只能在对应 DATA_ROOT 的服务停止后执行：
 
 ```sh
 uv run python -m problem_locator validate-state \
@@ -463,44 +459,17 @@ uv run python -m problem_locator export-state \
   --output /absolute/path/outside-data-root/state-export.json
 ```
 
-`validate-state` 输出规范化的 `ValidationReport`。`export-state` 输出规范化的 `StateExport`，其中包含单个状态世代、完整对象数量，以及按顺序排列的资源大小/哈希清单。导出文件必须位于 `DATA_ROOT` 之外；它只用于审计和同合同备份核对，不能替代资源备份，也不能把旧数据转换为 State V9。
+`validate-state` 检查终态数据库及 DTO；`export-state` 显式加载终态历史，输出对象统计和资源清单。这些离线操作允许遍历历史，不属于轻量 readiness。导出文件只用于审计和备份核对，不能替代资源备份，也不能导入旧格式。
 
-创建可恢复备份：
+备份前先停止服务，保留完整 DATA_ROOT，包括 `completed.sqlite3`、仍存在的 `completed.sqlite3-wal`/`completed.sqlite3-shm`、`data-format.json`、`jobs/**` 和 `resources/**`。恢复使用相同版本的完整备份；不要只复制 SQLite 主文件或手工编辑数据库。旧数据目录原样保留，不进行原地迁移。
 
-1. 停止服务，并等待关闭流程完成。
-2. 执行 `validate-state` 和 `export-state`。
-3. 完整复制 `DATA_ROOT` 目录树，并尽量以原子方式保证 `state.json`、`jobs/**` 和 `resources/**` 来自同一个停机时间点。
-4. 将导出文件与备份放在一起，以便核对对象数量和哈希。
+## 后续扩展边界
 
-恢复时，应将损坏的数据根目录保持为只读，把完整且已知可用的 State V9 备份复制到一个新的绝对路径，执行 `validate-state`，并核对导出文件中的对象数量和哈希，最后使用新的数据根目录启动服务。
+当前架构面向单进程 Linux Server。需要多实例、高可用或分布式持久队列时，另行设计数据库和调度方案。历史 Case 数量不再触发每次活动更新的全库复制，因此不沿用旧版 500 Case 或 16 MiB state.json 的迁移门槛。
 
-不要手工编辑 `state.json`，不要丢弃已经最终确定的 outbox 文件，也不要静默回退到 `state.json.prev`。
+直接模型 API、常驻 CLI 进程池和 Logparse 多 target 批处理留到下一轮。当前改动减少模型工具往返、存储重复读写和跨 Case 排队，不能解释或保证消除客户端提交附件前的等待。后续应在目标 4 核、8 GB 机器上比较队列等待、模型轮次、上传吞吐和峰值内存。
 
-State V9 与所有 V1–V8 State、Job 和 Outcome 有意不兼容。服务不提供原地迁移、旧 Job 恢复、隐藏旧字段或按需转换路径；部署当前版本时使用新的空数据根目录。GENERIC V1 文件兼容只适用于新 V9 Case 的 Skill 输出，不表示可以加载旧 DATA_ROOT。
-
-### 冻结发布边界声明
-
-以下英文短句是发布测试使用的稳定语义标识；中文解释是规范正文：
-
-- State V9 is a hard cut：服务不迁移或恢复 V1–V8 State、Job、Outcome。
-- Replay every durable, finalized but unconfirmed Job Outcome：启动时先重放所有已最终确定但未确认的 Outcome。
-- 当 `state.json` approaches 16 MiB 时，应启动离线迁移设计。
-- 当 retained history approaches 500 Cases 时，应启动离线迁移设计。
-- 需要 second service instance or high availability 时，必须迁移出单实例 JSON 架构。
-- 恢复或迁移期间必须 keep the original JSON root read-only。
-
-## PostgreSQL 迁移边界
-
-当前 6.0.0 版本不包含 PostgreSQL、ORM、双写机制或分布式锁。当满足以下任一条件时，应开始设计离线 PostgreSQL 迁移方案：
-
-- 需要第二个服务实例或高可用能力；
-- `state.json` 接近 16 MiB；
-- 保留的历史记录接近 500 个 Case；
-- 状态写入延迟已经明显影响运行。
-
-迁移时必须停止写入，导出一个规范化状态世代，通过等价的仓储/资源记录完成导入，核对所有对象数量和资源哈希，并在验收完成前保持原 JSON 数据根目录只读。
-
-领域层、应用层和运行时层依赖冻结的端口，而不是 JSON 适配器，因此迁移仍然是一次离线适配器替换，而不是业务模型分叉。
+本轮实现、测量条件、收益与限制见 [7.0 性能测量记录](docs/performance-v10.md)。真实 RPC 样本已经消除 ROUTE/Specialist 的文件工具往返，但本次端到端耗时没有下降，需在目标服务器继续采样。
 
 ## 安全说明与已知限制
 
@@ -509,7 +478,7 @@ State V9 与所有 V1–V8 State、Job 和 Outcome 有意不兼容。服务不�
 - 专有定位的 Candidate、Outcome、`diagnosis-result.json`、`result.zip` 和审计包都由服务端生成。
   MCP/REST 不泄露 storage key、服务端绝对路径、非交付日志或角色私有执行内容。
 - Logparse 会在启动时进行指纹校验。首个符合条件的诊断任务可以解析一次日志；后续任务必须使用已持久化的 `LOGPARSE_RUN`，不得再次解包或解析原始归档。
-- 当前版本的并发数固定为 `1`，上下文、工作区和输出限制均为固定值；持久化依赖本地文件系统，不提供多实例故障转移。
+- 当前版本默认 ROUTE 1、DIAGNOSE 2、Logparse 1、ZIP 1，可按实测峰值内存调整；一个数据目录仍只允许一个服务进程，不提供多实例故障转移。
 - Linux Server 启动验证、Windows/macOS 默认 Client 能力、显式 Linux Client、平台进程树/取消验证、确定性 Journey 和真实 Logparse 冒烟测试属于不同证明。测试或交接记录必须明确实际运行的平台和 Stage。
 
 ## 测试与发布

@@ -1,12 +1,4 @@
-"""Durable-outbox-aware orchestration for one S02 retention pass.
-
-Physical age discovery lives in :mod:`problem_locator.storage.retention` and
-atomic isolation/deletion lives in :mod:`problem_locator.storage.quarantine`.
-This module supplies the business-reference layer between them.  In
-particular, a finalized Outcome without a persisted processing record is a
-durable outbox entry whose staged resources, deterministic formal targets,
-source Job, and prospective next Job must survive cleanup.
-"""
+"""Metadata-only retention with indexed references and a publication barrier."""
 
 from __future__ import annotations
 
@@ -22,17 +14,13 @@ from pydantic import TypeAdapter
 from problem_locator.contracts import (
     ApplicationError,
     ApplicationPortError,
-    ArtifactProposal,
     ERROR_SPECS,
     ErrorCode,
-    EvidenceProposal,
     ExecutionRecordStore,
     IdGenerator,
-    JobOutcome,
     JobStatus,
     OpaqueId,
     ResourceStore,
-    ResourceType,
     StateFile,
     StateRepository,
 )
@@ -40,7 +28,6 @@ from problem_locator.contracts import (
 from .atomic import is_reparse_point, require_real_directory
 from .coordination import AttachmentUploadRegistry
 from .layout import StorageLayout
-from .paths import proposal_stage_path
 from .quarantine import QuarantineMover
 from .resource_store import StagePathRegistry
 from .retention import RetentionScanner, _RetentionCandidate
@@ -178,156 +165,6 @@ class StorageRetentionCleaner:
                 keys.add(artifact.storage_key)
         return keys
 
-    def _finalized_job_ids(self) -> tuple[str, ...]:
-        require_real_directory(self._layout.jobs)
-        finalized: list[str] = []
-        for entry in sorted(os.scandir(self._layout.jobs), key=lambda item: item.name):
-            metadata = entry.stat(follow_symlinks=False)
-            if not stat.S_ISDIR(metadata.st_mode) or is_reparse_point(metadata):
-                raise _execution_record_error()
-            try:
-                job_id = _OPAQUE_ID_ADAPTER.validate_python(entry.name)
-            except (TypeError, ValueError):
-                raise _execution_record_error() from None
-            outcome_path = Path(entry.path) / "job_outcome.json"
-            if outcome_path.exists() or outcome_path.is_symlink():
-                finalized.append(job_id)
-        return tuple(finalized)
-
-    def _read_unprocessed_outcome(self, job_id: str) -> JobOutcome:
-        try:
-            receipt = self._execution_record_store.read_published_outcome(job_id)
-        except ApplicationPortError as error:
-            if error.error.code is ErrorCode.EXECUTION_RECORD_FAILED:
-                raise
-            raise _execution_record_error() from error
-        except BaseException as error:
-            if isinstance(error, (KeyboardInterrupt, SystemExit)):
-                raise
-            raise _execution_record_error() from error
-        if receipt is None or receipt.job_outcome.job_id != job_id:
-            raise _execution_record_error()
-        return receipt.job_outcome
-
-    def _plan_outbox_resource(
-        self,
-        state: StateFile,
-        outcome: JobOutcome,
-        proposal: EvidenceProposal | ArtifactProposal,
-        resource_type: ResourceType,
-        id_kind: str,
-    ) -> tuple[Path, str] | None:
-        staged_ref = proposal.staged_resource_ref
-        if staged_ref is None:
-            return None
-        try:
-            stage_path = proposal_stage_path(
-                self._layout.data_root,
-                staged_ref.owner_job_id,
-                staged_ref.proposal_key,
-            )
-            resource_id = self._id_generator.derive(
-                id_kind,
-                [
-                    state.installation_id,
-                    outcome.case_id,
-                    outcome.outcome_id,
-                    proposal.proposal_key,
-                ],
-            )
-            target = self._resource_store.plan_target(
-                outcome.case_id,
-                resource_type,
-                resource_id,
-                staged_ref.resource_kind,
-                staged_ref.size,
-                staged_ref.sha256,
-            )
-        except BaseException as error:
-            if isinstance(error, (KeyboardInterrupt, SystemExit)):
-                raise
-            raise _execution_record_error() from error
-        return (Path(os.path.abspath(stage_path)), target.final_storage_key)
-
-    def _protection_snapshot(self) -> _ProtectionSnapshot:
-        """Read fresh state and validate every unconfirmed finalized Outcome."""
-
-        state = self._state_repository.read_snapshot()
-        state_job_ids: set[str] = set()
-        terminal_job_ids: set[str] = set()
-        processed_job_ids: set[str] = set()
-        for aggregate in state.cases.values():
-            for job_id, job in aggregate.jobs.items():
-                state_job_ids.add(job_id)
-                if job.status in _TERMINAL_JOB_STATUSES:
-                    terminal_job_ids.add(job_id)
-            processed_job_ids.update(
-                record.job_id
-                for record in aggregate.outcome_processing_records.values()
-            )
-
-        outbox_stage_paths: set[Path] = set()
-        outbox_resource_keys: set[str] = set()
-        outbox_job_ids: set[str] = set()
-        for job_id in self._finalized_job_ids():
-            # A persisted disposition is authoritative even for the r3
-            # technical REJECTED branch that deliberately stores no trusted
-            # JobOutcome.  Do not re-open that final file merely for cleanup.
-            if job_id in processed_job_ids:
-                continue
-            outcome = self._read_unprocessed_outcome(job_id)
-            outbox_job_ids.add(job_id)
-
-            for proposal in outcome.proposed_evidence:
-                planned = self._plan_outbox_resource(
-                    state,
-                    outcome,
-                    proposal,
-                    ResourceType.EVIDENCE,
-                    "evidence",
-                )
-                if planned is not None:
-                    stage_path, storage_key = planned
-                    outbox_stage_paths.add(stage_path)
-                    outbox_resource_keys.add(storage_key)
-            for proposal in outcome.proposed_artifacts:
-                planned = self._plan_outbox_resource(
-                    state,
-                    outcome,
-                    proposal,
-                    ResourceType.ARTIFACT,
-                    "artifact",
-                )
-                assert planned is not None
-                stage_path, storage_key = planned
-                outbox_stage_paths.add(stage_path)
-                outbox_resource_keys.add(storage_key)
-
-            try:
-                next_job_id = self._id_generator.derive(
-                    "job",
-                    [
-                        state.installation_id,
-                        outcome.case_id,
-                        outcome.outcome_id,
-                        "next_job",
-                    ],
-                )
-            except BaseException as error:
-                if isinstance(error, (KeyboardInterrupt, SystemExit)):
-                    raise
-                raise _execution_record_error() from error
-            outbox_job_ids.add(next_job_id)
-
-        return _ProtectionSnapshot(
-            state_resource_keys=frozenset(self._formal_resource_keys(state)),
-            state_job_ids=frozenset(state_job_ids),
-            terminal_job_ids=frozenset(terminal_job_ids),
-            processed_job_ids=frozenset(processed_job_ids),
-            outbox_stage_paths=frozenset(outbox_stage_paths),
-            outbox_resource_keys=frozenset(outbox_resource_keys),
-            outbox_job_ids=frozenset(outbox_job_ids),
-        )
 
     @staticmethod
     def _anchor_path(candidate: _RetentionCandidate) -> Path:
@@ -374,7 +211,6 @@ class StorageRetentionCleaner:
     ) -> bool:
         if not self._candidate_is_unchanged(candidate, observation):
             return False
-        protection = self._protection_snapshot()
         path = Path(os.path.abspath(candidate.path))
 
         if candidate.kind == "STATE_TEMP":
@@ -387,32 +223,16 @@ class StorageRetentionCleaner:
             )
         if candidate.kind == "PROPOSAL":
             owner_job_id = _OPAQUE_ID_ADAPTER.validate_python(path.parent.name)
-            job_is_still_active = (
-                owner_job_id in protection.state_job_ids
-                and owner_job_id not in protection.terminal_job_ids
-            )
-            return (
-                path not in protection.outbox_stage_paths
-                and not job_is_still_active
-            )
+            return not self._state_repository.retention_in_use('active_job', owner_job_id)
         if candidate.kind == "WORKSPACE":
             job_id = _OPAQUE_ID_ADAPTER.validate_python(path.name)
-            return (
-                job_id in protection.terminal_job_ids
-                and job_id not in protection.outbox_job_ids
-            )
+            return not self._state_repository.retention_in_use('active_job', job_id)
         if candidate.kind == "FORMAL_RESOURCE":
             storage_key = path.relative_to(self._layout.data_root).as_posix()
-            return (
-                storage_key not in protection.state_resource_keys
-                and storage_key not in protection.outbox_resource_keys
-            )
+            return self._state_repository.retention_in_use('resource', storage_key) is False
         if candidate.kind == "JOB":
             job_id = _OPAQUE_ID_ADAPTER.validate_python(path.name)
-            return (
-                job_id not in protection.state_job_ids
-                and job_id not in protection.outbox_job_ids
-            )
+            return not self._state_repository.retention_in_use('job', job_id)
         raise AssertionError(f"unknown retention candidate kind: {candidate.kind}")
 
     def _delete_quarantine(
@@ -441,10 +261,11 @@ class StorageRetentionCleaner:
         return tuple(deleted), tuple(failed)
 
     def run_once(self) -> CleanupRunResult:
-        """Perform one pass; no path is deleted before a healthy outbox scan."""
+        """Recheck each reference under the publication barrier before quarantine."""
 
         with self._coordination_lock:
-            self._protection_snapshot()
+            if not self._state_repository.health().valid:
+                raise _execution_record_error()
 
         candidates = self._retention_scanner.discover()
         observations = {
@@ -500,7 +321,8 @@ class StorageRetentionCleaner:
         # The second health scan prevents an error discovered while moving a
         # later candidate from being followed by recursive quarantine deletion.
         with self._coordination_lock:
-            self._protection_snapshot()
+            if not self._state_repository.health().valid:
+                raise _execution_record_error()
             pending_deletions = self._quarantine_mover.discover()
 
         deleted, failed = self._delete_quarantine(pending_deletions)

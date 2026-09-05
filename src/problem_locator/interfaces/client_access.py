@@ -20,11 +20,10 @@ from urllib.parse import urlsplit
 from pydantic import TypeAdapter, ValidationError
 
 from problem_locator.contracts.commands import (
-    ApplicationResponse,
     ArtifactView,
-    CaseQueryResponse,
     UploadDescriptor,
 )
+from .progress import McpApplicationResponse as ApplicationResponse, McpCaseQueryResponse as CaseQueryResponse
 from problem_locator.contracts.enums import ErrorCode
 from problem_locator.contracts.models import (
     ApplicationError,
@@ -356,11 +355,13 @@ class ClientAccessWorkflow:
         *,
         wait_for_job_id: str | None = None,
         wait_seconds: int = 0,
+        include_details: bool = False,
     ) -> CaseQueryResponse:
         response, _artifact_views = self.get_case_with_artifact_views(
             case_id,
             wait_for_job_id=wait_for_job_id,
             wait_seconds=wait_seconds,
+            include_details=include_details,
         )
         return response
 
@@ -370,13 +371,9 @@ class ClientAccessWorkflow:
         *,
         wait_for_job_id: str | None = None,
         wait_seconds: int = 0,
-    ) -> tuple[CaseQueryResponse, list[ArtifactView] | None]:
-        """Read a Case and preserve whether the server supplied inline descriptors.
-
-        ``None`` identifies an older compatible service and is the only state in
-        which a caller should fall back to ``list_artifacts``.  A present empty
-        list remains authoritative.
-        """
+        include_details: bool = False,
+    ) -> tuple[CaseQueryResponse, list[ArtifactView]]:
+        """Read compact progress by default, with complete download descriptors."""
 
         data = _success_data(
             self._mcp.call_tool(
@@ -385,17 +382,14 @@ class ClientAccessWorkflow:
                     "case_id": case_id,
                     "wait_for_job_id": wait_for_job_id,
                     "wait_seconds": wait_seconds,
+                    "include_details": include_details,
                 },
             )
         )
         if not isinstance(data, Mapping):
             raise ClientProtocolError("case response does not match S00")
         expected = {"case_view", "wait_timed_out"}
-        accepted_shapes = {
-            frozenset(expected),
-            frozenset({*expected, "artifact_views"}),
-        }
-        if set(data) not in accepted_shapes:
+        if set(data) != {*expected, "artifact_views"}:
             raise ClientProtocolError("case response has unexpected fields")
         response = _validate_model(
             CaseQueryResponse,
@@ -405,17 +399,13 @@ class ClientAccessWorkflow:
             },
             "case response does not match S00",
         )
-        views = (
-            None
-            if "artifact_views" not in data
-            else _validate_type(
+        views = _validate_type(
                 list[ArtifactView],
                 data["artifact_views"],
                 "case artifact views do not match S00",
             )
-        )
         if views is not None:
-            summaries = {item.artifact_id: item for item in response.case_view.artifacts}
+            summaries = {item.artifact_id: item for item in response.case_view.artifacts if item.downloadable}
             if (
                 len(views) != len(summaries)
                 or set(summaries) != {item.artifact_id for item in views}
@@ -674,12 +664,7 @@ class ClientAccessWorkflow:
         if destination.exists():
             raise FileExistsError("download destination already exists")
         if artifact_views is None:
-            _response, inline_artifacts = self.get_case_with_artifact_views(case_id)
-            artifacts = (
-                self.list_artifacts(case_id)
-                if inline_artifacts is None
-                else inline_artifacts
-            )
+            _response, artifacts = self.get_case_with_artifact_views(case_id)
         else:
             artifacts = _validate_type(
                 list[ArtifactView],

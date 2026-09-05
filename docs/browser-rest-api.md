@@ -17,7 +17,7 @@
 | 方法与路径 | 用途 | 响应类型 |
 | --- | --- | --- |
 | `GET /live` | 进程存活检查 | JSON envelope |
-| `GET /ready` | 依赖与恢复状态检查 | JSON envelope |
+| `GET /ready` | 启动、运行状态及已知存储故障检查 | JSON envelope |
 | `GET /openapi.json` | 下载完整 OpenAPI 合同 | OpenAPI JSON |
 | `GET /docs` | 打开交互调试页 | HTML |
 | `POST /api/v1/cases` | 创建 Case | `ApplicationResponse` envelope |
@@ -136,7 +136,7 @@ OpenAPI 对受 UTF-8 字节数约束的字符串同时给出 `maxLength` 和
 | `INSTANCE_LOCK` | 单实例锁有效。 |
 | `STATE` | 持久化状态可读取。 |
 | `DATA_DIRECTORIES` | 所需数据目录可用。 |
-| `RECOVERY` | 启动恢复已经完成。 |
+| `RECOVERY` | 当前运行时 epoch 已建立，调度已启用；不会恢复旧活动任务。 |
 
 ```json
 {
@@ -329,6 +329,8 @@ GET /api/v1/cases/10000000-0000-4000-8000-000000000001?wait_for_job_id=20000000-
       "generic_result_v2": null,
       "failure": null,
       "artifacts": [],
+      "archive_status": "NOT_REQUIRED",
+      "attachments": [],
       "created_at": "2026-08-18T02:30:00.000Z",
       "updated_at": "2026-08-18T02:31:00.000Z"
     },
@@ -592,7 +594,9 @@ GET /api/v1/artifacts/40000000-0000-4000-8000-000000000001/content?case_id=10000
 
 `active_job` 只会在 `RUNNING` 或 `REVIEWING` 非空；等待状态、终态和 `INTERRUPTED` 均为 `null`。不能根据 `wait_timed_out` 推断状态，必须读取 `case_view.status`。
 
-V9 专有路径使用 `Candidate → 可选 Review → USER_RESULT`。审核关闭时，服务端验证通过后直接公开；审核开启时，`REVIEWING` 阶段不公开任何结果产物，只有 PASS 后才同时公开 JSON 和 ZIP。非 PASS 会隐藏原 Candidate 产物，只公开重新生成的 `INCONCLUSIVE` JSON 和审计包。兼容字段 `methods_result` 在 V9 始终缺省，前端不得把它当结果来源。
+7.0 专有路径使用 `Candidate → 可选 Review → USER_RESULT`。审核关闭时，服务端验证并持久化 JSON 后立即公开；审核开启时，`REVIEWING` 阶段不公开结果，PASS 后先交付 JSON。ZIP 在后台生成，`archive_status=PENDING` 或 `FAILED` 都不影响 JSON 展示；只有 `READY` 才显示 ZIP 下载入口。`NOT_REQUIRED` 表示无需归档。非 PASS 隐藏原 Candidate 产物，只公开重新生成的 `INCONCLUSIVE` JSON 和审计包。`methods_result` 不属于当前结果合同。
+
+Case 的 `attachments` 包含附件摘要。活动 Case 在服务重启后不恢复；已交付的终态报告和待归档任务保留。查询继续返回完整 CaseView。
 
 `diagnosis-result.json` 固定使用 `problem-locator-diagnosis-v3`。前端必须校验列表元数据、响应头、实际字节数和 SHA-256，再按固定结构展示根因、发现、因素、完成条件、验证结果、时间判断、证据缺口、限制、建议和安全说明。不得根据缺失字段补写结论。
 
@@ -1257,6 +1261,8 @@ latestCaseRevision = ready.case_revision;
 | `CaseView` | `confirmed_facts` | `DiagnosisItem[]` | 已由证据确认的事实。 |
 | `CaseView` | `open_questions` | `DiagnosisItem[]` | 尚未解决的问题。 |
 | `CaseView` | `pending_requirements` | `PendingRequirement[]` | 所有待办记录；收集输入时只看 `OPEN`。 |
+| `CaseView` | `attachments` | `AttachmentSummary[]` | 已准备或上传的附件摘要，包括 ID、名称、大小和上传状态。 |
+| `CaseView` | `archive_status` | `NOT_REQUIRED \| PENDING \| READY \| FAILED` | ZIP 归档状态；仅 `READY` 时提供 ZIP，其他状态不阻塞已交付 JSON。 |
 | `CaseView` | `active_job` | `JobSummary \| null` | 仅 `RUNNING`/`REVIEWING` 存在。 |
 | `CaseView` | `selected_skill_ref` | `VersionedRef \| null` | 服务所选执行定义的固定版本引用；前端只展示，不提交。 |
 | `CaseView` | `final_result` | `CandidateConclusion \| null` | 专有定位在 `RESOLVED`/`PARTIALLY_RESOLVED` 的最终 Candidate。 |
@@ -1446,6 +1452,10 @@ latestCaseRevision = ready.case_revision;
 | `WebUploadRequiredHeaders` | `Idempotency-Key` | `uuid` | 等于 `attachment_id`。 |
 | `WebUploadRequiredHeaders` | `Content-Type` | `content_type` | 已准备类型。 |
 | `WebUploadRequiredHeaders` | `X-Content-SHA256` | `sha256` | 已声明散列。 |
+| `AttachmentSummary` | `attachment_id` | `uuid` | 附件 ID，用于关联上传记录与后续提交。 |
+| `AttachmentSummary` | `name` | `text` | 附件名称。 |
+| `AttachmentSummary` | `status` | `AttachmentStatus` | 上传状态；只提交已经 `READY` 的附件。 |
+| `AttachmentSummary` | `size` | `integer >= 0 \| null` | 已接收的字节数；未就绪时可能为 null。 |
 | `ArtifactSummary` | `artifact_id` | `uuid` | 产物 ID。 |
 | `ArtifactSummary` | `kind` | `ArtifactKind` | 产物种类。 |
 | `ArtifactSummary` | `name` | `text` | 文件名。 |

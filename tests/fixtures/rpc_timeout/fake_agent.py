@@ -152,6 +152,12 @@ def _preprocess(prompt: str) -> int:
     return 0
 
 
+def _emit_result(value: dict[str, Any]) -> None:
+    sys.stdout.buffer.write(canonical_json_bytes({"type": "result", "subtype": "success", "is_error": False,
+        "result": canonical_json_bytes(value).decode("utf-8")}))
+    sys.stdout.buffer.flush()
+
+
 def _route(instruction: dict[str, Any], context: str) -> None:
     index = json.loads(_section(context, "SKILL_INDEX"))
     skills = index.get("skills")
@@ -189,9 +195,8 @@ def _route(instruction: dict[str, Any], context: str) -> None:
         error=None,
         rule_claims=[],
     )
-    payload = canonical_json_bytes(draft)
-    Path("output/job_outcome.draft.json").write_bytes(payload)
-    seal_agent_outcome_draft(Path.cwd())
+    _emit_result({"skill_id": draft.payload.skill_ref.id,
+        "reason": draft.payload.reason, "confidence": draft.payload.confidence})
     _record_invocation(
         job_id=draft.job_id,
         job_type=JobType.ROUTE,
@@ -304,9 +309,7 @@ def _diagnose(instruction: dict[str, Any], context: str) -> None:
             "Only server-frozen target logs and the pinned Methods index were inspected."
         ],
     }
-    Path("output/method-diagnosis.draft.json").write_bytes(
-        canonical_json_bytes(draft)
-    )
+    _emit_result(draft)
     _record_invocation(
         job_id=str(instruction["job_id"]),
         job_type=JobType.DIAGNOSE,

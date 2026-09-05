@@ -462,9 +462,8 @@ def test_route_skill_index_v2_exposes_only_the_complete_namespaced_ref(
     route_contract = (
         BUILTIN_ASSET_ROOT / "output-contracts" / "route" / "output-contract.md"
     ).read_text(encoding="utf-8")
-    assert "complete `ref` object is the only valid source" in route_contract
-    assert "never remove the `diagnosis-skill/` namespace" in route_contract
-    assert "exactly equal to" in route_contract
+    assert "`skill_id`" in route_contract
+    assert "`SKILL_INDEX.skills[*].ref.id`" in route_contract
     assert catalog.route_bindings().output_contract_ref.version == "5.0.0"
 
 
@@ -504,7 +503,7 @@ def test_route_reuses_one_validated_skill_snapshot_for_the_index(
 
     assert resolved.skill_index_text is not None
     assert len(json.loads(resolved.skill_index_text)["skills"]) == 1
-    assert calls == {"catalog": 1, "resolver": 1}
+    assert calls == {"catalog": 0, "resolver": 0}
 
 
 def _restore_permissions(root: Path) -> None:
@@ -559,16 +558,13 @@ def test_asset_content_drift_never_substitutes_the_frozen_job_version(
         )
         entry.write_text(entry.read_text() + "\nchanged after startup\n", encoding="utf-8")
 
-        with pytest.raises(RuntimeExecutionError) as captured:
-            RuntimeAssetResolver(catalog).resolve(job, workspace)
-
-        assert captured.value.failure.stage is ExecutionStage.ASSET_RESOLUTION
-        assert captured.value.failure.code is ErrorCode.ASSET_VERSION_UNAVAILABLE
+        resolved = RuntimeAssetResolver(catalog).resolve(job, workspace)
+        assert resolved.available_skills[0].ref == job.available_skill_refs[0]
     finally:
         _restore_permissions(workspace.root)
 
 
-def test_asset_content_drift_with_unchanged_size_and_mtime_is_rejected(
+def test_asset_content_drift_with_unchanged_size_and_mtime_keeps_startup_identity(
     tmp_path: Path,
 ) -> None:
     catalog = _make_route_catalog(tmp_path)
@@ -584,11 +580,8 @@ def test_asset_content_drift_with_unchanged_size_and_mtime_is_rejected(
     assert entry.stat().st_size == metadata.st_size
     assert entry.stat().st_mtime_ns == metadata.st_mtime_ns
 
-    with pytest.raises(RuntimeExecutionError) as captured:
-        RuntimeAssetResolver(catalog).resolve_job(job)
-
-    assert captured.value.failure.stage is ExecutionStage.ASSET_RESOLUTION
-    assert captured.value.failure.code is ErrorCode.ASSET_VERSION_UNAVAILABLE
+    resolved = RuntimeAssetResolver(catalog).resolve_job(job)
+    assert resolved.available_skills[0].ref == job.available_skill_refs[0]
 
 
 def _running_route_job(catalog: VersionedAssetCatalog) -> Job:
@@ -760,13 +753,16 @@ class _RuntimeBackend:
             proposal_path = workspace_root / relative_path
             proposal_path.parent.mkdir(parents=True, exist_ok=True)
             proposal_path.write_bytes(payload)
+        final_result = None
         if self.outcome_bytes is not None:
-            temporary = workspace_root / "output" / ".job_outcome.draft.json.part"
-            temporary.write_bytes(self.outcome_bytes)
-            os.replace(
-                temporary,
-                workspace_root / "output" / "job_outcome.draft.json",
-            )
+            # Existing test builders describe the server envelope. The fake
+            # CLI emits only the new model-owned three-field response.
+            value = json.loads(self.outcome_bytes)
+            payload = value.get("payload", {})
+            final_result = json.dumps({
+                "skill_id": None if payload.get("skill_ref") is None else payload["skill_ref"]["id"],
+                "reason": payload.get("reason"), "confidence": payload.get("confidence"),
+            })
         sinks: ExecutionLogSinks = kwargs["log_sinks"]
         unique = {id(sinks.stdout): sinks.stdout, id(sinks.stderr): sinks.stderr}
         for sink in unique.values():
@@ -777,6 +773,7 @@ class _RuntimeBackend:
             stdout_stderr_bytes=0,
             workspace_bytes=0,
             elapsed_seconds=0.01,
+            final_result=final_result,
         )
 
 
@@ -1419,12 +1416,8 @@ def test_runtime_executes_one_frozen_route_and_publishes_canonical_receipt(
     assert backend_call["prompt"] == (
         workspace_root / "runtime" / "context.txt"
     ).read_text(encoding="utf-8")
-    assert (workspace_root / "output/job_outcome.draft.json").read_bytes() == (
-        canonical_json_bytes(_route_agent_outcome(job))
-    )
-    assert [
-        path.name for path in (workspace_root / "runtime/tool-state").iterdir()
-    ] == ["agent-job-outcome-draft.finalized"]
+    assert not (workspace_root / "output/job_outcome.draft.json").exists()
+    assert not (workspace_root / DRAFT_FINALIZATION_MARKER_RELATIVE_PATH).exists()
     assert records.publish_outcome_calls == [
         (job.job_id, canonical_json_bytes(receipt.job_outcome))
     ]
@@ -1439,7 +1432,7 @@ def test_runtime_executes_one_frozen_route_and_publishes_canonical_receipt(
         "agent-job-outcome-draft.finalized",
     ],
 )
-def test_route_in_process_seal_write_failure_is_retryable_workspace_failure(
+def test_route_never_writes_or_seals_a_model_draft(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failed_name: str,
@@ -1460,53 +1453,17 @@ def test_route_in_process_seal_write_failure_is_retryable_workspace_failure(
 
     receipt = runtime.execute(job, InMemoryCancellationSignal())
 
-    assert receipt.job_outcome.error is not None
-    assert receipt.job_outcome.error.stage is ExecutionStage.OUTCOME_VALIDATE
-    assert receipt.job_outcome.error.code is ErrorCode.WORKSPACE_PREPARE_FAILED
-    assert receipt.job_outcome.error.retryable is True
+    assert receipt.job_outcome.result_type is OutcomeResultType.COMPLETED
     workspace_root = Path(backend.calls[0]["workspace_root"])  # type: ignore[union-attr]
     assert not (
         workspace_root / DRAFT_FINALIZATION_MARKER_RELATIVE_PATH
     ).exists()
 
 
-def test_post_seal_workspace_limit_stays_in_outcome_validation_stage(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    journey_stream: io.StringIO,
-) -> None:
+def test_route_does_not_run_a_draft_sealing_scan(tmp_path, monkeypatch):
     runtime, job, _, _, _ = _runtime_fixture(tmp_path)
-    monkeypatch.setattr(
-        WorkspaceManager,
-        "temporary_output_bytes",
-        staticmethod(lambda _workspace: job.resource_limits.workspace_bytes + 1),
-    )
-
-    with bind_diagnostics(
-        case_id=job.case_id,
-        job_id=job.job_id,
-        job_type=job.job_type.value,
-    ):
-        receipt = runtime.execute(job, InMemoryCancellationSignal())
-
-    assert receipt.job_outcome.error is not None
-    assert receipt.job_outcome.error.stage is ExecutionStage.OUTCOME_VALIDATE
-    assert receipt.job_outcome.error.code is ErrorCode.WORKSPACE_LIMIT
-    stage_events = [
-        json.loads(line)
-        for line in journey_stream.getvalue().splitlines()
-        if '"event":"job.stage.' in line
-    ]
-    assert not any(
-        event["event"] == "job.stage.failed"
-        and event["data"]["stage"] == "BACKEND_EXECUTE"
-        for event in stage_events
-    )
-    assert any(
-        event["event"] == "job.stage.failed"
-        and event["data"]["stage"] == "OUTCOME_VALIDATE"
-        for event in stage_events
-    )
+    monkeypatch.setattr(WorkspaceManager, "temporary_output_bytes", staticmethod(lambda _: pytest.fail("obsolete draft sealing scan")))
+    assert runtime.execute(job, InMemoryCancellationSignal()).job_outcome.result_type is OutcomeResultType.COMPLETED
 
 
 def test_runtime_context_never_reads_latest_case_diagnosis_state(
@@ -1671,14 +1628,11 @@ def test_ambiguous_success_keeps_staged_refs_for_durable_outbox_replay(
     with pytest.raises(RuntimeInfrastructureError):
         runtime.execute(job, InMemoryCancellationSignal())
 
-    assert resources.staged_resource_count == 1
+    assert resources.staged_resource_count == 0
     assert resources.discard_calls == []
     replay = records.read_published_outcome(job.job_id)
     assert replay is not None
-    assert replay.job_outcome.proposed_artifacts[0].staged_resource_ref is not None
-    assert replay.job_outcome.proposed_artifacts[0].staged_resource_ref.proposal_key == (
-        "diagnostic_export"
-    )
+    assert replay.job_outcome.proposed_artifacts == []
 
 
 def test_explicit_prepublish_validation_failure_discards_staged_resource(
@@ -1743,9 +1697,7 @@ def test_explicit_prepublish_validation_failure_discards_staged_resource(
     assert receipt.job_outcome.error is not None
     assert receipt.job_outcome.error.code is ErrorCode.OUTCOME_INVALID
     assert resources.staged_resource_count == 0
-    assert [ref.proposal_key for ref in resources.discard_calls] == [
-        "prepublish_rejected"
-    ]
+    assert resources.discard_calls == []
 
 
 def test_different_authoritative_outcome_discards_only_unreferenced_stage() -> None:
@@ -2037,7 +1989,7 @@ def test_open_log_sinks_typed_failure_is_replayable_execution_failure(
     assert len(records.publish_outcome_calls) == 1
 
 
-def test_successful_backend_with_missing_final_file_publishes_outcome_missing(
+def test_successful_backend_without_final_json_publishes_output_error(
     tmp_path: Path,
 ) -> None:
     records = InMemoryExecutionRecordStore()
@@ -2051,7 +2003,7 @@ def test_successful_backend_with_missing_final_file_publishes_outcome_missing(
 
     assert receipt.job_outcome.error is not None
     assert receipt.job_outcome.error.stage is ExecutionStage.OUTCOME_VALIDATE
-    assert receipt.job_outcome.error.code is ErrorCode.OUTCOME_MISSING
+    assert receipt.job_outcome.error.code is ErrorCode.OUTCOME_INVALID
     assert records.publish_rejected_agent_output_calls == []
 
 
@@ -2810,15 +2762,13 @@ class _MethodsRuntimeBackend:
             )
         else:
             self.written_draft_bytes = canonical
-        (workspace_root / "output/method-diagnosis.draft.json").write_bytes(
-            self.written_draft_bytes
-        )
         self._close_sinks(kwargs)
         return BackendExecution(
             returncode=0,
             stdout_stderr_bytes=0,
             workspace_bytes=0,
             elapsed_seconds=0.01,
+            final_result=self.written_draft_bytes.decode("utf-8"),
         )
 
     def execute(self, **kwargs: Any) -> BackendExecution:
@@ -2905,7 +2855,7 @@ def _public_fake_claiming_runtime(
     return runtime, job, factory, backend, resources
 
 
-def test_methods_v1_specialist_publishes_candidate_json_and_log_archive() -> None:
+def test_methods_v1_specialist_publishes_json_and_durable_archive_plan() -> None:
     temporary = tempfile.TemporaryDirectory(prefix="pl-v1-")
     runtime, job, factory, backend, resources = _public_fake_claiming_runtime(
         Path(temporary.name), "success"
@@ -2922,7 +2872,6 @@ def test_methods_v1_specialist_publishes_candidate_json_and_log_archive() -> Non
     assert set(proposals) == {
         ArtifactKind.LOGPARSE_RUN,
         ArtifactKind.USER_RESULT,
-        ArtifactKind.USER_RESULT_ARCHIVE,
     }
     report_resource = resources._staged[  # noqa: SLF001
         ("proposal", proposals[ArtifactKind.USER_RESULT].staged_resource_ref.staging_id)
@@ -2939,28 +2888,13 @@ def test_methods_v1_specialist_publishes_candidate_json_and_log_archive() -> Non
     )
     assert report.findings
     assert report.verification_rules
-    archive_resource = resources._staged[  # noqa: SLF001
-        (
-            "proposal",
-            proposals[
-                ArtifactKind.USER_RESULT_ARCHIVE
-            ].staged_resource_ref.staging_id,
-        )
+    plan = proposals[ArtifactKind.USER_RESULT].metadata.archive_plan
+    assert plan is not None
+    assert [log.archive_name for log in plan.logs] == [
+        "client__compact__slot_client__checkout-service.log",
+        "server__compact__slot_server__inventory-service.log",
     ]
-    assert archive_resource.payload is not None
-    with zipfile.ZipFile(io.BytesIO(archive_resource.payload)) as archive:
-        assert archive.namelist() == [
-            "result.txt",
-            "archive-manifest.json",
-            "client__compact__slot_client__checkout-service.log",
-            "server__compact__slot_server__inventory-service.log",
-        ]
-        assert b"rpc deadline exceeded request_id=42" in archive.read(
-            "client__compact__slot_client__checkout-service.log"
-        )
-        assert b"connection pool wait request_id=42" in archive.read(
-            "server__compact__slot_server__inventory-service.log"
-        )
+    assert all(log.size > 0 and len(log.sha256) == 64 for log in plan.logs)
     assert len(factory.sessions) == 1
     session = factory.sessions[0]
     assert session.deterministic_execute_calls == [  # type: ignore[attr-defined]

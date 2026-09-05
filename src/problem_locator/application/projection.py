@@ -9,6 +9,8 @@ services map them to the public typed error contract at their boundary.
 
 from __future__ import annotations
 
+from problem_locator.contracts.models import AttachmentSummary
+
 from collections.abc import Iterable, Sequence
 
 from problem_locator.contracts import (
@@ -120,6 +122,7 @@ def project_case_view(state: StateFile, case_id: str) -> CaseView:
         aggregate.case,
         _active_job(aggregate),
         aggregate.artifacts.values(),
+        attachments=aggregate.attachments.values(),
     )
 
 
@@ -127,6 +130,8 @@ def project_case_components(
     case: Case,
     active_job: Job | None,
     artifacts: Iterable[Artifact],
+    *,
+    attachments=(),
 ) -> CaseView:
     """Project a fully materialized target Case without another state read."""
 
@@ -141,6 +146,10 @@ def project_case_components(
         case_id=case.case_id,
         status=case.status,
         case_revision=case.case_revision,
+        archive_status=case.archive_status,
+        attachments=[AttachmentSummary(attachment_id=item.attachment_id,
+            name=item.name, status=item.status, size=item.size if item.size is not None else item.declared_size)
+            for item in attachments],
         raw_problem_text=case.raw_problem_text,
         diagnosis_state_revision=case.diagnosis_state.revision,
         problem_spec=case.diagnosis_state.problem_spec,

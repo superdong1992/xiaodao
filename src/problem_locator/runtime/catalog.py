@@ -6,8 +6,11 @@ import json
 import os
 import re
 import stat
+import shutil
+import tempfile
+import weakref
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -29,6 +32,7 @@ from problem_locator.contracts import (
 )
 
 from .catalog_hash import hash_product_directory
+from .asset_snapshot import register_snapshot, release_snapshots
 from .methods_skill import (
     ResolvedSpecializedSkillV1,
     load_specialized_skill_registration,
@@ -296,6 +300,28 @@ class VersionedAssetCatalog:
             )
         )
 
+        self._snapshot_directory = tempfile.TemporaryDirectory(prefix="problem-locator-assets-")
+        snapshot_parent = Path(self._snapshot_directory.name).resolve()
+        weakref.finalize(self, release_snapshots, str(snapshot_parent))
+        for ordinal, (key, resolved) in enumerate(tuple(self._assets.items())):
+            if resolved.asset_kind is AssetKind.LOGPARSE_TOOL:
+                continue
+            source = Path(resolved.root_path)
+            destination = snapshot_parent / str(ordinal) / source.name
+            shutil.copytree(source, destination)
+            frozen = resolved.model_copy(update={"root_path": str(destination)})
+            descriptor = self._skills.get(key)
+            specialized = None
+            if descriptor is not None:
+                specialized = load_specialized_skill_registration(destination)
+                if specialized.combined_sha256 != resolved.ref.content_hash:
+                    raise ValueError("Skill changed while its startup snapshot was captured")
+                self._skills[key] = replace(descriptor, resolved_asset=frozen, specialized=specialized)
+            elif hash_product_directory(destination) != resolved.ref.content_hash:
+                raise ValueError("Asset changed while its startup snapshot was captured")
+            self._assets[key] = frozen
+            register_snapshot(destination, frozen.ref, specialized)
+
     @staticmethod
     def _scan_skills(skill_dir: Path) -> tuple[_SkillDescriptor, ...]:
         try:
@@ -345,37 +371,9 @@ class VersionedAssetCatalog:
             raise ValueError("built-in binding is invalid")
         return _clone(ref)
 
-    @staticmethod
-    def _skill_is_current(descriptor: _SkillDescriptor) -> bool:
-        try:
-            current = load_specialized_skill_registration(
-                descriptor.specialized.registration_root
-            )
-            return (
-                current.registration_id == descriptor.specialized.registration_id
-                and current.combined_sha256 == descriptor.specialized.combined_sha256
-                and current.package_tree_sha256 == descriptor.specialized.package_tree_sha256
-            )
-        except (OSError, TypeError, ValueError):
-            return False
-
-    def _asset_is_current(self, resolved: ResolvedAsset) -> bool:
-        if resolved.asset_kind is AssetKind.LOGPARSE_TOOL:
-            return True
-        if resolved.asset_kind is AssetKind.DIAGNOSIS_SKILL:
-            descriptor = self._skills.get(_ref_key(resolved.ref))
-            return descriptor is not None and self._skill_is_current(descriptor)
-        try:
-            return hash_product_directory(Path(resolved.root_path)) == resolved.ref.content_hash
-        except (OSError, TypeError, ValueError):
-            return False
-
     def _ref_is_current(self, ref: VersionedRef) -> bool:
-        try:
-            resolved = self._assets.get(_ref_key(ref))
-        except (AttributeError, TypeError, ValueError):
-            return False
-        return isinstance(resolved, ResolvedAsset) and resolved.ref == ref and self._asset_is_current(resolved)
+        resolved = self._assets.get(_ref_key(ref))
+        return resolved is not None and resolved.ref == ref
 
     def check(self, refs: Sequence[VersionedRef]) -> AssetAvailabilityReport:
         missing = [_clone(ref) for ref in refs if not self._ref_is_current(ref)]
@@ -404,7 +402,7 @@ class VersionedAssetCatalog:
                 ErrorCode.ASSET_VERSION_UNAVAILABLE,
                 "The requested pinned Methods Skill is unavailable.",
             ) from None
-        return load_specialized_skill_registration(descriptor.specialized.registration_root)
+        return descriptor.specialized
 
     def route_bindings(self, user_fact_names: Sequence[str] = ()) -> RuntimeBindings:
         try:

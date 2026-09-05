@@ -7,7 +7,7 @@ from problem_locator.contracts import (
     canonical_json_bytes,
 )
 from problem_locator.storage.coordination import StorageCoordinationLock
-from problem_locator.storage.state_repository import JsonFileStateRepository
+from problem_locator.storage.state_repository import CaseStateRepository
 from tests.deterministic.unit.storage.fakes import DeterministicIdGenerator, FixedClock
 
 
@@ -15,7 +15,7 @@ FIXED_TIME = "2026-07-31T08:00:00.000Z"
 
 
 def _repository(tmp_path):
-    return JsonFileStateRepository(
+    return CaseStateRepository(
         tmp_path,
         StorageCoordinationLock(),
         FixedClock(FIXED_TIME),
@@ -23,7 +23,7 @@ def _repository(tmp_path):
     )
 
 
-def test_real_json_repository_round_trips_the_frozen_r3_state(tmp_path) -> None:
+def test_real_case_repository_round_trips_the_v10_export(tmp_path) -> None:
     repository = _repository(tmp_path)
 
     assert isinstance(repository, StateRepository)
@@ -32,18 +32,17 @@ def test_real_json_repository_round_trips_the_frozen_r3_state(tmp_path) -> None:
 
     assert report.valid is True
     assert report.generation == snapshot.generation == 1
-    assert snapshot.contract_revision == "v9-contract-r1"
+    assert snapshot.contract_revision == "v10-contract-r1"
     assert repository.export_snapshot() == canonical_json_bytes(snapshot)
-    assert repository.export_snapshot() == repository.layout.state.read_bytes()
+    assert not repository.layout.state.exists()
+    repository.close()
 
 
 def test_r2_state_is_rejected_through_the_typed_state_error_channel(
     tmp_path,
 ) -> None:
-    repository = _repository(tmp_path)
-    payload = repository.read_snapshot().model_dump(mode="json")
-    payload["contract_revision"] = "v1-contract-r2"
-    repository.layout.state.write_bytes(canonical_json_bytes(payload))
+    payload = {"schema_version": 1, "contract_revision": "v1-contract-r2"}
+    (tmp_path / 'state.json').write_bytes(canonical_json_bytes(payload))
 
     try:
         _repository(tmp_path)

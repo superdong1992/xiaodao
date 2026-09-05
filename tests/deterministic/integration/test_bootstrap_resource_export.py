@@ -181,7 +181,7 @@ def test_nonempty_state_export_is_complete_canonical_and_generation_consistent(
             initial.generation,
             None,
             build_state_mutation(
-                upsert_case=seed_aggregate.case,
+                upsert_case=seed_aggregate.case.model_copy(update={'status': type(seed_aggregate.case.status).CANCELLED, 'active_job_id': None}),
                 insert_jobs=[source_job],
                 upsert_attachments=[attachment],
                 insert_evidence=[

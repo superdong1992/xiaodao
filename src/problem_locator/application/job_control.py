@@ -254,7 +254,7 @@ class JobControlService:
         expected_case_revision: int | None,
         mutation: StateMutation,
     ) -> CommitReceipt:
-        lease = self._publication_guard.acquire()
+        lease = self._publication_guard.acquire(mutation.upsert_case.case_id if mutation.upsert_case is not None else next(iter(state.cases), None))
         try:
             return self._repository.commit(
                 state.generation,
@@ -290,7 +290,7 @@ class JobControlService:
         trigger_id: str | None = None
 
         for attempt in range(self._max_commit_attempts):
-            state = self._repository.read_snapshot()
+            state = self._repository.read_snapshot(job_id=job_id)
             found = _find_job(state, job_id)
             if found is None:
                 raise _application_error(
@@ -487,7 +487,7 @@ class JobControlService:
         occurred_at: str | None = None
         trigger_id: str | None = None
         for attempt in range(self._max_commit_attempts):
-            state = self._repository.read_snapshot()
+            state = self._repository.read_snapshot(job_id=command.job_id)
             previous = _find_failure_record(state, command.failure_id)
             if previous is not None:
                 previous_case_id, _, record = previous
@@ -561,7 +561,7 @@ class JobControlService:
             if isinstance(decision, ApplicationError):
                 if decision.code is not ErrorCode.INVALID_CASE_STATE:
                     raise ApplicationPortError(decision)
-                fresh_state = self._repository.read_snapshot()
+                fresh_state = self._repository.read_snapshot(job_id=command.job_id)
                 fresh_previous = _find_failure_record(
                     fresh_state,
                     command.failure_id,
@@ -815,7 +815,7 @@ class JobControlService:
         occurred_at: str | None = None
         trigger_id: str | None = None
         for attempt in range(self._max_commit_attempts):
-            state = self._repository.read_snapshot()
+            state = self._repository.read_snapshot(job_id=job_id)
             found = _find_job(state, job_id)
             if found is None:
                 raise _application_error(
@@ -872,7 +872,7 @@ class JobControlService:
             if isinstance(decision, ApplicationError):
                 if decision.code is not ErrorCode.INVALID_CASE_STATE:
                     raise ApplicationPortError(decision)
-                fresh_state = self._repository.read_snapshot()
+                fresh_state = self._repository.read_snapshot(job_id=job_id)
                 fresh_found = _find_job(fresh_state, job_id)
                 if fresh_found is None or not (
                     fresh_found[2].status is JobStatus.RUNNING

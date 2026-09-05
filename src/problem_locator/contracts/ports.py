@@ -170,7 +170,8 @@ class StateRepository(Protocol):
 
     def read_artifact(self, artifact_id: OpaqueId) -> Artifact: ...
 
-    def read_snapshot(self) -> StateFile: ...
+    def read_snapshot(self, case_id: OpaqueId | None = None, *, job_id: OpaqueId | None = None,
+                      attachment_id: OpaqueId | None = None, request_key: str | None = None) -> StateFile: ...
 
     def commit(
         self,
@@ -191,7 +192,7 @@ class PublicationCommitLease(Protocol):
 
 @runtime_checkable
 class PublicationCommitGuard(Protocol):
-    def acquire(self) -> PublicationCommitLease: ...
+    def acquire(self, case_id: OpaqueId | None = None) -> PublicationCommitLease: ...
 
 
 @runtime_checkable

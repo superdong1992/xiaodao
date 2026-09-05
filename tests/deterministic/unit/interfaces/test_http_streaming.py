@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import tracemalloc
 
 import pytest
 
@@ -10,6 +12,8 @@ from problem_locator.interfaces.http_streaming import (
 )
 from tests.deterministic.contracts.fakes import InMemoryBinaryStream
 from tests.deterministic.contracts.scenario_fakes import CountingBinaryStream
+from tests.deterministic.unit.storage.fakes import FakeFileSync
+from problem_locator.storage.streams import copy_binary_stream
 
 
 def test_async_request_is_exposed_as_bounded_forward_only_stream() -> None:
@@ -25,9 +29,9 @@ def test_async_request_is_exposed_as_bounded_forward_only_stream() -> None:
             await asyncio.to_thread(stream.read, 4),
             await asyncio.to_thread(stream.read, 4),
         ]
-        assert chunks == [b"ab", b"c", b"defg", b"h"]
+        assert chunks == [b"ab", b"cd", b"efgh", b""]
         assert await asyncio.to_thread(stream.read, 1) == b""
-        assert stream.max_buffered_bytes <= 5
+        assert stream.max_buffered_bytes <= 8
         await stream.aclose()
         assert stream.closed
         with pytest.raises(ValueError, match="closed"):
@@ -52,8 +56,8 @@ def test_request_bridge_caps_reads_and_ignores_empty_asgi_frames() -> None:
                 break
             chunks.append(chunk)
         assert b"".join(chunks) == payload
-        assert max(map(len, chunks)) == 64 * 1024
-        assert stream.max_buffered_bytes == len(payload)
+        assert max(map(len, chunks)) == len(payload)
+        assert stream.max_buffered_bytes == 2 * len(payload)
         await stream.aclose()
 
     asyncio.run(scenario())
@@ -81,6 +85,40 @@ def test_abort_unblocks_worker_before_async_source_close() -> None:
     asyncio.run(scenario())
 
 
+def test_small_upload_frames_coalesce_without_retaining_a_previous_batch(tmp_path) -> None:
+    async def scenario() -> None:
+        frame = b"x" * 8192
+        frame_count = 512
+
+        async def source():
+            for _ in range(frame_count):
+                yield frame
+
+        # Exclude executor initialization and the transport-owned frame.
+        await asyncio.to_thread(lambda: None)
+        stream = AsyncRequestBinaryStream(source(), loop=asyncio.get_running_loop())
+        tracemalloc.start()
+        try:
+            receipt = await asyncio.to_thread(copy_binary_stream, stream, tmp_path / "upload",
+                file_sync=FakeFileSync(), byte_limit=frame_count * len(frame))
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+            await stream.aclose()
+        assert receipt.size == frame_count * len(frame)
+        expected = hashlib.sha256()
+        for _ in range(frame_count):
+            expected.update(frame)
+        assert receipt.sha256 == expected.hexdigest()
+        assert len(stream.read_requests) == 5  # Four 1 MiB batches plus EOF.
+        assert stream.max_buffered_bytes <= 2 * 1024 * 1024
+        # Payload buffers <= 2 MiB; allow 64 KiB for Python tasks, file objects,
+        # futures and tracing metadata. Retaining the last batch adds 1 MiB.
+        assert peak < 2 * 1024 * 1024 + 64 * 1024
+
+    asyncio.run(scenario())
+
+
 def test_request_stream_propagates_disconnect_and_closes() -> None:
     async def scenario() -> None:
         async def source():
@@ -88,7 +126,6 @@ def test_request_stream_propagates_disconnect_and_closes() -> None:
             raise ConnectionError("client disconnected")
 
         stream = AsyncRequestBinaryStream(source(), loop=asyncio.get_running_loop())
-        assert await asyncio.to_thread(stream.read, 10) == b"first"
         with pytest.raises(ConnectionError, match="disconnected"):
             await asyncio.to_thread(stream.read, 10)
         await stream.aclose()

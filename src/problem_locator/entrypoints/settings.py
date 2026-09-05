@@ -52,6 +52,10 @@ class Settings:
     specialized_reviewer_enabled: bool = False
     route_claude_command: str | None = None
     diagnose_claude_command: str | None = None
+    route_workers: int = 1
+    diagnose_workers: int = 2
+    logparse_concurrency: int = 1
+    archive_workers: int = 1
 
     @classmethod
     def load(
@@ -172,7 +176,15 @@ class Settings:
                 "SPECIALIZED_REVIEWER_ENABLED must be true or false"
             )
 
+        workers = {}
+        for key, default in (("ROUTE_WORKERS", 1), ("DIAGNOSE_WORKERS", 2), ("LOGPARSE_CONCURRENCY", 1), ("ARCHIVE_WORKERS", 1)):
+            raw = values.get(key, str(default))
+            if re.fullmatch(r"[1-9][0-9]*", raw) is None:
+                raise SettingsError(f"{key} 必须是正整数")
+            workers[key.lower()] = int(raw)
+
         return cls(
+            **workers,
             data_root=paths["DATA_ROOT"],
             public_base_url=base_url.rstrip("/"),
             bind_host=bind_host,

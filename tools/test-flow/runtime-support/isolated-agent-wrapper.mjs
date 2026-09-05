@@ -75,6 +75,12 @@ if (workflow === "skill-generation") {
     "--allowedTools", ...permissionRules,
     "--permission-mode", "dontAsk",
   ];
+} else if (values.file_access === "none") {
+  toolArguments = ["--tools", "", "--permission-mode", "dontAsk"];
+} else if (values.file_access === "read-only") {
+  toolArguments = ["--tools", "Read", "--allowedTools", `Read(${process.cwd()}/inputs/**)`, "--permission-mode", "dontAsk"];
+} else if (values.file_access !== undefined) {
+  throw new Error("WRAPPER_FILE_ACCESS_INVALID");
 } else {
   toolArguments = ["--tools", "Read,Write", "--dangerously-skip-permissions"];
 }

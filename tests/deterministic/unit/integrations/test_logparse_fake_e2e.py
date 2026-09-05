@@ -843,13 +843,15 @@ def test_first_parse_dual_anchor_claim_audit_close_and_fixed_argv(
         record = _record(record_path)
         assert record["parse_count"] == 1
         assert record["target_logs_count"] == 2
-        # Session open, the accepted operation, parse, and each target child
-        # independently retain the pinned-asset boundary.
-        assert fingerprint_calls == 5
+        # The deployment fingerprint is frozen once at startup.
+        assert fingerprint_calls == 0
         assert [event for event, _fields in journey_events] == [
             "job.logparse.operation.started",
+            "job.logparse.slot.acquired",
             "job.logparse.phase.completed",
+            "job.logparse.slot.acquired",
             "job.logparse.phase.completed",
+            "job.logparse.slot.acquired",
             "job.logparse.phase.completed",
             "job.logparse.operation.completed",
         ]

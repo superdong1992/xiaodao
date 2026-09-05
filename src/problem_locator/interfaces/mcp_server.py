@@ -197,6 +197,7 @@ class GetCaseRequest(_RequestModel):
     case_id: OpaqueId
     wait_for_job_id: OpaqueId | None = None
     wait_seconds: WaitSeconds = 0
+    include_details: bool = Field(default=False, description="默认返回紧凑进度；需要完整事实、来源和诊断结果时设为 true。")
 
 
 class ResumeCaseRequest(_RequestModel):
@@ -324,6 +325,23 @@ class McpAdapter:
         self._query_port = query_port
         self._public_base_url = public_base_url
 
+    def _progress(self, view):
+        if view is None:
+            return None
+        from .progress import CaseProgress
+        return CaseProgress.from_view(view)
+
+    def _downloads(self, view):
+        return [] if view is None else [artifact_view(item, case_id=view.case_id,
+            public_base_url=self._public_base_url) for item in view.artifacts if item.downloadable]
+
+    def _command_response(self, response):
+        return {"business_receipt": response.business_receipt,
+            "case_view": self._progress(response.case_view),
+            "wait_timed_out": response.wait_timed_out,
+            "dispatch_pending": response.dispatch_pending,
+            "artifact_views": self._downloads(response.case_view)}
+
     async def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         started = time.perf_counter()
         request_id = arguments.get("request_id")
@@ -409,7 +427,7 @@ class McpAdapter:
                 _log_validation_failure(name, arguments, exc)
                 return error_envelope(validation_error_from(exc))
             response = await asyncio.to_thread(self._command_port.execute, command)
-            return success_envelope(response)
+            return success_envelope(self._command_response(response))
 
         if isinstance(request, PrepareAttachmentRequest):
             try:
@@ -434,7 +452,7 @@ class McpAdapter:
                 declared_sha256=request.declared_sha256,
             )
             return success_envelope(
-                {"application_response": response, "upload": descriptor}
+                {"application_response": self._command_response(response), "upload": descriptor}
             )
 
         if isinstance(request, SubmitSupplementRequest):
@@ -453,7 +471,7 @@ class McpAdapter:
                 _log_validation_failure(name, arguments, exc)
                 return error_envelope(validation_error_from(exc))
             response = await asyncio.to_thread(self._command_port.execute, command)
-            return success_envelope(response)
+            return success_envelope(self._command_response(response))
 
         if isinstance(request, GetCaseRequest):
             response = await asyncio.to_thread(
@@ -478,7 +496,7 @@ class McpAdapter:
             ]
             return success_envelope(
                 {
-                    "case_view": response.case_view,
+                    "case_view": response.case_view if request.include_details else self._progress(response.case_view),
                     "wait_timed_out": response.wait_timed_out,
                     "artifact_views": views,
                 }
@@ -492,7 +510,7 @@ class McpAdapter:
                 wait_seconds=request.wait_seconds,
             )
             response = await asyncio.to_thread(self._command_port.execute, command)
-            return success_envelope(response)
+            return success_envelope(self._command_response(response))
 
         if isinstance(request, CancelCaseRequest):
             command = CancelCase(
@@ -501,7 +519,7 @@ class McpAdapter:
                 expected_case_revision=request.expected_case_revision,
             )
             response = await asyncio.to_thread(self._command_port.execute, command)
-            return success_envelope(response)
+            return success_envelope(self._command_response(response))
 
         assert isinstance(request, ListArtifactsRequest)
         response = await asyncio.to_thread(

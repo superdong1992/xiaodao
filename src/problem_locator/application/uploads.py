@@ -8,6 +8,8 @@ through immutable publication and the matching state commit.
 
 from __future__ import annotations
 
+import time
+
 from dataclasses import dataclass
 
 from problem_locator.contracts import (
@@ -252,11 +254,13 @@ class AttachmentUploadService:
         if not isinstance(command, UploadAttachmentContent):
             raise TypeError("AttachmentUploadService accepts UploadAttachmentContent")
 
+        started = time.perf_counter()
+        timings = {}
         staged_ref = None
         upload_lease = None
         try:
             upload_lease = self.upload_guard.acquire(command.attachment_id)
-            initial = self.repository.read_snapshot()
+            initial = self.repository.read_snapshot(attachment_id=command.attachment_id, request_key=f"UploadAttachmentContent:{command.idempotency_key}")
             initial_idempotency = decide_idempotency(initial, command)
             if initial_idempotency.disposition is IdempotencyDisposition.REPLAY:
                 assert initial_idempotency.record is not None
@@ -276,6 +280,7 @@ class AttachmentUploadService:
             # runs while the per-Attachment lease is active and before any
             # PublicationCommitLease is acquired.
             try:
+                receiving = time.perf_counter()
                 staged_ref = self.resource_store.stage_attachment(
                     command.attachment_id,
                     upload_lease,
@@ -283,6 +288,7 @@ class AttachmentUploadService:
                     expected_size=command.expected_size,
                     expected_sha256=command.expected_sha256,
                 )
+                timings["receive_hash_stage_ms"] = (time.perf_counter() - receiving) * 1000
             except ApplicationPortError:
                 raise
             except Exception as error:
@@ -293,6 +299,7 @@ class AttachmentUploadService:
                     ErrorCode.UPLOAD_INCOMPLETE,
                     "The Attachment upload did not complete.",
                 ) from error
+            validating = time.perf_counter()
             if staged_ref.attachment_id != command.attachment_id:
                 raise _port_error(
                     ErrorCode.UPLOAD_INCOMPLETE,
@@ -310,6 +317,7 @@ class AttachmentUploadService:
                 )
 
             occurred_at = self.clock.now()
+            timings["receipt_validation_ms"] = (time.perf_counter() - validating) * 1000
             committed_generation: int | None = None
             committed_case_id: str | None = None
             committed_receipt: BusinessReceipt | None = None
@@ -319,11 +327,11 @@ class AttachmentUploadService:
             committed_case: Case | None = None
 
             for attempt in range(_MAX_POST_STAGE_ATTEMPTS):
-                publication_lease = self.publication_guard.acquire()
+                publication_lease = self.publication_guard.acquire(aggregate.case.case_id)
                 retry_revision_conflict = False
                 post_stage_replay: BusinessReceipt | None = None
                 try:
-                    fresh = self.repository.read_snapshot()
+                    fresh = self.repository.read_snapshot(attachment_id=command.attachment_id, request_key=f"UploadAttachmentContent:{command.idempotency_key}")
                     idempotency = decide_idempotency(fresh, command)
                     if idempotency.disposition is IdempotencyDisposition.REPLAY:
                         assert idempotency.record is not None
@@ -361,10 +369,12 @@ class AttachmentUploadService:
                             except ApplicationPortError as error:
                                 _translate_capacity_conflict(error)
                             try:
+                                publishing = time.perf_counter()
                                 resource_ref = self.resource_store.publish(
                                     staged_ref,
                                     target.final_storage_key,
                                 )
+                                timings["publish_ms"] = (time.perf_counter() - publishing) * 1000
                             except ApplicationPortError as error:
                                 _translate_publish_failure(error)
                             _validate_published_resource(
@@ -404,11 +414,13 @@ class AttachmentUploadService:
                                 insert_idempotency_records=[record],
                             )
                             try:
+                                committing = time.perf_counter()
                                 commit = self.repository.commit(
                                     fresh.generation,
                                     fresh_aggregate.case.case_revision,
                                     mutation,
                                 )
+                                timings["commit_ms"] = (time.perf_counter() - committing) * 1000
                             except ApplicationPortError as error:
                                 if (
                                     error.error.code is ErrorCode.REVISION_CONFLICT
@@ -452,7 +464,9 @@ class AttachmentUploadService:
                 timestamp=occurred_at,
                 request_id=command.idempotency_key,
                 case_id=committed_case_id,
+                duration_ms=(time.perf_counter() - started) * 1000,
                 data={
+                    "timings": timings,
                     "operation": committed_receipt.operation,
                     "attachment": committed_attachment,
                     "resource_ref": committed_resource_ref,

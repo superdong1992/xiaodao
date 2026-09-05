@@ -1053,7 +1053,9 @@ def test_catalog_routes_registered_methods_skill_for_empty_partial_and_extra_fac
     skill_ref = routes[0].available_skill_refs[0]
     assert all(route.available_skill_refs[0] == skill_ref for route in routes)
     assert skill_ref.id == "diagnosis-skill/test-timeout"
-    assert catalog.resolve(skill_ref).root_path == str((store / "test-timeout").resolve())
+    snapshot_root = Path(catalog.resolve(skill_ref).root_path)
+    assert snapshot_root != (store / "test-timeout").resolve()
+    assert snapshot_root.name == "test-timeout"
     resolved_specialized = catalog.resolved_specialized_skill(skill_ref)
     assert resolved_specialized.registration_id == "test-timeout"
     resolved_asset = catalog.resolve(skill_ref)
@@ -1144,7 +1146,7 @@ def test_product_hash_rejects_links_and_detects_content_drift(tmp_path: Path) ->
         hash_product_directory(root)
 
 
-def test_catalog_marks_registration_or_package_drift_unavailable(tmp_path: Path) -> None:
+def test_catalog_keeps_startup_bytes_until_restart(tmp_path: Path) -> None:
     store = tmp_path / "skills"
     root = _write_registration(store)
     logparse_root = tmp_path / "logparse"
@@ -1169,9 +1171,16 @@ def test_catalog_marks_registration_or_package_drift_unavailable(tmp_path: Path)
     ref = catalog.route_bindings().available_skill_refs[0]
     package_entry = root / "package/diagnose-test-timeout/SKILL.md"
     package_entry.write_text(package_entry.read_text(encoding="utf-8") + "\ndrift\n", encoding="utf-8")
-    assert catalog.check([ref]).missing_refs == [ref]
-    with pytest.raises(ApplicationPortError):
-        catalog.resolve(ref)
+    assert catalog.check([ref]).available
+    frozen = catalog.resolve(ref)
+    assert "\ndrift\n" not in _load_entry_text(frozen, ref, AssetKind.DIAGNOSIS_SKILL)
+    restarted = VersionedAssetCatalog(
+        skill_dir=store, assets_root=BUILTIN_ASSET_ROOT, logparse_tool=logparse,
+        logparse_broker_factory=_BrokerFactory(), generic_skill_name="generic-problem-locator-smoke",
+    )
+    assert restarted.check([ref]).missing_refs == [ref]
+    current_ref = restarted.route_bindings().available_skill_refs[0]
+    assert "\ndrift\n" in _load_entry_text(restarted.resolve(current_ref), current_ref, AssetKind.DIAGNOSIS_SKILL)
 
 
 def test_runtime_catalog_fixture_manifest_matches_methods_layout() -> None:

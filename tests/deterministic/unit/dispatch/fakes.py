@@ -294,7 +294,7 @@ class FakeRecoveryView:
         with self._lock:
             self._state = state
 
-    def read_snapshot(self) -> StateFile:
+    def read_snapshot(self, case_id=None, *, job_id=None, attachment_id=None, request_key=None) -> StateFile:
         with self._lock:
             self.read_snapshot_calls += 1
             if self.read_snapshot_script:

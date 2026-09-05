@@ -30,6 +30,7 @@ from problem_locator.contracts.methods_v2 import (
 )
 
 from .catalog import hash_product_directory
+from .asset_snapshot import snapshot_asset, snapshot_bytes, contains_snapshot_file, snapshot_manifest
 from .context_builder import (
     ContextMaterials,
     build_methods_review_method_cards_v2,
@@ -181,6 +182,9 @@ def _invalid_asset(
 
 
 def _parse_manifest(path: Path) -> dict[str, Any]:
+    cached = snapshot_manifest(path)
+    if cached is not None:
+        return cached
     def object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         value: dict[str, Any] = {}
         for key, item in pairs:
@@ -193,16 +197,13 @@ def _parse_manifest(path: Path) -> dict[str, Any]:
         raise ValueError("non-finite manifest value")
 
     try:
-        metadata = path.stat(follow_symlinks=False)
-        maximum_links = 2 if os.name == "nt" else 1
-        if (
-            path.is_symlink()
-            or not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_nlink > maximum_links
-        ):
-            raise ValueError("manifest is not an ordinary file")
+        if not contains_snapshot_file(path):
+            metadata = path.stat(follow_symlinks=False)
+            maximum_links = 2 if os.name == "nt" else 1
+            if path.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink > maximum_links:
+                raise ValueError("manifest is not an ordinary file")
         value = json.loads(
-            path.read_bytes().decode("utf-8"),
+            snapshot_bytes(path).decode("utf-8"),
             object_pairs_hook=object_pairs,
             parse_constant=reject_constant,
         )
@@ -224,6 +225,8 @@ def _safe_entry(root: Path, relative_value: object) -> Path:
     ):
         raise _invalid_asset() from None
     target = root.joinpath(*relative.parts)
+    if contains_snapshot_file(target):
+        return target
     try:
         metadata = target.stat(follow_symlinks=False)
         target.resolve(strict=True).relative_to(root.resolve(strict=True))
@@ -248,6 +251,11 @@ def _validate_resolved_asset(
         raise _invalid_asset() from None
     root = Path(resolved.root_path)
     specialized: ResolvedSpecializedSkillV1 | None = None
+    frozen = snapshot_asset(root)
+    if frozen is not None:
+        if frozen[0] != expected_ref:
+            raise _invalid_asset()
+        return root, frozen[1]
     try:
         metadata = root.stat(follow_symlinks=False)
         if root.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
@@ -315,7 +323,7 @@ def _load_entry_text(
             seen.add(relative)
             target = _safe_entry(package_root, relative)
             try:
-                text = target.read_bytes().decode("utf-8")
+                text = snapshot_bytes(target).decode("utf-8")
             except (OSError, UnicodeDecodeError):
                 raise _invalid_asset() from None
             rendered.append(
@@ -330,7 +338,7 @@ def _load_entry_text(
     manifest = _parse_manifest(root / manifest_name)
     target = _safe_entry(root, manifest.get("entry"))
     try:
-        return target.read_bytes().decode("utf-8")
+        return snapshot_bytes(target).decode("utf-8")
     except (OSError, UnicodeDecodeError):
         raise _invalid_asset() from None
 

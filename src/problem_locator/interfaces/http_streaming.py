@@ -12,7 +12,7 @@ from typing import Self
 from problem_locator.contracts.ports import BinaryStream
 
 
-HTTP_STREAM_CHUNK_BYTES = 64 * 1024
+HTTP_STREAM_CHUNK_BYTES = 1024 * 1024
 
 
 class AsyncRequestBinaryStream:
@@ -74,31 +74,42 @@ class AsyncRequestBinaryStream:
                 await aborted
 
     async def _read_async(self, max_bytes: int) -> bytes:
+        if self._eof:
+            return b""
         bounded_max = min(max_bytes, HTTP_STREAM_CHUNK_BYTES)
-        while self._buffered_bytes() == 0 and not self._eof:
-            chunk = await self._next_chunk()
-            if chunk is None:
-                self._eof = True
-                continue
-            if not isinstance(chunk, bytes):
-                raise TypeError("ASGI request stream yielded a non-bytes chunk")
-            if chunk:
-                # Retain the ASGI-owned immutable bytes without copying the
-                # whole frame into a second bytearray.  Returned slices remain
-                # bounded even if the server supplied a larger ASGI frame.
+        # Coalesce on the event loop: one thread handoff per MiB, independent
+        # of how many tiny frames the HTTP transport emits. The bytearray and
+        # returned immutable copy together occupy at most two MiB. The current
+        # ASGI frame is borrowed as a memoryview, never copied in full.
+        # Preallocate: bytearray.extend geometrically overallocates capacity.
+        result = bytearray(bounded_max)
+        result_view = memoryview(result)
+        used = 0
+        while used < bounded_max:
+            if self._buffered_bytes() == 0:
+                if self._eof:
+                    break
+                chunk = await self._next_chunk()
+                if chunk is None:
+                    self._eof = True
+                    break
+                if not isinstance(chunk, bytes):
+                    raise TypeError("ASGI request stream yielded a non-bytes chunk")
+                if not chunk:
+                    continue
                 self._buffer = memoryview(chunk)
                 self._buffer_offset = 0
-                self.max_buffered_bytes = max(self.max_buffered_bytes, len(chunk))
-        if self._buffer is None:
-            return b""
-        end = min(self._buffer_offset + bounded_max, len(self._buffer))
-        result = self._buffer[self._buffer_offset : end].tobytes()
-        self._buffer_offset = end
-        if self._buffer_offset == len(self._buffer):
-            self._buffer.release()
-            self._buffer = None
-            self._buffer_offset = 0
-        return result
+            count = min(bounded_max - used, self._buffered_bytes())
+            end = self._buffer_offset + count
+            result_view[used:used + count] = self._buffer[self._buffer_offset:end]
+            used += count
+            self._buffer_offset = end
+            if end == len(self._buffer):
+                self._buffer.release()
+                self._buffer = None
+                self._buffer_offset = 0
+        self.max_buffered_bytes = max(self.max_buffered_bytes, bounded_max + used)
+        return bytes(result_view[:used])
 
     def read(self, max_bytes: int) -> bytes:
         if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:

@@ -34,7 +34,7 @@ from problem_locator.storage.coordination import (
 from problem_locator.storage.execution_records import FileExecutionRecordStore
 from problem_locator.storage.layout import StorageLayout
 from problem_locator.storage.resource_store import FileResourceStore
-from problem_locator.storage.state_repository import JsonFileStateRepository
+from problem_locator.storage.state_repository import CaseStateRepository
 from tests.deterministic.contracts.fakes import (
     DeterministicIdGenerator,
     FakeAssetCatalog,
@@ -171,7 +171,7 @@ def test_host_timeout_kills_the_real_child_tree_without_rerunning_agent(
     with publication_guard.acquire():
         records.publish_job(route_job)
     layout.state.write_bytes(canonical_json_bytes(state))
-    repository = JsonFileStateRepository(
+    repository = CaseStateRepository(
         data_root,
         coordination_lock,
         FakeClock(FIXED_TIME),

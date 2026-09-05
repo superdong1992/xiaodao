@@ -11,6 +11,48 @@ import { SKILL_GENERATION_TRACE_SCHEMA_VERSION } from "../runtime-support/isolat
 const WRAPPER = path.resolve("tools/test-flow/runtime-support/isolated-agent-wrapper.mjs");
 const posixRuntimeTest = process.platform === "win32" ? test.skip : test;
 
+posixRuntimeTest("job final responses disable tools or allow only frozen input reads", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "isolated-agent-final-response-")));
+  const fakeClaude = path.join(root, "fake-claude.mjs");
+  const settings = path.join(root, "settings.json");
+  fs.writeFileSync(settings, "{}\n");
+  fs.writeFileSync(fakeClaude, `
+import fs from "node:fs";
+const model = process.argv[process.argv.indexOf("--model") + 1];
+fs.writeFileSync("argv.json", JSON.stringify(process.argv.slice(2)));
+console.log(JSON.stringify({type:"system",subtype:"init",model}));
+console.log(JSON.stringify({type:"result",subtype:"success",is_error:false,num_turns:1,
+  total_cost_usd:0.01,result:"{}",
+  usage:{input_tokens:10,output_tokens:20,cache_creation_input_tokens:0,cache_read_input_tokens:0}}));
+`);
+  for (const policy of ["none", "read-only", "invalid"]) {
+    const workspace = path.join(root, policy);
+    fs.mkdirSync(workspace);
+    const result = spawnSync(process.execPath, [WRAPPER,
+      "--claude-entry", fakeClaude, "--settings", settings, "--model", "test-model",
+      "--usage-root", path.join(workspace, "usage"), "--workflow", "job",
+      "--max-turns", "2", "--max-total-tokens", "1000", "--max-budget-usd", "1",
+      "--hard-timeout-seconds", "30", "--file-access", policy,
+    ], { cwd: workspace, input: "{}", encoding: "utf8",
+      env: { PATH: process.env.PATH ?? "", HOME: root } });
+    if (policy === "invalid") {
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /WRAPPER_FILE_ACCESS_INVALID/);
+      assert.equal(fs.existsSync(path.join(workspace, "argv.json")), false);
+      continue;
+    }
+    assert.equal(result.status, 0, result.stderr);
+    const args = JSON.parse(fs.readFileSync(path.join(workspace, "argv.json"), "utf8"));
+    const option = (name) => args[args.indexOf(name) + 1];
+    assert.equal(option("--output-format"), "stream-json");
+    assert.equal(option("--permission-mode"), "dontAsk");
+    assert.equal(option("--tools"), policy === "none" ? "" : "Read");
+    assert.equal(args.includes("--dangerously-skip-permissions"), false);
+    assert.equal(args.includes("--allowedTools"), policy === "read-only");
+    if (policy === "read-only") assert.equal(option("--allowedTools"), `Read(${workspace}/inputs/**)`);
+  }
+});
+
 posixRuntimeTest("a failed model terminal persists complete usage without changing the failure exit", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "isolated-agent-terminal-"));
   try {

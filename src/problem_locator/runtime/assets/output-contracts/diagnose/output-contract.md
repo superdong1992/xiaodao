@@ -1,12 +1,8 @@
 # Methods V1 diagnosis output contract
 
-Write exactly one canonical UTF-8 JSON object to
-`output/method-diagnosis.draft.json`. Do not write
-`output/job_outcome.draft.json` or any other Agent Outcome, create
-proposal drafts, generate a report, or run an outcome sealer.
+在最终响应中直接返回一个 UTF-8 JSON 对象，不要使用 Markdown 代码块，不要调用 Write 或创建草稿。服务端负责规范化、核验和报告生成。
 
-Read only `inputs/request.json`, `inputs/target_logs.json`, the `log_path` files
-listed there, `inputs/logparse-receipt.json`, and the pinned Methods package.
+完整使用上下文中的方法卡和冻结输入。服务端内联输入时，无需再读取文件；未内联时，只读取 `inputs/request.json`、`inputs/target_logs.json` 及其 `log_path` 文件、`inputs/logparse-receipt.json` 和明确列出的方法卡文件，不能静默裁剪或遗漏。
 Scan every target log for every method's declared `evidence_markers`.
 
 The top-level object has exactly these fields:
@@ -67,6 +63,6 @@ Wiki confirmation conditions must also be satisfied.
 
 `CONFIRMED` requires a confirmed method. `INSUFFICIENT` requires empty
 `confirmed_methods` and `evidence`. Never infer an absent marker, invent a line,
-widen a target, or use narrative text as evidence. Publish only the canonical
-Methods draft named above. The Server rechecks every method, marker, line,
+widen a target, or use narrative text as evidence. Return only the diagnosis JSON.
+The Server rechecks every method, marker, line,
 source, identity, and hash before it creates Candidate, Outcome, JSON, or ZIP.

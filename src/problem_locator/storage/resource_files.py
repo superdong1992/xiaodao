@@ -177,19 +177,18 @@ def validate_formal_resource(
     return path
 
 
-def scan_case_resources(
+def iter_case_resource_nodes(
     layout: StorageLayout,
     case_id: OpaqueId,
-) -> dict[str, _ObservedFormalResource]:
-    """Strictly enumerate every formal target for one Case, including orphans."""
+):
+    """Enumerate exact resource nodes without opening payloads or walking trees."""
 
     validated_case_id = _OPAQUE_ID_ADAPTER.validate_python(case_id)
     case_root = layout.cases_resources / validated_case_id
     try:
         require_real_directory(case_root)
     except FileNotFoundError:
-        return {}
-    observations: dict[str, _ObservedFormalResource] = {}
+        return
     expected_categories = {"attachments", "evidence", "artifacts"}
     for category_entry in sorted(os.scandir(case_root), key=lambda item: item.name):
         category_metadata = category_entry.stat(follow_symlinks=False)
@@ -231,14 +230,25 @@ def scan_case_resources(
                 f"{resource_entry.name}/{leaf.name}"
             )
             path = Path(leaf.path)
-            size, sha256, _ = _inspect_physical_resource(path, kind)
-            observations[storage_key] = _ObservedFormalResource(
+            if kind is ResourceKind.DIRECTORY:
+                require_real_directory(path)
+            else:
+                require_ordinary_file(path)
+            yield storage_key, path, kind
+
+
+def scan_case_resources(layout: StorageLayout, case_id: OpaqueId) -> dict[str, _ObservedFormalResource]:
+    """Explicit content validation; retention uses metadata enumeration instead."""
+    observations = {}
+    for storage_key, path, kind in iter_case_resource_nodes(layout, case_id):
+        size, sha256, _ = _inspect_physical_resource(path, kind)
+        observations[storage_key] = _ObservedFormalResource(
                 storage_key=storage_key,
                 resource_kind=kind,
                 size=size,
                 sha256=sha256,
                 path=path,
-            )
+        )
     return observations
 
 
@@ -433,6 +443,7 @@ class FormalResourcePublisher:
         expected_size: int,
         expected_sha256: str,
         expected_tree_manifest: TreeManifest | None,
+        verified_file: _ValidatedFileSnapshot | None = None,
     ) -> _ObservedFormalResource:
         address = parse_storage_key(final_storage_key)
         if address.resource_kind is not expected_kind:
@@ -459,13 +470,15 @@ class FormalResourcePublisher:
                     staged_content_path,
                     expected_kind,
                 )
-                staged_file_snapshot = self._validate_expected_content(
-                    staged_path,
-                    expected_kind,
-                    expected_size,
-                    expected_sha256,
-                    expected_tree_manifest,
-                )
+                if verified_file is not None:
+                    if expected_kind is not ResourceKind.FILE or verified_file != _file_snapshot(_require_single_link_file(staged_path)):
+                        raise ValueError("validated upload changed before publication")
+                    staged_file_snapshot = verified_file
+                else:
+                    staged_file_snapshot = self._validate_expected_content(
+                        staged_path, expected_kind, expected_size,
+                        expected_sha256, expected_tree_manifest,
+                    )
                 self._ensure_formal_parent(final_path)
                 if staged_path.stat(follow_symlinks=False).st_dev != final_path.parent.stat(
                     follow_symlinks=False
@@ -496,13 +509,11 @@ class FormalResourcePublisher:
             else:
                 finalize_read_only_tree(final_path, self._file_sync)
             self._file_sync.sync_directory(final_path.parent)
-            self._validate_expected_content(
-                final_path,
-                expected_kind,
-                expected_size,
-                expected_sha256,
-                expected_tree_manifest,
-            )
+            if verified_file is None:
+                self._validate_expected_content(
+                    final_path, expected_kind, expected_size,
+                    expected_sha256, expected_tree_manifest,
+                )
             return _ObservedFormalResource(
                 storage_key=final_storage_key,
                 resource_kind=expected_kind,

@@ -6,7 +6,7 @@ import threading
 import time
 from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -112,6 +112,7 @@ from .agent_backend import (
 from .context_builder import ContextBuilder, ContextLimitExceeded, ContextMaterials
 from .context_policy import ResolvedJobAssets, RuntimeAssetResolver
 from .failures import RuntimeExecutionError, runtime_failure
+from .final_response import parse_route_response, parse_specialist_response, specialist_prompt
 from .generic_locator import GenericLocatorExecutor
 from .input_profile import expand_profile_requirements
 from .outcome_finalizer import (
@@ -1318,21 +1319,26 @@ class DiagnosisRuntime:
                     workspace,
                     loaded_method_ids=methods_skill_load.loaded_method_ids,
                 )
+                materials = resolved.materials
+                if materials.skill is not None and len(materials.skill.encode("utf-8")) > 64 * 1024:
+                    self._workspace_manager.freeze_methods_package(workspace, materials.skill.encode("utf-8"))
+                    materials = replace(materials, skill=(
+                        "The complete frozen Skill, method cards and shared references are in "
+                        "inputs/methods-package.txt. Read every section in full before diagnosis."
+                    ))
                 context = self._materialize_context(
                     job,
                     workspace,
-                    resolved.materials,
+                    materials,
                 )
-                methods_prompt = (
-                    context.body
-                    + "\n\n<<<METHODS_FROZEN_EXECUTION_BOUNDARY>>>\n"
-                    "Logparse preprocessing is complete and its capability has been revoked. "
-                    "Read inputs/request.json, inputs/target_logs.json, only the log_path files "
-                    "listed there, and inputs/logparse-receipt.json. Do not invoke Logparse, do "
-                    "not traverse output/, and write only output/method-diagnosis.draft.json.\n"
-                    "<<<END METHODS_FROZEN_EXECUTION_BOUNDARY>>>\n"
+                methods_prompt, inputs_inlined, complete_input_bytes = specialist_prompt(
+                    context.body, workspace.root, methods_preprocessing.frozen.target_logs,
                 )
-                self._backend_for_job(job).execute(
+                record_journey_event("job.inputs.prepared", data={
+                    "inputs_inlined": inputs_inlined, "complete_input_bytes": complete_input_bytes,
+                    "prompt_bytes": len(methods_prompt.encode("utf-8")),
+                })
+                backend_result = self._backend_for_job(job).execute(
                     prompt=methods_prompt,
                     workspace_root=workspace.root,
                     cancellation=cancellation,
@@ -1341,7 +1347,9 @@ class DiagnosisRuntime:
                     broker_environment=None,
                     test_limits=self._backend_test_limits,
                     backend_phase="METHODS_SPECIALIST",
+                    file_access="none" if inputs_inlined else "read-only",
                 )
+            final_response = backend_result.final_result
             secrets = methods_preprocessing.secrets
             parse_request_bytes = methods_preprocessing.validated.request_bytes
             claim = methods_preprocessing.claim
@@ -1362,7 +1370,7 @@ class DiagnosisRuntime:
                     "output/method-review.draft.json. Logparse is unavailable.\n"
                     "<<<END METHODS_REVIEW_BOUNDARY>>>\n"
                 )
-            secrets, parse_request_bytes, claim, broker_audit_bytes = self._execute_backend(
+            secrets, parse_request_bytes, claim, broker_audit_bytes, final_response = self._execute_backend(
                 job,
                 workspace,
                 cancellation,
@@ -1371,34 +1379,16 @@ class DiagnosisRuntime:
         if broker_audit_bytes is not None:
             self._publish_audit_bytes(job, "broker_audit.json", broker_audit_bytes)
         validating = record_stage_started(ExecutionStage.OUTCOME_VALIDATE)
-        if (
-            job.job_type is JobType.ROUTE
-            and _seal_route_draft_after_backend(workspace)
-        ):
-            try:
-                workspace_bytes = self._workspace_manager.temporary_output_bytes(
-                    workspace
-                )
-            except RuntimeExecutionError:
-                raise runtime_failure(
-                    stage=ExecutionStage.OUTCOME_VALIDATE,
-                    code=ErrorCode.WORKSPACE_LIMIT,
-                    message="Finalized ROUTE Workspace could not be measured safely.",
-                ) from None
-            if workspace_bytes > job.resource_limits.workspace_bytes:
-                raise runtime_failure(
-                    stage=ExecutionStage.OUTCOME_VALIDATE,
-                    code=ErrorCode.WORKSPACE_LIMIT,
-                    message="Finalized ROUTE Workspace exceeded the fixed byte limit.",
-                )
         try:
-            validated_draft = read_agent_output(
-                workspace,
-                job,
-                workspace.manifest,
-                secrets=secrets,
-                broker_audit_bytes=broker_audit_bytes,
-            )
+            if job.job_type is JobType.ROUTE:
+                validated_draft = parse_route_response(final_response, job)
+            elif job.job_type is JobType.DIAGNOSE:
+                validated_draft = parse_specialist_response(final_response, secrets=secrets)
+            else:
+                validated_draft = read_agent_output(
+                    workspace, job, workspace.manifest, secrets=secrets,
+                    broker_audit_bytes=broker_audit_bytes,
+                )
         except RejectedAgentOutputError as exc:
             self._archive_rejected_agent_output(job, exc)
             raise
@@ -4411,15 +4401,17 @@ class DiagnosisRuntime:
         bytes | None,
         LogparseParseClaim | None,
         bytes | None,
+        str | None,
     ]:
         if workspace.manifest.resolved_logparse_plan is None:
-            self._backend_for_job(job).execute(
+            backend_result = self._backend_for_job(job).execute(
                 prompt=prompt,
                 workspace_root=workspace.root,
                 cancellation=cancellation,
                 log_sinks=self._open_log_sinks(job),
                 resource_limits=job.resource_limits,
                 test_limits=self._backend_test_limits,
+                file_access="none" if job.job_type is JobType.ROUTE else None,
                 backend_phase=(
                     "ROUTE"
                     if job.job_type is JobType.ROUTE
@@ -4428,7 +4420,7 @@ class DiagnosisRuntime:
                     else "DIAGNOSE"
                 ),
             )
-            return (), None, None, None
+            return (), None, None, None, backend_result.final_result
 
         if self._logparse_broker_factory is None:
             raise runtime_failure(
@@ -4459,7 +4451,7 @@ class DiagnosisRuntime:
         try:
             broker_environment = session.agent_environment()
             secrets = tuple(broker_environment.values())
-            self._backend_for_job(job).execute(
+            backend_result = self._backend_for_job(job).execute(
                 prompt=prompt,
                 workspace_root=workspace.root,
                 cancellation=cancellation,
@@ -4525,7 +4517,7 @@ class DiagnosisRuntime:
                 "request_bytes": None if request_bytes is None else len(request_bytes),
             },
         )
-        return secrets, request_bytes, claim, audit_bytes
+        return secrets, request_bytes, claim, audit_bytes, backend_result.final_result
 
     @staticmethod
     def _close_and_audit_broker(

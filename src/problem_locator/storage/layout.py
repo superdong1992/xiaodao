@@ -24,8 +24,8 @@ DATA_FORMAT_MARKER_BYTES = (
     json.dumps(
         {
             "contract_revision": CONTRACT_REVISION,
-            "format_id": "problem-locator-data-v2",
-            "schema_version": 2,
+            "format_id": "problem-locator-data-v10",
+            "schema_version": 10,
             "state_schema_version": SCHEMA_VERSION,
         },
         ensure_ascii=False,
@@ -195,7 +195,7 @@ class StorageLayout:
             or temporary.exists()
             or temporary.is_symlink()
         ):
-            raise ValueError("DATA_ROOT data-format marker is invalid")
+            raise UnsupportedDataFormatError("数据目录格式不受支持，请配置空 DATA_ROOT。")
 
     def validate_v2_data_format(self) -> None:
         """Read-only validation for an already initialized Result V2 root."""

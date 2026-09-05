@@ -34,55 +34,16 @@
 - 条件参数若已作为初始 USER_FACT 提供，应直接固定并复用，不得重复询问；若未提供，分支激活后才创建一次可补充的 OPEN requirement。
 - 生成器、manifest/合同、Catalog、Coordinator、服务端验证器和正反向测试必须共同覆盖“命中分支才询问、未命中分支不询问且不阻塞”。
 
-## P1：显式专用路由与多 Case 队头阻塞
+## P1：下一轮性能优化与目标机复测
 
-- 当前 `create_case` 没有专用 Skill selector，registration 也只有自由文本 capability；唯一候选仍可能
-  与问题不匹配。因此不能按候选数量自动跳过 ROUTE。若要消除实测约 2 分 34 秒的 ROUTE Agent，
-  需要选择一种显式合同：由专用客户端提交完整扁平 selector，或把某个 Linux endpoint 明确配置成
-  单一专用入口。服务端必须校验当前 production registration 并冻结完整 ref；旧客户端省略 selector
-  时继续执行语义 ROUTE。
-- 先用 `backend_phase=ROUTE` 的真实遥测核对 `turn_count`、`model_api_duration_ms` 和 Write 工具耗时。
-  如果 ROUTE 因落盘草稿产生额外模型回合，可另行设计“模型只返回最小 RouteDecision、服务端补齐并
-  冻结完整 Outcome”的单响应合同；不得把未密封的 stdout 文本直接当作权威结果。
-- 当前调度器仍只有一个 active worker。多用户时，短 ROUTE 会排在其他 Case 的长 DIAGNOSE 后面，
-  单 Case 本地基准无法暴露这类队头阻塞。后续若拆分 ROUTE lane 或开放并发，必须先冻结 CPU、内存、
-  Logparse 子进程、状态提交和取消/恢复的资源隔离合同，再用多 Case Linux 压测给出 P50/P95/P99。
-- 2026-09-05 已核对 [`InProcessDispatcher`](src/problem_locator/dispatch/dispatcher.py)：所有 Case
-  共用一个 FIFO worker。当前预处理已直接调用 Logparse，但正常专有链路通常仍需 ROUTE 和
-  Specialist 两次 Agent 启动。后续压测应分别统计排队、状态提交、Logparse 和模型执行耗时。
-- 单体 StateFile 与资源复核带来的跨 Case 开销单列在下方“状态提交与全库资源校验开销”，与调度
-  队头阻塞分别评估。
-
-## P1：状态提交与全库资源校验开销（待评估）
-
-- 已确认的代码路径：[`JsonFileStateRepository.commit`](src/problem_locator/storage/state_repository.py)
-  在共享协调锁内生成完整 StateFile、校验全部外部引用、重写 `state.json`，再调用
-  `_decode_and_validate` 复核落盘结果；后者再次校验全部外部引用。每轮都遍历全部 Case 的
-  Job、Outcome 和资源，并由 [`validate_formal_resource`](src/problem_locator/storage/resource_files.py)
-  读取资源的完整内容计算哈希。
-- 待验证影响：提交成本可能随历史资源总量增长，一个 Case 的大附件可能拖慢其他 Case 的状态
-  查询和更新。代码路径已确认，具体延迟、I/O 量和容量拐点尚未压测。
-- 后续分别增加 Case 数、Job/Outcome 数和归档总字节数，测量资源校验次数、读取字节数、锁等待、
-  提交延迟及多 Case P50/P95/P99；区分冷缓存与热缓存，避免只用小样本推断长期运行表现。
-- 取得基线后，再评估按 Case 分片、增量核验或 append-only 日志。方案必须保留资源篡改检测、
-  原子发布、幂等、崩溃恢复和源码快照证明；不能仅以 mtime/size 缓存替代最终内容校验。
-
-## P1：专用定位单响应模型合同与 Logparse 批处理
-
-- 当前 Specialist 仍由通用 Agent CLI 读取 `request.json`、目标日志和方法卡，再写
-  `method-diagnosis.draft.json`。真实环境约 4 分 23 秒的 `BACKEND_EXECUTE` 是否来自多轮文件工具调用，
-  必须先用新增 `backend_phase/backend_invocation_id` 遥测核对 `turn_count`、各工具耗时和模型 API 时间。
-  若证据成立，应设计服务端生成的有界 evidence packet，并让低延迟模型一次返回可由服务端密封的
-  结构化草稿；不能直接信任未密封 stdout，也不能丢掉原始日志的最终逐行校验。
-- 一个 `parse-targets` 仍会按 anchor 串行启动多个 `mech-target-logs` Python 进程。优先给 pinned
-  Logparse 增加一次性 multi-target 命令，在单进程中按声明顺序返回全部目标；并发子进程只能作为
-  次选，启用前必须证明上游解析树只读、取消能回收整棵进程树，且总 CPU/内存仍受 Job 上限约束。
-- Logparse 新产物树仍会在初检、目标捕获、跨 Specialist 边界和正式发布时多次完整 hash。后续可在
-  第一次完整校验后立即封存为只读受控 stage，保存 inode/metadata seal 和 TreeManifest；中间边界
-  用轻量 seal，跨 Agent 与正式发布仍做完整 hash。不得用可恢复的 mtime/size 代替最终内容校验。
-- 30 秒长轮询会让分钟级 Job 产生多次客户端工具回合。只有确认 Claude Code/Codex Host、反向代理
-  和企业网络都支持更长请求后，才考虑把上限提高到 90–300 秒；否则应使用连接稳定的进度流协议，
-  不能单纯延长超时导致远端 MCP 请求被 Host 提前中断。
+- 第一轮保留自动 ROUTE 和 Agent CLI。直接模型 API、常驻 CLI 进程池、Logparse 多 target 批处理分别评估，避免一次改变模型协议、进程生命周期和日志解析合同。
+- 7.0 原生 WSL 单样本已将 ROUTE/Specialist 降为各 1 turn、零文件工具，但 Specialist 约 48 秒，较前次约 18 秒更慢。下一轮对同输入重复采样，区分提示词、推理输出长度、缓存和服务负载；评估模型推理设置时同时检查证据与诊断质量，不仅追求总耗时下降。详见 `docs/performance-v10.md`。
+- 在目标 4 核、8 GB Linux Server 上采集并发 1/2/3 Case 的吞吐、队列 P50/P95/P99、进程树峰值 RSS、磁盘读写量和上传吞吐。默认 ROUTE 1、DIAGNOSE 2、Logparse 1、ZIP 1 只是起点，需要真实负载校准。
+- 继续拆分客户端“等待材料”的 108 秒：分别核对 ROUTE 返回、准备附件、客户端 hash、上传接收、发布和 submit。当前没有目标机详细事件，不能把两段约 54 秒归因于某个服务端步骤，也不能宣称已消除。
+- 超过 128 KiB 的 Specialist 输入保留受控完整读取。后续评估证据包或更长上下文时，保留完整方法卡、目标日志和逐行证据核验，不静默截断。
+- Logparse 新产物树仍有多次跨边界完整核验；可评估首次核验后使用受控只读 stage 和清单复用，但不能改变原始日志、marker、来源和行号的判定依据。
+- 若后续需要跳过 ROUTE，先设计明确的扁平 Skill selector 或单一专用入口。只有一个候选不代表它一定匹配问题。
+- 更长轮询或进度流需要核对 Claude Host、局域网和代理的支持情况；当前维持 30 秒有限等待。
 
 ## P1：证据核验与诊断语义的保证范围（待评估）
 

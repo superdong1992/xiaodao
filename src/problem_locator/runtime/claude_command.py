@@ -15,6 +15,7 @@ import shlex
 import shutil
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from problem_locator.contracts import ErrorCode
 
@@ -61,6 +62,49 @@ class ClaudeCommand:
             f"argv_tokens={len(self.argv)}, "
             f"environment_variables={len(self.environment)})"
         )
+
+
+def apply_final_response_policy(invocation: ClaudeCommand, *, file_access: str | None,
+                                workspace_root: Path, phase: str) -> ClaudeCommand:
+    """Pin native Claude's tools; custom launchers receive the same explicit policy."""
+    if file_access is None:
+        return invocation
+    if file_access not in {'none', 'read-only'}:
+        raise ClaudeCommandError('Invalid Agent file access policy.')
+    environment = dict(invocation.environment)
+    environment['PROBLEM_LOCATOR_AGENT_FILE_ACCESS'] = file_access
+    environment['PROBLEM_LOCATOR_AGENT_PHASE'] = phase
+    argv = invocation.argv
+    executable = Path(argv[0]).name.lower()
+    native = executable in {'claude', 'claude.exe', 'claude.cmd'}
+    native = native or (executable in {'node', 'node.exe'} and len(argv) > 1
+        and Path(argv[1]).name == 'cli.js')
+    if native:
+        # The task owns output/tool policy. Model, endpoint, settings and budget
+        # options remain configured by the operator.
+        rewritten = []
+        index = 0
+        owned = {'--tools', '--allowedTools', '--allowed-tools', '--output-format', '--permission-mode'}
+        while index < len(argv):
+            token = argv[index]
+            if token.split('=', 1)[0] not in owned:
+                rewritten.append(token)
+                index += 1
+                continue
+            index += 1
+            if '=' not in token:
+                while index < len(argv) and not argv[index].startswith('-'):
+                    index += 1
+        if '-p' not in rewritten and '--print' not in rewritten:
+            rewritten.append('-p')
+        if '--verbose' not in rewritten:
+            rewritten.append('--verbose')
+        rewritten.extend(['--output-format', 'stream-json', '--permission-mode', 'dontAsk',
+            '--tools', '' if file_access == 'none' else 'Read'])
+        if file_access == 'read-only':
+            rewritten.extend(['--allowedTools', f'Read({workspace_root.as_posix()}/inputs/**)'])
+        argv = tuple(rewritten)
+    return ClaudeCommand(argv, environment)
 
 
 def _is_reserved_logparse_key(name: str) -> bool:

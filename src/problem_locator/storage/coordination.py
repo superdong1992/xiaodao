@@ -15,6 +15,7 @@ publication/cleanup race described by S02.
 from __future__ import annotations
 
 import threading
+import time
 from collections import defaultdict, deque
 from types import TracebackType
 from typing import Self
@@ -36,17 +37,43 @@ class StorageCoordinationLock:
     """
 
     def __init__(self) -> None:
-        self._lock = threading.RLock()
         self._metadata_lock = threading.Lock()
+        self._gate = threading.Condition(self._metadata_lock)
+        self._scope_by_thread: dict[int, str | None] = {}
+        self._locks: dict[str | None, threading.RLock] = {}
         self._depth_by_thread: defaultdict[int, int] = defaultdict(int)
         self._publication_depth_by_thread: defaultdict[int, int] = defaultdict(int)
 
-    def acquire(self, blocking: bool = True, timeout: float = -1.0) -> bool:
-        acquired = self._lock.acquire(blocking, timeout)
+    def acquire(self, blocking: bool = True, timeout: float = -1.0, *, case_id: str | None = None) -> bool:
+        thread_id = threading.get_ident()
+        deadline = None if timeout < 0 else time.monotonic() + timeout
+        with self._gate:
+            nested = thread_id in self._scope_by_thread
+            if nested:
+                scope = self._scope_by_thread[thread_id]
+                if case_id is not None and scope is not None and scope != case_id:
+                    raise RuntimeError("cannot nest publication across Cases")
+            else:
+                scope = case_id
+                # Unscoped calls are explicit maintenance barriers. Scoped
+                # publications overlap across Cases, while cleanup is exclusive.
+                available = lambda: (not self._scope_by_thread if scope is None
+                    else None not in self._scope_by_thread.values())
+                if not blocking and not available():
+                    return False
+                if not self._gate.wait_for(available, None if deadline is None else max(0, deadline - time.monotonic())):
+                    return False
+                self._scope_by_thread[thread_id] = scope
+            selected = self._locks.setdefault(scope, threading.RLock())
+        remaining = -1.0 if deadline is None else max(0, deadline - time.monotonic())
+        acquired = selected.acquire(blocking, remaining) if blocking else selected.acquire(False)
         if acquired:
-            thread_id = threading.get_ident()
             with self._metadata_lock:
                 self._depth_by_thread[thread_id] += 1
+        elif not nested:
+            with self._gate:
+                self._scope_by_thread.pop(thread_id, None)
+                self._gate.notify_all()
         return acquired
 
     def release(self) -> None:
@@ -63,13 +90,17 @@ class StorageCoordinationLock:
 
         # RLock performs the authoritative owner check.  Metadata is updated
         # only after the real lock release succeeds.
-        self._lock.release()
-        with self._metadata_lock:
+        self._locks[self._scope_by_thread[thread_id]].release()
+        with self._gate:
             remaining = self._depth_by_thread[thread_id] - 1
             if remaining:
                 self._depth_by_thread[thread_id] = remaining
             else:
                 self._depth_by_thread.pop(thread_id, None)
+                scope = self._scope_by_thread.pop(thread_id)
+                if scope not in self._scope_by_thread.values():
+                    self._locks.pop(scope, None)
+                self._gate.notify_all()
 
     def held_by_current_thread(self) -> bool:
         with self._metadata_lock:
@@ -175,8 +206,8 @@ class InProcessPublicationCommitGuard:
         self._metadata_lock = threading.Lock()
         self._active_leases: dict[int, PublicationCommitLease] = {}
 
-    def acquire(self) -> PublicationCommitLease:
-        self.coordination_lock.acquire()
+    def acquire(self, case_id: str | None = None) -> PublicationCommitLease:
+        self.coordination_lock.acquire(case_id=case_id)
         publication_marked = False
         try:
             self.coordination_lock._mark_publication_acquired()

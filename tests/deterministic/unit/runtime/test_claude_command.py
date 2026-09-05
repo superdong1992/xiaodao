@@ -12,6 +12,7 @@ from problem_locator.runtime.claude_command import (
     ClaudeCommandError,
     parse_command_tokens,
     prepare_claude_command,
+    apply_final_response_policy,
     sanitize_environment,
 )
 from problem_locator.runtime.secret_redactor import StreamingSecretRedactor
@@ -20,6 +21,26 @@ from problem_locator.runtime.secret_redactor import StreamingSecretRedactor
 FIXTURE_ROOT = (
     Path(__file__).parents[3] / "fixtures" / "components" / "runtime-command"
 )
+
+
+@pytest.mark.parametrize('access,tools', [('none', ''), ('read-only', 'Read')])
+def test_final_json_native_cli_has_only_the_required_file_tools(tmp_path, access, tools):
+    invocation = prepare_claude_command('claude --model model-name --tools Read,Write --output-format text',
+        parent_environment={}, os_name='posix')
+    result = apply_final_response_policy(invocation, file_access=access, workspace_root=tmp_path, phase='ROUTE')
+    assert result.argv[result.argv.index('--tools') + 1] == tools
+    assert result.argv[result.argv.index('--output-format') + 1] == 'stream-json'
+    assert result.argv[result.argv.index('--model') + 1] == 'model-name'
+    assert '-p' in result.argv and '--verbose' in result.argv
+    assert 'Write' not in ' '.join(result.argv)
+    assert result.environment['PROBLEM_LOCATOR_AGENT_FILE_ACCESS'] == access
+
+
+def test_custom_cli_receives_policy_without_unrecognized_arguments(tmp_path):
+    invocation = prepare_claude_command('python worker.py', parent_environment={}, os_name='posix')
+    result = apply_final_response_policy(invocation, file_access='none', workspace_root=tmp_path, phase='ROUTE')
+    assert result.argv == invocation.argv
+    assert result.environment['PROBLEM_LOCATOR_AGENT_PHASE'] == 'ROUTE'
 
 
 class RecordingSink:

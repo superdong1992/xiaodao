@@ -2058,6 +2058,19 @@ class WorkspaceManager:
         return request_path, result_path
 
     @staticmethod
+    def freeze_methods_package(workspace: PreparedWorkspace, content: bytes) -> None:
+        """Keep every large method card in one read-only, process-frozen file."""
+        inputs = workspace.root / "inputs"
+        metadata = inputs.stat(follow_symlinks=False)
+        if inputs.is_symlink() or _identity(metadata) != (workspace.inputs_device, workspace.inputs_inode):
+            raise _UnsafeWorkspaceError("workspace inputs identity changed")
+        try:
+            inputs.chmod(0o755)
+            _atomic_write(inputs / "methods-package.txt", content)
+        finally:
+            _set_inputs_read_only(inputs)
+
+    @staticmethod
     def freeze_methods_review_inputs(
         workspace: PreparedWorkspace,
         *,

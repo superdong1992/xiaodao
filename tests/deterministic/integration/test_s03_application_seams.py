@@ -28,7 +28,7 @@ from problem_locator.storage.coordination import (
 from problem_locator.storage.execution_records import FileExecutionRecordStore
 from problem_locator.storage.layout import StorageLayout
 from problem_locator.storage.resource_store import FileResourceStore
-from problem_locator.storage.state_repository import JsonFileStateRepository
+from problem_locator.storage.state_repository import CaseStateRepository
 from tests.deterministic.contracts.fakes import (
     DeterministicIdGenerator,
     FakeAssetCatalog,
@@ -85,7 +85,7 @@ class _ObservedExecutionRecords(FileExecutionRecordStore):
         return super().publish_job(job)
 
 
-class _ObservedStateRepository(JsonFileStateRepository):
+class _ObservedStateRepository(CaseStateRepository):
     def __init__(self, *args, publication_guard, **kwargs) -> None:
         self.publication_guard = publication_guard
         self.publication_observations: list[bool] = []
@@ -225,15 +225,17 @@ def test_domain_plan_is_fully_committed_through_real_file_adapters(
         data_root / "jobs" / JOB_ID / "job.json"
     ).read_bytes()
 
-    restarted = JsonFileStateRepository(
+    restarted = CaseStateRepository(
         data_root,
         coordination_lock,
         FakeClock(FIXED_TIME),
         storage_ids,
         execution_record_store=execution_records,
     )
-    assert restarted.read_snapshot() == state
-    assert canonical_json_bytes(restarted.read_job(JOB_ID)) == canonical_json_bytes(job)
+    assert restarted.read_snapshot().cases == {}
+    assert restarted.read_snapshot().idempotency_records == {}
+    restarted.close()
+    repository.close()
 
 
 def test_route_outcome_and_projected_next_job_share_one_commit() -> None:

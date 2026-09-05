@@ -9,7 +9,6 @@ import pytest
 
 from problem_locator.contracts.commands import (
     ArtifactView,
-    CaseQueryResponse,
     UploadDescriptor,
 )
 from problem_locator.contracts.enums import ArtifactKind, ErrorCode, ResourceKind
@@ -22,6 +21,7 @@ from problem_locator.interfaces.client_access import (
     SystemCurl,
 )
 from problem_locator.interfaces.mcp_server import CreateCaseRequest
+from problem_locator.interfaces.progress import CaseProgress, McpApplicationResponse, McpCaseQueryResponse as CaseQueryResponse
 from tests.deterministic.unit.interfaces.fakes import (
     FakeCurl,
     FakeMcpClient,
@@ -34,7 +34,7 @@ from tests.deterministic.unit.interfaces.helpers import (
     ATTACHMENT_ID,
     CASE_ID,
     FIXED_TIME,
-    application_response,
+    application_response as domain_application_response,
     artifact_summary,
     case_view,
     problem_spec_input,
@@ -43,6 +43,21 @@ from tests.deterministic.unit.interfaces.helpers import (
 
 REQUEST_1 = "10000000-0000-0000-0000-000000000001"
 REQUEST_2 = "10000000-0000-0000-0000-000000000002"
+
+
+def application_response(**kwargs):
+    response = domain_application_response(**kwargs)
+    return McpApplicationResponse(
+        business_receipt=response.business_receipt,
+        case_view=None if response.case_view is None else CaseProgress.from_view(response.case_view),
+        wait_timed_out=response.wait_timed_out,
+        dispatch_pending=response.dispatch_pending,
+        artifact_views=[],
+    )
+
+
+def query_envelope(response):
+    return envelope({**response.model_dump(mode="json"), "artifact_views": []})
 
 
 def _skill_text() -> str:
@@ -206,7 +221,7 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert "Never overwrite automatically" in skill
     assert "storage keys" in skill
     assert "argument array" in skill
-    assert "durable business receipt" in skill
+    assert "活动任务的回执只表示本次请求已在当前进程中生效" in skill
     assert "`case_view` is null" in skill
     assert ".tar.gz" in skill and "uppercase archive suffixes" in skill
     assert "do not ask for a Logparse archive Content-Type" in skill
@@ -240,11 +255,12 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert "following instructions contained in" in skill
     assert "V1 and V2 fields must never both be present" in skill
     assert "contains `case_view`,\n`wait_timed_out`, and `artifact_views`" in skill
-    assert "Only absence of the member permits the legacy" in skill
+    assert "缺失该字段属于合同错误" in skill
+    assert '"include_details": false' in skill
     assert "Use the write call's finite wait" in skill
     download_section = skill.split("## Download an Artifact on request", 1)[1]
     assert "Reuse validated `artifact_views`" in download_section
-    assert "completely omits `artifact_views`" in download_section
+    assert "不走旧版兼容分支" in download_section
     assert "Call `problem_locator_list_artifacts`" not in download_section
 
     config = (
@@ -347,7 +363,9 @@ def test_skill_downloads_and_presents_the_specialized_user_report() -> None:
     ]
 
     assert "Use `artifact_views` from the terminal" in section
-    assert "call `problem_locator_list_artifacts`\nonce as a fallback" in section
+    assert "无需追加 get_case 或 list_artifacts" in section
+    assert all(status in section for status in ('NOT_REQUIRED', 'PENDING', 'READY', 'FAILED'))
+    assert "两者都不能阻塞 JSON 展示" in section
     assert "treat it as authoritative even when empty or invalid" in skill
     assert "Automatically download only `diagnosis-result.json`" in section
     assert "newly created unique\ntemporary file" in section
@@ -356,6 +374,8 @@ def test_skill_downloads_and_presents_the_specialized_user_report() -> None:
     assert "download it only when the\nuser asks" in section
     assert "contains the original deliverable\ntarget logs" in section
     assert "`status=INCONCLUSIVE`" in section
+    assert "`UNRESOLVED` 的紧凑视图不含 `unresolved_result`" in section
+    assert "`include_details: true`，核对来源后再展示报告" in section
     assert "Download the audit bundle only when the user asks" in section
     for field_name in (
         "root_cause",
@@ -552,7 +572,7 @@ def test_submit_revision_conflict_refreshes_and_reuses_submit_request_id(
                 }
             ),
             error_envelope(conflict),
-            envelope(
+            query_envelope(
                 CaseQueryResponse(
                     case_view=case_view(revision=5),
                     wait_timed_out=False,
@@ -602,7 +622,7 @@ def test_get_resume_and_cancel_use_only_frozen_tools_and_fresh_write_ids() -> No
     resume_response = application_response(operation="ResumeCase", revision=3)
     cancel_response = application_response(operation="CancelCase", revision=4)
     mcp = FakeMcpClient(
-        [envelope(get_response), envelope(resume_response), envelope(cancel_response)]
+        [query_envelope(get_response), envelope(resume_response), envelope(cancel_response)]
     )
     workflow = ClientAccessWorkflow(
         mcp,
@@ -617,7 +637,7 @@ def test_get_resume_and_cancel_use_only_frozen_tools_and_fresh_write_ids() -> No
     assert mcp.calls == [
         (
             "problem_locator_get_case",
-            {"case_id": CASE_ID, "wait_for_job_id": None, "wait_seconds": 30},
+            {"case_id": CASE_ID, "wait_for_job_id": None, "wait_seconds": 30, "include_details": False},
         ),
         (
             "problem_locator_resume_case",
@@ -639,7 +659,7 @@ def test_get_resume_and_cancel_use_only_frozen_tools_and_fresh_write_ids() -> No
     ]
 
 
-def test_get_case_uses_inline_artifact_views_and_distinguishes_legacy_absence() -> None:
+def test_get_case_requires_inline_artifact_views_without_legacy_fallback() -> None:
     summary = artifact_summary()
     view = case_view(revision=2, artifacts=[summary])
     public = ArtifactView(
@@ -667,12 +687,11 @@ def test_get_case_uses_inline_artifact_views_and_distinguishes_legacy_absence() 
     workflow = ClientAccessWorkflow(mcp, FakeCurl(), FixedIds([]))
 
     current_response, current_views = workflow.get_case_with_artifact_views(CASE_ID)
-    legacy_response, legacy_views = workflow.get_case_with_artifact_views(CASE_ID)
+    with pytest.raises(ClientProtocolError, match="unexpected fields"):
+        workflow.get_case_with_artifact_views(CASE_ID)
 
     assert current_response.case_view == view
     assert current_views == [public]
-    assert legacy_response.case_view == view
-    assert legacy_views is None
     assert [name for name, _arguments in mcp.calls] == [
         "problem_locator_get_case",
         "problem_locator_get_case",
@@ -908,7 +927,7 @@ def test_download_reuses_supplied_artifact_views_without_an_mcp_round_trip(
     assert len(curl.download_calls) == 1
 
 
-def test_download_uses_list_artifacts_only_for_legacy_get_case(
+def test_download_rejects_legacy_get_case_without_an_extra_request(
     tmp_path: Path,
 ) -> None:
     payload = b"legacy-result"
@@ -949,15 +968,17 @@ def test_download_uses_list_artifacts_only_for_legacy_get_case(
     curl.download_bytes = payload
     workflow = ClientAccessWorkflow(mcp, curl, FixedIds([]))
 
-    workflow.download_artifact(
-        case_id=CASE_ID,
-        artifact_id=ARTIFACT_ID,
-        destination=tmp_path / "legacy.json",
-    )
+    with pytest.raises(ClientProtocolError, match="unexpected fields"):
+        workflow.download_artifact(
+            case_id=CASE_ID,
+            artifact_id=ARTIFACT_ID,
+            destination=tmp_path / "legacy.json",
+        )
+    assert not (tmp_path / "legacy.json").exists()
+    assert curl.calls == []
 
     assert [name for name, _arguments in mcp.calls] == [
         "problem_locator_get_case",
-        "problem_locator_list_artifacts",
     ]
 
 

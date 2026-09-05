@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import problem_locator.storage.resource_files as resource_files_module
+from problem_locator.contracts import ResourceRef
+
 import hashlib
 import os
 import threading
@@ -185,6 +188,25 @@ def _write_formal_file(
     return path
 
 
+def test_upload_hashes_the_stream_once_and_capacity_never_reads_files(harness: Harness, monkeypatch) -> None:
+    import problem_locator.storage.staging as staging
+    def reread(*args, **kwargs):
+        pytest.fail("verified upload was read again to hash")
+    monkeypatch.setattr(staging, "hash_file", reread)
+    monkeypatch.setattr(resource_files_module, "hash_file", reread)
+    monkeypatch.setattr(resource_files_module, "scan_case_resources", reread)
+    payload = b"log line\n" * 1000
+    with harness.attachments.acquire(ATTACHMENT_ID) as lease:
+        staged = harness.store.stage_attachment(ATTACHMENT_ID, lease, InMemoryBinaryStream(payload), len(payload), _sha(payload))
+        target = harness.store.plan_target(CASE_ID, ResourceType.ATTACHMENT, ATTACHMENT_ID, ResourceKind.FILE, len(payload), _sha(payload))
+        with harness.guard.acquire():
+            harness.store.validate_case_capacity(CASE_ID, [target])
+            ref = harness.store.publish(staged, target.final_storage_key)
+            usage = harness.store.validate_case_capacity(CASE_ID, [])
+    assert usage.current_bytes == len(payload)
+    assert (harness.layout.data_root / ref.storage_key).read_bytes() == payload
+
+
 def test_store_structurally_implements_the_frozen_port(harness: Harness) -> None:
     assert isinstance(harness.store, ResourceStore)
 
@@ -309,7 +331,7 @@ def test_generated_generic_report_retry_restages_then_adopts_formal_target(
     ).read_bytes() == payload
 
 
-def test_restaged_generated_report_never_adopts_conflicting_formal_bytes(
+def test_publication_reuses_receipt_and_explicit_read_detects_external_drift(
     harness: Harness,
 ) -> None:
     payload = b"# Expected generic report\n"
@@ -338,9 +360,8 @@ def test_restaged_generated_report_never_adopts_conflicting_formal_bytes(
     final.write_bytes(b"# Conflicting bytes\n")
 
     with harness.guard.acquire():
-        assert _error_code(
-            lambda: harness.store.publish(restored, target.final_storage_key)
-        ) is ErrorCode.RESOURCE_HASH_MISMATCH
+        ref = harness.store.publish(restored, target.final_storage_key)
+    assert _error_code(lambda: harness.store.open_read(ref)) is ErrorCode.RESOURCE_SIZE_MISMATCH
     assert final.read_bytes() == b"# Conflicting bytes\n"
 
 
@@ -673,31 +694,20 @@ def test_capacity_error_observed_counts_every_physical_formal_class_atomically(
         key=lambda item: item.final_storage_key,
     )
 
-    real_scan = resource_store_module.scan_case_resources
-    scan_lock_observations: list[tuple[bool, bool]] = []
-
-    def scan_while_observing_lock(
-        layout: StorageLayout,
-        case_id: str,
-    ):
-        scan_lock_observations.append(
-            (
-                harness.lock.held_by_current_thread(),
-                harness.lock.publication_held_by_current_thread(),
-            )
+    # The new root records each publication in memory. Capacity uses those
+    # verified receipts, including publications whose Case commit has not run.
+    harness.store._published[CASE_ID] = {
+        target.final_storage_key: ResourceRef(
+            storage_key=target.final_storage_key, resource_kind=target.resource_kind,
+            size=target.size, sha256=target.sha256,
         )
-        return real_scan(layout, case_id)
-
-    monkeypatch.setattr(
-        resource_store_module,
-        "scan_case_resources",
-        scan_while_observing_lock,
-    )
+        for target in (state_referenced, durable_outbox, ordinary_orphan)
+    }
+    monkeypatch.setattr(resource_files_module, "scan_case_resources", lambda *args: pytest.fail("capacity scanned resource bytes"))
 
     with harness.guard.acquire(), pytest.raises(ApplicationPortError) as raised:
         harness.store.validate_case_capacity(CASE_ID, batch)
 
-    assert scan_lock_observations == [(True, True)]
     assert raised.value.error.code is ErrorCode.RESOURCE_LIMIT_EXCEEDED
     assert raised.value.error.retryable is False
     assert raised.value.error.details == [

@@ -535,12 +535,12 @@ def test_replay_document_parent_sync_failure_rolls_back_complete_link(
     assert list(tmp_path.glob(f".{destination.name}.*.tmp")) == []
 
 
-def test_v9_state_contract_is_the_replay_hard_cut() -> None:
-    assert SCHEMA_VERSION == 9
-    assert CONTRACT_REVISION == "v9-contract-r1"
+def test_v10_state_contract_is_the_replay_hard_cut() -> None:
+    assert SCHEMA_VERSION == 10
+    assert CONTRACT_REVISION == "v10-contract-r1"
     assert ReplayManifest.model_fields["state_schema_version"].annotation is not None
     assert ReplayManifest.model_json_schema()["properties"]["state_schema_version"] == {
-        "const": 9,
+        "const": 10,
         "title": "State Schema Version",
         "type": "integer",
     }

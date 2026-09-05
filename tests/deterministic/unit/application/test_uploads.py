@@ -196,7 +196,7 @@ class _CountingRepository(InMemoryStateRepository):
         self.snapshot_reads = 0
         self.commit_attempts: list[tuple[int, int | None]] = []
 
-    def read_snapshot(self) -> StateFile:
+    def read_snapshot(self, case_id=None, *, job_id=None, attachment_id=None, request_key=None) -> StateFile:
         self.snapshot_reads += 1
         return super().read_snapshot()
 
@@ -215,7 +215,7 @@ class _ReadFailsAfterCommitRepository(_CountingRepository):
         self.fail_next_read = False
         self.error_code = error_code
 
-    def read_snapshot(self) -> StateFile:
+    def read_snapshot(self, case_id=None, *, job_id=None, attachment_id=None, request_key=None) -> StateFile:
         if self.fail_next_read:
             self.fail_next_read = False
             raise _application_error(self.error_code)
@@ -239,7 +239,7 @@ class _ReadFailsOnSnapshotNumberRepository(_CountingRepository):
         self.failure = failure
         self.fail_on_snapshot_number = fail_on_snapshot_number
 
-    def read_snapshot(self) -> StateFile:
+    def read_snapshot(self, case_id=None, *, job_id=None, attachment_id=None, request_key=None) -> StateFile:
         if self.snapshot_reads + 1 == self.fail_on_snapshot_number:
             self.snapshot_reads += 1
             raise self.failure
@@ -249,7 +249,7 @@ class _ReadFailsOnSnapshotNumberRepository(_CountingRepository):
 class _ReadyOnPostStageRepository(_CountingRepository):
     """Expose a concurrent READY finalize on the post-stage snapshot."""
 
-    def read_snapshot(self) -> StateFile:
+    def read_snapshot(self, case_id=None, *, job_id=None, attachment_id=None, request_key=None) -> StateFile:
         snapshot = super().read_snapshot()
         if self.snapshot_reads != 2:
             return snapshot

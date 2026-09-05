@@ -1,6 +1,6 @@
 ---
 name: problem-locator-client
-description: Operate a current Problem Locator 6.0 diagnosis case through its seven Remote MCP tools, display server-verified specialized reports, and transfer selected attachments or downloadable artifacts with system curl. Use when creating, inspecting, continuing, resuming, or cancelling a diagnosis case, supplying requested facts or local files, or presenting a diagnosis result.
+description: 使用 Problem Locator 7.0 的七个远程 MCP 工具创建、查询、补充或取消定位任务，展示服务端核验的报告，并用系统 curl 上传附件、下载产物。
 ---
 
 # Problem Locator Client
@@ -105,7 +105,8 @@ paired by index. Fact names must be unique.
 {
   "case_id": "<case-uuid>",
   "wait_for_job_id": null,
-  "wait_seconds": 0
+  "wait_seconds": 0,
+  "include_details": false
 }
 ```
 
@@ -140,7 +141,7 @@ paired by index. Fact names must be unique.
 
 Only `declared_size`, `declared_sha256`, and `wait_for_job_id` accept explicit
 `null`. The two initial fact arrays and each `wait_seconds` are optional with
-defaults `[]` and `0`; all other members shown above are required for their tool.
+defaults `[]` and `0`; `include_details` 默认为 `false`，只有需要完整事实或结论元数据时才设为 `true`。其余字段按上方模板提交。
 Defaults describe the server contract only: when invoking a tool, always send the
 complete explicit shape shown above. Never call any Problem Locator tool with an
 empty `{}` root input.
@@ -156,7 +157,7 @@ work, set it to `30` and consume the returned progressed Case view.
 
 For every long poll, preserve one explicit `problem_locator_get_case` template
 containing the authoritative `case_id`, the current `wait_for_job_id` (or explicit
-`null`), and `wait_seconds: 30`. Copy all three fields into every subsequent poll;
+`null`), `wait_seconds: 30`, and `include_details: false`. Copy all four fields into every subsequent poll;
 do not change `wait_for_job_id` merely because a RUNNING Diagnose Job is visible.
 Keep it `null` for ordinary Case progress polling, including after the Case enters
 `REVIEWING`; null follows the current active Job without changing the tool input.
@@ -169,13 +170,14 @@ malformed call.
 Current `problem_locator_get_case` success data contains `case_view`,
 `wait_timed_out`, and `artifact_views`. The last member is the public transfer
 projection of the same downloadable summaries in `case_view.artifacts`; it is
-usually empty before a terminal result. An older service may omit the member.
+usually empty before a terminal result. 7.0 始终返回这个字段，不兼容省略该字段的旧服务。
 If it is present, treat it as authoritative even when empty or invalid: validate
 it against the Case summaries and never hide a mismatch by calling another
-tool. Only absence of the member permits the legacy `problem_locator_list_artifacts`
-fallback.
+tool. 缺失该字段属于合同错误，不调用其他工具掩盖问题。
 
-After every write response, show the durable business receipt first. When `case_view` is present, also show the user the current Case and diagnosis-state revisions, status, open requirements, active Job, and next required action. When `case_view` is null, report that the write was persisted at the receipt's `case_id` and `case_revision` but the current projection is unavailable; do not turn the success into a failure or invent current Case state. Preserve the receipt's `case_id`, then use `problem_locator_get_case` to refresh when state reads are healthy.
+写操作先展示业务回执，再展示 `case_view` 中的 Case ID、`case_revision`、状态、当前 Job、OPEN requirements、附件和可下载产物。活动任务的回执只表示本次请求已在当前进程中生效；终态报告才是持久化交付。`case_view` is null 时保留回执的 ID 和 revision，说明当前视图暂不可用，随后用 `problem_locator_get_case` 刷新，不重复创建请求。
+
+写操作和默认查询返回紧凑进度视图，不含完整事实、来源和 `final_result`。只有核对这些详情时才发送 `include_details: true`。写操作的有限等待若已得到终态，直接使用同一响应的 `artifact_views` 下载 JSON，不再额外查询。完整查询只改变返回详情，不改变下载合同。
 
 ## Create or inspect a Case
 
@@ -184,11 +186,11 @@ After every write response, show the durable business receipt first. When `case_
 3. If the user already selected a local Attachment in the same request, start measuring, preparing, and uploading that exact file immediately after Case creation while ROUTE continues. Do not wait for `WAITING_ATTACHMENT` merely to begin file I/O. Keep the resulting READY `attachment_id`; do not submit it until the latest Case view exposes the matching OPEN requirement. On a prepare revision conflict, refresh the Case once and retry the same logical prepare with its stable request ID.
 4. Otherwise poll or finitely wait with `problem_locator_get_case`; never create a replacement Case merely because waiting timed out.
 
-Use `problem_locator_resume_case` only for a persisted pending or interrupted Case. Use `problem_locator_submit_supplement` for a waiting Case. Use `problem_locator_cancel_case` only after confirming the current revision with the user when cancellation is not already explicit.
+`problem_locator_resume_case` 只用于服务仍能查询到的、允许恢复的 Case。服务重启后，活动任务会丢失，需要重新创建 Case；不得反复恢复不存在的旧 ID。等待材料的 Case 使用 `problem_locator_submit_supplement`。用户已明确要求取消时，使用最新 revision 调用 `problem_locator_cancel_case`。
 
 ### Present a terminal generic result
 
-When a terminal Case contains `generic_result_v2`, encode `report_markdown` as
+通用诊断终态需要完整详情时，查询一次 `include_details: true`。When a terminal Case contains `generic_result_v2`, encode `report_markdown` as
 UTF-8 and verify both `report_utf8_size` and `report_sha256` before displaying it.
 Use the same `artifact_views`-first rule and require the Case summaries to contain
 exactly the referenced `GENERIC_REPORT` with the same ID, size, SHA-256, source
@@ -205,23 +207,12 @@ as a native Markdown report. V1 and V2 fields must never both be present.
 
 ### Present a terminal specialized result
 
-For `RESOLVED` or `PARTIALLY_RESOLVED`, require `final_result` and require
-`methods_result` to be absent. Use `artifact_views` from the terminal
-`problem_locator_get_case` response. Only when that member is absent because the
-service is an older compatible version, call `problem_locator_list_artifacts`
-once as a fallback. Require exactly one downloadable `USER_RESULT` named
-`diagnosis-result.json` and one
-downloadable `USER_RESULT_ARCHIVE` named `result.zip`. The matching Case
-summaries must both have `created_by_job_id` equal to
-`final_result.proposed_by_job_id`; IDs, kinds, content types, sizes and SHA-256
-values must agree between each descriptor and summary. A missing, duplicate or
-mismatched item is a protocol error, not an invitation to reconstruct a
-conclusion.
+`RESOLVED` 或 `PARTIALLY_RESOLVED` 表示 JSON 报告已经持久化。Use `artifact_views` from the terminal
+响应，要求恰好一份可下载的 `USER_RESULT`，名称为 `diagnosis-result.json`。描述符的 ID、类型、大小和 SHA-256 必须与 Case 的产物摘要一致。完整详情中的 `final_result` 可供显式核对；紧凑视图省略该字段不表示诊断失败。`methods_result` 不是报告来源。
 
-If a waited write response itself first reveals the terminal status, make one
-immediate `problem_locator_get_case` call with the fixed complete input and
-`wait_seconds: 0` to obtain `artifact_views`; do not call the legacy listing
-tool first.
+`archive_status` 为 `NOT_REQUIRED`、`PENDING`、`READY` 或 `FAILED`。`PENDING` 表示 ZIP 正在后台生成，`FAILED` 只表示归档失败；两者都不能阻塞 JSON 展示。只有 `READY` 才要求可下载的 `USER_RESULT_ARCHIVE`，名称为 `result.zip`。用户需要 ZIP 时再查询归档状态，不为等待 ZIP 重跑诊断。
+
+有限等待的写操作已附带终态及 `artifact_views` 时，直接下载并展示 JSON，无需追加 get_case 或 list_artifacts。
 
 Automatically download only `diagnosis-result.json` to a newly created unique
 temporary file. Use the listed `download_url` verbatim and system `curl`; reject
@@ -250,6 +241,7 @@ every error path. `result.zip` remains available, but download it only when the
 user asks. Before downloading, warn that it contains the original deliverable
 target logs, then apply the same destination, byte-count and SHA-256 checks.
 
+`UNRESOLVED` 的紧凑视图不含 `unresolved_result`。此时用完整查询模板设置 `include_details: true`，核对来源后再展示报告。
 For `UNRESOLVED`, require `unresolved_result`, require `methods_result` to be
 absent, and use the same `artifact_views`-first rule. Require exactly one
 `USER_RESULT` matching `unresolved_result.user_result_artifact_id` and source
@@ -259,7 +251,7 @@ display the JSON as above with `status=INCONCLUSIVE` and no invented root cause.
 Download the audit bundle only when the user asks.
 
 For `FAILED`, `CANCELLED`, or `INTERRUPTED`, do not fabricate or search for a
-specialized report. Show the persisted `failure` or status. A V9 specialized
+specialized report. Show the persisted `failure` or status. A specialized
 Case never uses `methods_result` as a client result source.
 
 ## Submit requested facts
@@ -283,7 +275,7 @@ Treat READY as “upload published,” not “adopted by the diagnosis.” Uploa
 
 ## Download an Artifact on request
 
-1. Reuse validated `artifact_views` already returned by the latest terminal `problem_locator_get_case` in this conversation. If none is available, call `problem_locator_get_case` once with the complete fixed input and `wait_seconds: 0`. Only when that successful response completely omits `artifact_views` may an older service use one `problem_locator_list_artifacts` fallback. A present empty, invalid, or mismatched member is a protocol error.
+1. Reuse validated `artifact_views`：优先复用本次会话最近一次终态写响应或查询响应中的下载描述符。尚无描述符时，用完整模板查询一次 `problem_locator_get_case`，设置 `wait_seconds: 0`、`include_details: false`。字段缺失或描述符不匹配时停止，不走旧版兼容分支。ZIP 尚未就绪不影响已交付的 JSON。
 2. Select only an Artifact from that validated transfer projection and use its `download_url` verbatim. Do not infer a URL from an Artifact ID or from `case_view.artifacts` summaries.
 3. If the destination exists, stop and ask the user for permission or a new name. Never overwrite automatically.
 4. Download with system `curl` using independent argv values, then verify the received byte count and SHA-256 against the `ArtifactView`.

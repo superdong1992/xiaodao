@@ -219,7 +219,7 @@ class OutcomeSubmissionService:
         outcome_trigger_id: str,
         control_trigger_id: str,
     ) -> OutcomeReceipt:
-        snapshot = self._repository.read_snapshot()
+        snapshot = self._repository.read_snapshot(job_id=command.job_outcome.job_id)
         located = _find_job(snapshot, command.job_outcome.job_id)
         if located is None:
             raise_port_error(ErrorCode.JOB_NOT_FOUND, "The Job does not exist.")
@@ -927,7 +927,7 @@ class OutcomeSubmissionService:
 
         target_rows.sort(key=lambda row: row[2].final_storage_key)
         planned_targets = {key: target for key, _, target in target_rows}
-        lease = self._publication_guard.acquire()
+        lease = self._publication_guard.acquire(job.case_id)
         rejection: _DeterministicRejection | None = None
         committed: _AppliedCommit | None = None
         formal_artifacts = {}
@@ -1343,7 +1343,7 @@ class OutcomeSubmissionService:
         # the rejection decision from an authoritative snapshot so an Outcome
         # that became stale is audited as STALE instead of failing an unrelated
         # live Job from the old generation.
-        snapshot = self._repository.read_snapshot()
+        snapshot = self._repository.read_snapshot(job_id=job.job_id)
         current_job = _find_job(snapshot, job.job_id)
         if current_job is None:
             raise_port_error(ErrorCode.JOB_NOT_FOUND, "The Job does not exist.")
@@ -1452,7 +1452,7 @@ class OutcomeSubmissionService:
             active_job,
             aggregate.artifacts.values(),
         )
-        lease = self._publication_guard.acquire()
+        lease = self._publication_guard.acquire(job.case_id)
         try:
             receipt = self._repository.commit(
                 snapshot.generation,
@@ -1574,7 +1574,7 @@ class OutcomeSubmissionService:
             active_job,
             aggregate.artifacts.values(),
         )
-        lease = self._publication_guard.acquire()
+        lease = self._publication_guard.acquire(job.case_id)
         try:
             receipt = self._repository.commit(
                 snapshot.generation,

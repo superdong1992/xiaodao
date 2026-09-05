@@ -1303,10 +1303,14 @@ def finalize_generic_result_v2(
     return GenericResultV2.model_validate(payload)
 
 
+ArchiveStatus = Literal["NOT_REQUIRED", "PENDING", "READY", "FAILED"]
+
+
 class Case(ContractModel):
     case_id: OpaqueId
     status: CaseStatus
     case_revision: PositiveInt
+    archive_status: ArchiveStatus = "NOT_REQUIRED"
     raw_problem_text: NonEmptyText
     diagnosis_state: DiagnosisState
     active_job_id: OpaqueId | None
@@ -1750,10 +1754,26 @@ class Evidence(ContractModel):
         return self
 
 
+class ArchiveSourceFile(ContractModel):
+    source_kind: Literal["INPUT_ARTIFACT", "OUTPUT_PROPOSAL"]
+    source_ref: NonEmptyText
+    relative_path: RelativePosixPath
+    archive_name: NonEmptyText
+    size: NonNegativeInt
+    sha256: Sha256
+
+
+class ArchivePlan(ContractModel):
+    result_text: NonEmptyText
+    manifest_json: NonEmptyText
+    logs: list[ArchiveSourceFile]
+
+
 class UserResultMetadataV3(ContractModel):
     schema_version: Literal[3]
     format_id: Literal["problem-locator-diagnosis-v3"]
     description: DescriptionText
+    archive_plan: ArchivePlan | None = None
 
 
 class UserResultArchiveMetadataV3(ContractModel):
@@ -4161,9 +4181,9 @@ def _validate_server_final_user_results(
             raise ValueError("generic diagnosis Outcomes forbid result Artifacts")
         return
     if candidate_result:
-        if len(user_results) != 1 or len(archives) != 1:
+        if len(user_results) != 1:
             raise ValueError(
-                "a reviewed Candidate Outcome requires exactly one USER_RESULT and one USER_RESULT_ARCHIVE"
+                "a reviewed Candidate Outcome requires exactly one USER_RESULT"
             )
     elif unresolved_result:
         if len(user_results) != 1 or archives:
@@ -5616,7 +5636,7 @@ class CaseAggregate(ContractModel):
                 and artifact.created_by_job_id
                 == self.case.final_result.proposed_by_job_id
             ]
-            if len(result_archives) != 1:
+            if len(result_archives) > 1 or (self.case.archive_status == "READY" and len(result_archives) != 1):
                 raise ValueError(
                     "resolved Case requires its accepted candidate USER_RESULT_ARCHIVE"
                 )
@@ -5674,7 +5694,7 @@ class CaseAggregate(ContractModel):
 
 
 class StateFile(ContractModel):
-    schema_version: Literal[9]
+    schema_version: Literal[10]
     contract_revision: Literal[CONTRACT_REVISION]
     generation: NonNegativeInt
     installation_id: OpaqueId
@@ -5833,6 +5853,13 @@ class CommitReceipt(ContractModel):
     case_revision: PositiveInt | None
 
 
+class AttachmentSummary(ContractModel):
+    attachment_id: OpaqueId
+    name: NonEmptyText
+    status: AttachmentStatus
+    size: NonNegativeInt | None
+
+
 class JobSummary(ContractModel):
     job_id: OpaqueId
     job_type: JobType
@@ -5933,6 +5960,8 @@ class CaseView(ContractModel):
     case_id: OpaqueId
     status: CaseStatus
     case_revision: PositiveInt
+    archive_status: ArchiveStatus = "NOT_REQUIRED"
+    attachments: list[AttachmentSummary] = Field(default_factory=list)
     raw_problem_text: NonEmptyText
     diagnosis_state_revision: PositiveInt
     problem_spec: ProblemSpec
@@ -6094,10 +6123,10 @@ class CaseView(ContractModel):
                 raise ValueError(
                     "resolved CaseView requires the accepted candidate's USER_RESULT"
                 )
-            if len(result_archives) != 1 or (
+            if (self.archive_status == "READY" and len(result_archives) != 1) or (result_archives and (
                 result_archives[0].created_by_job_id
                 != self.final_result.proposed_by_job_id
-            ):
+            )):
                 raise ValueError(
                     "resolved CaseView requires the accepted candidate's USER_RESULT_ARCHIVE"
                 )
@@ -6699,8 +6728,8 @@ class StateExportResource(ContractModel):
 
 
 class StateExport(ContractModel):
-    export_schema_version: Literal[9]
-    schema_version: Literal[9]
+    export_schema_version: Literal[10]
+    schema_version: Literal[10]
     contract_revision: Literal[CONTRACT_REVISION]
     source_generation: NonNegativeInt
     installation_id: OpaqueId
@@ -6769,7 +6798,7 @@ class ContractManifestEntry(ContractModel):
 
 
 class ContractManifest(ContractModel):
-    schema_version: Literal[9]
+    schema_version: Literal[10]
     contract_revision: Literal[CONTRACT_REVISION]
     generator_version: NonEmptyText
     files: list[ContractManifestEntry]

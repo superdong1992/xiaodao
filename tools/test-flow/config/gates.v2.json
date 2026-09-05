@@ -78,7 +78,7 @@
       "selectors": [
         "tests/deterministic/journey/test_rpc_timeout.py::test_r01_r14_rpc_timeout_is_one_durable_cross_module_path",
         "tests/deterministic/journey/test_rpc_timeout.py::test_same_job_uses_initial_order_fact_and_survives_restart",
-        "tests/deterministic/unit/runtime/test_diagnosis_runtime.py::test_methods_v1_specialist_publishes_candidate_json_and_log_archive",
+        "tests/deterministic/unit/runtime/test_diagnosis_runtime.py::test_methods_v1_specialist_publishes_json_and_durable_archive_plan",
         "tests/deterministic/unit/runtime/test_diagnosis_runtime.py::test_methods_preflight_publishes_waiting_without_backend_or_broker",
         "tests/deterministic/unit/runtime/test_methods_output_pipeline.py::test_verify_method_diagnosis_classifies_marker_not_indexed",
         "tests/deterministic/unit/runtime/test_methods_output_pipeline.py::test_specialized_diagnosis_hard_cut_ignores_legacy_v6_envelope",
@@ -86,7 +86,7 @@
         "tests/deterministic/unit/integrations/test_result_archive.py::test_result_archive_v3_is_deterministic_and_uses_plan_order",
         "tests/deterministic/unit/integrations/test_result_archive.py::test_result_text_uses_the_locked_nine_chinese_sections",
         "tests/deterministic/unit/integrations/test_result_archive.py::test_inconclusive_result_never_builds_result_zip",
-        "tests/deterministic/contracts/test_user_result_v2.py::test_completed_candidate_server_final_requires_json_and_archive",
+        "tests/deterministic/contracts/test_user_result_v2.py::test_completed_candidate_server_final_requires_json_and_allows_deferred_archive",
         "tests/deterministic/contracts/test_user_result_v2.py::test_inconclusive_server_final_requires_json_and_forbids_archive",
         "tests/deterministic/contracts/test_user_result_v2.py::test_non_pass_review_carries_json_but_pass_carries_no_new_result",
         "tests/deterministic/unit/domain/test_coordinator_diagnosis.py::test_specialized_candidate_is_accepted_and_published_when_review_is_disabled",

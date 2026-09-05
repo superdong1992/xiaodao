@@ -49,7 +49,7 @@ from problem_locator.storage.coordination import (
 from problem_locator.storage.execution_records import FileExecutionRecordStore
 from problem_locator.storage.layout import StorageLayout
 from problem_locator.storage.resource_store import FileResourceStore
-from problem_locator.storage.state_repository import JsonFileStateRepository
+from problem_locator.storage.state_repository import CaseStateRepository
 from tests.deterministic.contracts.fakes import (
     DeterministicIdGenerator,
     FakeAssetCatalog,
@@ -88,7 +88,7 @@ def _port_error(code: ErrorCode) -> ApplicationPortError:
     )
 
 
-class _FaultingStateRepository(JsonFileStateRepository):
+class _FaultingStateRepository(CaseStateRepository):
     def __init__(self, *args: object, **kwargs: object) -> None:
         self.outcome_commit_faults: collections.deque[ErrorCode] = (
             collections.deque()
@@ -113,7 +113,7 @@ class _FaultingStateRepository(JsonFileStateRepository):
         )
 
 
-class _ReadCaseFaultRepository(JsonFileStateRepository):
+class _ReadCaseFaultRepository(CaseStateRepository):
     def __init__(self, *args: object, read_case_code: ErrorCode, **kwargs: object) -> None:
         self.read_case_code = read_case_code
         self.read_case_calls: list[str] = []
@@ -122,6 +122,10 @@ class _ReadCaseFaultRepository(JsonFileStateRepository):
     def read_case(self, case_id: str):
         self.read_case_calls.append(case_id)
         raise _port_error(self.read_case_code)
+
+    def read_job(self, job_id):
+        state = self.read_snapshot(job_id=job_id)
+        return next(aggregate.jobs[job_id] for aggregate in state.cases.values() if job_id in aggregate.jobs)
 
 
 class _RecordingJobControl:
@@ -186,7 +190,7 @@ class _PublishingRuntime:
     def execute(self, job, cancellation) -> RuntimeExecutionReceipt:
         self.calls.append(job)
         resource_context = self.resource_context
-        if isinstance(resource_context, JsonFileStateRepository):
+        if isinstance(resource_context, CaseStateRepository):
             resource_context = resource_context.read_case(job.case_id)
         receipt = self.publisher.publish_success(
             job,
@@ -280,13 +284,20 @@ def _seed_route_files(
     records = FileExecutionRecordStore(data_root, lock)
     with guard.acquire():
         records.publish_job(route)
-    layout.state.write_bytes(canonical_json_bytes(state))
     return records, state, route
+
+
+def _seed_live(repository, state=None):
+    from tests.deterministic.unit.storage.test_state_repository import _empty_mutation
+    selected = state or StateFile.model_validate(_json('state.json'))
+    aggregate = selected.cases[CASE_ID]
+    repository.commit(1, None, _empty_mutation(upsert_case=aggregate.case,
+        insert_jobs=list(aggregate.jobs.values())))
 
 
 def _route_application(
     data_root: Path,
-    repository: JsonFileStateRepository,
+    repository: CaseStateRepository,
     records: FileExecutionRecordStore,
     resources: FileResourceStore,
     guard: InProcessPublicationCommitGuard,
@@ -341,6 +352,7 @@ def test_finalized_outcome_retries_only_submission_with_real_file_records(
         execution_record_store=records,
     )
     repository.outcome_commit_faults.extend(faults)
+    _seed_live(repository)
     resources = FileResourceStore(
         StorageLayout.at(data_root),
         lock,
@@ -399,7 +411,7 @@ def test_finalized_outcome_retries_only_submission_with_real_file_records(
     ).read_bytes()
 
 
-def test_asset_error_parks_scheduler_then_recovery_replays_before_interrupt(
+def test_asset_error_stops_scheduler_and_restart_drops_unfinished_case(
     tmp_path: Path,
 ) -> None:
     data_root = tmp_path / "data"
@@ -412,13 +424,14 @@ def test_asset_error_parks_scheduler_then_recovery_replays_before_interrupt(
         first_lock,
         first_guard,
     )
-    first_repository = JsonFileStateRepository(
+    first_repository = CaseStateRepository(
         data_root,
         first_lock,
         FakeClock(FIXED_TIME),
         DeterministicIdGenerator(seed="s08-asset-park-state"),
         execution_record_store=first_records,
     )
+    _seed_live(first_repository)
     first_resources = FileResourceStore(
         StorageLayout.at(data_root),
         first_lock,
@@ -453,6 +466,7 @@ def test_asset_error_parks_scheduler_then_recovery_replays_before_interrupt(
 
     started = first_scheduler.start()
     assert started.completed is True
+    assert first_scheduler.submit(ROUTE_JOB_ID).accepted
     assert first_scheduler.wait_until_idle(2.0) is True
     assert first_scheduler.ready is False
     assert first_scheduler.fatal_worker_error_code is (
@@ -471,7 +485,7 @@ def test_asset_error_parks_scheduler_then_recovery_replays_before_interrupt(
     restart_guard = InProcessPublicationCommitGuard(restart_lock)
     restart_registry = AttachmentUploadRegistry()
     restart_records = FileExecutionRecordStore(data_root, restart_lock)
-    restart_repository = JsonFileStateRepository(
+    restart_repository = CaseStateRepository(
         data_root,
         restart_lock,
         FakeClock(FIXED_TIME),
@@ -512,23 +526,16 @@ def test_asset_error_parks_scheduler_then_recovery_replays_before_interrupt(
     recovered = recovery.recover()
 
     assert recovered.completed is True
-    assert recovered.replayed_job_ids == (ROUTE_JOB_ID,)
-    assert [name for name, _ in restarted_control.operation_log] == [
-        "submit",
-        "interrupt",
-    ]
+    assert recovered.replayed_job_ids == ()
+    assert restarted_control.operation_log == []
     assert recovery_dispatcher.claiming_enabled is True
     assert len(first_runtime.calls) == 1
     replayed = restart_records.read_published_outcome(ROUTE_JOB_ID)
     assert replayed is not None
     assert canonical_json_bytes(replayed.job_outcome) == parked_bytes
-    aggregate = restart_repository.read_snapshot().cases[CASE_ID]
-    assert aggregate.jobs[ROUTE_JOB_ID].status is JobStatus.SUCCEEDED
-    assert aggregate.outcome_processing_records[route_outcome.outcome_id].disposition is (
-        OutcomeDisposition.APPLIED
-    )
-    assert aggregate.case.active_job_id is not None
-    assert aggregate.jobs[aggregate.case.active_job_id].status is JobStatus.PENDING
+    assert restart_repository.read_snapshot().cases == {}
+    first_repository.close()
+    restart_repository.close()
 
 
 def _alternate_diagnose_bindings(source: RuntimeBindings) -> RuntimeBindings:
@@ -542,7 +549,7 @@ def _alternate_diagnose_bindings(source: RuntimeBindings) -> RuntimeBindings:
     return RuntimeBindings.model_validate(payload)
 
 
-def test_recovery_adopts_prepublished_catalog_a_job_without_catalog_b_substitution(
+def test_restart_leaves_abandoned_job_bytes_untouched_without_adoption(
     tmp_path: Path,
 ) -> None:
     data_root = tmp_path / "data"
@@ -558,6 +565,7 @@ def test_recovery_adopts_prepublished_catalog_a_job_without_catalog_b_substituti
         execution_record_store=first_records,
     )
     first_repository.outcome_commit_faults.append(ErrorCode.STATE_WRITE_FAILED)
+    _seed_live(first_repository)
     first_resources = FileResourceStore(
         StorageLayout.at(data_root),
         first_lock,
@@ -609,7 +617,7 @@ def test_recovery_adopts_prepublished_catalog_a_job_without_catalog_b_substituti
     restart_guard = InProcessPublicationCommitGuard(restart_lock)
     restart_registry = AttachmentUploadRegistry()
     restart_records = FileExecutionRecordStore(data_root, restart_lock)
-    restart_repository = JsonFileStateRepository(
+    restart_repository = CaseStateRepository(
         data_root,
         restart_lock,
         FakeClock(FIXED_TIME),
@@ -657,19 +665,17 @@ def test_recovery_adopts_prepublished_catalog_a_job_without_catalog_b_substituti
     ).recover()
 
     assert recovered.completed is True
-    assert recovered.replayed_job_ids == (ROUTE_JOB_ID,)
+    assert recovered.replayed_job_ids == ()
     assert catalog_b.diagnose_calls == []
     adopted = restart_records.read_published_job(prospective_job_id)
     assert adopted is not None
     assert canonical_json_bytes(adopted.job) == catalog_a_bytes
     assert runtime_bindings_from_job(adopted.job) == catalog_a_bindings
     assert runtime_bindings_from_job(adopted.job) != catalog_b_bindings
-    aggregate = restart_repository.read_snapshot().cases[CASE_ID]
-    assert aggregate.jobs[prospective_job_id] == adopted.job
-    assert [name for name, _ in restarted_control.operation_log] == [
-        "submit",
-        "interrupt",
-    ]
+    assert restart_repository.read_snapshot().cases == {}
+    assert restarted_control.operation_log == []
+    first_repository.close()
+    restart_repository.close()
 
 
 def _real_route_catalog(tmp_path: Path) -> VersionedAssetCatalog:
@@ -704,7 +710,7 @@ def _state_with_catalog_route_job(catalog: VersionedAssetCatalog) -> tuple[State
     "code",
     [ErrorCode.STATE_CORRUPT, ErrorCode.STATE_SCHEMA_UNSUPPORTED],
 )
-def test_real_runtime_state_fault_fails_scheduler_and_next_start_only_interrupts(
+def test_real_runtime_state_fault_fails_scheduler_and_next_start_drops_active_work(
     tmp_path: Path,
     code: ErrorCode,
 ) -> None:
@@ -719,7 +725,6 @@ def test_real_runtime_state_fault_fails_scheduler_and_next_start_only_interrupts
     first_records = FileExecutionRecordStore(data_root, first_lock)
     with first_guard.acquire():
         first_records.publish_job(route)
-    layout.state.write_bytes(canonical_json_bytes(state))
     first_repository = _ReadCaseFaultRepository(
         data_root,
         first_lock,
@@ -728,6 +733,7 @@ def test_real_runtime_state_fault_fails_scheduler_and_next_start_only_interrupts
         execution_record_store=first_records,
         read_case_code=code,
     )
+    _seed_live(first_repository, state)
     first_resources = FileResourceStore(
         layout,
         first_lock,
@@ -766,6 +772,7 @@ def test_real_runtime_state_fault_fails_scheduler_and_next_start_only_interrupts
 
     started = first_scheduler.start()
     assert started.completed is True
+    assert first_scheduler.submit(ROUTE_JOB_ID).accepted
     assert first_scheduler.wait_until_idle(2.0) is True
     assert first_scheduler.ready is False
     assert first_scheduler.fatal_worker_error_type == "ApplicationPortError"
@@ -781,7 +788,7 @@ def test_real_runtime_state_fault_fails_scheduler_and_next_start_only_interrupts
     restart_guard = InProcessPublicationCommitGuard(restart_lock)
     restart_registry = AttachmentUploadRegistry()
     restart_records = FileExecutionRecordStore(data_root, restart_lock)
-    restart_repository = JsonFileStateRepository(
+    restart_repository = CaseStateRepository(
         data_root,
         restart_lock,
         FakeClock(FIXED_TIME),
@@ -817,14 +824,14 @@ def test_real_runtime_state_fault_fails_scheduler_and_next_start_only_interrupts
 
     assert recovered.completed is True
     assert recovered.replayed_job_ids == ()
-    assert recovered.interrupted_job_ids == (route.job_id,)
+    assert recovered.interrupted_job_ids == ()
     assert recovered.pending_job_ids == ()
     assert restarted_scheduler.ready is True
     assert restart_runtime.calls == []
-    recovered_state = restart_repository.read_snapshot().cases[CASE_ID]
-    assert recovered_state.jobs[route.job_id].status is JobStatus.INTERRUPTED
-    assert recovered_state.outcomes == {}
+    assert restart_repository.read_snapshot().cases == {}
     assert restarted_scheduler.shutdown(2.0) is True
+    first_repository.close()
+    restart_repository.close()
 
 
 def test_cancel_commit_wins_barrier_and_late_finalized_outcome_is_stale_once(
@@ -835,13 +842,14 @@ def test_cancel_commit_wins_barrier_and_late_finalized_outcome_is_stale_once(
     guard = InProcessPublicationCommitGuard(lock)
     registry = AttachmentUploadRegistry()
     records, _, _ = _seed_route_files(data_root, lock, guard)
-    repository = JsonFileStateRepository(
+    repository = CaseStateRepository(
         data_root,
         lock,
         FakeClock(FIXED_TIME),
         DeterministicIdGenerator(seed="s08-cancel-race-state"),
         execution_record_store=records,
     )
+    _seed_live(repository)
     resources = FileResourceStore(
         StorageLayout.at(data_root),
         lock,
@@ -873,6 +881,7 @@ def test_cancel_commit_wins_barrier_and_late_finalized_outcome_is_stale_once(
 
     started = scheduler.start()
     assert started.completed is True
+    assert scheduler.submit(ROUTE_JOB_ID).accepted
     assert runtime.finalized.wait(2.0) is True
     running = repository.read_snapshot().cases[CASE_ID]
     assert running.jobs[ROUTE_JOB_ID].status is JobStatus.RUNNING

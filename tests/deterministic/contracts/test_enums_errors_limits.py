@@ -404,7 +404,8 @@ def test_resource_limits_are_the_frozen_v1_values() -> None:
     assert limits.JOB_WALL_TIME_SECONDS == 1_800
     assert limits.JOB_STDOUT_STDERR_BYTES == 67_108_864
     assert limits.JOB_WORKSPACE_BYTES == 1_073_741_824
-    assert limits.ACTIVE_WORKERS == 1
+    assert (limits.ROUTE_WORKERS, limits.DIAGNOSE_WORKERS,
+        limits.LOGPARSE_CONCURRENCY, limits.ARCHIVE_WORKERS) == (1, 2, 1, 1)
 
 
 def test_retention_limits_are_explicit_and_not_derived_at_runtime() -> None:

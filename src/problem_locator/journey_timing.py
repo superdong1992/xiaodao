@@ -209,7 +209,7 @@ def _collect_wait_spans(lines: tuple[Any, ...], as_of: float) -> list[TimingSpan
             status, started = active
             result.append(
                 TimingSpan(
-                    label=f"用户等待（{status}）",
+                    label=f"等待材料（{status}）",
                     category="user_wait",
                     start_ms=_line_time(started),
                     end_ms=_line_time(line),
@@ -226,7 +226,7 @@ def _collect_wait_spans(lines: tuple[Any, ...], as_of: float) -> list[TimingSpan
             status, started = active
             result.append(
                 TimingSpan(
-                    label=f"用户等待（{status}）",
+                    label=f"等待材料（{status}）",
                     category="user_wait",
                     start_ms=_line_time(started),
                     end_ms=_line_time(line),
@@ -241,7 +241,7 @@ def _collect_wait_spans(lines: tuple[Any, ...], as_of: float) -> list[TimingSpan
         status, started = active
         result.append(
             TimingSpan(
-                label=f"用户等待（{status}）",
+                label=f"等待材料（{status}）",
                 category="user_wait",
                 start_ms=_line_time(started),
                 end_ms=as_of,

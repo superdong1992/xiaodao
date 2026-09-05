@@ -34,7 +34,7 @@ from problem_locator.journey import (
 )
 
 from .agent_telemetry import AgentStreamTelemetry, TelemetryTeeSink
-from .claude_command import ClaudeCommandError, prepare_claude_command
+from .claude_command import ClaudeCommandError, prepare_claude_command, apply_final_response_policy
 from .failures import RuntimeExecutionError, runtime_failure
 from .process_tree import ManagedProcess, ProcessTreeError, spawn_managed_process
 from .secret_redactor import StreamingSecretRedactor
@@ -82,6 +82,7 @@ class BackendExecution:
     stdout_stderr_bytes: int
     workspace_bytes: int
     elapsed_seconds: float
+    final_result: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +210,7 @@ class AgentBackend:
         test_limits: BackendExecutionLimits | None = None,
         diagnosis_mode: Literal["GENERIC", "SPECIALIZED"] = "SPECIALIZED",
         backend_phase: str = "UNSPECIFIED",
+        file_access: str | None = None,
     ) -> BackendExecution:
         backend_invocation_id = _next_backend_invocation_id()
         telemetry = AgentStreamTelemetry(monotonic=self._monotonic)
@@ -240,6 +242,7 @@ class AgentBackend:
                 telemetry=telemetry,
                 backend_phase=backend_phase,
                 backend_invocation_id=backend_invocation_id,
+                file_access=file_access,
             )
         except RuntimeExecutionError as exc:
             failure = exc.failure
@@ -300,6 +303,7 @@ class AgentBackend:
         telemetry: AgentStreamTelemetry,
         backend_phase: str,
         backend_invocation_id: str,
+        file_access: str | None = None,
     ) -> BackendExecution:
         limits = test_limits or BackendExecutionLimits.from_resource_limits(
             resource_limits
@@ -320,6 +324,8 @@ class AgentBackend:
                 parent_environment=self._parent_environment,
                 broker_environment=broker_environment,
             )
+            invocation = apply_final_response_policy(invocation, file_access=file_access,
+                workspace_root=workspace_root, phase=backend_phase)
         except ClaudeCommandError as exc:
             raise runtime_failure(
                 stage=ExecutionStage.BACKEND_START,
@@ -376,6 +382,7 @@ class AgentBackend:
         workspace_bytes = 0
         workspace_scan_count = 0
         workspace_scan_duration_ms = 0.0
+        next_workspace_scan = 0.0
         tree_released = False
         readers: tuple[threading.Thread, ...] = ()
         lifecycle_threads: tuple[threading.Thread, ...] = ()
@@ -504,9 +511,9 @@ class AgentBackend:
                     )
                     break
                 try:
-                    workspace_bytes = measure_workspace(
-                        allow_transient_changes=True
-                    )
+                    if self._monotonic() >= next_workspace_scan:
+                        workspace_bytes = measure_workspace(allow_transient_changes=True)
+                        next_workspace_scan = self._monotonic() + 1.0
                 except RuntimeExecutionError as exc:
                     primary_failure = exc.failure
                     break
@@ -648,11 +655,15 @@ class AgentBackend:
                 code=ErrorCode.WORKSPACE_LIMIT,
                 message="Agent Workspace exceeded the fixed byte limit.",
             )
+        if file_access is not None and not telemetry.permits_file_access(file_access):
+            raise runtime_failure(stage=ExecutionStage.OUTCOME_VALIDATE, code=ErrorCode.OUTCOME_INVALID,
+                message="Agent 使用了当前阶段不允许的文件工具。")
         result = BackendExecution(
             returncode=managed.process.returncode or 0,
             stdout_stderr_bytes=output_state.total,
             workspace_bytes=workspace_bytes,
             elapsed_seconds=max(0.0, self._monotonic() - started),
+            final_result=telemetry.final_result,
         )
         assert backend_execution_observed is not None
         record_stage_completed(

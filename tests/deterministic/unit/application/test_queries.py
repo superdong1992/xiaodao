@@ -88,7 +88,7 @@ class _FailingReadRepository(InMemoryStateRepository):
             )
         )
 
-    def read_snapshot(self) -> StateFile:
+    def read_snapshot(self, case_id=None, *, job_id=None, attachment_id=None, request_key=None) -> StateFile:
         raise self.error
 
 
@@ -97,7 +97,7 @@ class _CountingRepository(InMemoryStateRepository):
         super().__init__(state)
         self.read_snapshot_calls = 0
 
-    def read_snapshot(self) -> StateFile:
+    def read_snapshot(self, case_id=None, *, job_id=None, attachment_id=None, request_key=None) -> StateFile:
         self.read_snapshot_calls += 1
         return super().read_snapshot()
 

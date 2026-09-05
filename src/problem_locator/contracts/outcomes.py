@@ -1147,7 +1147,7 @@ def validate_transition_plan_for_outcome(
             raise ValueError("TransitionPlan accepts an unknown candidate proposal")
         if len(user_result_keys) != 1 or not user_result_keys <= accepted_artifacts:
             raise ValueError("an accepted candidate requires its unique USER_RESULT Artifact")
-        if len(archive_keys) != 1 or not archive_keys <= accepted_artifacts:
+        if not archive_keys <= accepted_artifacts:
             raise ValueError(
                 "an accepted candidate requires its USER_RESULT_ARCHIVE Artifact"
             )

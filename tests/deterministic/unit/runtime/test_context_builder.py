@@ -446,21 +446,17 @@ def test_production_output_contract_materializes_the_role_specific_protocol(
         assert len(content) < 4_096
         assert len(shared_schema) - len(content) > 30_000
         assert len(context.body.encode("utf-8")) < 8_192
-        assert b"exactly these twelve top-level" in content
-        assert b'`result_type="COMPLETED"`' in content
-        assert b'`result_type="NO_CAPABILITY"`' in content
-        assert b'`error`: `null`' in content
-        assert b"every registered production Methods Skill" in content
-        assert b"user-fact-name filter" in content
-        assert b"decides semantic compatibility" in content
+        assert all(field in content for field in (b'skill_id', b'reason', b'confidence'))
+        assert b'null' in content
+        assert '不要调用文件工具'.encode() in content
+        assert b'output/job_outcome.draft.json' not in content
         return
 
     assert content == production_contract.encode("utf-8")
     assert b"<<<BEGIN S00 AGENT JOB OUTCOME DRAFT SCHEMA>>>" not in content
-    assert b"output/job_outcome.draft.json" in content
-    assert b"Do not write" in content
     if job_type is JobType.DIAGNOSE:
-        assert b"output/method-diagnosis.draft.json" in content
+        assert '不要调用 Write'.encode() in content
+        assert b'output/method-diagnosis.draft.json' not in content
         assert b"inputs/request.json" in content
         assert b"inputs/target_logs.json" in content
         assert b"inputs/logparse-receipt.json" in content
@@ -469,6 +465,8 @@ def test_production_output_contract_materializes_the_role_specific_protocol(
         assert b"line_number" in content
     else:
         assert job_type is JobType.REVIEW
+        assert b"output/job_outcome.draft.json" in content
+        assert b"Do not write" in content
         assert b"output/method-review.draft.json" in content
         assert b"inputs/method-diagnosis.json" in content
         assert b"inputs/method-grounding-audit.json" in content

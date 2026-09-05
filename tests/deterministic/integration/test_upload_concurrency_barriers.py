@@ -118,9 +118,9 @@ class _ObservedPublicationCommitGuard(InProcessPublicationCommitGuard):
         super().__init__(coordination_lock)
         self._recorder = recorder
 
-    def acquire(self):
+    def acquire(self, case_id=None):
         self._recorder.record("publication-attempt")
-        lease = super().acquire()
+        lease = super().acquire(case_id)
         self._recorder.record("publication-acquired")
         return lease
 
@@ -272,7 +272,7 @@ class _ObservedRepository(InMemoryStateRepository):
         self._block_lock = threading.Lock()
         self._blocked_once = False
 
-    def read_snapshot(self) -> StateFile:
+    def read_snapshot(self, case_id=None, *, job_id=None, attachment_id=None, request_key=None) -> StateFile:
         snapshot = super().read_snapshot()
         self.recorder.record("snapshot-read")
         return snapshot

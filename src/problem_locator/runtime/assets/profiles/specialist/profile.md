@@ -29,6 +29,4 @@ evidence gap. Never invent or shorten a marker, or omit required evidence while
 still confirming the method. A marker hit alone does not satisfy the Wiki's
 complete confirmation conditions.
 
-Write only `output/method-diagnosis.draft.json` in the exact output-contract
-shape. Do not create a Candidate, Outcome, user report, ZIP, or any other
-artifact; the Server owns verification, domain mapping, and all report bytes.
+按照输出合同，在最终响应中直接返回诊断 JSON。输入已完整内联时，无需调用文件工具；超过内联上限时，完整读取服务端列出的文件。不要使用 Write 或创建草稿，服务端负责证据核验、状态映射和报告生成。

@@ -275,7 +275,7 @@ class ExternalCommandHandler:
         route_bindings = None
 
         for attempt in range(3):
-            snapshot = self._repository.read_snapshot()
+            snapshot = self._repository.read_snapshot(request_key=f"CreateCase:{command.idempotency_key}")
             replay = self._idempotency_result(snapshot, command)
             if replay is not None:
                 return self._respond(snapshot, replay, command.wait_seconds)
@@ -439,7 +439,7 @@ class ExternalCommandHandler:
         attachment_id: str | None = None
 
         for attempt in range(3):
-            snapshot = self._repository.read_snapshot()
+            snapshot = self._repository.read_snapshot(command.case_id, request_key=f"{type(command).__name__}:{command.idempotency_key}")
             replay = self._idempotency_result(snapshot, command)
             if replay is not None:
                 return self._respond(snapshot, replay, 0)
@@ -499,7 +499,7 @@ class ExternalCommandHandler:
                 upsert_attachments=[attachment],
                 insert_idempotency_records=[record],
             )
-            lease = self._publication_guard.acquire()
+            lease = self._publication_guard.acquire(command.case_id)
             try:
                 usage = self._resource_store.validate_case_capacity(
                     command.case_id,
@@ -572,7 +572,7 @@ class ExternalCommandHandler:
         fixed_diagnose_bindings: RuntimeBindings | None = None
 
         for attempt in range(3):
-            snapshot = self._repository.read_snapshot()
+            snapshot = self._repository.read_snapshot(command.case_id, request_key=f"{type(command).__name__}:{command.idempotency_key}")
             replay = self._idempotency_result(snapshot, command)
             if replay is not None:
                 return self._respond(snapshot, replay, command.wait_seconds)
@@ -692,7 +692,7 @@ class ExternalCommandHandler:
         replacement_job_id: str | None = None
 
         for attempt in range(3):
-            snapshot = self._repository.read_snapshot()
+            snapshot = self._repository.read_snapshot(command.case_id, request_key=f"{type(command).__name__}:{command.idempotency_key}")
             replay = self._idempotency_result(snapshot, command)
             if replay is not None:
                 return self._respond(snapshot, replay, command.wait_seconds)
@@ -860,7 +860,7 @@ class ExternalCommandHandler:
         trigger_id: str | None = None
 
         for attempt in range(3):
-            snapshot = self._repository.read_snapshot()
+            snapshot = self._repository.read_snapshot(command.case_id, request_key=f"{type(command).__name__}:{command.idempotency_key}")
             replay = self._idempotency_result(snapshot, command)
             if replay is not None:
                 return self._respond(snapshot, replay, 0)
@@ -1042,7 +1042,7 @@ class ExternalCommandHandler:
         *,
         publish_job: Job | None = None,
     ) -> CommitReceipt:
-        lease = self._publication_guard.acquire()
+        lease = self._publication_guard.acquire(mutation.upsert_case.case_id if mutation.upsert_case is not None else None)
         try:
             if publish_job is not None:
                 self._execution_records.publish_job(publish_job)
@@ -1708,7 +1708,7 @@ class ExternalCommandHandler:
                     data={"exception_type": type(exc).__name__},
                 )
         try:
-            state = self._repository.read_snapshot()
+            state = self._repository.read_snapshot(committed.receipt.case_id)
             return self._response_from_state(
                 state,
                 committed.receipt,
@@ -1823,7 +1823,7 @@ class ExternalCommandHandler:
                     )
                 except Exception:
                     changed = False
-                snapshot = self._repository.read_snapshot()
+                snapshot = self._repository.read_snapshot(case_id)
                 if not changed and self._response_wait_is_live(
                     snapshot,
                     case_id,

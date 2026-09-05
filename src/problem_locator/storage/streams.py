@@ -173,6 +173,9 @@ def copy_binary_stream(
                 raise ValueError("resource exceeds its byte limit")
             handle.write(chunk)
             digest.update(chunk)
+            # Release the consumed batch before the bridge assembles the next
+            # one; retaining it would add a third MiB to a single upload.
+            del chunk
         handle.flush()
         file_sync.sync_file(handle)
     return StreamCopyReceipt(size=size, sha256=digest.hexdigest())

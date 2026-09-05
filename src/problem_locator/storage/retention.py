@@ -28,7 +28,7 @@ from problem_locator.contracts.limits import (
 
 from .atomic import is_reparse_point, require_ordinary_file, require_real_directory
 from .layout import StorageLayout
-from .resource_files import scan_all_resources
+from .resource_files import iter_case_resource_nodes
 
 
 _OPAQUE_ID_ADAPTER = TypeAdapter(OpaqueId)
@@ -178,13 +178,18 @@ class RetentionScanner:
             if candidate is not None:
                 candidates.append(candidate)
 
-        for observation in scan_all_resources(self._layout).values():
+        formal_nodes = (
+            path
+            for case in self._real_directory_entries(self._layout.cases_resources)
+            for _key, path, _kind in iter_case_resource_nodes(self._layout, case.name)
+        )
+        for path in formal_nodes:
             candidate = self._candidate(
                 "FORMAL_RESOURCE",
-                observation.path,
+                path,
                 ORPHAN_RESOURCE_RETENTION_SECONDS,
                 now_ns,
-                timestamp_path=observation.path.parent,
+                timestamp_path=path.parent,
             )
             if candidate is not None:
                 candidates.append(candidate)

@@ -57,6 +57,7 @@ from problem_locator.entrypoints.replay import (
 )
 from problem_locator.entrypoints.settings import Settings
 from problem_locator.integrations.logparse import build_logparse_runtime
+from problem_locator.dispatch.archive import ArchiveService
 from problem_locator.interfaces.composition_hooks import (
     InterfaceDependencies,
     create_asgi_app,
@@ -86,7 +87,7 @@ from problem_locator.storage.retention_cleaner import (
     CleanupRunResult,
     StorageRetentionCleaner,
 )
-from problem_locator.storage.state_repository import JsonFileStateRepository
+from problem_locator.storage.state_repository import CaseStateRepository
 
 
 _SHUTDOWN_TIMEOUT_SECONDS = 30.0
@@ -359,7 +360,7 @@ def _state_resources(state: StateFile) -> list[StateExportResource]:
 
 
 def _export_state(
-    repository: JsonFileStateRepository,
+    repository: CaseStateRepository,
     coordination_lock: StorageCoordinationLock,
 ) -> bytes:
     with coordination_lock:
@@ -404,7 +405,7 @@ class ServiceStateAdmin:
         layout: StorageLayout,
         instance_lock: FileInstanceLock,
         coordination_lock: StorageCoordinationLock,
-        repository: JsonFileStateRepository,
+        repository: CaseStateRepository,
         scheduler: SchedulerService,
     ) -> None:
         self._layout = layout
@@ -415,7 +416,7 @@ class ServiceStateAdmin:
 
     def readiness(self) -> ReadinessReport:
         try:
-            validation = self._repository.validate_all()
+            validation = self._repository.health()
         except Exception:
             validation = _invalid_report(
                 _application_error(
@@ -494,13 +495,13 @@ class StandaloneStateAdmin:
     @contextmanager
     def _open_repository(
         self,
-    ) -> Iterator[tuple[JsonFileStateRepository, StorageCoordinationLock]]:
+    ) -> Iterator[tuple[CaseStateRepository, StorageCoordinationLock]]:
         try:
             layout = StorageLayout.at(self._data_root)
             layout.validate_v2_data_format()
             for directory in _layout_directories(layout):
                 require_real_directory(directory)
-            require_ordinary_file(layout.state)
+            require_ordinary_file(layout.data_root / "completed.sqlite3")
         except UnsupportedDataFormatError as exc:
             raise _port_error(
                 ErrorCode.STATE_SCHEMA_UNSUPPORTED,
@@ -524,14 +525,17 @@ class StandaloneStateAdmin:
         try:
             coordination_lock = StorageCoordinationLock()
             records = FileExecutionRecordStore(layout.data_root, coordination_lock)
-            repository = JsonFileStateRepository(
+            repository = CaseStateRepository(
                 layout.data_root,
                 coordination_lock,
                 ProductionClock(),
                 UuidIdGenerator(),
                 execution_record_store=records,
             )
-            yield repository, coordination_lock
+            try:
+                yield repository, coordination_lock
+            finally:
+                repository.close()
         except ApplicationPortError:
             raise
         except (OSError, TypeError, ValueError) as exc:
@@ -629,7 +633,7 @@ class RetentionService:
         *,
         layout: StorageLayout,
         coordination_lock: StorageCoordinationLock,
-        repository: JsonFileStateRepository,
+        repository: CaseStateRepository,
         resource_store: FileResourceStore,
         execution_records: FileExecutionRecordStore,
         ids: UuidIdGenerator,
@@ -768,7 +772,7 @@ class ServiceComposition:
     attachment_registry: AttachmentUploadRegistry
     upload_guard: InProcessAttachmentUploadGuard
     execution_records: FileExecutionRecordStore
-    repository: JsonFileStateRepository
+    repository: CaseStateRepository
     resource_store: FileResourceStore
     file_sync: PlatformFileSync
     replacer: PlatformReplaceOperation
@@ -780,6 +784,7 @@ class ServiceComposition:
     runtime: DiagnosisRuntime
     scheduler: SchedulerService
     retention: RetentionService
+    archive: ArchiveService
     state_admin: ServiceStateAdmin
     _lifecycle_lock: threading.Lock = field(
         default_factory=threading.Lock,
@@ -833,6 +838,7 @@ class ServiceComposition:
         try:
             result = self.scheduler.start()
             if result.completed:
+                self.archive.start()
                 self.retention.start()
         finally:
             with self._lifecycle_condition:
@@ -861,6 +867,7 @@ class ServiceComposition:
         retention_stopped = self.retention.shutdown(
             max(0.0, deadline - time.monotonic())
         )
+        archive_stopped = self.archive.shutdown(max(0.0, deadline - time.monotonic()))
         with self._lifecycle_condition:
             if self._start_in_progress:
                 self._lifecycle_condition.wait_for(
@@ -870,6 +877,7 @@ class ServiceComposition:
             safe_to_release = (
                 scheduler_stopped
                 and retention_stopped
+                and archive_stopped
                 and not self._start_in_progress
             )
 
@@ -881,6 +889,7 @@ class ServiceComposition:
                 "managed service threads did not stop before the shutdown deadline"
             )
 
+        self.repository.close()
         self.instance_lock.release()
         with self._lifecycle_condition:
             self._closed = True
@@ -1034,6 +1043,7 @@ def _assemble(
             settings.logparse_repo,
             settings.logparse_config_path,
             settings.logparse_python,
+            concurrency=settings.logparse_concurrency,
         )
         asset_catalog = VersionedAssetCatalog(
             skill_dir=settings.skill_dir,
@@ -1119,7 +1129,7 @@ def _assemble(
             file_sync,
             replacer,
         )
-        repository = JsonFileStateRepository(
+        repository = CaseStateRepository(
             layout.data_root,
             coordination_lock,
             clock,
@@ -1174,6 +1184,7 @@ def _assemble(
             file_sync=file_sync,
             replacer=replacer,
         )
+        repository.on_terminal = resource_store.forget_case
         dispatcher = LateBoundDispatcher()
         application = build_application_service(
             repository=repository,
@@ -1215,6 +1226,8 @@ def _assemble(
             application,
             runtime,
             ids,
+            route_workers=settings.route_workers,
+            diagnose_workers=settings.diagnose_workers,
         )
         dispatcher.bind(scheduler)
         retention = RetentionService(
@@ -1235,6 +1248,8 @@ def _assemble(
             repository=repository,
             scheduler=scheduler,
         )
+        archive = ArchiveService(repository, resource_store, publication_guard, notifier, clock,
+            workers=settings.archive_workers)
         return ServiceComposition(
             settings=settings,
             clock=clock,
@@ -1259,6 +1274,7 @@ def _assemble(
             runtime=runtime,
             scheduler=scheduler,
             retention=retention,
+            archive=archive,
             state_admin=state_admin,
         )
     except Exception as exc:

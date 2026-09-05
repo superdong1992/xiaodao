@@ -113,7 +113,7 @@ def test_methods_v1_asset_versions_match_the_builtin_catalog() -> None:
         assert _BUILTIN_SPECS_BY_ID[asset_id].version == version
 
 
-def test_router_writes_one_server_finalized_draft_without_a_tool_round_trip() -> None:
+def test_router_returns_minimal_json_without_file_tools() -> None:
     contract_meta, contract = _asset("output-contracts/route")
     tool_meta, tool_bundle_text = _asset("tool-bundles/router")
     tool_bundle = json.loads(tool_bundle_text)
@@ -121,9 +121,9 @@ def test_router_writes_one_server_finalized_draft_without_a_tool_round_trip() ->
     assert contract_meta["version"] == "5.0.0"
     assert tool_meta["version"] == "3.0.0"
     assert tool_bundle == {"schema_version": 1, "tools": []}
-    assert "then exit without invoking another tool" in contract
+    assert "不要调用文件工具" in contract
     assert "problem-locator-seal-outcome-draft" not in contract
-    assert "independently parses, validates" in contract
+    assert all(field in contract for field in ('skill_id', 'reason', 'confidence'))
 
 
 def test_router_profile_does_not_claim_the_unfiltered_skill_index_was_prefiltered() -> None:
@@ -145,7 +145,8 @@ def test_specialist_assets_require_grounded_methods_v1_output() -> None:
     assert tool_meta["version"] == "4.0.0"
     assert "SPECIALIST" in profile
     assert "authoritative target logs" in profile
-    assert "output/method-diagnosis.draft.json" in contract
+    assert "不要调用 Write" in contract
+    assert "output/method-diagnosis.draft.json" not in contract
     assert "inputs/request.json" in contract
     assert "inputs/target_logs.json" in contract
     assert "inputs/logparse-receipt.json" in contract
@@ -156,7 +157,7 @@ def test_specialist_assets_require_grounded_methods_v1_output() -> None:
     assert "CONFIRMED" in contract
     assert "PARTIAL" in contract
     assert "INSUFFICIENT" in contract
-    assert "output/job_outcome.draft.json" in contract
+    assert "output/job_outcome.draft.json" not in contract
     assert "Candidate, Outcome, JSON, or ZIP" in contract
     assert "problem-locator-logparse" not in tool_bundle
     assert "problem-locator-seal-outcome-draft" not in tool_bundle

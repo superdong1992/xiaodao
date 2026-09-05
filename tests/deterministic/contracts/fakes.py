@@ -583,7 +583,7 @@ class InMemoryPublicationCommitGuard:
     def coordination_lock(self) -> threading.RLock:
         return self._lock
 
-    def acquire(self) -> PublicationCommitLease:
+    def acquire(self, case_id: str | None = None) -> PublicationCommitLease:
         self._lock.acquire()
         thread_id = threading.get_ident()
         self.acquire_calls += 1
@@ -1661,7 +1661,8 @@ class InMemoryStateRepository:
                 "The requested Artifact does not exist.",
             )
 
-    def read_snapshot(self) -> StateFile:
+    def read_snapshot(self, case_id: str | None = None, *, job_id: str | None = None,
+                      attachment_id: str | None = None, request_key: str | None = None) -> StateFile:
         with self._lock:
             self._maybe_fail_read("read_snapshot")
             return _clone(self._require_state())

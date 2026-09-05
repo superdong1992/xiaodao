@@ -19,6 +19,7 @@ from typing import Any, Mapping
 from problem_locator.contracts import canonical_json_sha256
 
 from .catalog_hash import hash_product_directory
+from .asset_snapshot import snapshot_asset
 
 
 _KEBAB = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
@@ -839,6 +840,9 @@ def load_specialized_skill_registration(registration_root: Path) -> ResolvedSpec
     """Resolve one product-owned registration and its closed generated package."""
 
     root = Path(registration_root)
+    frozen = snapshot_asset(root)
+    if frozen is not None and frozen[1] is not None:
+        return frozen[1]
     _real_directory(root, label="specialized Skill registration root")
     try:
         root_entries = {item.name for item in root.iterdir()}

@@ -106,7 +106,7 @@ class _CountingRepository(InMemoryStateRepository):
         super().__init__(state)
         self.read_snapshot_calls = 0
 
-    def read_snapshot(self) -> StateFile:
+    def read_snapshot(self, case_id=None, *, job_id=None, attachment_id=None, request_key=None) -> StateFile:
         self.read_snapshot_calls += 1
         return super().read_snapshot()
 
@@ -116,7 +116,7 @@ class _ReadFailsAfterCommitRepository(_CountingRepository):
         super().__init__(state)
         self.fail_next_read = False
 
-    def read_snapshot(self) -> StateFile:
+    def read_snapshot(self, case_id=None, *, job_id=None, attachment_id=None, request_key=None) -> StateFile:
         if self.fail_next_read:
             self.fail_next_read = False
             raise _port_error(ErrorCode.STATE_CORRUPT, "injected post-commit failure")

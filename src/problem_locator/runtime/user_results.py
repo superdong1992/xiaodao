@@ -42,8 +42,7 @@ from problem_locator.contracts import (
 )
 from problem_locator.integrations.result_archive import (
     ResultArchiveLog,
-    build_result_archive,
-    validate_result_archive_bytes,
+    prepare_result_archive,
 )
 
 from .authoritative_targets import AuthoritativeTargetSet
@@ -766,39 +765,10 @@ def build_server_result_bundle(
     files = [ServerGeneratedResultFile(draft=result_draft, content=report_bytes)]
     if candidate_result:
         archive_logs = _result_archive_logs(captured_logs, report)
-        problem_time = (
-            None if authoritative_targets is None else authoritative_targets.problem_time
-        )
-        archive_bytes = build_result_archive(
+        result_draft.metadata.archive_plan = prepare_result_archive(
             report,
-            problem_time=problem_time,
+            problem_time=None if authoritative_targets is None else authoritative_targets.problem_time,
             target_logs=archive_logs,
-        )
-        validate_result_archive_bytes(
-            archive_bytes,
-            report=report,
-            problem_time=problem_time,
-            target_logs=archive_logs,
-        )
-        archive_draft = AgentArtifactProposalDraft(
-            proposal_key=_ARCHIVE_KEY,
-            artifact_kind=ArtifactKind.USER_RESULT_ARCHIVE,
-            name="result.zip",
-            content_type="application/zip",
-            resource_kind=ResourceKind.FILE,
-            workspace_relative_path=f"output/proposals/{_ARCHIVE_KEY}/result.zip",
-            declared_size=len(archive_bytes),
-            declared_sha256=bytes_sha256(archive_bytes),
-            metadata=UserResultArchiveMetadataV3(
-                schema_version=3,
-                format_id="problem-locator-result-archive-v3",
-                description="服务端验证后生成的诊断结果归档 v3。",
-                user_result_proposal_key=_RESULT_KEY,
-                target_log_count=len(archive_logs),
-            ),
-        )
-        files.append(
-            ServerGeneratedResultFile(draft=archive_draft, content=archive_bytes)
         )
     return ServerResultBundle(report=report, files=tuple(files))
 

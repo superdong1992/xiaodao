@@ -24,6 +24,10 @@ EXPECTED_ENV_KEYS = {
     "PORT",
     "PUBLIC_BASE_URL",
     "SKILL_DIR",
+    "ROUTE_WORKERS",
+    "DIAGNOSE_WORKERS",
+    "LOGPARSE_CONCURRENCY",
+    "ARCHIVE_WORKERS",
 }
 EXPECTED_TEST_ROOTS = [
     "tests/deterministic",
@@ -69,12 +73,12 @@ def test_release_metadata_keeps_the_offline_database_boundary() -> None:
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     required_release_boundaries = (
-        "State、Job 和权威 Outcome 已硬切到 V9",
-        "Replay every durable, finalized but unconfirmed Job Outcome",
-        "`state.json` approaches 16 MiB",
-        "retained history approaches 500 Cases",
-        "second service instance or high availability",
-        "keep the original JSON root read-only",
+        "State、Job 和权威 Outcome 已切换到 V10",
+        "不重放活动任务或未确认的 Outcome",
+        "SQLite WAL + FULL",
+        "旧数据目录原样保留",
+        "活动 Case、Job、幂等记录和中间状态不恢复",
+        "archive_status=PENDING|READY|FAILED",
     )
     for statement in required_release_boundaries:
         assert statement in readme

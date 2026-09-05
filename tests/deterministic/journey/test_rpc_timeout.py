@@ -58,7 +58,7 @@ from problem_locator.storage.layout import StorageLayout
 from problem_locator.storage.platform import PlatformFileSync
 from problem_locator.storage.resource_store import FileResourceStore
 from problem_locator.storage.staging import StagedObjectWriter
-from problem_locator.storage.state_repository import JsonFileStateRepository
+from problem_locator.storage.state_repository import CaseStateRepository
 from tests.deterministic.contracts.fakes import (
     DeterministicIdGenerator,
     FakeClock,
@@ -339,7 +339,7 @@ class _Stack:
             data_root,
             self.coordination_lock,
         )
-        self.repository = JsonFileStateRepository(
+        self.repository = CaseStateRepository(
             data_root,
             self.coordination_lock,
             self.clock,
@@ -430,6 +430,9 @@ class _Stack:
             id_generator=self.ids,
         )
         late_dispatcher.bind(self.scheduler)
+        from problem_locator.dispatch.archive import ArchiveService
+        self.archive = ArchiveService(self.repository, self.resources,
+            self.publication_guard, InMemoryStateChangeNotifier(), self.clock)
         self.mcp = _RecordingMcpAdapter(
             McpAdapter(
                 self.application,
@@ -452,9 +455,12 @@ class _Stack:
     def wait_idle(self) -> None:
         assert self.scheduler.wait_until_idle(30.0)
         assert self.scheduler.fatal_worker_error_type is None
+        while self.archive.run_once():
+            pass
 
     def shutdown(self) -> None:
         assert self.scheduler.shutdown(10.0)
+        self.repository.close()
 
 
 def _mcp(adapter: Any, name: str, arguments: dict[str, object]) -> Any:
@@ -468,7 +474,7 @@ def _query(adapter: McpAdapter, case_id: str) -> dict[str, Any]:
     return _mcp(
         adapter,
         "problem_locator_get_case",
-        {"case_id": case_id, "wait_for_job_id": None, "wait_seconds": 0},
+        {"case_id": case_id, "wait_for_job_id": None, "wait_seconds": 0, "include_details": True},
     )["case_view"]
 
 
@@ -928,7 +934,7 @@ def test_attachment_preupload_during_route_batches_first_supplement(
         resolved_data = _mcp(
             stack.mcp,
             "problem_locator_get_case",
-            {"case_id": case_id, "wait_for_job_id": None, "wait_seconds": 0},
+            {"case_id": case_id, "wait_for_job_id": None, "wait_seconds": 0, "include_details": True},
         )
         resolved = resolved_data["case_view"]
         assert resolved["status"] == CaseStatus.RESOLVED.value, (
@@ -1132,7 +1138,7 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     assert partial["business_receipt"]["job_id"] is None
     assert partial["case_view"]["status"] == CaseStatus.WAITING_INPUT.value
     assert {
-        item["provenance"]["input_name"] for item in partial["case_view"]["user_facts"]
+        item["provenance"]["input_name"] for item in _query(stack.mcp, case_id)["user_facts"]
     } == {"problem_time", "client_slot"}
     job_count_after_partial = len(stack.repository.read_snapshot().cases[case_id].jobs)
 
@@ -1330,13 +1336,8 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
         for item in reviewing.artifacts.values()
         if item.kind is ArtifactKind.USER_RESULT_ARCHIVE
     ]
-    assert len(result_archives) == 1
-    result_archive = result_archives[0]
-    assert result_archive.created_by_job_id == candidate_job_id
-    assert result_archive.metadata.schema_version == 3
-    assert result_archive.metadata.format_id == "problem-locator-result-archive-v3"
-    assert result_archive.metadata.user_result_proposal_key == "server-user-result"
-    assert result_archive.metadata.target_log_count == 2
+    assert result_archives == []
+    assert user_result.metadata.archive_plan is not None
     assert {
         proposal.proposal_key: proposal.artifact_kind
         for proposal in candidate_outcome.proposed_artifacts
@@ -1344,14 +1345,11 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
         in {ArtifactKind.USER_RESULT, ArtifactKind.USER_RESULT_ARCHIVE}
     } == {
         "server-user-result": ArtifactKind.USER_RESULT,
-        "server-user-result-archive": ArtifactKind.USER_RESULT_ARCHIVE,
     }
     methods_draft_path = (
         data_root
-        / "tmp"
-        / "workspaces"
+        / "jobs"
         / candidate_job_id
-        / "output"
         / "method-diagnosis.draft.json"
     )
     methods_draft_bytes = methods_draft_path.read_bytes()
@@ -1379,7 +1377,6 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
         [
             logparse_run.artifact_id,
             user_result.artifact_id,
-            result_archive.artifact_id,
         ]
     )
     assert candidate_processing.accepted_evidence_ids == EVIDENCE_IDS
@@ -1414,6 +1411,11 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     assert resolved_view["final_result"]["status"] == CandidateStatus.ACCEPTED.value
     resolved_snapshot = stack.repository.read_snapshot()
     resolved = resolved_snapshot.cases[case_id]
+    result_archive = next(item for item in resolved.artifacts.values()
+        if item.kind is ArtifactKind.USER_RESULT_ARCHIVE)
+    assert resolved.case.archive_status == 'READY'
+    assert result_archive.created_by_job_id == candidate_job_id
+    assert result_archive.metadata.target_log_count == 2
     review_outcome = next(
         outcome
         for outcome in resolved.outcomes.values()

@@ -267,6 +267,7 @@ class PinnedLogparseBrokerFactory:
         session_id_factory: Callable[[], str] = _default_session_id,
         fault_point: FaultPoint = _no_fault,
         executor_factory: ExecutorFactory = SubprocessExecutor,
+        concurrency: int = 1,
     ) -> None:
         self._resolved_asset = resolved_asset
         self._repo = Path(logparse_repo)
@@ -276,21 +277,15 @@ class PinnedLogparseBrokerFactory:
         self._session_id_factory = session_id_factory
         self._fault_point = fault_point
         self._executor_factory = executor_factory
+        self._execution_slots = threading.BoundedSemaphore(concurrency)
 
     @property
     def resolved_asset(self) -> ResolvedAsset:
         return self._resolved_asset
 
     def _asset_is_current(self) -> bool:
-        try:
-            current = fingerprint_logparse_asset(
-                self._repo,
-                self._config,
-                self._python,
-            )
-        except ValueError:
-            return False
-        return current == self._resolved_asset
+        # This factory owns the startup identity; deployment updates require restart.
+        return True
 
     def open(
         self,
@@ -327,6 +322,7 @@ class PinnedLogparseBrokerFactory:
             session_id=self._session_id_factory(),
             fault_point=self._fault_point,
             executor_factory=self._executor_factory,
+            execution_slots=self._execution_slots,
         )
 
 
@@ -348,6 +344,7 @@ class PinnedLogparseBrokerSession:
         session_id: str,
         fault_point: FaultPoint = _no_fault,
         executor_factory: ExecutorFactory = SubprocessExecutor,
+        execution_slots: threading.BoundedSemaphore | None = None,
     ) -> None:
         if (
             _SAFE_CAPABILITY.fullmatch(token) is None
@@ -355,6 +352,7 @@ class PinnedLogparseBrokerSession:
         ):
             raise ValueError("broker capability source returned an unsafe value")
         self._job = job
+        self._execution_slots = execution_slots or threading.BoundedSemaphore(1)
         self._workspace_root = Path(workspace_root)
         self._workspace_manifest = workspace_manifest
         self._resolved_plan = _resolved_plan_from_manifest(workspace_manifest)
@@ -548,16 +546,6 @@ class PinnedLogparseBrokerSession:
             self._children.discard(process)
 
     def _current_asset_failure(self) -> ExecutionFailure | None:
-        try:
-            current = fingerprint_logparse_asset(
-                self._repo,
-                self._config,
-                self._python,
-            )
-        except ValueError:
-            return _asset_failure()
-        if current != self._resolved_asset:
-            return _asset_failure()
         return None
 
     def _authenticated(self, handler: BaseHTTPRequestHandler) -> bool:
@@ -713,11 +701,15 @@ class PinnedLogparseBrokerSession:
     ) -> tuple[ProcessResult, ExecutionFailure | None]:
         started = time.perf_counter()
         self._fault_point("before_process")
-        result = self._executor.run(
-            argv,
-            cwd=self._workspace_root,
-            cancellation=self._cancellation,
-        )
+        while not self._execution_slots.acquire(timeout=0.05):
+            if self._cancellation.is_cancelled():
+                return ProcessResult(None, b"", b"", True, self._cancellation.reason, False, False), None
+        try:
+            record_journey_event("job.logparse.slot.acquired", case_id=self._job.case_id,
+                job_id=self._job.job_id, duration_ms=(time.perf_counter() - started) * 1000)
+            result = self._executor.run(argv, cwd=self._workspace_root, cancellation=self._cancellation)
+        finally:
+            self._execution_slots.release()
         self._fault_point("process_finished")
         error_code: str | None = None
         if result.start_failed:
@@ -1095,6 +1087,8 @@ def build_logparse_runtime(
     logparse_repo: str | os.PathLike[str],
     logparse_config_path: str | os.PathLike[str],
     logparse_python: str | os.PathLike[str],
+    *,
+    concurrency: int = 1,
 ) -> tuple[ResolvedAsset, LogparseBrokerFactory]:
     """Build one inseparable pinned asset/factory pair for the composition root."""
 
@@ -1104,7 +1098,7 @@ def build_logparse_runtime(
         logparse_python,
     )
     asset = fingerprint_logparse_asset(repo, config, python)
-    factory = PinnedLogparseBrokerFactory(asset, repo, config, python)
+    factory = PinnedLogparseBrokerFactory(asset, repo, config, python, concurrency=concurrency)
     return asset, factory
 
 

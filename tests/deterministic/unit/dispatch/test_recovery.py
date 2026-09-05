@@ -376,7 +376,7 @@ def _coordinator(
     return coordinator, view, records, application, dispatcher, epoch_context
 
 
-def test_pending_job_is_redispatched_with_same_id_only_after_recovery_completes() -> None:
+def test_startup_does_not_redispatch_or_persist_old_pending_work() -> None:
     state = _state_with_job_status(JobStatus.PENDING)
     coordinator, view, _, application, dispatcher, epoch_context = _coordinator(state)
     job_id = next(iter(next(iter(state.cases.values())).jobs))
@@ -387,26 +387,16 @@ def test_pending_job_is_redispatched_with_same_id_only_after_recovery_completes(
     assert result.completed
     assert result.runtime_epoch == CURRENT_EPOCH
     assert result.replayed_job_ids == ()
-    assert result.pending_job_ids == (job_id,)
-    assert application.operation_log == [("interrupt", CURRENT_EPOCH)]
-    assert dispatcher.submitted == [job_id]
+    assert result.pending_job_ids == ()
+    assert application.operation_log == []
+    assert dispatcher.submitted == []
     assert dispatcher.claiming_enabled
     assert epoch_context.require() == CURRENT_EPOCH
-    recovered = view.read_snapshot()
-    processing = recovered.recovery_processing_records[CURRENT_EPOCH]
-    epoch_record = next(
-        record
-        for record in recovered.runtime_epochs
-        if record.runtime_epoch == CURRENT_EPOCH
-    )
-    assert processing.current_runtime_epoch == CURRENT_EPOCH
-    assert processing.interrupted_job_ids == []
-    assert processing.pending_job_ids == [job_id]
-    assert processing.completed_at == epoch_record.recovery_completed_at
+    assert view.read_snapshot_calls == 0
     assert view.read_job(job_id) == original_job
 
 
-def test_recovery_scans_by_case_then_dispatches_persisted_global_job_order() -> None:
+def test_startup_does_not_scan_history_or_order_old_jobs() -> None:
     state, rows = _two_case_pending_state()
     records = RecordingExecutionRecordStore()
     coordinator, _, _, _, dispatcher, _ = _coordinator(
@@ -416,16 +406,14 @@ def test_recovery_scans_by_case_then_dispatches_persisted_global_job_order() -> 
 
     result = coordinator.recover()
 
-    expected_scan = [job_id for _, job_id in sorted(rows)]
-    expected_pending = sorted(job_id for _, job_id in rows)
     assert result.completed
-    assert records.read_outcome_calls == expected_scan
-    assert result.pending_job_ids == tuple(expected_pending)
-    assert dispatcher.submitted == expected_pending
+    assert records.read_outcome_calls == []
+    assert result.pending_job_ids == ()
+    assert dispatcher.submitted == []
     assert dispatcher.claiming_enabled
 
 
-def test_finalized_old_running_outcome_is_replayed_before_interrupt() -> None:
+def test_startup_does_not_replay_finalized_old_running_outcome() -> None:
     scenario = next(
         item
         for item in load_dispatch_fixture("startup-outbox.json")["scenarios"]
@@ -449,885 +437,16 @@ def test_finalized_old_running_outcome_is_replayed_before_interrupt() -> None:
     result = coordinator.recover()
 
     assert result.completed
-    assert result.replayed_job_ids == (outcome.job_id,)
+    assert result.replayed_job_ids == ()
     assert result.interrupted_job_ids == ()
-    assert [name for name, _ in application.operation_log] == ["submit", "interrupt"]
+    assert application.operation_log == []
     assert dispatcher.submitted == []
 
 
-def test_replayed_outcome_cannot_leave_the_job_pending_for_agent_rerun() -> None:
-    state = _state_with_job_status(JobStatus.PENDING)
-    records = InMemoryExecutionRecordStore()
-    outcome = load_outcome("route")
-    records.publish_outcome_bytes(outcome.job_id, canonical_json_bytes(outcome))
-    coordinator, view, _, application, dispatcher, _ = _coordinator(
-        state,
-        records=records,
-    )
-
-    def persist_processing_only(_outcome, _ref, disposition) -> None:
-        payload = view.read_snapshot().model_dump(mode="json")
-        aggregate = next(iter(payload["cases"].values()))
-        receipt = runtime_receipt(outcome)
-        aggregate["outcomes"][outcome.outcome_id] = outcome.model_dump(mode="json")
-        aggregate["outcome_processing_records"][outcome.outcome_id] = {
-            "outcome_id": outcome.outcome_id,
-            "job_id": outcome.job_id,
-            "outcome_hash": receipt.outcome_file_ref.sha256,
-            "outcome_file_ref": receipt.outcome_file_ref.model_dump(mode="json"),
-            "disposition": disposition.value,
-            "processed_at": FINISHED_AT,
-            "error_code": None,
-            "accepted_evidence_ids": [],
-            "accepted_artifact_ids": [],
-            "created_job_id": None,
-            "reason": "Injected invalid active replay state.",
-        }
-        view.replace(StateFile.model_validate(payload))
-
-    application.on_submit = persist_processing_only
-
-    result = coordinator.recover()
-
-    assert not result.completed
-    assert result.failure_type == "RecoveryInvariantError"
-    assert result.replayed_job_ids == (outcome.job_id,)
-    assert application.interrupt_calls == []
-    assert dispatcher.submitted == []
-    assert not dispatcher.claiming_enabled
-
-
-def test_old_running_without_finalized_outcome_is_interrupted_not_reexecuted() -> None:
-    state = _state_with_job_status(JobStatus.RUNNING)
-    coordinator, view, _, application, dispatcher, _ = _coordinator(state)
-    job_id = next(iter(next(iter(state.cases.values())).jobs))
-
-    result = coordinator.recover()
-
-    assert result.completed
-    assert result.replayed_job_ids == ()
-    assert result.interrupted_job_ids == (job_id,)
-    assert view.read_job(job_id).status is JobStatus.INTERRUPTED
-    assert application.submit_calls == []
-    assert dispatcher.submitted == []
-    processing = view.read_snapshot().recovery_processing_records[CURRENT_EPOCH]
-    assert processing.interrupted_job_ids == [job_id]
-    assert processing.pending_job_ids == []
-
-
-def test_replay_retries_the_same_finalized_receipt_before_interrupt() -> None:
-    state = _state_with_job_status(JobStatus.RUNNING)
-    records = InMemoryExecutionRecordStore()
-    outcome = load_outcome("route")
-    records.publish_outcome_bytes(outcome.job_id, canonical_json_bytes(outcome))
-    application = FakeApplicationService(
-        [next(iter(next(iter(state.cases.values())).jobs.values()))]
-    )
-    retry_codes = [
-        ErrorCode.RESOURCE_PUBLISH_FAILED,
-        ErrorCode.STATE_WRITE_FAILED,
-        ErrorCode.REVISION_CONFLICT,
-        ErrorCode.EXECUTION_RECORD_FAILED,
-        ErrorCode.RESOURCE_PUBLISH_FAILED,
-        ErrorCode.STATE_WRITE_FAILED,
-        ErrorCode.EXECUTION_RECORD_FAILED,
-    ]
-    assert frozenset(retry_codes) == JOB_OUTCOME_SUBMISSION_RETRY_ERROR_CODES
-    application.submit_failures.extend(
-        application_port_error(code) for code in retry_codes
-    )
-    backoff = ManualSubmissionBackoff()
-    coordinator, view, _, application, dispatcher, _ = _coordinator(
-        state,
-        records=records,
-        application=application,
-        backoff=backoff,
-    )
-    application.on_submit = lambda _outcome, _ref, disposition: _record_processed_outcome(
-        view, disposition
-    )
-
-    result = coordinator.recover()
-
-    assert result.completed
-    assert result.replayed_job_ids == (outcome.job_id,)
-    assert len(application.submit_calls) == len(retry_codes) + 1
-    assert backoff.delays == [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 5.0]
-    first_outcome, first_ref = application.submit_calls[0]
-    assert all(
-        replayed_outcome is first_outcome and replayed_ref is first_ref
-        for replayed_outcome, replayed_ref in application.submit_calls
-    )
-    assert [name for name, _ in application.operation_log] == [
-        *("submit" for _ in range(len(retry_codes) + 1)),
-        "interrupt",
-    ]
-    assert dispatcher.claiming_enabled
-
-
-@pytest.mark.parametrize(
-    "code",
-    sorted(JOB_OUTCOME_SUBMISSION_PARK_ERROR_CODES, key=lambda code: code.value),
-)
-def test_replay_park_error_preserves_outbox_without_backoff_or_interrupt(
-    code: ErrorCode,
-) -> None:
-    state = _state_with_job_status(JobStatus.RUNNING)
-    records = InMemoryExecutionRecordStore()
-    outcome = load_outcome("route")
-    records.publish_outcome_bytes(outcome.job_id, canonical_json_bytes(outcome))
-    application = FakeApplicationService(
-        [next(iter(next(iter(state.cases.values())).jobs.values()))]
-    )
-    application.submit_failures.append(application_port_error(code))
-    backoff = ManualSubmissionBackoff()
-    coordinator, view, _, application, dispatcher, _ = _coordinator(
-        state,
-        records=records,
-        application=application,
-        backoff=backoff,
-    )
-
-    result = coordinator.recover()
-
-    assert not result.completed
-    assert result.failure_type == "ApplicationPortError"
-    assert result.failure_code is code
-    assert len(application.submit_calls) == 1
-    assert application.interrupt_calls == []
-    assert dispatcher.submitted == []
-    assert not dispatcher.claiming_enabled
-    assert backoff.delays == []
-    aggregate = next(iter(view.read_snapshot().cases.values()))
-    assert outcome.outcome_id not in aggregate.outcome_processing_records
-    assert records.read_published_outcome(outcome.job_id) is not None
-
-
-def test_repaired_asset_replays_the_same_canonical_outbox_on_next_recovery() -> None:
-    state = _state_with_job_status(JobStatus.PENDING)
-    view = FakeRecoveryView(state)
-    job = next(iter(next(iter(state.cases.values())).jobs.values()))
-    records = RecordingExecutionRecordStore()
-    outcome = load_outcome("route")
-    receipt = runtime_receipt(outcome)
-
-    def publish_finalized_outcome(_job, _cancellation):
-        records.publish_outcome_bytes(
-            receipt.job_outcome.job_id,
-            canonical_json_bytes(receipt.job_outcome),
-        )
-        return receipt
-
-    runtime = FakeRuntime([publish_finalized_outcome])
-    application = FakeApplicationService([job])
-    application.on_claim = lambda running_job: _record_claimed_job(
-        view, running_job
-    )
-    application.on_interrupt = lambda epoch, recovery_id: _complete_interrupt(
-        view, epoch, recovery_id
-    )
-    application.submit_failures.append(
-        application_port_error(ErrorCode.ASSET_VERSION_UNAVAILABLE)
-    )
-    first_backoff = ManualSubmissionBackoff()
-    first = SchedulerService(
-        view,
-        records,
-        application,
-        runtime,
-        DeterministicIdGenerator(
-            scripted_ids={"runtime_epoch": [CURRENT_EPOCH]}
-        ),
-        submission_backoff=first_backoff,
-    )
-
-    assert first.start().completed
-    assert first.wait_until_idle(1.0)
-
-    assert first.fatal_worker_error_code is ErrorCode.ASSET_VERSION_UNAVAILABLE
-    assert not first.ready
-    assert not first._dispatcher.claiming_enabled
-    assert first_backoff.delays == []
-    assert len(runtime.calls) == 1
-    assert len(application.submit_calls) == 1
-    parked_job = view.read_job(job.job_id)
-    assert parked_job.status is JobStatus.RUNNING
-    assert parked_job.runtime_epoch == CURRENT_EPOCH
-    assert first.shutdown(1.0)
-
-    application.on_submit = lambda _outcome, _ref, disposition: (
-        _record_processed_outcome(view, disposition)
-    )
-    repaired_dispatcher = RecordingDispatcher()
-    repaired = RecoveryCoordinator(
-        view,
-        records,
-        application,
-        repaired_dispatcher,  # type: ignore[arg-type]
-        DeterministicEpochFactory(
-            "00000000-0000-0000-0000-000000000092"
-        ),  # type: ignore[arg-type]
-        RuntimeEpochContext(),
-        submission_backoff=ManualSubmissionBackoff(),
-    )
-
-    recovered = repaired.recover()
-
-    assert recovered.completed
-    assert recovered.replayed_job_ids == (outcome.job_id,)
-    assert records.read_outcome_calls == [outcome.job_id, outcome.job_id]
-    assert len(application.submit_calls) == 2
-    first_outcome, first_ref = application.submit_calls[0]
-    second_outcome, second_ref = application.submit_calls[1]
-    assert canonical_json_bytes(first_outcome) == canonical_json_bytes(second_outcome)
-    assert first_ref == second_ref
-    assert first_outcome.outcome_id == second_outcome.outcome_id
-    assert [operation for operation, _ in application.operation_log] == [
-        "interrupt",
-        "claim",
-        "submit",
-        "submit",
-        "interrupt",
-    ]
-    assert len(runtime.calls) == 1
-    assert view.read_job(job.job_id).status is JobStatus.SUCCEEDED
-    assert repaired_dispatcher.claiming_enabled
-
-
-def test_replay_accepts_null_postcommit_case_view_but_still_requires_processing() -> None:
-    state = _state_with_job_status(JobStatus.RUNNING)
-    records = InMemoryExecutionRecordStore()
-    outcome = load_outcome("route")
-    records.publish_outcome_bytes(outcome.job_id, canonical_json_bytes(outcome))
-    application = FakeApplicationService(
-        [next(iter(next(iter(state.cases.values())).jobs.values()))]
-    )
-    application.outcome_case_view_available = False
-    coordinator, view, _, application, dispatcher, _ = _coordinator(
-        state,
-        records=records,
-        application=application,
-    )
-    application.on_submit = lambda _outcome, _ref, disposition: (
-        _record_processed_outcome(view, disposition)
-    )
-
-    result = coordinator.recover()
-
-    assert result.completed
-    assert result.replayed_job_ids == (outcome.job_id,)
-    assert len(application.submit_calls) == 1
-    assert dispatcher.claiming_enabled
-
-
-def test_null_postcommit_case_view_cannot_bypass_processing_record_gate() -> None:
-    state = _state_with_job_status(JobStatus.RUNNING)
-    records = InMemoryExecutionRecordStore()
-    outcome = load_outcome("route")
-    records.publish_outcome_bytes(outcome.job_id, canonical_json_bytes(outcome))
-    application = FakeApplicationService(
-        [next(iter(next(iter(state.cases.values())).jobs.values()))]
-    )
-    application.outcome_case_view_available = False
-    coordinator, _, _, application, dispatcher, _ = _coordinator(
-        state,
-        records=records,
-        application=application,
-    )
-
-    result = coordinator.recover()
-
-    assert not result.completed
-    assert result.failure_type == "RecoveryInvariantError"
-    assert result.replayed_job_ids == (outcome.job_id,)
-    assert len(application.submit_calls) == 1
-    assert application.interrupt_calls == []
-    assert not dispatcher.claiming_enabled
-
-
-@pytest.mark.parametrize(
-    "code",
-    [ErrorCode.STATE_WRITE_FAILED, ErrorCode.EXECUTION_RECORD_FAILED],
-)
-def test_replay_shutdown_during_backoff_never_interrupts(code: ErrorCode) -> None:
-    state = _state_with_job_status(JobStatus.RUNNING)
-    records = InMemoryExecutionRecordStore()
-    outcome = load_outcome("route")
-    records.publish_outcome_bytes(outcome.job_id, canonical_json_bytes(outcome))
-    application = FakeApplicationService(
-        [next(iter(next(iter(state.cases.values())).jobs.values()))]
-    )
-    application.submit_failures.append(
-        application_port_error(code)
-    )
-    backoff = ManualSubmissionBackoff()
-    backoff.shutdown = True
-    coordinator, _, _, application, dispatcher, _ = _coordinator(
-        state,
-        records=records,
-        application=application,
-        backoff=backoff,
-    )
-
-    result = coordinator.recover()
-
-    assert not result.completed
-    assert result.failure_type == "RecoveryInvariantError"
-    assert len(application.submit_calls) == 1
-    assert backoff.delays == [0.1]
-    assert application.interrupt_calls == []
-    assert not dispatcher.claiming_enabled
-
-
-@pytest.mark.parametrize(
-    "code",
-    [
-        ErrorCode.IDEMPOTENCY_CONFLICT,
-        ErrorCode.VALIDATION_ERROR,
-        ErrorCode.STATE_CORRUPT,
-        ErrorCode.STATE_SCHEMA_UNSUPPORTED,
-    ],
-)
-def test_non_retryable_replay_port_error_fails_closed_without_backoff(
-    code: ErrorCode,
-) -> None:
-    state = _state_with_job_status(JobStatus.RUNNING)
-    records = InMemoryExecutionRecordStore()
-    outcome = load_outcome("route")
-    records.publish_outcome_bytes(outcome.job_id, canonical_json_bytes(outcome))
-    application = FakeApplicationService(
-        [next(iter(next(iter(state.cases.values())).jobs.values()))]
-    )
-    application.submit_failures.append(
-        application_port_error(code)
-    )
-    backoff = ManualSubmissionBackoff()
-    coordinator, _, _, application, dispatcher, _ = _coordinator(
-        state,
-        records=records,
-        application=application,
-        backoff=backoff,
-    )
-
-    result = coordinator.recover()
-
-    assert not result.completed
-    assert result.failure_type == "ApplicationPortError"
-    assert result.failure_code is code
-    assert len(application.submit_calls) == 1
-    assert backoff.delays == []
-    assert application.interrupt_calls == []
-    assert not dispatcher.claiming_enabled
-
-
-@pytest.mark.parametrize(
-    "code",
-    [
-        ErrorCode.VALIDATION_ERROR,
-        ErrorCode.STATE_CORRUPT,
-        ErrorCode.STATE_SCHEMA_UNSUPPORTED,
-        ErrorCode.REVISION_CONFLICT,
-        ErrorCode.STATE_WRITE_FAILED,
-    ],
-)
-def test_interrupt_port_error_fails_closed_without_submission_backoff(
-    code: ErrorCode,
-) -> None:
-    state = _state_with_job_status(JobStatus.PENDING)
-    application = FakeApplicationService(
-        [next(iter(next(iter(state.cases.values())).jobs.values()))]
-    )
-    application.interrupt_failures.append(
-        application_port_error(code)
-    )
-    backoff = ManualSubmissionBackoff()
-    coordinator, _, _, application, dispatcher, _ = _coordinator(
-        state,
-        application=application,
-        backoff=backoff,
-    )
-
-    result = coordinator.recover()
-
-    assert not result.completed
-    assert result.failure_type == "ApplicationPortError"
-    assert result.failure_code is code
-    assert len(application.interrupt_calls) == 1
-    assert backoff.delays == []
-    assert dispatcher.submitted == []
-    assert not dispatcher.claiming_enabled
-
-
-@pytest.mark.parametrize(
-    "code",
-    [ErrorCode.STATE_CORRUPT, ErrorCode.STATE_SCHEMA_UNSUPPORTED],
-)
-@pytest.mark.parametrize(
-    ("fault_call", "expected_interrupt_calls"),
-    [(1, 0), (2, 0), (4, 1)],
-    ids=["initial", "post-replay", "post-interrupt"],
-)
-def test_snapshot_state_fault_fails_closed_at_each_recovery_gate(
-    code: ErrorCode,
-    fault_call: int,
-    expected_interrupt_calls: int,
-) -> None:
-    state = _state_with_job_status(JobStatus.RUNNING)
-    records = RecordingExecutionRecordStore()
-    coordinator, view, _, application, dispatcher, _ = _coordinator(
-        state,
-        records=records,
-    )
-    view.read_snapshot_script.extend(
-        [None] * (fault_call - 1) + [application_port_error(code)]
-    )
-
-    result = coordinator.recover()
-
-    assert not result.completed
-    assert result.failure_type == "ApplicationPortError"
-    assert result.failure_code is code
-    assert view.read_snapshot_calls == fault_call
-    assert records.read_outcome_calls == (
-        [] if fault_call == 1 else [next(iter(next(iter(state.cases.values())).jobs))]
-    )
-    assert len(application.interrupt_calls) == expected_interrupt_calls
-    assert application.submit_calls == []
-    assert dispatcher.submitted == []
-    assert not dispatcher.claiming_enabled
-
-
-@pytest.mark.parametrize(
-    "code",
-    [ErrorCode.STATE_CORRUPT, ErrorCode.STATE_SCHEMA_UNSUPPORTED],
-)
-def test_snapshot_state_fault_after_successful_replay_preserves_replay_audit(
-    code: ErrorCode,
-) -> None:
-    state = _state_with_job_status(JobStatus.RUNNING)
-    records = RecordingExecutionRecordStore()
-    outcome = load_outcome("route")
-    records.publish_outcome_bytes(outcome.job_id, canonical_json_bytes(outcome))
-    coordinator, view, _, application, dispatcher, _ = _coordinator(
-        state,
-        records=records,
-    )
-    application.on_submit = lambda _outcome, _ref, disposition: (
-        _record_processed_outcome(view, disposition)
-    )
-    view.read_snapshot_script.extend(
-        [None, None, application_port_error(code)]
-    )
-
-    result = coordinator.recover()
-
-    assert not result.completed
-    assert result.failure_type == "ApplicationPortError"
-    assert result.failure_code is code
-    assert result.replayed_job_ids == (outcome.job_id,)
-    assert view.read_snapshot_calls == 3
-    assert records.read_outcome_calls == [outcome.job_id]
-    assert len(application.submit_calls) == 1
-    assert application.interrupt_calls == []
-    assert dispatcher.submitted == []
-    assert not dispatcher.claiming_enabled
-
-
-def test_corrupt_finalized_record_fails_closed_before_interrupt() -> None:
-    state = _state_with_job_status(JobStatus.RUNNING)
-    records = InMemoryExecutionRecordStore()
-    records.inject_failure(
-        "read_published_outcome",
-        application_port_error(ErrorCode.EXECUTION_RECORD_FAILED),
-    )
-    coordinator, _, _, application, dispatcher, _ = _coordinator(
-        state, records=records
-    )
-
-    result = coordinator.recover()
-
-    assert not result.completed
-    assert result.failure_type == "ApplicationPortError"
-    assert result.failure_code is ErrorCode.EXECUTION_RECORD_FAILED
-    assert application.interrupt_calls == []
-    assert application.submit_calls == []
-    assert not dispatcher.claiming_enabled
-
-
-def test_cancelled_then_finalized_job_is_replayed_for_stale_audit() -> None:
-    state = _state_with_job_status(JobStatus.CANCELLED)
-    records = InMemoryExecutionRecordStore()
-    outcome = load_outcome("route")
-    records.publish_outcome_bytes(outcome.job_id, canonical_json_bytes(outcome))
-    application = FakeApplicationService(
-        [next(iter(next(iter(state.cases.values())).jobs.values()))],
-        outcome_dispositions=[OutcomeDisposition.STALE],
-    )
-    coordinator, view, _, application, dispatcher, _ = _coordinator(
-        state,
-        records=records,
-        application=application,
-    )
-    application.on_submit = lambda _outcome, _ref, disposition: _record_processed_outcome(
-        view, disposition
-    )
-
-    result = coordinator.recover()
-
-    assert result.completed
-    assert result.replayed_job_ids == (outcome.job_id,)
-    assert application.submit_calls[0][0] is not None
-    assert dispatcher.submitted == []
-    aggregate = next(iter(view.read_snapshot().cases.values()))
-    assert aggregate.case.status.value == "CANCELLED"
-    record = next(iter(aggregate.outcome_processing_records.values()))
-    assert record.disposition is OutcomeDisposition.STALE
-
-
-@pytest.mark.parametrize(
-    "disposition",
-    [OutcomeDisposition.DUPLICATE, OutcomeDisposition.REJECTED],
-)
-def test_duplicate_and_rejected_replay_are_final_determinations(
-    disposition: OutcomeDisposition,
-) -> None:
-    state = _state_with_job_status(JobStatus.RUNNING)
-    records = InMemoryExecutionRecordStore()
-    outcome = load_outcome("route")
-    records.publish_outcome_bytes(outcome.job_id, canonical_json_bytes(outcome))
-    application = FakeApplicationService(
-        [next(iter(next(iter(state.cases.values())).jobs.values()))],
-        outcome_dispositions=[disposition],
-    )
-    coordinator, view, _, application, dispatcher, _ = _coordinator(
-        state,
-        records=records,
-        application=application,
-    )
-    application.on_submit = lambda _outcome, _ref, returned: _record_processed_outcome(
-        view, returned
-    )
-
-    result = coordinator.recover()
-
-    assert result.completed
-    assert result.replayed_job_ids == (outcome.job_id,)
-    assert application.returned_outcome_dispositions == [disposition]
-    assert [name for name, _ in application.operation_log] == [
-        "submit",
-        "interrupt",
-    ]
-    assert dispatcher.claiming_enabled
-
-
-def test_existing_next_job_record_corruption_is_rejected_without_retry() -> None:
-    state = _state_with_job_status(JobStatus.RUNNING)
-    records = InMemoryExecutionRecordStore()
-    outcome = load_outcome("route")
-    records.publish_outcome_bytes(outcome.job_id, canonical_json_bytes(outcome))
-    application = FakeApplicationService(
-        [next(iter(next(iter(state.cases.values())).jobs.values()))],
-        outcome_dispositions=[OutcomeDisposition.REJECTED],
-    )
-    backoff = ManualSubmissionBackoff()
-    coordinator, view, _, application, dispatcher, _ = _coordinator(
-        state,
-        records=records,
-        application=application,
-        backoff=backoff,
-    )
-    application.on_submit = lambda _outcome, _ref, returned: (
-        _record_processed_outcome(
-            view,
-            returned,
-            rejection_error_code=ErrorCode.EXECUTION_RECORD_FAILED,
-        )
-    )
-
-    result = coordinator.recover()
-
-    assert result.completed
-    assert len(application.submit_calls) == 1
-    assert backoff.delays == []
-    assert [name for name, _ in application.operation_log] == [
-        "submit",
-        "interrupt",
-    ]
-    aggregate = next(iter(view.read_snapshot().cases.values()))
-    processing = aggregate.outcome_processing_records[outcome.outcome_id]
-    assert processing.disposition is OutcomeDisposition.REJECTED
-    assert processing.error_code is ErrorCode.EXECUTION_RECORD_FAILED
-    assert dispatcher.claiming_enabled
-
-
-def test_success_receipt_without_persisted_completed_epoch_is_not_ready() -> None:
-    state = _state_with_job_status(JobStatus.PENDING)
-    coordinator, _, _, application, dispatcher, _ = _coordinator(state)
-    application.on_interrupt = lambda _epoch, recovery_id: RecoveryReceipt(
-        recovery_id=recovery_id,
-        interrupted_job_ids=[],
-        pending_job_ids=[],
-    )
-
-    result = coordinator.recover()
-
-    assert not result.completed
-    assert result.failure_type == "RecoveryInvariantError"
-    assert dispatcher.submitted == []
-    assert not dispatcher.claiming_enabled
-
-
-def test_recovery_receipt_must_exactly_match_the_persisted_record() -> None:
-    state = _state_with_job_status(JobStatus.PENDING)
-    coordinator, view, _, application, dispatcher, _ = _coordinator(state)
-
-    def drifted_receipt(epoch: str, recovery_id: str) -> RecoveryReceipt:
-        _complete_interrupt(view, epoch, recovery_id)
-        return RecoveryReceipt(
-            recovery_id=recovery_id,
-            interrupted_job_ids=[],
-            pending_job_ids=[],
-        )
-
-    application.on_interrupt = drifted_receipt
-
-    result = coordinator.recover()
-
-    assert not result.completed
-    assert result.failure_type == "RecoveryInvariantError"
-    assert dispatcher.submitted == []
-    assert not dispatcher.claiming_enabled
-
-
-def test_persisted_pending_list_must_match_the_post_recovery_state() -> None:
-    state = _state_with_job_status(JobStatus.PENDING)
-    coordinator, view, _, application, dispatcher, _ = _coordinator(state)
-
-    def omit_pending(epoch: str, recovery_id: str) -> RecoveryReceipt:
-        payload = view.read_snapshot().model_dump(mode="json")
-        payload["runtime_epochs"].append(
-            _epoch_record(epoch, CURRENT_RECOVERED_AT)
-        )
-        payload["recovery_processing_records"][recovery_id] = _recovery_record(
-            epoch,
-            CURRENT_RECOVERED_AT,
-        )
-        view.replace(StateFile.model_validate(payload))
-        return RecoveryReceipt(
-            recovery_id=recovery_id,
-            interrupted_job_ids=[],
-            pending_job_ids=[],
-        )
-
-    application.on_interrupt = omit_pending
-
-    result = coordinator.recover()
-
-    assert not result.completed
-    assert result.failure_type == "RecoveryInvariantError"
-    assert dispatcher.submitted == []
-    assert not dispatcher.claiming_enabled
-
-
-def test_completed_recovery_cannot_leave_old_epoch_running_unreported() -> None:
-    state = _state_with_job_status(JobStatus.RUNNING)
-    coordinator, view, _, application, dispatcher, _ = _coordinator(state)
-
-    def omit_interrupted(epoch: str, recovery_id: str) -> RecoveryReceipt:
-        payload = view.read_snapshot().model_dump(mode="json")
-        payload["runtime_epochs"].append(
-            _epoch_record(epoch, CURRENT_RECOVERED_AT)
-        )
-        payload["recovery_processing_records"][recovery_id] = _recovery_record(
-            epoch,
-            CURRENT_RECOVERED_AT,
-        )
-        view.replace(StateFile.model_validate(payload))
-        return RecoveryReceipt(
-            recovery_id=recovery_id,
-            interrupted_job_ids=[],
-            pending_job_ids=[],
-        )
-
-    application.on_interrupt = omit_interrupted
-
-    result = coordinator.recover()
-
-    assert not result.completed
-    assert result.failure_type == "RecoveryInvariantError"
-    assert dispatcher.submitted == []
-    assert not dispatcher.claiming_enabled
-
-
-def test_new_recovery_lists_must_match_the_preinterrupt_snapshot() -> None:
-    state = _state_with_job_status(JobStatus.RUNNING)
-    coordinator, view, _, application, dispatcher, _ = _coordinator(state)
-
-    def misclassify_old_running(epoch: str, recovery_id: str) -> RecoveryReceipt:
-        payload = view.read_snapshot().model_dump(mode="json")
-        aggregate = next(iter(payload["cases"].values()))
-        job = next(iter(aggregate["jobs"].values()))
-        job.update(status="CANCELLED", finished_at=FINISHED_AT)
-        aggregate["case"].update(status="CANCELLED", active_job_id=None)
-        payload["runtime_epochs"].append(
-            _epoch_record(epoch, CURRENT_RECOVERED_AT)
-        )
-        payload["recovery_processing_records"][recovery_id] = _recovery_record(
-            epoch,
-            CURRENT_RECOVERED_AT,
-        )
-        view.replace(StateFile.model_validate(payload))
-        return RecoveryReceipt(
-            recovery_id=recovery_id,
-            interrupted_job_ids=[],
-            pending_job_ids=[],
-        )
-
-    application.on_interrupt = misclassify_old_running
-
-    result = coordinator.recover()
-
-    assert not result.completed
-    assert result.failure_type == "RecoveryInvariantError"
-    assert dispatcher.submitted == []
-    assert not dispatcher.claiming_enabled
-
-
-def test_incomplete_recovery_record_keeps_claiming_disabled() -> None:
-    state = _state_with_job_status(JobStatus.PENDING)
-    coordinator, view, _, application, dispatcher, _ = _coordinator(state)
-    job_id = next(iter(next(iter(state.cases.values())).jobs))
-
-    def persist_incomplete(epoch: str, recovery_id: str) -> RecoveryReceipt:
-        payload = view.read_snapshot().model_dump(mode="json")
-        payload["runtime_epochs"].append(_epoch_record(epoch, None))
-        payload["recovery_processing_records"][recovery_id] = _recovery_record(
-            epoch,
-            None,
-            pending=[job_id],
-        )
-        view.replace(StateFile.model_validate(payload))
-        return RecoveryReceipt(
-            recovery_id=recovery_id,
-            interrupted_job_ids=[],
-            pending_job_ids=[job_id],
-        )
-
-    application.on_interrupt = persist_incomplete
-
-    result = coordinator.recover()
-
-    assert not result.completed
-    assert result.failure_type == "RecoveryInvariantError"
-    assert dispatcher.submitted == []
-    assert not dispatcher.claiming_enabled
-
-    first_record = view.read_snapshot().recovery_processing_records[CURRENT_EPOCH]
-    application.on_interrupt = lambda epoch, recovery_id: _complete_interrupt(
-        view, epoch, recovery_id
-    )
-    completed_result = coordinator.recover()
-
-    assert completed_result.completed
-    completed_record = view.read_snapshot().recovery_processing_records[CURRENT_EPOCH]
-    assert completed_record.interrupted_job_ids == first_record.interrupted_job_ids
-    assert completed_record.pending_job_ids == first_record.pending_job_ids
-    assert completed_record.completed_at == CURRENT_RECOVERED_AT
-    assert dispatcher.submitted == [job_id]
-    assert dispatcher.claiming_enabled
-
-
-def test_technical_rejected_processing_without_trusted_outcome_is_not_replayed() -> None:
-    payload = _state_with_job_status(JobStatus.CANCELLED).model_dump(mode="json")
-    aggregate = next(iter(payload["cases"].values()))
-    job_id = next(iter(aggregate["jobs"]))
-    outcome = load_outcome("route")
-    receipt = runtime_receipt(outcome)
-    aggregate["outcomes"] = {}
-    aggregate["outcome_processing_records"] = {
-        outcome.outcome_id: {
-            "outcome_id": outcome.outcome_id,
-            "job_id": job_id,
-            "outcome_hash": receipt.outcome_file_ref.sha256,
-            "outcome_file_ref": receipt.outcome_file_ref.model_dump(mode="json"),
-            "disposition": "REJECTED",
-            "processed_at": FINISHED_AT,
-            "error_code": "OUTCOME_INVALID",
-            "accepted_evidence_ids": [],
-            "accepted_artifact_ids": [],
-            "created_job_id": None,
-            "reason": "The finalized Outcome was rejected before trust.",
-        }
-    }
-    state = StateFile.model_validate(payload)
-    records = InMemoryExecutionRecordStore()
-    records.publish_outcome_bytes(outcome.job_id, canonical_json_bytes(outcome))
-    coordinator, _, _, application, dispatcher, _ = _coordinator(
-        state,
-        records=records,
-    )
-
-    result = coordinator.recover()
-
-    assert result.completed
-    assert result.replayed_job_ids == ()
-    assert application.submit_calls == []
-    assert dispatcher.claiming_enabled
-
-
-def test_duplicate_pending_dispatch_is_an_idempotent_recovery_success() -> None:
-    state = _state_with_job_status(JobStatus.PENDING)
-    job_id = next(iter(next(iter(state.cases.values())).jobs))
-    dispatcher = RecordingDispatcher()
-    assert dispatcher.submit(job_id).accepted
-    coordinator, _, _, _, dispatcher, _ = _coordinator(
-        state,
-        dispatcher=dispatcher,
-    )
-
-    result = coordinator.recover()
-
-    assert result.completed
-    assert result.pending_job_ids == (job_id,)
-    assert dispatcher.submitted == [job_id]
-    assert dispatcher.claiming_enabled
-
-
-def test_dispatch_rejection_after_persisted_recovery_fails_closed() -> None:
-    state = _state_with_job_status(JobStatus.PENDING)
-    job_id = next(iter(next(iter(state.cases.values())).jobs))
-    dispatcher = RecordingDispatcher()
-    dispatcher.reject_ids.add(job_id)
-    coordinator, view, _, application, dispatcher, _ = _coordinator(
-        state,
-        dispatcher=dispatcher,
-    )
-
-    result = coordinator.recover()
-
-    assert not result.completed
-    assert result.failure_type == "RecoveryInvariantError"
-    assert CURRENT_EPOCH in view.read_snapshot().recovery_processing_records
-    assert view.read_job(job_id).status is JobStatus.PENDING
-    assert not dispatcher.claiming_enabled
-
-    first_record = view.read_snapshot().recovery_processing_records[CURRENT_EPOCH]
-    dispatcher.reject_ids.clear()
-    replayed_result = coordinator.recover()
-
-    assert replayed_result.completed
-    assert replayed_result.pending_job_ids == (job_id,)
-    assert application.interrupt_calls == [
-        (CURRENT_EPOCH, CURRENT_EPOCH),
-        (CURRENT_EPOCH, CURRENT_EPOCH),
-    ]
-    assert (
-        view.read_snapshot().recovery_processing_records[CURRENT_EPOCH]
-        == first_record
-    )
-    assert dispatcher.submitted == [job_id]
-    assert dispatcher.claiming_enabled
-
+# V10 deliberately retires startup replay and interruption. The replacement
+# contract covers PENDING/RUNNING/CANCELLED and corrupt old state/outbox/assets
+# in test_startup_v10.py. Terminal process-crash durability is exercised by
+# integration/test_terminal_crash.py; delivery retries remain below.
 
 def test_scheduler_service_shutdown_wakes_the_worker_delivery_backoff() -> None:
     state = _state_with_job_status(JobStatus.PENDING)
@@ -1357,6 +476,7 @@ def test_scheduler_service_shutdown_wakes_the_worker_delivery_backoff() -> None:
 
     recovery_result = service.start()
     assert recovery_result.completed
+    assert service.submit(job.job_id).accepted
     assert wait_gate.entered.wait(1.0)
 
     assert service.shutdown(1.0)
@@ -1391,12 +511,13 @@ def test_invalid_shutdown_timeout_does_not_poison_scheduler_service() -> None:
         service.shutdown(-1.0)
 
     assert service.start().completed
+    assert service.submit(job.job_id).accepted
     assert service.wait_until_idle(1.0)
     assert len(runtime.calls) == 1
     assert service.shutdown(1.0)
 
 
-def test_scheduler_service_shutdown_wakes_the_recovery_replay_backoff() -> None:
+def test_scheduler_service_starts_without_entering_old_replay_backoff() -> None:
     state = _state_with_job_status(JobStatus.RUNNING)
     view = FakeRecoveryView(state)
     outcome = load_outcome("route")
@@ -1424,17 +545,15 @@ def test_scheduler_service_shutdown_wakes_the_recovery_replay_backoff() -> None:
     results = []
     thread = threading.Thread(target=lambda: results.append(service.start()))
     thread.start()
-    assert wait_gate.entered.wait(1.0)
-
-    assert service.shutdown(1.0)
     thread.join(1.0)
-
+    assert service.shutdown(1.0)
     assert not thread.is_alive()
     assert len(results) == 1
-    assert not results[0].completed
-    assert len(application.submit_calls) == 1
+    assert results[0].completed
+    assert not wait_gate.entered.is_set()
+    assert application.submit_calls == []
     assert application.interrupt_calls == []
-    assert backoff.delays == [0.1]
+    assert backoff.delays == []
     assert not service.ready
 
 
@@ -1471,6 +590,7 @@ def test_scheduler_service_keeps_safe_code_for_fatal_worker_port_error(
     )
 
     assert service.start().completed
+    assert service.submit(job.job_id).accepted
     assert service.wait_until_idle(1.0)
 
     assert service.fatal_worker_error_type == "ApplicationPortError"
@@ -1483,7 +603,7 @@ def test_scheduler_service_keeps_safe_code_for_fatal_worker_port_error(
     "code",
     [ErrorCode.STATE_CORRUPT, ErrorCode.STATE_SCHEMA_UNSUPPORTED],
 )
-def test_runtime_state_fault_stops_readiness_and_restart_recovery_interrupts(
+def test_runtime_state_fault_stops_readiness_and_restart_does_not_replay(
     code: ErrorCode,
 ) -> None:
     state = _state_with_job_status(JobStatus.PENDING)
@@ -1509,6 +629,7 @@ def test_runtime_state_fault_stops_readiness_and_restart_recovery_interrupts(
     )
 
     assert service.start().completed
+    assert service.submit(job.job_id).accepted
     assert service.wait_until_idle(1.0)
 
     assert service.fatal_worker_error_type == "ApplicationPortError"
@@ -1533,8 +654,8 @@ def test_runtime_state_fault_stops_readiness_and_restart_recovery_interrupts(
     recovered = repaired.recover()
 
     assert recovered.completed
-    assert recovered.interrupted_job_ids == (job.job_id,)
-    assert repaired_view.read_job(job.job_id).status is JobStatus.INTERRUPTED
+    assert recovered.interrupted_job_ids == ()
+    assert repaired_view.read_snapshot_calls == 0
     assert repaired_application.submit_calls == []
     assert len(runtime.calls) == 1
     assert dispatcher.claiming_enabled

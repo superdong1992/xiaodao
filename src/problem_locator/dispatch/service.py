@@ -20,7 +20,6 @@ from problem_locator.diagnostics import log_event
 
 from .backoff import InterruptibleSubmissionBackoff, SubmissionBackoff
 from .dispatcher import InProcessDispatcher
-from .execution_lease import ExecutionPermit
 from .recovery import RecoveryCoordinator, RecoveryResult
 from .runtime_epoch import RuntimeEpochContext, RuntimeEpochFactory
 from .shutdown import SchedulerShutdownSignal
@@ -39,6 +38,8 @@ class SchedulerService:
         id_generator: IdGenerator,
         *,
         submission_backoff: SubmissionBackoff | None = None,
+        route_workers: int = 1,
+        diagnose_workers: int = 2,
     ) -> None:
         self._lock = threading.Lock()
         self._recovery_result: RecoveryResult | None = None
@@ -50,18 +51,19 @@ class SchedulerService:
             else InterruptibleSubmissionBackoff()
         )
         self._shutdown_signal = SchedulerShutdownSignal()
-        self._execution_permit = ExecutionPermit()
         epoch_context = RuntimeEpochContext()
         worker = JobWorker(
             job_control,
             runtime,
             epoch_context,
-            self._execution_permit,
-            self._shutdown_signal,
-            self._backoff,
+            shutdown_signal=self._shutdown_signal,
+            submission_backoff=self._backoff,
         )
         self._dispatcher = InProcessDispatcher(
             worker,
+            job_identity=lambda key: self._identity(repository, key),
+            route_workers=route_workers,
+            diagnose_workers=diagnose_workers,
             on_fatal_worker_error=self._record_fatal_worker_error,
         )
         self._recovery = RecoveryCoordinator(
@@ -74,6 +76,11 @@ class SchedulerService:
             self._shutdown_signal,
             self._backoff,
         )
+
+    @staticmethod
+    def _identity(repository, key):
+        job = repository.read_job(key)
+        return job.case_id, job.job_type
 
     @property
     def ready(self) -> bool:

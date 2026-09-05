@@ -8,7 +8,6 @@ from .backoff import (
 )
 from .cancellation import CancellationController
 from .dispatcher import InProcessDispatcher
-from .execution_lease import ExecutionPermit
 from .recovery import RecoveryCoordinator, RecoveryResult
 from .runtime_epoch import RuntimeEpochContext, RuntimeEpochFactory
 from .service import SchedulerService
@@ -27,7 +26,6 @@ __all__ = [
     "InProcessDispatcher",
     "InterruptibleSubmissionBackoff",
     "JobWorker",
-    "ExecutionPermit",
     "RecoveryCoordinator",
     "RecoveryResult",
     "ReviewWorker",

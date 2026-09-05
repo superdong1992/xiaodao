@@ -30,7 +30,6 @@ from .backoff import (
     submission_backoff_delay,
 )
 from .cancellation import CancellationController
-from .execution_lease import ExecutionPermit
 from .runtime_epoch import RuntimeEpochContext
 from .shutdown import SchedulerShutdownSignal
 
@@ -95,15 +94,11 @@ class JobWorker:
         job_control: JobControlPort,
         runtime: Runtime,
         epoch_context: RuntimeEpochContext,
-        execution_permit: ExecutionPermit | None = None,
         shutdown_signal: SchedulerShutdownSignal | None = None,
         submission_backoff: SubmissionBackoff | None = None,
     ) -> None:
         self._job_control = job_control
         self._epoch_context = epoch_context
-        self._execution_permit = (
-            execution_permit if execution_permit is not None else ExecutionPermit()
-        )
         self._shutdown_signal = (
             shutdown_signal
             if shutdown_signal is not None
@@ -125,8 +120,7 @@ class JobWorker:
         job_id: str,
         cancellation: CancellationController,
     ) -> WorkerRunResult:
-        with self._execution_permit.hold():
-            return self._execute_one_with_permit(job_id, cancellation)
+        return self._execute_claimed(job_id, cancellation)
 
     def request_shutdown(self) -> bool:
         requested = self._shutdown_signal.request()
@@ -134,7 +128,7 @@ class JobWorker:
             self._submission_backoff.wake_for_shutdown()
         return requested
 
-    def _execute_one_with_permit(
+    def _execute_claimed(
         self,
         job_id: str,
         cancellation: CancellationController,

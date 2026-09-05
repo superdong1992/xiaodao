@@ -255,10 +255,10 @@ def test_agent_draft_forbids_server_generated_user_result_artifacts() -> None:
         AgentJobOutcomeDraftV2.model_validate(draft)
 
 
-def test_completed_candidate_server_final_requires_json_and_archive() -> None:
+def test_completed_candidate_server_final_requires_json_and_allows_deferred_archive() -> None:
     payload = _positive("job-outcome-diagnosis.json")
     assert JobOutcome.model_validate(payload)
-    for forbidden_kind in (ArtifactKind.USER_RESULT, ArtifactKind.USER_RESULT_ARCHIVE):
+    for forbidden_kind in (ArtifactKind.USER_RESULT,):
         drifted = copy.deepcopy(payload)
         drifted["proposed_artifacts"] = [
             item
@@ -267,6 +267,9 @@ def test_completed_candidate_server_final_requires_json_and_archive() -> None:
         ]
         with pytest.raises(ValidationError, match="exactly one USER_RESULT"):
             JobOutcome.model_validate(drifted)
+    payload["proposed_artifacts"] = [item for item in payload["proposed_artifacts"]
+        if item["artifact_kind"] != ArtifactKind.USER_RESULT_ARCHIVE.value]
+    assert JobOutcome.model_validate(payload)
 
 
 def test_inconclusive_server_final_requires_json_and_forbids_archive() -> None:

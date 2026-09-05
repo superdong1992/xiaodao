@@ -181,7 +181,8 @@ def test_real_storage_adapters_restart_finalize_post_replace_publications(
             staged,
             target.final_storage_key,
         )
-    assert replay_usage.new_bytes == 0
+    # The new process has no active inventory; only completed Cases seed it.
+    assert replay_usage.new_bytes == staged.size
     assert resource_receipt == ResourceRef(
         resource_kind=ResourceKind.FILE,
         storage_key=target.final_storage_key,

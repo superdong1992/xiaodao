@@ -145,11 +145,23 @@ class SnapshotRepository:
         self.read_calls = 0
         self.on_read = on_read
 
-    def read_snapshot(self) -> StateFile:
+    def read_snapshot(self, case_id=None, *, job_id=None, attachment_id=None, request_key=None) -> StateFile:
         self.read_calls += 1
         if self.on_read is not None:
             self.on_read(self.read_calls)
         return self.state.model_copy(deep=True)
+
+    def health(self):
+        from types import SimpleNamespace
+        self.read_snapshot()
+        return SimpleNamespace(valid=True)
+
+    def retention_in_use(self, kind, key):
+        state = self.read_snapshot()
+        if kind == 'resource':
+            return key in StorageRetentionCleaner._formal_resource_keys(state)
+        job = next((aggregate.jobs[key] for aggregate in state.cases.values() if key in aggregate.jobs), None)
+        return job is not None and (kind == 'job' or job.status in {JobStatus.PENDING, JobStatus.RUNNING})
 
 
 @dataclass(slots=True)
@@ -415,7 +427,7 @@ def test_strict_24_hour_and_7_day_candidates_are_deleted_only_after_threshold(
     assert result.failed_deletions == ()
 
 
-def test_unconfirmed_durable_outbox_protects_stage_target_and_next_job(
+def test_abandoned_outbox_no_longer_protects_unreferenced_stage_target_or_next_job(
     tmp_path: Path,
 ) -> None:
     harness = _harness(tmp_path)
@@ -428,15 +440,11 @@ def test_unconfirmed_durable_outbox_protects_stage_target_and_next_job(
 
     result = harness.cleaner.run_once()
 
-    assert stage.exists()
-    assert formal.exists()
-    assert next_job.exists()
+    assert not stage.exists()
+    assert not formal.exists()
+    assert not next_job.exists()
     assert not unrelated.exists()
-    assert {stage, formal, next_job} <= set(result.skipped)
-    assert any(
-        call[1] is ResourceType.ARTIFACT
-        for call in harness.resources.plan_target_calls
-    )
+    assert not ({stage, formal, next_job} & set(result.skipped))
 
 
 @pytest.mark.parametrize(
@@ -482,7 +490,7 @@ def test_every_persisted_terminal_disposition_stops_outbox_protection_without_re
 
 
 @pytest.mark.parametrize("failure_mode", ["typed_error", "unexpected_none"])
-def test_corrupt_unconfirmed_outcome_pauses_all_moves_and_existing_deletes(
+def test_corrupt_abandoned_outcome_does_not_block_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure_mode: str,
@@ -510,13 +518,10 @@ def test_corrupt_unconfirmed_outcome_pauses_all_moves_and_existing_deletes(
             lambda _job_id: None,
         )
 
-    with pytest.raises(ApplicationPortError) as raised:
-        harness.cleaner.run_once()
-
-    assert raised.value.error.code is ErrorCode.EXECUTION_RECORD_FAILED
-    assert old_upload.exists()
-    assert (harness.layout.jobs / outcome.job_id).exists()
-    assert isolated.exists()
+    harness.cleaner.run_once()
+    assert not old_upload.exists()
+    assert not (harness.layout.jobs / outcome.job_id).exists()
+    assert not isolated.exists()
 
 
 def test_markerless_active_stage_and_attachment_upload_lease_are_not_deleted(

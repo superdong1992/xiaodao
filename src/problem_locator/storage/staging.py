@@ -115,6 +115,7 @@ class StagedObjectWriter:
         byte_limit: int,
         expected_size: int | None,
         expected_sha256: str | None,
+        verify_after_publish: bool = True,
     ) -> StreamCopyReceipt:
         """Consume one stream and atomically install its staged payload."""
 
@@ -140,6 +141,8 @@ class StagedObjectWriter:
             pass
         self._replacer.replace(temporary, payload)
         self._file_sync.sync_directory(directory)
+        if not verify_after_publish:
+            return receipt
         observed = hash_file(payload)
         if observed != receipt:
             raise OSError("staged payload changed during atomic publication")

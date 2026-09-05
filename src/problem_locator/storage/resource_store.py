@@ -59,7 +59,8 @@ from .platform import PlatformFileSync, PlatformReplaceOperation
 from .resource_files import (
     FormalResourcePublisher,
     FormalResourceReader,
-    scan_case_resources,
+    _file_snapshot,
+    _require_single_link_file,
 )
 from .staging import StagedObjectWriter
 from .streams import hash_file
@@ -233,6 +234,9 @@ class FileResourceStore:
         self._file_sync = file_sync or PlatformFileSync()
         self._replacer = replacer or PlatformReplaceOperation()
         self._id_generator = id_generator
+        self._published: dict[str, dict[str, ResourceRef]] = {}
+        self._verified_uploads: dict[str, tuple[AttachmentStagedRef, object]] = {}
+        self._verified_archives: dict[str, tuple[StagedResourceRef, object]] = {}
         self._writer = StagedObjectWriter(
             layout,
             self._file_sync,
@@ -726,6 +730,7 @@ class FileResourceStore:
                     byte_limit=MAX_ATTACHMENT_BYTES,
                     expected_size=expected_size,
                     expected_sha256=expected_sha256,
+                    verify_after_publish=False,
                 )
                 staged_ref = AttachmentStagedRef(
                     attachment_id=attachment_id,
@@ -736,6 +741,10 @@ class FileResourceStore:
                 self._writer.publish_marker(
                     directory,
                     self._expected_marker_bytes(staged_ref),
+                )
+                self._verified_uploads[attachment_id] = (
+                    staged_ref.model_copy(deep=True),
+                    _file_snapshot(_require_single_link_file(directory / "payload")),
                 )
                 return staged_ref
         except ValueError as error:
@@ -773,6 +782,26 @@ class FileResourceStore:
                 ErrorCode.RESOURCE_HASH_MISMATCH,
                 "The staged resource receipt or bytes have drifted.",
             ) from None
+
+    def stage_archive(self, owner_job_id: str, producer) -> StagedResourceRef:
+        """Let the archive worker stream directly into its private staging file."""
+        staging_id = self._id_generator.new("resource_staging")
+        proposal_key = f"archive-{staging_id}"
+        directory = proposal_stage_path(self.layout.data_root, owner_job_id, proposal_key)
+        with self.stage_registry.acquire_stage(directory):
+            self._writer._ensure_directory(directory)
+            content = directory / "payload"
+            producer(content)
+            self._file_sync.sync_file(content)
+            observation = hash_file(content)
+            if observation.size > MAX_CASE_RESOURCE_BYTES:
+                raise _port_error(ErrorCode.RESOURCE_LIMIT_EXCEEDED, "归档超过 Case 资源上限。")
+            staged = StagedResourceRef(staging_id=staging_id, owner_job_id=owner_job_id,
+                proposal_key=proposal_key, resource_kind=ResourceKind.FILE,
+                size=observation.size, sha256=observation.sha256, tree_manifest=None)
+            self._writer.publish_marker(directory, self._expected_marker_bytes(staged))
+            self._verified_archives[staging_id] = (staged, _file_snapshot(_require_single_link_file(content)))
+            return staged
 
     def plan_target(
         self,
@@ -850,6 +879,8 @@ class FileResourceStore:
         staged_ref: StagedResourceRef | AttachmentStagedRef,
         final_storage_key: str,
     ) -> ResourceRef:
+        if not self.coordination_lock.publication_held_by_current_thread():
+            raise RuntimeError("Resource publication requires a publication lease")
         if not isinstance(staged_ref, (StagedResourceRef, AttachmentStagedRef)):
             raise _port_error(
                 ErrorCode.RESOURCE_HASH_MISMATCH,
@@ -875,6 +906,21 @@ class FileResourceStore:
         directory = self._stage_directory(self.layout, staged_ref)
         content_path = self._content_path(directory, staged_ref.resource_kind)
         final_path = self.layout.data_root / Path(final_storage_key)
+        case_id = parse_storage_key(final_storage_key).case_id
+        existing = self._published.get(case_id, {}).get(final_storage_key)
+        if existing is not None:
+            if (existing.resource_kind, existing.size, existing.sha256) != (staged_ref.resource_kind, staged_ref.size, staged_ref.sha256):
+                raise _port_error(ErrorCode.RESOURCE_HASH_MISMATCH, "资源目标已绑定其他内容。")
+            return existing.model_copy(deep=True)
+        verified_file = None
+        if isinstance(staged_ref, AttachmentStagedRef):
+            verified = self._verified_uploads.get(staged_ref.attachment_id)
+            if verified is not None and verified[0] == staged_ref:
+                verified_file = verified[1]
+        else:
+            verified = self._verified_archives.get(staged_ref.staging_id)
+            if verified is not None and verified[0] == staged_ref:
+                verified_file = verified[1]
         try:
             final_exists = final_path.exists() or final_path.is_symlink()
             if not final_exists:
@@ -908,13 +954,20 @@ class FileResourceStore:
                     if isinstance(staged_ref, StagedResourceRef)
                     else None
                 ),
+                verified_file=verified_file,
             )
-            return ResourceRef(
+            resource_ref = ResourceRef(
                 resource_kind=observed.resource_kind,
                 storage_key=observed.storage_key,
                 size=observed.size,
                 sha256=observed.sha256,
             )
+            self._published.setdefault(case_id, {})[final_storage_key] = resource_ref
+            if isinstance(staged_ref, AttachmentStagedRef):
+                self._verified_uploads.pop(staged_ref.attachment_id, None)
+            else:
+                self._verified_archives.pop(staged_ref.staging_id, None)
+            return resource_ref.model_copy(deep=True)
         except ApplicationPortError:
             raise
         except FileNotFoundError:
@@ -949,6 +1002,23 @@ class FileResourceStore:
                 ErrorCode.RESOURCE_PUBLISH_FAILED,
                 "The formal resource could not be published.",
             ) from None
+
+    def forget_case(self, case_id: str) -> None:
+        """Terminal snapshots own the metadata; retain no historical inventory."""
+        self._published.pop(case_id, None)
+
+    def seed_case_resources(self, aggregate) -> None:
+        """Load one completed Case's immutable references for background work."""
+        resources = {}
+        for name in ("attachments", "evidence", "artifacts"):
+            for item in getattr(aggregate, name).values():
+                ref = getattr(item, "resource_ref", None)
+                if ref is None and getattr(item, "storage_key", None) is not None:
+                    ref = ResourceRef(storage_key=item.storage_key, size=item.size, sha256=item.sha256,
+                        resource_kind=getattr(item, "resource_kind", ResourceKind.FILE))
+                if ref is not None:
+                    resources[ref.storage_key] = ref.model_copy(deep=True)
+        self._published[aggregate.case.case_id] = resources
 
     def validate_case_capacity(
         self,
@@ -989,7 +1059,7 @@ class FileResourceStore:
                     )
                 _SHA256_ADAPTER.validate_python(sha256)
             with self.coordination_lock:
-                existing = scan_case_resources(self.layout, case_id)
+                existing = self._published.get(case_id, {})
                 current = sum(
                     observation.size for observation in existing.values()
                 )

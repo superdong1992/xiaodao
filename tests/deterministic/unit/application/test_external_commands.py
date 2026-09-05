@@ -274,7 +274,7 @@ class _ReadFailsAfterCommitRepository(InMemoryStateRepository):
         self.fail_next_read = False
         self.error_code = error_code
 
-    def read_snapshot(self) -> StateFile:
+    def read_snapshot(self, case_id=None, *, job_id=None, attachment_id=None, request_key=None) -> StateFile:
         if self.fail_next_read:
             self.fail_next_read = False
             raise ApplicationPortError(

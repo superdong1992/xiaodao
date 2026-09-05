@@ -157,7 +157,7 @@ def test_mcp_get_case_and_list_artifacts_preserve_generic_v2_report_contract() -
     case_result = asyncio.run(
         adapter.call(
             "problem_locator_get_case",
-            {"case_id": CASE_ID, "wait_for_job_id": None, "wait_seconds": 0},
+            {"case_id": CASE_ID, "wait_for_job_id": None, "wait_seconds": 0, "include_details": True},
         )
     )
     artifact_result = asyncio.run(
@@ -901,7 +901,7 @@ def test_official_sdk_calls_all_seven_stateless_tools(caplog) -> None:
                                 },
                             ),
                             TOOL_NAMES[3]: (
-                                {"case_id", "wait_for_job_id", "wait_seconds"},
+                                {"case_id", "wait_for_job_id", "wait_seconds", "include_details"},
                                 {"case_id"},
                             ),
                             TOOL_NAMES[4]: (

@@ -44,7 +44,7 @@ from problem_locator.storage.quarantine import QuarantineMover
 from problem_locator.storage.resource_store import FileResourceStore
 from problem_locator.storage.retention import RetentionScanner
 from problem_locator.storage.retention_cleaner import StorageRetentionCleaner
-from problem_locator.storage.state_repository import JsonFileStateRepository
+from problem_locator.storage.state_repository import CaseStateRepository
 from tests.deterministic.contracts.fakes import (
     DeterministicIdGenerator,
     FakeAssetCatalog,
@@ -217,7 +217,7 @@ def test_reachable_route_state_retention_cleanup_and_commit_race(
     )
     records = FileExecutionRecordStore(data_root, lock, file_sync, replacer)
     clock = FakeClock("2026-07-31T00:01:00.000Z")
-    repository = JsonFileStateRepository(
+    repository = CaseStateRepository(
         data_root,
         lock,
         clock,

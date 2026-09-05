@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
+from pathlib import Path
 import zipfile
 from dataclasses import dataclass
 from typing import Iterable
@@ -18,6 +20,8 @@ from problem_locator.runtime.authoritative_targets import (
     AuthoritativeTargetLog,
     semantic_archive_name,
 )
+from problem_locator.contracts.models import ArchivePlan, ArchiveSourceFile
+from problem_locator.storage.streams import FileBinaryStream
 
 
 _FORMAT_ID = "problem-locator-result-archive-v3"
@@ -41,6 +45,7 @@ def _zip_info(name: str) -> zipfile.ZipInfo:
     info.compress_type = zipfile.ZIP_DEFLATED
     info.create_system = 3
     info.external_attr = _ZIP_EXTERNAL_ATTR
+    info._compresslevel = 1
     return info
 
 
@@ -426,6 +431,51 @@ def _archive_manifest(
     )
 
 
+def prepare_result_archive(report: UserResultPayloadV3, *, problem_time: str | None,
+                           target_logs: tuple[ResultArchiveLog, ...]) -> ArchivePlan:
+    """Freeze the small manifest now; defer compression and file I/O."""
+    logs = _validated_logs(target_logs)
+    if logs and not problem_time:
+        raise ValueError("Logparse-backed result.zip requires problem_time")
+    result_text = render_result_text(report, target_logs=logs)
+    manifest = _archive_manifest(report, problem_time=problem_time,
+        result_bytes=result_text.encode("utf-8"), target_logs=logs)
+    rows = json.loads(manifest)["target_logs"]
+    return ArchivePlan(result_text=result_text, manifest_json=manifest.decode("utf-8"), logs=[
+        ArchiveSourceFile(source_kind=item.target.source_kind, source_ref=item.target.source_ref,
+            relative_path=item.target.log_path, archive_name=item.target.archive_name,
+            size=row["size"], sha256=row["sha256"])
+        for item, row in zip(logs, rows, strict=True)
+    ])
+
+
+def write_result_archive_file(destination: Path, *, plan: ArchivePlan, source_paths,
+                              cancelled=lambda: False) -> None:
+    """Write bounded chunks to one temporary ZIP, without rebuilding it."""
+    if len(plan.logs) != len(source_paths):
+        raise ValueError("archive source count differs from frozen plan")
+    with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED,
+                         compresslevel=1, allowZip64=True) as archive:
+        archive.writestr(_zip_info("result.txt"), plan.result_text.encode("utf-8"))
+        archive.writestr(_zip_info("archive-manifest.json"), plan.manifest_json.encode("utf-8"))
+        for item, path in zip(plan.logs, source_paths, strict=True):
+            if "/" in item.archive_name or "\\" in item.archive_name:
+                raise ValueError("archive log name must be a leaf")
+            digest, size = hashlib.sha256(), 0
+            with FileBinaryStream(path) as source, archive.open(_zip_info(item.archive_name), "w", force_zip64=True) as target:
+                while True:
+                    if cancelled():
+                        raise InterruptedError("archive service is stopping")
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    digest.update(chunk)
+                    target.write(chunk)
+            if size != item.size or digest.hexdigest() != item.sha256:
+                raise ValueError("archive source differs from verified raw log")
+
+
 def build_result_archive(
     report: UserResultPayloadV3,
     *,
@@ -449,7 +499,7 @@ def build_result_archive(
         stream,
         mode="w",
         compression=zipfile.ZIP_DEFLATED,
-        compresslevel=9,
+        compresslevel=1,
         allowZip64=False,
         strict_timestamps=True,
     ) as archive:

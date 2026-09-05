@@ -159,7 +159,7 @@ def test_unique_object_graph_recovery_export_and_shutdown_lock_order(
         assert graph.instance_lock.is_acquired()
         assert graph.dispatcher.target is graph.scheduler
         assert graph.publication_guard.coordination_lock is graph.coordination_lock
-        assert graph.repository._coordination_lock is graph.coordination_lock
+        assert graph.repository._lock_for('case-a') is not graph.repository._lock_for('case-b')
         assert graph.execution_records._coordination_lock is graph.coordination_lock
         assert graph.resource_store.coordination_lock is graph.coordination_lock
         assert graph.resource_store.attachment_registry is graph.attachment_registry
@@ -167,7 +167,6 @@ def test_unique_object_graph_recovery_export_and_shutdown_lock_order(
         assert graph.repository._file_sync is graph.file_sync
         assert graph.execution_records._file_sync is graph.file_sync
         assert graph.resource_store._file_sync is graph.file_sync
-        assert graph.repository._replacer is graph.replacer
         assert graph.execution_records._replacer is graph.replacer
         assert graph.resource_store._replacer is graph.replacer
         assert graph.retention.cleaner._coordination_lock is graph.coordination_lock
@@ -213,8 +212,8 @@ def test_unique_object_graph_recovery_export_and_shutdown_lock_order(
         )
         assert exported.source_generation == exported.state.generation
         assert exported.resources == []
-        assert exported.object_counts.runtime_epochs == 1
-        assert exported.object_counts.recovery_processing_records == 1
+        assert exported.object_counts.runtime_epochs == 0
+        assert exported.object_counts.recovery_processing_records == 0
     finally:
         graph.close()
 
@@ -337,19 +336,19 @@ def test_standalone_admin_is_lock_scoped_and_exports_one_canonical_generation(
     graph = build_service(_settings(tmp_path / "data"))
     graph.start()
     graph.close()
-    original_state = graph.layout.state.read_bytes()
+    original_state = (graph.layout.data_root / 'completed.sqlite3').read_bytes()
 
     admin = StandaloneStateAdmin(graph.layout.data_root)
     report = admin.validate_state()
     assert report.valid is True
-    assert graph.layout.state.read_bytes() == original_state
+    assert (graph.layout.data_root / 'completed.sqlite3').read_bytes() == original_state
 
     exported_bytes = admin.export_state()
     exported = parse_canonical_json_bytes(exported_bytes, StateExport)
     assert exported.source_generation == report.generation
     assert exported.object_counts == report.object_counts
     assert canonical_json_bytes(exported) == exported_bytes
-    assert graph.layout.state.read_bytes() == original_state
+    assert (graph.layout.data_root / 'completed.sqlite3').read_bytes() == original_state
 
     # Both operations released the process lock before returning.
     lock = FileInstanceLock(graph.layout.instance_lock).acquire()

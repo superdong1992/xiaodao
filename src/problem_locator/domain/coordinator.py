@@ -852,9 +852,9 @@ class DomainCoordinator:
                 for proposal in outcome.proposed_artifacts
                 if proposal.artifact_kind is ArtifactKind.USER_RESULT_ARCHIVE
             ]
-            if len(archive_keys) != 1:
+            if len(archive_keys) > 1:
                 return _validation(
-                    "An accepted Candidate requires exactly one USER_RESULT_ARCHIVE Artifact."
+                    "诊断结果最多只能有一个归档。"
                 )
             artifact_keys = _dedupe(
                 [*dependency_artifact_keys, user_result_keys[0], *archive_keys]

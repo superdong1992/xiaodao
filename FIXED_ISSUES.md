@@ -1,9 +1,31 @@
 # 已修复问题台账
 
-更新时间：2026-09-03
+更新时间：2026-09-05
 
 本文件记录已经在当前工作区验证、修复并由专项回归测试保护的问题。活跃待办仍只写入
 [`TODO.md`](TODO.md)；同一问题再次回归时更新原条目，不另建一个缺少历史关联的条目。
+
+## PL-FIX-056：活动状态更新复制全库并反复读取历史资源
+
+- **状态**：7.0 实现完成，是否验证通过以本条最终元数据为准。
+- **症状与受影响版本**：6.0.0 / `e55a08c` 每次活动更新序列化完整 StateFile、重写 state.json 并复核全部资源，开销随历史 Case 和附件总量增长。
+- **根因**：全局 generation、共享提交锁与全库资源校验绑定到每次业务提交。
+- **修复历史**：2026-09-05 将活动 Case、Job、幂等和索引放入内存，按 Case 锁及 revision 更新；终态、查询索引、幂等和归档任务保存到 SQLite WAL/FULL。资源先 fsync，数据库提交后才通知交付。清理只看元数据，并用索引逐项查询引用。
+- **不可回归行为**：1,000/10,000 个历史 Case 不增加活动更新的历史加载、序列化或附件读取；终态事务失败必须回滚索引，已确认报告跨进程保留。启动不重放活动任务。新 DATA_ROOT、V10 格式，不迁移或修改旧目录。
+- **取舍**：活动任务在服务退出后丢失；外部修改历史文件不再被每次提交即时发现。终态查询按需发现存储损坏，已知故障使 readiness 失败。
+- **专项回归测试**：`tests/deterministic/unit/storage/test_case_store_v10.py`；`tests/deterministic/unit/storage/test_state_repository.py`；`tests/deterministic/integration/test_terminal_crash.py`；`tests/deterministic/integration/test_bootstrap_resource_export.py`；`tests/deterministic/unit/dispatch/test_startup_v10.py`。
+- **最新 Test Flow verdict（7.0）**：Dev [run-20260905T152251Z-bc60e01f](.tmp/test-flow-evidence/run-20260905T152251Z-bc60e01f/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:14a770d4c99596e650442ee7c0c8f44750625bb5ef593581ff2c47094ceb5136`（764 files）；完整 deterministic 2,535 passed / 68 skipped，Core 31 passed。此行是验证完成后的元数据回填，不属于所引用快照。
+
+## PL-FIX-057：全局串行 worker 使短 ROUTE 等待长 DIAGNOSE
+
+- **状态**：7.0 实现完成，是否验证通过以本条最终元数据为准。
+- **症状与受影响版本**：6.0.0 / `e55a08c` 的全部 Case 共用 FIFO worker 和 ExecutionPermit，不同 Case 无法重叠执行。
+- **根因**：进程级执行许可把所有角色和 Case 串行化。
+- **修复历史**：2026-09-05 删除全局许可，拆分 ROUTE 与 DIAGNOSE/REVIEW 队列，默认 worker 为 1/2，Logparse 和 ZIP 默认并发均为 1，均可配置。
+- **不可回归行为**：同一 Case 串行，不同 Case 可重叠；ROUTE 可与长诊断并行；取消一个 Job 只终止其进程树，其他 Case 继续。每个 Job 独享 Workspace、上下文与取消信号。
+- **取舍**：提高吞吐并缩短排队，但增加模型请求、CPU 和内存并发；不能据此解释单 Case 上传前的 108 秒等待。
+- **专项回归测试**：`tests/deterministic/unit/dispatch/test_parallel_queues.py`；`tests/deterministic/unit/dispatch/test_concurrency.py`；`tests/deterministic/integration/test_runtime_dispatch_recovery.py::test_cancel_commit_wins_barrier_and_late_finalized_outcome_is_stale_once`；`tests/deterministic/integration/test_upload_concurrency_barriers.py`。
+- **最新 Test Flow verdict（7.0）**：Dev [run-20260905T152251Z-bc60e01f](.tmp/test-flow-evidence/run-20260905T152251Z-bc60e01f/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:14a770d4c99596e650442ee7c0c8f44750625bb5ef593581ff2c47094ceb5136`（764 files）；完整 deterministic 2,535 passed / 68 skipped，Core 31 passed。此行是验证完成后的元数据回填，不属于所引用快照。
 
 ## 登记格式
 
@@ -2061,6 +2083,14 @@
   `git-visible-worktree-v1:86407911bd63718703d2ba23946e9415039d35777da0b4b0a4e00b11fcca235a`
   （749 files），verdict verification 为 PASS。本元数据行本身不宣称被其引用的快照覆盖。
 
+### 2026-09-05：7.0 启动快照取代运行期重复核验
+
+- **受影响版本与根因**：6.0.0 / `e55a08c` 仍在运行期重复加载、解析和 hash 同一资产，Workspace 还可能重新读取部署目录。
+- **本次修复与取舍**：Skill、方法卡和内置资产在启动时冻结，运行期直接查表并从同一份快照构建 Workspace。7.0 明确取消运行期热更新及原目录篡改即时检测；更新后重启。上述旧版“每个 Job 必须重做内容校验”的约束不再适用。
+- **不可回归行为**：启动后对原部署目录的修改不影响已冻结任务；新进程加载新的资产。Logparse 身份只在启动确认，readiness 不重新扫描历史资源。
+- **专项回归测试**：`tests/deterministic/unit/runtime/test_diagnosis_runtime.py` 的资产变动与 ROUTE 快照用例；`tests/deterministic/unit/runtime/test_methods_skill.py`；`tests/deterministic/unit/integrations/test_logparse_fake_e2e.py::test_first_parse_dual_anchor_claim_audit_close_and_fixed_argv`。
+- **最新 Test Flow verdict（7.0）**：Dev [run-20260905T152251Z-bc60e01f](.tmp/test-flow-evidence/run-20260905T152251Z-bc60e01f/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:14a770d4c99596e650442ee7c0c8f44750625bb5ef593581ff2c47094ceb5136`（764 files）；完整 deterministic 2,535 passed / 68 skipped，Core 31 passed。此行是验证完成后的元数据回填，不属于所引用快照。
+
 ## PL-FIX-051：dev.quick 要求 full 后又被同身份重试策略阻断，BLOCKED verdict 自身校验失败
 
 - **状态**：已修复；验证结论以本条最终复验元数据为准。
@@ -2361,6 +2391,15 @@
   完整性和调用合同，不证明真实环境的分钟级降幅；同模型、网络、附件和服务负载下的 A/B 仍以新增
   `backend_phase/backend_invocation_id` 遥测为准。本元数据段本身不宣称被其引用的源码快照覆盖。
 
+### 2026-09-05：7.0 减少模型往返与客户端重复上下文
+
+- **受影响版本与症状**：6.0.0 / `e55a08c` 的 ROUTE 要求模型写完整草稿，Specialist 逐个读取小输入并写草稿；轮询重复返回完整 Case。历史实测与代码检查见原条目，不能把模型等待全部归因于本地 I/O。
+- **根因与修复**：输出元数据和文件读写占用了模型回合。ROUTE 改为最终 JSON 的三个字段，由服务端解析冻结 Skill ref；Specialist 完整输入不超过 128 KiB 时全部内联，最终 JSON 由服务端规范化、核验。大输入完整列出受控文件，保留逐行证据检查。
+- **不可回归行为**：ROUTE 不调用文件工具；小 Specialist 不调用 Read/Write；未知 Skill、非法 JSON、重复最终结果和异常退出不自动修复。MCP 七个输入保持扁平；执行态紧凑返回，显式 `include_details` 才取详情。上传每批最多 1 MiB，自有缓冲最多 2 MiB：固定容量，复制后释放上一批，专项测试检查真实分配峰值。新增接收/校验/发布/提交耗时。
+- **影响**：不再兼容旧输出和旧客户端返回体；大输入仍可能多轮读取。工作区全树检查降为每秒一次，退出后完整检查，取消检查保持快速响应。
+- **专项回归测试**：`tests/deterministic/unit/runtime/test_final_response.py`；`tests/deterministic/unit/runtime/test_claude_command.py`；`tests/deterministic/unit/interfaces/test_mcp_server.py`、`test_client_access_skill.py`、`test_http_streaming.py`；`tests/deterministic/journey/test_rpc_timeout.py`。
+- **最新 Test Flow verdict（7.0）**：Dev [run-20260905T152251Z-bc60e01f](.tmp/test-flow-evidence/run-20260905T152251Z-bc60e01f/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:14a770d4c99596e650442ee7c0c8f44750625bb5ef593581ff2c47094ceb5136`（764 files）；完整 deterministic 2,535 passed / 68 skipped，Core 31 passed。此行是验证完成后的元数据回填，不属于所引用快照。
+
 ## PL-FIX-054：专有定位终态只返回审计引用，缺少面向用户的具体报告
 
 - **状态**：修复完成；验证结论以本条“最新 Test Flow verdict”为准。
@@ -2429,6 +2468,14 @@
   `git-visible-worktree-v1:5f72aab29bc22eaac1d56f67ae66825f6b9b302507265919c3d83095da1b2e44`
   （752 files），worktree 与 materialized source verification 均为 PASS。本元数据行本身不宣称被其
   引用的源码快照覆盖。
+
+### 2026-09-05：7.0 先交付 JSON，再后台生成 ZIP
+
+- **受影响版本与根因**：6.0.0 / `e55a08c` 同步生成 ZIP，生产路径重复构建 ZIP 校验，使 JSON 等待归档完成，并提高内存峰值。
+- **本次修复**：终态事务保存 JSON 及归档计划。独立 worker 流式写 DEFLATE level 1 ZIP，逐个检查原始日志的长度与 hash，完成后发布。`archive_status` 公开 NOT_REQUIRED/PENDING/READY/FAILED。
+- **不可回归行为**：ZIP 延迟、失败或进程中断不撤销 JSON；待归档任务和文件已发布但事务未提交的任务，重启后可继续。原始日志、清单顺序和内容不变；压缩包可能更大。
+- **专项回归测试**：`tests/deterministic/integration/test_async_archive.py`；`tests/deterministic/integration/test_terminal_crash.py`；`tests/deterministic/journey/test_rpc_timeout.py`；`tests/deterministic/unit/integrations/test_result_archive.py`。
+- **最新 Test Flow verdict（7.0）**：Dev [run-20260905T152251Z-bc60e01f](.tmp/test-flow-evidence/run-20260905T152251Z-bc60e01f/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:14a770d4c99596e650442ee7c0c8f44750625bb5ef593581ff2c47094ceb5136`（764 files）；完整 deterministic 2,535 passed / 68 skipped，Core 31 passed。此行是验证完成后的元数据回填，不属于所引用快照。
 
 ## PL-FIX-055：Methods V1 引用提示未明确 marker 必须在当前日志行中连续出现
 

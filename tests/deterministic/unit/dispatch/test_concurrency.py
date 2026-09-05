@@ -15,6 +15,16 @@ from ._support import (
 from .fakes import FakeApplicationService, FakeRuntime, ManualGate
 
 
+class _ConcurrencyGate(ManualGate):
+    def __init__(self, count):
+        super().__init__()
+        self.barrier = threading.Barrier(count + 1)
+
+    def arrive_and_wait(self, timeout_seconds=2):
+        self.barrier.wait(timeout_seconds)
+        super().arrive_and_wait(timeout_seconds)
+
+
 def _make_jobs_and_receipts():
     definitions = [
         ("route", "00000000-0000-0000-0000-000000000130", "00000000-0000-0000-0000-000000000230"),
@@ -42,30 +52,32 @@ def _make_jobs_and_receipts():
 def _dispatcher(application, runtime):
     epoch = RuntimeEpochContext()
     epoch.install(CURRENT_EPOCH)
-    dispatcher = InProcessDispatcher(JobWorker(application, runtime, epoch))
+    dispatcher = InProcessDispatcher(JobWorker(application, runtime, epoch),
+        job_identity=lambda key: (application.jobs[key].case_id, application.jobs[key].job_type))
     dispatcher.start()
     return dispatcher
 
 
-def test_all_job_types_and_cases_share_one_global_execution_slot() -> None:
+def test_route_and_two_diagnoses_execute_across_cases() -> None:
     jobs, receipts = _make_jobs_and_receipts()
     application = FakeApplicationService(jobs)
-    runtime = FakeRuntime(receipts)
-    first_execution = ManualGate()
+    by_job = {receipt.job_outcome.job_id: receipt for receipt in receipts}
+    runtime = FakeRuntime([lambda job, _: by_job[job.job_id]] * 3)
+    first_execution = _ConcurrencyGate(3)
     runtime.execution_gate = first_execution
     dispatcher = _dispatcher(application, runtime)
 
     for job in jobs:
         assert dispatcher.submit(job.job_id).accepted
     dispatcher.enable_claiming()
-    assert first_execution.entered.wait(1.0)
-    assert len(runtime.calls) == 1
-    assert dispatcher.queued_job_ids == tuple(job.job_id for job in jobs[1:])
+    first_execution.barrier.wait(2)
+    assert len(runtime.calls) == 3
+    assert dispatcher.queued_job_ids == ()
 
     first_execution.release()
     assert dispatcher.wait_until_idle(1.0)
-    assert runtime.max_active == 1
-    assert [job.job_id for job, _ in runtime.calls] == [job.job_id for job in jobs]
+    assert runtime.max_active == 3
+    assert {job.job_id for job, _ in runtime.calls} == {job.job_id for job in jobs}
     assert dispatcher.shutdown(1.0)
 
 
@@ -98,7 +110,7 @@ def test_concurrent_duplicate_submit_produces_one_claim_and_runtime_call() -> No
     assert dispatcher.shutdown(1.0)
 
 
-def test_shared_worker_execution_permit_serializes_direct_callers_before_claim() -> None:
+def test_worker_has_no_global_execution_permit_between_direct_callers() -> None:
     jobs, receipts = _make_jobs_and_receipts()
     application = FakeApplicationService(jobs[:2])
     receipts_by_job_id = {
@@ -109,7 +121,7 @@ def test_shared_worker_execution_permit_serializes_direct_callers_before_claim()
         return receipts_by_job_id[job.job_id]
 
     runtime = FakeRuntime([receipt_for_claimed_job, receipt_for_claimed_job])
-    gate = ManualGate()
+    gate = _ConcurrencyGate(2)
     runtime.execution_gate = gate
     epoch = RuntimeEpochContext()
     epoch.install(CURRENT_EPOCH)
@@ -129,10 +141,9 @@ def test_shared_worker_execution_permit_serializes_direct_callers_before_claim()
     for thread in threads:
         thread.start()
     barrier.wait()
-    assert gate.entered.wait(1.0)
-
-    assert len(application.claim_calls) == 1
-    assert len(runtime.calls) == 1
+    gate.barrier.wait(2)
+    assert len(application.claim_calls) == 2
+    assert len(runtime.calls) == 2
     gate.release()
     for thread in threads:
         thread.join(1.0)
@@ -141,4 +152,4 @@ def test_shared_worker_execution_permit_serializes_direct_callers_before_claim()
     assert len(results) == 2
     assert len(application.claim_calls) == 2
     assert len(runtime.calls) == 2
-    assert runtime.max_active == 1
+    assert runtime.max_active == 2

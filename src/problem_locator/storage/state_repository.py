@@ -1,13 +1,14 @@
-"""Strict, atomic ``state.json`` implementation of the frozen StateRepository.
+"""Case-scoped live state and durable, lazily loaded terminal snapshots.
 
-The repository keeps one validated in-memory snapshot, but every durable
-change is a whole-file replacement through :class:`AtomicStateFileWriter`.
-All snapshot reads, conditional mutation, reference validation, persistence,
-and in-memory replacement run under the shared storage coordination lock.
+The process owns active Cases. Only terminal Cases cross the SQLite durability
+barrier; no active mutation scans historical Cases or their resource bytes.
 """
-
 from __future__ import annotations
 
+import sqlite3
+import json
+import threading
+import weakref
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -15,447 +16,388 @@ from typing import Any
 from pydantic import ValidationError
 
 from problem_locator.contracts import (
-    CONTRACT_REVISION,
-    SCHEMA_VERSION,
-    ApplicationError,
-    ApplicationPortError,
-    Artifact,
-    AttachmentStatus,
-    CaseAggregate,
-    Clock,
-    CommitReceipt,
-    ERROR_SPECS,
-    ErrorCode,
-    ExecutionRecordStore,
-    IdGenerator,
-    Job,
-    JobStatus,
-    OutcomeDisposition,
-    ResourceKind,
-    ResourceRef,
-    StateExportObjectCounts,
-    StateFile,
-    StateMutation,
-    ValidationIssue,
-    ValidationReport,
-    canonical_json_bytes,
-    parse_canonical_json_bytes,
+    CONTRACT_REVISION, SCHEMA_VERSION, ApplicationError, ApplicationPortError,
+    Artifact, ArtifactKind, CaseAggregate, CaseStatus, Clock, CommitReceipt, ERROR_SPECS,
+    ErrorCode, ExecutionRecordStore, IdGenerator, Job, JobStatus, StateExportObjectCounts,
+    StateFile, StateMutation, ValidationIssue, ValidationReport, canonical_json_bytes,
 )
-
 from .atomic import FileSync, Replacer, read_stable_file_bytes
 from .coordination import StorageCoordinationLock
-from .execution_records import FileExecutionRecordStore
 from .layout import StorageLayout, UnsupportedDataFormatError
-from .paths import parse_storage_key
-from .platform import PlatformFileSync, PlatformReplaceOperation
-from .resource_files import validate_formal_resource
-from .state_atomic import AtomicStateFileWriter
+from .platform import PlatformFileSync
 
+_TERMINAL = frozenset({CaseStatus.RESOLVED, CaseStatus.PARTIALLY_RESOLVED,
+                      CaseStatus.UNRESOLVED, CaseStatus.FAILED, CaseStatus.CANCELLED})
 
 def _port_error(code: ErrorCode, message: str) -> ApplicationPortError:
-    return ApplicationPortError(
-        ApplicationError(
-            code=code,
-            message=message,
-            details=[],
-            retryable=ERROR_SPECS[code].application_retryable,
-        )
-    )
+    return ApplicationPortError(ApplicationError(code=code, message=message,
+        details=[], retryable=ERROR_SPECS[code].application_retryable))
 
-
-def _clone[T](value: T) -> T:
-    copier = getattr(value, "model_copy", None)
-    if copier is None:  # pragma: no cover - every current caller passes a DTO
-        raise TypeError("state repository values must be contract DTOs")
-    return copier(deep=True)
-
-
-def _empty_counts() -> StateExportObjectCounts:
-    return StateExportObjectCounts(
-        cases=0,
-        jobs=0,
-        outcomes=0,
-        outcome_processing_records=0,
-        execution_failure_records=0,
-        attachments=0,
-        evidence=0,
-        artifacts=0,
-        idempotency_records=0,
-        runtime_epochs=0,
-        recovery_processing_records=0,
-    )
-
+def _clone(value):
+    return value.model_copy(deep=True)
 
 def _object_counts(state: StateFile) -> StateExportObjectCounts:
-    aggregates = tuple(state.cases.values())
-    return StateExportObjectCounts(
-        cases=len(aggregates),
-        jobs=sum(len(item.jobs) for item in aggregates),
-        outcomes=sum(len(item.outcomes) for item in aggregates),
-        outcome_processing_records=sum(
-            len(item.outcome_processing_records) for item in aggregates
-        ),
-        execution_failure_records=sum(
-            len(item.execution_failure_records) for item in aggregates
-        ),
-        attachments=sum(len(item.attachments) for item in aggregates),
-        evidence=sum(len(item.evidence) for item in aggregates),
-        artifacts=sum(len(item.artifacts) for item in aggregates),
-        idempotency_records=len(state.idempotency_records),
-        runtime_epochs=len(state.runtime_epochs),
-        recovery_processing_records=len(state.recovery_processing_records),
-    )
+    names = ('jobs', 'outcomes', 'outcome_processing_records',
+             'execution_failure_records', 'attachments', 'evidence', 'artifacts')
+    return StateExportObjectCounts(cases=len(state.cases),
+        **{name: sum(len(getattr(case, name)) for case in state.cases.values()) for name in names},
+        idempotency_records=len(state.idempotency_records), runtime_epochs=len(state.runtime_epochs),
+        recovery_processing_records=len(state.recovery_processing_records))
 
+class CaseStateRepository:
+    """An isolated revision domain per Case; SQLite contains completed work only."""
 
-class JsonFileStateRepository:
-    """One-process repository for the authoritative V2 ``state.json`` file."""
-
-    def __init__(
-        self,
-        data_root: Path,
-        coordination_lock: StorageCoordinationLock,
-        clock: Clock,
-        id_generator: IdGenerator,
-        *,
-        file_sync: FileSync | None = None,
-        replacer: Replacer | None = None,
-        execution_record_store: ExecutionRecordStore | None = None,
-        read_file: Callable[[Path], bytes] = read_stable_file_bytes,
-    ) -> None:
-        self._layout = StorageLayout.at(Path(data_root))
-        self._coordination_lock = coordination_lock
+    def __init__(self, data_root: Path, coordination_lock: StorageCoordinationLock,
+                 clock: Clock, id_generator: IdGenerator, *, file_sync: FileSync | None = None,
+                 replacer: Replacer | None = None,
+                 execution_record_store: ExecutionRecordStore | None = None,
+                 read_file: Callable[[Path], bytes] = read_stable_file_bytes) -> None:
+        self._layout = StorageLayout.at(data_root)
         self._clock = clock
         self._id_generator = id_generator
-        self._file_sync = file_sync if file_sync is not None else PlatformFileSync()
-        self._replacer = (
-            replacer if replacer is not None else PlatformReplaceOperation()
-        )
-        self._read_file = read_file
-        self._state: StateFile | None = None
+        self._file_sync = file_sync or PlatformFileSync()
+        self._index_lock = threading.RLock()
+        self._database_lock = threading.RLock()
+        self._case_locks = weakref.WeakValueDictionary()
+        self._live: dict[str, StateFile] = {}
+        self._objects: dict[str, str] = {}
+        self._requests: dict[str, str] = {}
         self._state_failure: ApplicationError | None = None
-
+        self.on_terminal: Callable[[str], None] = lambda case_id: None
         try:
             self._layout.initialize_v2_data_root(self._file_sync)
         except UnsupportedDataFormatError as exc:
-            raise _port_error(
-                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
-                "The DATA_ROOT data format is unsupported; configure a fresh DATA_ROOT.",
-            ) from exc
-        except (OSError, ValueError) as exc:
-            raise _port_error(
-                ErrorCode.STATE_CORRUPT,
-                "The DATA_ROOT storage layout is invalid.",
-            ) from exc
-
-        self._execution_record_store = execution_record_store or FileExecutionRecordStore(
-            self._layout.data_root,
-            self._coordination_lock,
-            self._file_sync,
-            self._replacer,
-        )
-        self._writer = AtomicStateFileWriter(
-            self._layout,
-            self._file_sync,
-            self._replacer,
-            self._id_generator,
-            read_file=self._read_file,
-        )
-
-        with self._coordination_lock:
-            try:
-                self._state = self._open_or_initialize()
-            except ApplicationPortError:
-                raise
-            except (OSError, TypeError, ValueError, ValidationError) as exc:
-                raise _port_error(
-                    ErrorCode.STATE_CORRUPT,
-                    "The stored state is corrupt or inconsistent.",
-                ) from exc
+            raise _port_error(ErrorCode.STATE_SCHEMA_UNSUPPORTED,
+                '数据目录格式不受支持，请为新版本配置空 DATA_ROOT。') from exc
+        try:
+            self._db = sqlite3.connect(self._layout.data_root / 'completed.sqlite3',
+                                      check_same_thread=False, isolation_level=None, timeout=30)
+            self._db.execute('PRAGMA journal_mode=WAL')
+            self._db.execute('PRAGMA synchronous=FULL')
+            self._db.executescript("""
+                CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS completed_cases (
+                    case_id TEXT PRIMARY KEY, snapshot BLOB NOT NULL);
+                CREATE TABLE IF NOT EXISTS object_index (
+                    object_id TEXT PRIMARY KEY, case_id TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS request_index (
+                    request_key TEXT PRIMARY KEY, case_id TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS resource_index (
+                    storage_key TEXT PRIMARY KEY, case_id TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS archive_tasks (
+                    case_id TEXT PRIMARY KEY, status TEXT NOT NULL,
+                    payload BLOB NOT NULL, error TEXT);
+                CREATE INDEX IF NOT EXISTS archive_tasks_status ON archive_tasks(status);
+            """)
+            self._db.execute("UPDATE archive_tasks SET status='PENDING' WHERE status='RUNNING'")
+            now = self._clock.now()
+            self._db.execute('INSERT OR IGNORE INTO metadata VALUES (?, ?)',
+                             ('installation_id', self._id_generator.new('installation')))
+            self._db.execute('INSERT OR IGNORE INTO metadata VALUES (?, ?)', ('created_at', now))
+            metadata = dict(self._db.execute('SELECT key, value FROM metadata'))
+            self._base = StateFile(schema_version=SCHEMA_VERSION, contract_revision=CONTRACT_REVISION,
+                generation=1, installation_id=metadata['installation_id'],
+                created_at=metadata['created_at'], updated_at=metadata['created_at'], runtime_epochs=[],
+                recovery_processing_records={}, cases={}, idempotency_records={})
+            self._file_sync.sync_directory(self._layout.data_root)
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            raise _port_error(ErrorCode.STATE_CORRUPT, '无法打开已完成 Case 的数据库。') from exc
 
     @property
     def layout(self) -> StorageLayout:
-        """Expose only the fixed layout object for S02 composition and tests."""
-
         return self._layout
 
-    def _open_or_initialize(self) -> StateFile:
+    def _lock_for(self, case_id: str) -> threading.RLock:
+        with self._index_lock:
+            return self._case_locks.setdefault(case_id, threading.RLock())
+
+    def _locate(self, key: str, *, request: bool = False) -> str | None:
+        with self._index_lock:
+            case_id = (self._requests if request else self._objects).get(key)
+        if case_id is not None:
+            return case_id
+        table, column = ('request_index', 'request_key') if request else ('object_index', 'object_id')
+        with self._database_lock:
+            row = self._db.execute(f'SELECT case_id FROM {table} WHERE {column}=?', (key,)).fetchone()
+        return None if row is None else row[0]
+
+    def _load_case(self, case_id: str) -> StateFile | None:
+        live = self._live.get(case_id)
+        if live is not None:
+            return live
         try:
-            self._layout.validate_v2_data_format()
-        except UnsupportedDataFormatError as exc:
-            raise _port_error(
-                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
-                "The DATA_ROOT data format is unsupported; configure a fresh DATA_ROOT.",
-            ) from exc
-        try:
-            state_bytes = self._read_file(self._layout.state)
-        except FileNotFoundError:
-            if self._layout.has_business_content_without_state():
-                raise _port_error(
-                    ErrorCode.STATE_CORRUPT,
-                    "state.json is missing while existing business content remains.",
-                )
-            try:
-                now = self._clock.now()
-                initial = StateFile(
-                    schema_version=SCHEMA_VERSION,
-                    contract_revision=CONTRACT_REVISION,
-                    generation=1,
-                    installation_id=self._id_generator.new("installation"),
-                    created_at=now,
-                    updated_at=now,
-                    runtime_epochs=[],
-                    recovery_processing_records={},
-                    cases={},
-                    idempotency_records={},
-                )
-                state_bytes = self._writer.write(canonical_json_bytes(initial))
-            except (OSError, TypeError, ValueError, ValidationError) as exc:
-                raise _port_error(
-                    ErrorCode.STATE_WRITE_FAILED,
-                    "The initial state could not be written durably.",
-                ) from exc
-        return self._decode_and_validate(state_bytes)
+            with self._database_lock:
+                row = self._db.execute('SELECT snapshot FROM completed_cases WHERE case_id=?',
+                                       (case_id,)).fetchone()
+            return None if row is None else StateFile.model_validate_json(row[0])
+        except (sqlite3.Error, ValidationError) as exc:
+            self._state_failure = _port_error(ErrorCode.STATE_CORRUPT, '已完成 Case 的快照无法读取。').error
+            raise ApplicationPortError(_clone(self._state_failure)) from exc
 
-    @staticmethod
-    def _decode_state(state_bytes: bytes) -> StateFile:
-        try:
-            payload = parse_canonical_json_bytes(state_bytes)
-        except (TypeError, ValueError) as exc:
-            raise _port_error(
-                ErrorCode.STATE_CORRUPT,
-                "state.json is not valid Canonical JSON.",
-            ) from exc
-        if not isinstance(payload, dict):
-            raise _port_error(
-                ErrorCode.STATE_CORRUPT,
-                "state.json must contain a JSON object.",
-            )
-        if (
-            "schema_version" in payload
-            and payload["schema_version"] != SCHEMA_VERSION
-        ) or (
-            "contract_revision" in payload
-            and payload["contract_revision"] != CONTRACT_REVISION
-        ):
-            raise _port_error(
-                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
-                "The stored state schema or contract revision is unsupported.",
-            )
-        try:
-            state = StateFile.model_validate(payload)
-        except (TypeError, ValueError, ValidationError) as exc:
-            raise _port_error(
-                ErrorCode.STATE_CORRUPT,
-                "state.json violates the frozen StateFile schema or invariants.",
-            ) from exc
-        if state.generation < 1:
-            raise _port_error(
-                ErrorCode.STATE_CORRUPT,
-                "state.json generation must be at least one.",
-            )
-        return state
-
-    def _decode_and_validate(self, state_bytes: bytes) -> StateFile:
-        state = self._decode_state(state_bytes)
-        try:
-            self._validate_external_references(state)
-        except ApplicationPortError as exc:
-            if exc.error.code in {
-                ErrorCode.STATE_CORRUPT,
-                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
-            }:
-                raise
-            raise _port_error(
-                ErrorCode.STATE_CORRUPT,
-                "A state-referenced execution record is invalid.",
-            ) from exc
-        except (OSError, TypeError, ValueError, ValidationError) as exc:
-            raise _port_error(
-                ErrorCode.STATE_CORRUPT,
-                "A state-referenced resource or execution record is invalid.",
-            ) from exc
-        return state
-
-    def _load_disk_state(self) -> StateFile:
-        try:
-            state_bytes = self._read_file(self._layout.state)
-        except (OSError, ValueError) as exc:
-            raise _port_error(
-                ErrorCode.STATE_CORRUPT,
-                "The authoritative state.json file cannot be read safely.",
-            ) from exc
-        return self._decode_and_validate(state_bytes)
-
-    @staticmethod
-    def _pending_job_version(job: Job) -> Job:
-        payload = job.model_dump(mode="python")
-        payload.update(
-            status=JobStatus.PENDING,
-            started_at=None,
-            finished_at=None,
-            runtime_epoch=None,
-        )
-        return Job.model_validate(payload)
-
-    @staticmethod
-    def _include_resource(
-        resources: dict[str, ResourceRef],
-        resource: ResourceRef,
-        *,
-        case_id: str,
-        category: str,
-        resource_id: str,
-    ) -> None:
-        address = parse_storage_key(resource.storage_key)
-        if (
-            address.case_id != case_id
-            or address.category != category
-            or address.resource_id != resource_id
-            or address.resource_kind is not resource.resource_kind
-        ):
-            raise ValueError("formal ResourceRef identity does not match its state owner")
-        existing = resources.setdefault(resource.storage_key, resource)
-        if existing != resource:
-            raise ValueError("one storage_key describes conflicting resource metadata")
-
-    def _validate_external_references(self, state: StateFile) -> None:
-        resources: dict[str, ResourceRef] = {}
-        for case_id, aggregate in state.cases.items():
-            for attachment_id, attachment in aggregate.attachments.items():
-                if attachment.status is AttachmentStatus.READY:
-                    assert (
-                        attachment.storage_key is not None
-                        and attachment.size is not None
-                        and attachment.sha256 is not None
-                    )
-                    self._include_resource(
-                        resources,
-                        ResourceRef(
-                            resource_kind=ResourceKind.FILE,
-                            storage_key=attachment.storage_key,
-                            size=attachment.size,
-                            sha256=attachment.sha256,
-                        ),
-                        case_id=case_id,
-                        category="attachments",
-                        resource_id=attachment_id,
-                    )
-            for evidence_id, evidence in aggregate.evidence.items():
-                if evidence.resource_ref is not None:
-                    self._include_resource(
-                        resources,
-                        evidence.resource_ref,
-                        case_id=case_id,
-                        category="evidence",
-                        resource_id=evidence_id,
-                    )
-            for artifact_id, artifact in aggregate.artifacts.items():
-                self._include_resource(
-                    resources,
-                    ResourceRef(
-                        resource_kind=artifact.resource_kind,
-                        storage_key=artifact.storage_key,
-                        size=artifact.size,
-                        sha256=artifact.sha256,
-                    ),
-                    case_id=case_id,
-                    category="artifacts",
-                    resource_id=artifact_id,
-                )
-
-            for job_id, job in aggregate.jobs.items():
-                published = self._execution_record_store.read_published_job(job_id)
-                if published is None or published.job != self._pending_job_version(job):
-                    raise ValueError(
-                        "state Job does not match its immutable published job.json"
-                    )
-
-            for outcome_id, outcome in aggregate.outcomes.items():
-                record = aggregate.outcome_processing_records[outcome_id]
-                published = self._execution_record_store.read_published_outcome(
-                    record.job_id
-                )
-                if (
-                    published is None
-                    or published.job_outcome != outcome
-                    or published.outcome_file_ref != record.outcome_file_ref
-                ):
-                    raise ValueError(
-                        "saved Outcome does not match its published job_outcome.json"
-                    )
-
-            for outcome_id, record in aggregate.outcome_processing_records.items():
-                if outcome_id in aggregate.outcomes:
-                    continue
-                if not (
-                    record.disposition is OutcomeDisposition.REJECTED
-                    and record.error_code is not None
-                ):
-                    raise ValueError(
-                        "untrusted Outcome audit is not a technical rejection"
-                    )
-
-        for resource in resources.values():
-            validate_formal_resource(
-                self._layout.data_root,
-                resource,
-                require_read_only=True,
-            )
-
-    def _require_state(self) -> StateFile:
-        if self._state is None:
-            failure = self._state_failure
-            if failure is None:
-                failure = _port_error(
-                    ErrorCode.STATE_CORRUPT,
-                    "The authoritative state is unavailable.",
-                ).error
-            raise ApplicationPortError(
-                failure.model_copy(deep=True)
-            )
-        return self._state
+    def read_snapshot(self, case_id: str | None = None, *, job_id: str | None = None,
+                      attachment_id: str | None = None, request_key: str | None = None) -> StateFile:
+        """Business callers provide a scope. No scope is an explicit administrative export."""
+        scoped = any(value is not None for value in (case_id, job_id, attachment_id, request_key))
+        if case_id is None and (job_id is not None or attachment_id is not None):
+            case_id = self._locate(job_id or attachment_id)
+        if case_id is None and request_key is not None:
+            case_id = self._locate(request_key, request=True)
+        if case_id is not None:
+            with self._lock_for(case_id):
+                state = self._load_case(case_id)
+                result = _clone(self._base if state is None else state)
+            # A reused key may belong to one other Case. Read only that owner,
+            # outside the first Case lock, so the command can report a conflict.
+            if request_key is not None:
+                owner = self._locate(request_key, request=True)
+                if owner is not None and owner != case_id:
+                    other = self.read_snapshot(owner)
+                    result.cases.update(other.cases)
+                    result.idempotency_records.update(other.idempotency_records)
+            return result
+        if scoped:
+            return _clone(self._base)
+        with self._index_lock:
+            case_ids = set(self._live)
+        with self._database_lock:
+            case_ids.update(row[0] for row in self._db.execute('SELECT case_id FROM completed_cases'))
+        result = _clone(self._base)
+        for selected in sorted(case_ids):
+            state = self.read_snapshot(selected)
+            result.cases.update(state.cases)
+            result.idempotency_records.update(state.idempotency_records)
+            result.generation = max(result.generation, state.generation)
+            result.updated_at = max(result.updated_at, state.updated_at)
+        return result
 
     def read_case(self, case_id: str) -> CaseAggregate:
-        with self._coordination_lock:
-            aggregate = self._require_state().cases.get(case_id)
-            if aggregate is None:
-                raise _port_error(
-                    ErrorCode.CASE_NOT_FOUND,
-                    "The requested Case does not exist.",
-                )
-            return _clone(aggregate)
+        aggregate = self.read_snapshot(case_id).cases.get(case_id)
+        if aggregate is None:
+            raise _port_error(ErrorCode.CASE_NOT_FOUND, 'Case 不存在或运行中任务已随服务重启失效。')
+        return aggregate
 
     def read_job(self, job_id: str) -> Job:
-        with self._coordination_lock:
-            for aggregate in self._require_state().cases.values():
-                job = aggregate.jobs.get(job_id)
-                if job is not None:
-                    return _clone(job)
-            raise _port_error(
-                ErrorCode.JOB_NOT_FOUND,
-                "The requested Job does not exist.",
-            )
+        case_id = self._locate(job_id)
+        if case_id is None:
+            raise _port_error(ErrorCode.JOB_NOT_FOUND, 'Job 不存在。')
+        return self.read_case(case_id).jobs[job_id]
 
     def read_artifact(self, artifact_id: str) -> Artifact:
-        with self._coordination_lock:
-            for aggregate in self._require_state().cases.values():
-                artifact = aggregate.artifacts.get(artifact_id)
-                if artifact is not None:
-                    return _clone(artifact)
-            raise _port_error(
-                ErrorCode.ARTIFACT_NOT_FOUND,
-                "The requested Artifact does not exist.",
-            )
+        case_id = self._locate(artifact_id)
+        if case_id is None:
+            raise _port_error(ErrorCode.ARTIFACT_NOT_FOUND, '产物不存在。')
+        return self.read_case(case_id).artifacts[artifact_id]
 
-    def read_snapshot(self) -> StateFile:
-        with self._coordination_lock:
+    def _mutation_case_id(self, mutation: StateMutation) -> str | None:
+        if mutation.upsert_case is not None:
+            return mutation.upsert_case.case_id
+        for collection in (mutation.insert_jobs, mutation.insert_outcomes, mutation.upsert_attachments,
+                           mutation.insert_evidence, mutation.insert_artifacts):
+            if collection:
+                return collection[0].case_id
+        for collection in (mutation.job_lifecycle_updates, mutation.insert_outcome_processing_records,
+                           mutation.insert_execution_failure_records):
+            if collection:
+                return self._locate(collection[0].job_id)
+        return None
+
+    def _archive_payload(self, aggregate: CaseAggregate):
+        case = aggregate.case
+        if case.status not in {CaseStatus.RESOLVED, CaseStatus.PARTIALLY_RESOLVED} or case.final_result is None:
+            return None
+        reports = [item for item in aggregate.artifacts.values() if item.kind is ArtifactKind.USER_RESULT
+                   and item.created_by_job_id == case.final_result.proposed_by_job_id]
+        if len(reports) != 1 or reports[0].metadata.archive_plan is None:
+            return None
+        report = reports[0]
+        plan = report.metadata.archive_plan
+        paths = []
+        for source in plan.logs:
+            if source.source_kind == 'INPUT_ARTIFACT':
+                source_artifact = aggregate.artifacts[source.source_ref]
+            else:
+                proposals = [proposal for outcome in aggregate.outcomes.values()
+                    if outcome.job_id == report.created_by_job_id
+                    for proposal in outcome.proposed_artifacts
+                    if proposal.proposal_key == source.source_ref and proposal.artifact_kind is ArtifactKind.LOGPARSE_RUN]
+                if len(proposals) != 1:
+                    raise ValueError('archive log has no unique accepted source proposal')
+                matches = [item for item in aggregate.artifacts.values()
+                    if item.created_by_job_id == report.created_by_job_id and item.kind is ArtifactKind.LOGPARSE_RUN
+                    and item.sha256 == proposals[0].sha256 and item.size == proposals[0].size]
+                if len(matches) != 1:
+                    raise ValueError('archive log has no unique persisted source artifact')
+                source_artifact = matches[0]
+            if source_artifact.kind is not ArtifactKind.LOGPARSE_RUN:
+                raise ValueError('archive source must be a LOGPARSE_RUN')
+            paths.append(source_artifact.storage_key + '/' + source.relative_path)
+        return {'report_artifact_id': report.artifact_id, 'source_job_id': report.created_by_job_id,
+                'plan': plan.model_dump(mode='json'), 'source_storage_keys': paths}
+
+    def _persist(self, case_id: str, state: StateFile) -> None:
+        aggregate = state.cases[case_id]
+        payload = self._archive_payload(aggregate)
+        if payload is not None and aggregate.case.archive_status == 'NOT_REQUIRED':
+            aggregate.case.archive_status = 'PENDING'
+        # Resource publication owns file/directory fsync. This FULL WAL commit
+        # occurs only after those immutable files have been published.
+        objects = [key for name in ('jobs', 'attachments', 'evidence', 'artifacts', 'outcomes')
+                   for key in getattr(aggregate, name)]
+        with self._database_lock:
+            self._db.execute('BEGIN IMMEDIATE')
             try:
-                return _clone(self._require_state())
-            except (TypeError, ValueError, ValidationError) as exc:
-                raise _port_error(
-                    ErrorCode.STATE_CORRUPT,
-                    "The in-memory state snapshot is invalid.",
-                ) from exc
+                self._db.execute('INSERT OR REPLACE INTO completed_cases VALUES (?, ?)',
+                                  (case_id, canonical_json_bytes(state)))
+                self._db.executemany('INSERT OR REPLACE INTO object_index VALUES (?, ?)',
+                                     ((key, case_id) for key in objects))
+                self._db.executemany('INSERT OR REPLACE INTO request_index VALUES (?, ?)',
+                                     ((key, case_id) for key in state.idempotency_records))
+                self._db.executemany('INSERT OR REPLACE INTO resource_index VALUES (?, ?)',
+                                     ((key, case_id) for key in self._resource_keys(aggregate)))
+                if payload is not None:
+                    self._db.execute('INSERT OR IGNORE INTO archive_tasks VALUES (?, ?, ?, NULL)',
+                        (case_id, 'PENDING', canonical_json_bytes(payload)))
+                if aggregate.case.archive_status in {'READY', 'FAILED'}:
+                    self._db.execute('UPDATE archive_tasks SET status=? WHERE case_id=?',
+                        (aggregate.case.archive_status, case_id))
+                self._db.execute('COMMIT')
+            except BaseException:
+                self._db.execute('ROLLBACK')
+                raise
+
+    def commit(self, expected_generation: int, expected_case_revision: int | None,
+               mutation: StateMutation) -> CommitReceipt:
+        if self._state_failure is not None:
+            raise ApplicationPortError(_clone(self._state_failure))
+        case_id = self._mutation_case_id(mutation)
+        if case_id is None:
+            # Installation bookkeeping is process-local and has no business I/O.
+            with self._index_lock:
+                if expected_generation != self._base.generation:
+                    raise _port_error(ErrorCode.REVISION_CONFLICT, '进程元数据已发生变化。')
+                self._base, _ = self._apply_mutation(self._base, None, mutation)
+                return CommitReceipt(generation=self._base.generation, case_revision=None)
+        with self._lock_for(case_id):
+            current = self._load_case(case_id) or self._base
+            if current.generation != expected_generation:
+                raise _port_error(ErrorCode.REVISION_CONFLICT, '当前 Case 已发生变化。')
+            try:
+                candidate, affected = self._apply_mutation(current, expected_case_revision, mutation)
+            except (ValueError, ValidationError) as exc:
+                raise _port_error(ErrorCode.STATE_WRITE_FAILED, '当前 Case 的状态变更无效。') from exc
+            aggregate = candidate.cases[case_id]
+            new_keys = [f'{item.operation}:{item.idempotency_key}' for item in mutation.insert_idempotency_records]
+            reserved: list[str] = []
+            try:
+                for key in new_keys:
+                    owner = self._locate(key, request=True)
+                    with self._index_lock:
+                        owner = self._requests.get(key, owner)
+                        if owner is not None:
+                            raise _port_error(ErrorCode.REVISION_CONFLICT, '该请求已经提交，请读取最新结果。')
+                        self._requests[key] = case_id
+                        reserved.append(key)
+                terminal = aggregate.case.status in _TERMINAL
+                if terminal:
+                    self._persist(case_id, candidate)
+                with self._index_lock:
+                    if terminal:
+                        self._live.pop(case_id, None)
+                    else:
+                        self._live[case_id] = candidate
+                    for name in ('jobs', 'attachments', 'evidence', 'artifacts', 'outcomes'):
+                        for key in getattr(aggregate, name):
+                            if terminal:
+                                self._objects.pop(key, None)
+                            else:
+                                self._objects[key] = case_id
+                    if terminal:
+                        for key in candidate.idempotency_records:
+                            self._requests.pop(key, None)
+                        self.on_terminal(case_id)
+            except (sqlite3.Error, OSError) as exc:
+                with self._index_lock:
+                    for key in reserved:
+                        self._requests.pop(key, None)
+                self._state_failure = _port_error(ErrorCode.STATE_WRITE_FAILED,
+                    '最终结果持久化失败，尚未交付。').error
+                raise ApplicationPortError(_clone(self._state_failure)) from exc
+            except BaseException:
+                with self._index_lock:
+                    for key in reserved:
+                        self._requests.pop(key, None)
+                raise
+            return CommitReceipt(generation=candidate.generation,
+                                 case_revision=aggregate.case.case_revision)
+
+    def health(self) -> ValidationReport:
+        failure = self._state_failure
+        return ValidationReport(valid=failure is None, schema_version=SCHEMA_VERSION,
+            contract_revision=CONTRACT_REVISION, generation=self._base.generation,
+            object_counts=_object_counts(self._base),
+            errors=[] if failure is None else [ValidationIssue(code=failure.code.value,
+                object_type='CompletedCaseStore', object_id=None, field_path=None, message=failure.message)])
+
+    @staticmethod
+    def _resource_keys(aggregate):
+        return {item.storage_key for item in aggregate.attachments.values() if item.storage_key} | {
+            item.storage_key for item in aggregate.artifacts.values()} | {
+            item.resource_ref.storage_key for item in aggregate.evidence.values() if item.resource_ref}
+
+    def retention_in_use(self, kind: str, key: str) -> bool:
+        """Indexed metadata lookup; never deserialize historical Cases or read resources."""
+        if self._state_failure is not None:
+            raise ApplicationPortError(_clone(self._state_failure))
+        if kind == 'resource':
+            case_id = key.split('/')[2]
+            with self._lock_for(case_id):
+                live = self._live.get(case_id)
+                if live is not None and key in self._resource_keys(live.cases[case_id]):
+                    return True
+            with self._database_lock:
+                return self._db.execute('SELECT 1 FROM resource_index WHERE storage_key=?', (key,)).fetchone() is not None
+        with self._index_lock:
+            owner = self._objects.get(key)
+        if owner is not None:
+            with self._lock_for(owner):
+                live = self._live.get(owner)
+                job = None if live is None else live.cases[owner].jobs.get(key)
+                if job is not None:
+                    return kind == 'job' or job.status in {JobStatus.PENDING, JobStatus.RUNNING}
+        if kind == 'active_job':
+            return False
+        if kind != 'job':
+            raise ValueError('unknown retention reference kind')
+        with self._database_lock:
+            return self._db.execute('SELECT 1 FROM object_index WHERE object_id=?', (key,)).fetchone() is not None
+
+    def claim_archive_task(self):
+        with self._database_lock:
+            row = self._db.execute("SELECT case_id, payload FROM archive_tasks WHERE status='PENDING' ORDER BY rowid LIMIT 1").fetchone()
+            if row is None:
+                return None
+            self._db.execute("UPDATE archive_tasks SET status='RUNNING' WHERE case_id=?", (row[0],))
+            return row[0], json.loads(row[1])
+
+    def requeue_archive_task(self, case_id: str) -> None:
+        with self._database_lock:
+            self._db.execute("UPDATE archive_tasks SET status='PENDING' WHERE case_id=? AND status='RUNNING'", (case_id,))
+
+    def validate_all(self) -> ValidationReport:
+        state = self.read_snapshot()
+        with self._database_lock:
+            if self._db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+                raise _port_error(ErrorCode.STATE_CORRUPT, '已完成 Case 数据库校验失败。')
+        return ValidationReport(valid=True, schema_version=SCHEMA_VERSION,
+            contract_revision=CONTRACT_REVISION, generation=state.generation,
+            object_counts=_object_counts(state), errors=[])
+
+    def export_snapshot(self) -> bytes:
+        return canonical_json_bytes(self.read_snapshot())
+
+    def close(self) -> None:
+        with self._database_lock:
+            self._db.close()
 
     @staticmethod
     def _empty_aggregate(case: Mapping[str, Any]) -> dict[str, Any]:
@@ -692,147 +634,6 @@ class JsonFileStateRepository:
         state_data["updated_at"] = self._clock.now()
         return StateFile.model_validate(state_data), affected_case_id
 
-    def _reload_after_failed_commit(self) -> None:
-        try:
-            reloaded = self._load_disk_state()
-        except ApplicationPortError as exc:
-            self._state = None
-            if exc.error.code in {
-                ErrorCode.STATE_CORRUPT,
-                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
-            }:
-                self._state_failure = exc.error.model_copy(deep=True)
-            else:  # pragma: no cover - _load_disk_state closes to state failures
-                self._state_failure = _port_error(
-                    ErrorCode.STATE_CORRUPT,
-                    "The authoritative state could not be reloaded safely.",
-                ).error
-        except (OSError, TypeError, ValueError, ValidationError):
-            self._state = None
-            self._state_failure = _port_error(
-                ErrorCode.STATE_CORRUPT,
-                "The authoritative state could not be reloaded safely.",
-            ).error
-        else:
-            self._state = reloaded
-            self._state_failure = None
-
-    def commit(
-        self,
-        expected_generation: int,
-        expected_case_revision: int | None,
-        mutation: StateMutation,
-    ) -> CommitReceipt:
-        if not isinstance(expected_generation, int) or isinstance(
-            expected_generation, bool
-        ):
-            raise TypeError("expected_generation must be an integer")
-        if expected_case_revision is not None and (
-            not isinstance(expected_case_revision, int)
-            or isinstance(expected_case_revision, bool)
-        ):
-            raise TypeError("expected_case_revision must be an integer or None")
-        if not isinstance(mutation, StateMutation):
-            raise TypeError("mutation must be a StateMutation")
-
-        with self._coordination_lock:
-            try:
-                current = self._require_state()
-            except ApplicationPortError as exc:
-                raise _port_error(
-                    ErrorCode.STATE_WRITE_FAILED,
-                    "The state repository is fail-stopped and cannot accept writes.",
-                ) from exc
-            if current.generation != expected_generation:
-                raise _port_error(
-                    ErrorCode.REVISION_CONFLICT,
-                    "The state generation changed before commit.",
-                )
-            try:
-                candidate, affected_case_id = self._apply_mutation(
-                    current,
-                    expected_case_revision,
-                    mutation,
-                )
-                self._validate_external_references(candidate)
-                final_bytes = self._writer.write(canonical_json_bytes(candidate))
-                committed = self._decode_and_validate(final_bytes)
-            except ApplicationPortError as exc:
-                if exc.error.code is ErrorCode.REVISION_CONFLICT:
-                    raise
-                self._reload_after_failed_commit()
-                raise _port_error(
-                    ErrorCode.STATE_WRITE_FAILED,
-                    "The state commit failed and disk state was reloaded.",
-                ) from exc
-            except (OSError, TypeError, ValueError, ValidationError) as exc:
-                self._reload_after_failed_commit()
-                raise _port_error(
-                    ErrorCode.STATE_WRITE_FAILED,
-                    "The state commit failed and disk state was reloaded.",
-                ) from exc
-
-            self._state = committed
-            self._state_failure = None
-            case_revision = (
-                committed.cases[affected_case_id].case.case_revision
-                if affected_case_id is not None
-                else None
-            )
-            return CommitReceipt(
-                generation=committed.generation,
-                case_revision=case_revision,
-            )
-
-    def validate_all(self) -> ValidationReport:
-        with self._coordination_lock:
-            try:
-                state = self._load_disk_state()
-            except ApplicationPortError as exc:
-                issue = ValidationIssue(
-                    code=exc.error.code.value,
-                    object_type="StateFile",
-                    object_id=None,
-                    field_path=None,
-                    message=exc.error.message,
-                )
-                return ValidationReport(
-                    valid=False,
-                    schema_version=None,
-                    contract_revision=None,
-                    generation=None,
-                    object_counts=_empty_counts(),
-                    errors=[issue],
-                )
-            except (OSError, TypeError, ValueError, ValidationError):
-                issue = ValidationIssue(
-                    code=ErrorCode.STATE_CORRUPT.value,
-                    object_type="StateFile",
-                    object_id=None,
-                    field_path=None,
-                    message="The stored state could not be validated.",
-                )
-                return ValidationReport(
-                    valid=False,
-                    schema_version=None,
-                    contract_revision=None,
-                    generation=None,
-                    object_counts=_empty_counts(),
-                    errors=[issue],
-                )
-            return ValidationReport(
-                valid=True,
-                schema_version=state.schema_version,
-                contract_revision=state.contract_revision,
-                generation=state.generation,
-                object_counts=_object_counts(state),
-                errors=[],
-            )
-
-    def export_snapshot(self) -> bytes:
-        with self._coordination_lock:
-            state = self._load_disk_state()
-            return canonical_json_bytes(state)
 
 
-__all__ = ["JsonFileStateRepository"]
+__all__ = ["CaseStateRepository"]

@@ -89,14 +89,14 @@ class ApplicationQueryService:
         wait_for_job_id = query.wait_for_job_id
         wait_seconds = query.wait_seconds
 
-        snapshot = self._repository.read_snapshot()
+        snapshot = self._repository.read_snapshot(case_id)
         aggregate = snapshot.cases.get(case_id)
         if aggregate is None:
             raise_port_error(ErrorCode.CASE_NOT_FOUND, "The Case does not exist.")
 
         target_job_id = wait_for_job_id
         if target_job_id is not None:
-            target_job = _find_job(snapshot, target_job_id)
+            target_job = self._repository.read_job(target_job_id)
             if target_job is None:
                 raise_port_error(ErrorCode.JOB_NOT_FOUND, "The Job does not exist.")
             if target_job.case_id != case_id:
@@ -128,7 +128,7 @@ class ApplicationQueryService:
                     # fails, refresh authoritative state before deciding whether
                     # the finite wait completed or timed out.
                     changed = False
-                snapshot = self._repository.read_snapshot()
+                snapshot = self._repository.read_snapshot(case_id)
                 if not changed and not _wait_is_complete(
                     snapshot, case_id, target_job_id
                 ):
@@ -161,7 +161,7 @@ class ApplicationQueryService:
         case_id = query.case_id
         include_internal = query.include_internal
 
-        snapshot = self._repository.read_snapshot()
+        snapshot = self._repository.read_snapshot(case_id)
         aggregate = snapshot.cases.get(case_id)
         if aggregate is None:
             raise_port_error(ErrorCode.CASE_NOT_FOUND, "The Case does not exist.")
@@ -191,7 +191,7 @@ class ApplicationQueryService:
         case_id = query.case_id
         artifact_id = query.artifact_id
 
-        snapshot = self._repository.read_snapshot()
+        snapshot = self._repository.read_snapshot(case_id)
         aggregate = snapshot.cases.get(case_id)
         if aggregate is None:
             raise_port_error(ErrorCode.CASE_NOT_FOUND, "The Case does not exist.")
