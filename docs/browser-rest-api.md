@@ -2,6 +2,8 @@
 
 本文是浏览器前端接入 Problem Locator REST API 的人工可读指南。前端开发者只需本文、部署方提供的服务基址，以及服务发布的 OpenAPI 文件即可完成接入；不需要了解服务内部实现。
 
+8.0 新增面向内部网站的自然语言 Agent 会话接口，支持追问、上传和 SSE 进度。新入口采用“网站前端 → 网站后端 → xiaodao”，详见 [网站 Agent API 指南](website-agent-api.md)。本文继续说明底层 Case、附件和报告接口，已有接入保持不变。
+
 当前正式浏览器目标是**当前稳定版 Google Chrome**。服务不承诺 Firefox、Safari、反向代理或旧版 Chrome 的兼容性。本文中的 TypeScript 使用标准 `fetch`、`File`、`Blob`、Web Worker 和 Web Streams，不依赖 React、Vue 等界面框架。
 
 ## 1. 接入前先确认
@@ -12,7 +14,7 @@
 - 服务没有登录、Cookie、令牌、Case 所有权或租户隔离。它只适合部署在受控网络；知道 ID 的调用方可能读取对应资源。
 - 首版没有 Case 列表、恢复、取消接口。前端必须持久保存创建响应中的 `case_id`，并把 `INTERRUPTED` 视为只能查询的状态。
 
-全部入口如下：
+底层 Case 与运维入口如下；六个会话入口及其独立合同见上述 Agent 指南：
 
 | 方法与路径 | 用途 | 响应类型 |
 | --- | --- | --- |

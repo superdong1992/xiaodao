@@ -126,7 +126,7 @@ class ReplayManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     schema_version: Literal[1]
-    state_schema_version: Literal[10]
+    state_schema_version: Literal[11]
     contract_revision: str
     replay_id: str
     mode: ReplayMode

@@ -1,12 +1,19 @@
 # TODO
 
-更新时间：2026-09-05
+更新时间：2026-09-07
 
 本文件是仓库活跃待办的唯一清单。已完成事项由代码、当前设计与 Git 历史证明，不在这里保留关闭项。
 
 2026-09-05 仓库分析的核对基线为 `main@443ca21` / Problem Locator `6.0.0` / State V9。
 本次补充记录已由代码路径确认的实现边界及待评估风险，尚未执行性能压测或新的 Test Flow。
 后续是否修复、采用何种方案，仍需结合届时的当前版本、复现证据和实际使用需求决定。
+
+## P0：8.0 网站 Agent 真实 Release 与内部网站联调
+
+- Agent REST、自然语言追问、持久 SSE、报告下载和网站后端示例已实现。正式 Dev 验证以当前源码快照的 `verdict.json` 为准。
+- `release.full` 已改为一条网站原话 → 追问 → 附件上传 → Reviewer → 报告下载 → 重启检查旅程；中间不再重启丢失活动 Case。真实调用预算包含 3 次 INTAKE，正常/硬上限均为 8 次，不允许 repair。
+- 2026-09-07 已查看官方 `--plan-only`，未运行真实模型。当前 Windows 主机的 Docker Linux daemon 未启动；规划还需显式绑定官方 Claude CLI/settings 及固定版本 Logparse/MCP 源码。依赖齐备后重新查看身份、预算和 blocker，再从全新 V11 数据根执行 fresh Release。
+- 网站开发者需把示例中的登录与归属回调接入内部网站后端，并部署来源访问限制。未经这些接入和真实 Release，不宣称已在内部网站生产可用。
 
 ## P0：Methods V1 Reviewer 最长链路 Release
 

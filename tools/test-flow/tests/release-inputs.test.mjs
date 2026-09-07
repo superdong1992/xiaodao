@@ -45,6 +45,38 @@ import { NEGATIVE_PROBE_VALIDATION_FIELDS } from "../lib/events.mjs";
 const TOOL_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SUPPORT_ROOT = path.join(TOOL_ROOT, "runtime-support");
 
+function runtimeSupportSourceNames(root) {
+  const names = [];
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (entry.name !== "__pycache__") {
+      names.push(entry.name);
+      continue;
+    }
+    assert.ok(entry.isDirectory() && !entry.isSymbolicLink(), "runtime bytecode cache must be an ordinary directory");
+    for (const cached of fs.readdirSync(path.join(root, entry.name), { withFileTypes: true })) {
+      const match = /^(.+)\.cpython-\d+(?:\.opt-[12])?\.pyc$/.exec(cached.name);
+      assert.ok(match && cached.isFile() && !cached.isSymbolicLink(), "runtime cache may contain only ordinary Python bytecode");
+      const source = path.join(root, `${match[1]}.py`);
+      assert.ok(fs.existsSync(source) && fs.lstatSync(source).isFile() && !fs.lstatSync(source).isSymbolicLink(), "runtime bytecode must have its corresponding source file");
+    }
+  }
+  return names.sort();
+}
+
+test("runtime support source inventory tolerates derived bytecode without hiding unexpected sources", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-runtime-inventory-"));
+  try {
+    fs.writeFileSync(path.join(root, "prepare_release_case.py"), "pass\n");
+    fs.mkdirSync(path.join(root, "__pycache__"));
+    fs.writeFileSync(path.join(root, "__pycache__", "prepare_release_case.cpython-312.pyc"), "bytecode fixture");
+    assert.deepEqual(runtimeSupportSourceNames(root), ["prepare_release_case.py"]);
+    fs.writeFileSync(path.join(root, "unexpected_helper.py"), "pass\n");
+    assert.deepEqual(runtimeSupportSourceNames(root), ["prepare_release_case.py", "unexpected_helper.py"]);
+    fs.writeFileSync(path.join(root, "__pycache__", "hidden_helper.py"), "pass\n");
+    assert.throws(() => runtimeSupportSourceNames(root), /only ordinary Python bytecode/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("Docker context arguments use ambient semantics for explicit default and exact named contexts otherwise", () => {
   assert.deepEqual(dockerContextArgs(null, ["version"]), ["version"]);
   assert.deepEqual(dockerContextArgs("default", ["image", "inspect", "sha256:abc"]), ["image", "inspect", "sha256:abc"]);
@@ -561,7 +593,7 @@ test("Linux capability installs the immutable source snapshot from the sealed of
 
 test("active runtime support is explicit and the historical harness closure is gone", () => {
   const expected = [
-    "audit_service_agent_usage.py", "checkpoint-temporary.mjs", "export-checkpoint.sh",
+    "audit_intake_usage.py", "audit_service_agent_usage.py", "checkpoint-temporary.mjs", "export-checkpoint.sh",
     "codex-luna-app-server-runtime.mjs", "codex-luna-app-server.mjs", "codex-luna-contract.mjs", "codex-luna-diagnosis.schema.json", "codex-luna-exploration-runner.mjs", "codex-luna-prepare.py",
     "evidence-v2-provider-terminal.mjs", "initialize-container.sh", "isolated-agent-env.mjs", "isolated-agent-tool-audit.mjs", "isolated-agent-wrapper.mjs", "linux_client_browser_runner.py",
     "prepare_claude_settings.py",
@@ -569,11 +601,12 @@ test("active runtime support is explicit and the historical harness closure is g
     "server_dfx_probe.py", "service-supervisor.sh", "stop-service.sh", "test_service_launcher.py",
     "verify-source-snapshot.mjs",
   ];
-  assert.deepEqual(fs.readdirSync(SUPPORT_ROOT).sort(), expected.sort());
+  const sourceNames = runtimeSupportSourceNames(SUPPORT_ROOT);
+  assert.deepEqual(sourceNames, expected.sort());
   assert.equal(fs.existsSync(path.join(TOOL_ROOT, "harness")), false);
   const activeText = [
     fs.readFileSync(path.join(TOOL_ROOT, "adapters", "cross-job-core.mjs"), "utf8"),
-    ...fs.readdirSync(SUPPORT_ROOT).map((name) => fs.readFileSync(path.join(SUPPORT_ROOT, name), "utf8")),
+    ...sourceNames.map((name) => fs.readFileSync(path.join(SUPPORT_ROOT, name), "utf8")),
   ].join("\n");
   assert.doesNotMatch(activeText, /\/harness\//);
   assert.match(activeText, /\/test-flow-runtime\//);
@@ -658,7 +691,7 @@ test("CrossJob runtime uses pull-never, empty labeled storage and authoritative 
   assert.doesNotMatch(core, /fixedGetCasePollingInvariant\("<authoritative-case-id>"\)/);
   assert.match(core, /assertPhaseOneCaseFirst\(audit\)/);
   assert.match(core, /phaseOnePrompt\(\)/);
-  assert.match(core, /phaseTwoPrompt\(state, configuration\.releaseCase, state\.archive\)/);
+  assert.match(core, /websiteStep\(configuration, state, "route", \{ driver: configuration\.releaseCase\.driver \}\)/);
   assert.match(core, /fixedGetCasePollingInvariant\(state\.case_id\)/);
   assert.match(core, /Poll with the same literal get-case input/);
   assert.match(core, /runtime_ref_id: product\.runtime_ref_id/);
@@ -690,7 +723,7 @@ test("model invocations preserve failed terminals while PASS still requires exac
   assert.match(core, /canonicalJson\(receipt\.new_job_ids\) === canonicalJson\(expectedJobIds\)/);
   assert.match(core, /Array\.isArray\(invocations\) && invocations\.every\(validSuccessfulInvocationReceipt\)/);
   assert.match(core, /jobTypes\.length === 1 && jobTypes\[0\] === "ROUTE"/);
-  assert.match(core, /validRouteMethodsPreflightEvidence\(correspondence\.service_no_model_jobs/);
+  assert.match(core, /validRouteMethodsPreflightEvidence\(serviceUsage\.noModelJobs/);
   assert.match(core, /registrationId: configuration\.generatedSkill\.registration_id/);
   assert.match(core, /expectedJobId: state\.methods_preflight_job_id/);
   assert.match(core, /methods_preflight_job_id: requestedBy\[0\]/);

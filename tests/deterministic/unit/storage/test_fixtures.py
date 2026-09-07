@@ -85,12 +85,12 @@ def test_all_complete_storage_json_fixtures_use_canonical_bytes() -> None:
         assert canonical_json_bytes(json.loads(raw.decode("utf-8"))) == raw
 
 
-def test_valid_empty_v10_state_fixture_is_accepted() -> None:
-    payload = parse_canonical_json_bytes(_fixture_bytes("state/valid-empty-v10.json"))
+def test_valid_empty_v11_state_fixture_is_accepted() -> None:
+    payload = parse_canonical_json_bytes(_fixture_bytes("state/valid-empty-v11.json"))
     _schema_validator(STATE_SCHEMA_PATH).validate(payload)
     state = StateFile.model_validate(payload)
-    assert state.schema_version == SCHEMA_VERSION == 10
-    assert state.contract_revision == CONTRACT_REVISION == "v10-contract-r1"
+    assert state.schema_version == SCHEMA_VERSION == 11
+    assert state.contract_revision == CONTRACT_REVISION == "v11-contract-r1"
     assert state.generation == 1
     assert state.runtime_epochs == []
     assert state.recovery_processing_records == {}

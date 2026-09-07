@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const GUIDE_PATH = path.join(REPO_ROOT, "docs", "browser-rest-api.md");
+const AGENT_GUIDE_PATH = path.join(REPO_ROOT, "docs", "website-agent-api.md");
 const OPENAPI_PATH = path.join(REPO_ROOT, "schemas", "v2", "web-api.openapi.snapshot.json");
 
 const BUSINESS_OPERATIONS = [
@@ -18,6 +19,14 @@ const BUSINESS_OPERATIONS = [
   "PUT /api/v1/attachments/{attachment_id}/content",
 ];
 const SERVICE_OPERATIONS = ["GET /live", "GET /ready"];
+const AGENT_OPERATIONS = [
+  "GET /api/v1/agent/conversations/{conversation_id}",
+  "GET /api/v1/agent/conversations/{conversation_id}/events",
+  "POST /api/v1/agent/conversations",
+  "POST /api/v1/agent/conversations/{conversation_id}/attachments",
+  "POST /api/v1/agent/conversations/{conversation_id}/messages",
+  "PUT /api/v1/agent/attachments/{attachment_id}/content",
+];
 const DOCUMENTATION_OPERATIONS = ["GET /docs", "GET /openapi.json"];
 
 function guideText() {
@@ -130,16 +139,20 @@ test("the guide documents exactly the public OpenAPI operations and browser help
     "browser OpenAPI contract contains cross-protocol concepts or tool names",
   );
   const contractOperations = openApiOperations(openapi);
-  assert.deepEqual(contractOperations, [...BUSINESS_OPERATIONS, ...SERVICE_OPERATIONS].sort());
+  assert.deepEqual(contractOperations, [...BUSINESS_OPERATIONS, ...SERVICE_OPERATIONS, ...AGENT_OPERATIONS].sort());
   assert.deepEqual(
     guideOperations(guide),
     [...BUSINESS_OPERATIONS, ...SERVICE_OPERATIONS, ...DOCUMENTATION_OPERATIONS].sort(),
   );
-  assert.deepEqual(contractOperations.filter((item) => item.includes(" /api/v1/")), BUSINESS_OPERATIONS);
+  assert.deepEqual(contractOperations.filter((item) => item.includes(" /api/v1/") && !item.includes("/agent/")), BUSINESS_OPERATIONS);
+  const agentGuide = fs.readFileSync(AGENT_GUIDE_PATH, "utf8");
+  const agentOperations = [...agentGuide.matchAll(/^\| `(GET|POST|PUT) (\/api\/v1\/agent\/[^`]+)` \|/gm)]
+    .map((match) => `${match[1]} ${match[2]}`).sort();
+  assert.deepEqual(agentOperations, AGENT_OPERATIONS);
 });
 
 test("the guide tables cover every published field, Case state, and public error code", () => {
-  const guide = guideText();
+  const guide = guideText() + "\n" + fs.readFileSync(AGENT_GUIDE_PATH, "utf8");
   const document = openApiDocument();
   const schemas = document.components.schemas;
   const fieldNames = new Set(

@@ -178,7 +178,7 @@ const GATE_FIELDS = {
   observation: ["kind", "observation", "evidence_contract", "evidence"],
 };
 
-const EVENT_STREAM_MODES = new Set(["diagnostics", "journey"]);
+const EVENT_STREAM_MODES = new Set(["diagnostics", "journey", "agent"]);
 const EVENT_INSTANCE_BY_CROSS_JOB_PHASE = Object.freeze({
   environment: "route",
   route: "route",
@@ -315,7 +315,8 @@ function validateGates(gates) {
       object(stream, "CONFIG_EVENT_STREAM_CONTRACT", `${gateId} event stream contract`);
       exactKeys(stream, ["instance", "pass_requires", "pass_allows_empty", "failure_allows_empty"], "CONFIG_EVENT_STREAM_FIELDS", `${gateId} event stream contract`);
       identifier(stream.instance, "CONFIG_EVENT_STREAM_INSTANCE", `${gateId} event stream instance`);
-      assertFlow(stream.instance === EVENT_INSTANCE_BY_CROSS_JOB_PHASE[gate.phase], "CONFIG_EVENT_STREAM_PHASE", `${gateId} event stream does not match its phase`);
+      assertFlow(stream.instance === EVENT_INSTANCE_BY_CROSS_JOB_PHASE[gate.phase]
+        || (gate.evidence_contract.id.startsWith("cross-job-website-") && gate.phase === "diagnose" && stream.instance === "route"), "CONFIG_EVENT_STREAM_PHASE", `${gateId} event stream does not match its phase`);
       for (const field of ["pass_requires", "pass_allows_empty", "failure_allows_empty"]) {
         stringArray(stream[field], "CONFIG_EVENT_STREAM_MODES", `${gateId}.${field}`);
         assertFlow(new Set(stream[field]).size === stream[field].length && stream[field].every((mode) => EVENT_STREAM_MODES.has(mode)), "CONFIG_EVENT_STREAM_MODES", `${gateId}.${field} has invalid modes`);
@@ -454,7 +455,7 @@ function validateRuntimeProfiles(runtimeProfiles) {
     for (const [name, commit] of Object.entries(profile.external_sources)) assertFlow(/^[a-f0-9]{40}$/.test(commit), "CONFIG_RUNTIME_EXTERNAL_COMMIT", `${profileId}.external_sources.${name} must be a commit SHA`);
     stringArray(profile.settings_environment_allowlist, "CONFIG_RUNTIME_SETTINGS_ENV", `${profileId}.settings_environment_allowlist`, { nonEmpty: true });
     assertFlow(canonicalJson([...profile.settings_environment_allowlist].sort()) === canonicalJson([...RELEASE_SETTINGS_ENVIRONMENT].sort()), "CONFIG_RUNTIME_SETTINGS_ENV", `${profileId} has an unsupported settings environment allowlist`);
-    exactKeys(profile.real_caps, ["isolated", "isolated.skill-generation", "codex.macos-methods", "codex.macos-e2e", "claude.macos-methods", "claude.macos-e2e", "service_agent", "journey.route", "journey.diagnose", "journey.publish-restart"], "CONFIG_RUNTIME_CAPS_FIELDS", `${profileId}.real_caps`);
+    exactKeys(profile.real_caps, ["isolated", "isolated.skill-generation", "codex.macos-methods", "codex.macos-e2e", "claude.macos-methods", "claude.macos-e2e", "service_agent", "service_intake", "journey.route", "journey.diagnose", "journey.publish-restart"], "CONFIG_RUNTIME_CAPS_FIELDS", `${profileId}.real_caps`);
     for (const [capId, cap] of Object.entries(profile.real_caps)) {
       exactKeys(cap, ["max_turns", "max_total_tokens", "max_output_tokens", "max_budget_usd", "hard_timeout_seconds"], "CONFIG_RUNTIME_CAP_FIELDS", `${profileId}.real_caps.${capId}`);
       positiveInteger(cap.max_turns, "CONFIG_RUNTIME_MAX_TURNS", `${capId}.max_turns`);

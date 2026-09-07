@@ -56,6 +56,7 @@ def test_settings_are_frozen_and_sensitive_paths_are_redacted(tmp_path: Path) ->
     values["CLAUDE_COMMAND"] = "secret-agent --token hidden"
     values["ROUTE_CLAUDE_COMMAND"] = "secret-route --token hidden-route"
     values["DIAGNOSE_CLAUDE_COMMAND"] = "secret-diagnose --token hidden-diagnose"
+    values["INTAKE_CLAUDE_COMMAND"] = "secret-intake --token hidden-intake"
     settings = Settings.load(environ=values)
 
     with pytest.raises(FrozenInstanceError):
@@ -66,6 +67,7 @@ def test_settings_are_frozen_and_sensitive_paths_are_redacted(tmp_path: Path) ->
     assert values["CLAUDE_COMMAND"] not in rendered
     assert values["ROUTE_CLAUDE_COMMAND"] not in rendered
     assert values["DIAGNOSE_CLAUDE_COMMAND"] not in rendered
+    assert values["INTAKE_CLAUDE_COMMAND"] not in rendered
 
 
 def test_all_fixed_configuration_defaults_are_exact(tmp_path: Path) -> None:
@@ -79,6 +81,7 @@ def test_all_fixed_configuration_defaults_are_exact(tmp_path: Path) -> None:
     assert settings.claude_command == "claude"
     assert settings.route_claude_command == settings.claude_command
     assert settings.diagnose_claude_command == settings.claude_command
+    assert settings.intake_claude_command == settings.route_claude_command
     assert settings.skill_dir == Path(values["SKILL_DIR"])
     assert settings.logparse_repo == Path(values["LOGPARSE_REPO"])
     assert settings.logparse_config_path == Path(values["LOGPARSE_CONFIG_PATH"])
@@ -117,6 +120,23 @@ def test_legacy_agent_command_remains_the_role_fallback_when_overrides_are_omitt
 
     assert settings.route_claude_command == values["CLAUDE_COMMAND"]
     assert settings.diagnose_claude_command == values["CLAUDE_COMMAND"]
+
+
+@pytest.mark.parametrize("overrides,expected", [
+    ({}, "legacy-agent"),
+    ({"ROUTE_CLAUDE_COMMAND": "route-agent"}, "route-agent"),
+    ({"ROUTE_CLAUDE_COMMAND": "route-agent", "INTAKE_CLAUDE_COMMAND": "intake-agent"}, "intake-agent"),
+    ({"DIAGNOSE_CLAUDE_COMMAND": "diagnose-agent"}, "legacy-agent"),
+])
+def test_intake_command_falls_back_only_to_route_role(tmp_path: Path, overrides, expected):
+    settings = Settings.load(environ={**environment(tmp_path), "CLAUDE_COMMAND": "legacy-agent", **overrides})
+    assert settings.intake_claude_command == expected
+
+
+@pytest.mark.parametrize("value", ["", "   ", "\n"])
+def test_explicit_empty_intake_command_is_rejected(tmp_path: Path, value):
+    with pytest.raises(SettingsError):
+        Settings.load(environ={**environment(tmp_path), "INTAKE_CLAUDE_COMMAND": value})
 
 
 @pytest.mark.parametrize(

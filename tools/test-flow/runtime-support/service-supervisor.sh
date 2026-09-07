@@ -24,11 +24,15 @@ test -n "${TEST_FLOW_SERVICE_MAX_TURNS:-}"
 test -n "${TEST_FLOW_SERVICE_MAX_TOTAL_TOKENS:-}"
 test -n "${TEST_FLOW_SERVICE_MAX_BUDGET_USD:-}"
 test -n "${TEST_FLOW_SERVICE_HARD_TIMEOUT_SECONDS:-}"
+test -n "${TEST_FLOW_INTAKE_MAX_TURNS:-}"
+test -n "${TEST_FLOW_INTAKE_MAX_BUDGET_USD:-}"
 case "$TEST_FLOW_SERVICE_MODEL" in *[!a-zA-Z0-9_.\[\]-]*) exit 64 ;; esac
 case "$TEST_FLOW_SERVICE_MAX_TURNS" in *[!0-9]*|'') exit 64 ;; esac
 case "$TEST_FLOW_SERVICE_MAX_TOTAL_TOKENS" in *[!0-9]*|'') exit 64 ;; esac
 case "$TEST_FLOW_SERVICE_MAX_BUDGET_USD" in *[!0-9.]*) exit 64 ;; esac
 case "$TEST_FLOW_SERVICE_HARD_TIMEOUT_SECONDS" in *[!0-9]*|'') exit 64 ;; esac
+test "$TEST_FLOW_INTAKE_MAX_TURNS" = 1
+case "$TEST_FLOW_INTAKE_MAX_BUDGET_USD" in *[!0-9.]*|'') exit 64 ;; esac
 
 runtime="/tmp/test-flow-service-$instance"
 dfx="/tmp/test-flow-dfx-$instance"
@@ -101,6 +105,7 @@ diagnostic_relay_pid=$!
 
 cd /opt/src/xiaodao
 service_claude_command="/usr/bin/timeout --foreground --signal=TERM --kill-after=5s ${TEST_FLOW_SERVICE_HARD_TIMEOUT_SECONDS}s /usr/local/bin/claude -p --output-format stream-json --verbose --no-chrome --no-session-persistence --dangerously-skip-permissions --tools Bash,Read,Write,Skill --allowedTools Skill(logparse-diagnose) --setting-sources user --settings /run/plagent-claude/settings.json --model haiku --effort low --max-turns $TEST_FLOW_SERVICE_MAX_TURNS --max-budget-usd $TEST_FLOW_SERVICE_MAX_BUDGET_USD"
+intake_claude_command="/usr/local/bin/claude -p --output-format stream-json --verbose --no-chrome --no-session-persistence --setting-sources user --settings /run/plagent-claude/settings.json --model haiku --effort low --max-turns $TEST_FLOW_INTAKE_MAX_TURNS --max-budget-usd $TEST_FLOW_INTAKE_MAX_BUDGET_USD"
 /usr/bin/setpriv \
   --reuid=10001 --regid=10001 --clear-groups --no-new-privs -- \
   /usr/bin/env -i \
@@ -124,6 +129,8 @@ service_claude_command="/usr/bin/timeout --foreground --signal=TERM --kill-after
     LOGPARSE_CONFIG_PATH=/opt/e2e-logparse/config.yaml \
     LOGPARSE_PYTHON=/opt/venvs/logparse/bin/python \
     "CLAUDE_COMMAND=$service_claude_command" \
+    "INTAKE_CLAUDE_COMMAND=$intake_claude_command" \
+    SPECIALIZED_REVIEWER_ENABLED=true \
     /opt/venvs/xiaodao/bin/python -I /test-flow-runtime/test_service_launcher.py serve \
     >>"$service_log" 2>&1 &
 service_pid=$!

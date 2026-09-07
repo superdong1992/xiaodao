@@ -100,10 +100,10 @@ test("Release is fresh, binds an immutable source snapshot and exposes exact per
   assert.equal(built.plan.resume, "fresh");
   assert.equal(built.options.crossJobAdapter, path.join(REPO_ROOT, "tools", "test-flow", "adapters", "macos-linux-release.mjs"));
   assert.deepEqual(built.plan.budget, {
-    estimated_tokens: 8100000,
-    sum_of_per_invocation_caps_usd: 31,
-    hard_cap_tokens: 8500000,
-    hard_cap_usd: 31,
+    estimated_tokens: 7000000,
+    sum_of_per_invocation_caps_usd: 23,
+    hard_cap_tokens: 7400000,
+    hard_cap_usd: 23,
     normal_model_calls: 8,
     repair_model_calls_max: 0,
     hard_max_model_calls: 8,
@@ -122,16 +122,16 @@ test("Release is fresh, binds an immutable source snapshot and exposes exact per
   const diagnose = built.plan.stages.find((stage) => stage.id === "journey.cross-job.diagnose");
   const publish = built.plan.stages.find((stage) => stage.id === "journey.cross-job.publish-restart");
   assert.deepEqual(route.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count, entry.caps.max_total_tokens, entry.caps.max_budget_usd]), [
-    ["host-client", 2, 2, 400000, 3],
+    ["server-intake", 2, 2, 100000, 1],
     ["server-agent", 1, 1, 2000000, 3],
   ]);
   assert.deepEqual(diagnose.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count, entry.caps.max_total_tokens, entry.caps.max_budget_usd]), [
-    ["host-client", 1, 1, 600000, 5],
+    ["server-intake", 1, 1, 100000, 1],
     ["server-agent", 2, 2, 2000000, 3],
   ]);
   assert.deepEqual([diagnose.normal_model_calls, diagnose.repair_model_calls_max, diagnose.hard_max_model_calls], [3, 0, 3]);
-  assert.deepEqual(diagnose.normal_budget, { tokens: 4600000, cost_usd: 11 });
-  assert.deepEqual(diagnose.hard_budget, { tokens: 4600000, cost_usd: 11 });
+  assert.deepEqual(diagnose.normal_budget, { tokens: 4100000, cost_usd: 7 });
+  assert.deepEqual(diagnose.hard_budget, { tokens: 4100000, cost_usd: 7 });
   assert.deepEqual(publish.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count, entry.caps.max_budget_usd]), [
     ["host-client", 1, 1, 1],
   ]);
@@ -474,7 +474,7 @@ test("Darwin explicit Linux declares the Client runtime by frozen image instead 
   assert.equal(Object.hasOwn(declared.claude, "tarball_sha256"), false);
   assert.equal(source.node.version, process.version);
   assert.notEqual(source.node.sha256, null);
-  for (const stageId of ["journey.cross-job.route", "journey.cross-job.diagnose", "journey.cross-job.publish-restart"]) {
+  for (const stageId of ["journey.cross-job.publish-restart"]) {
     const declaration = built.plan.stages.find((stage) => stage.id === stageId).invocation_caps[0];
     assert.equal(declaration.class, "linux-client-container");
     assert.equal(declaration.execution_topology, "darwin-orchestrated-linux-container");

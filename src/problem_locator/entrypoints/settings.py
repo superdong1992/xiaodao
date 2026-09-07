@@ -52,6 +52,7 @@ class Settings:
     specialized_reviewer_enabled: bool = False
     route_claude_command: str | None = None
     diagnose_claude_command: str | None = None
+    intake_claude_command: str | None = None
     route_workers: int = 1
     diagnose_workers: int = 2
     logparse_concurrency: int = 1
@@ -132,11 +133,13 @@ class Settings:
             "DIAGNOSE_CLAUDE_COMMAND",
             claude_command,
         )
+        intake_claude_command = values.get("INTAKE_CLAUDE_COMMAND", route_claude_command)
         if not bind_host or bind_host.isspace() or not claude_command or claude_command.isspace():
             raise SettingsError("BIND_HOST and CLAUDE_COMMAND must be non-empty")
         role_commands = (
             route_claude_command,
             diagnose_claude_command,
+            intake_claude_command,
         )
         if any(not command or command.isspace() for command in role_commands):
             raise SettingsError("Agent role command settings must be non-empty")
@@ -200,6 +203,7 @@ class Settings:
             specialized_reviewer_enabled=raw_reviewer_enabled == "true",
             route_claude_command=route_claude_command,
             diagnose_claude_command=diagnose_claude_command,
+            intake_claude_command=intake_claude_command,
         )
 
     def __repr__(self) -> str:
@@ -209,6 +213,7 @@ class Settings:
             "claude_command=<configured>, "
             "route_claude_command=<configured>, "
             "diagnose_claude_command=<configured>, "
+            "intake_claude_command=<configured>, "
             "skill_dir=<configured>, "
             f"generic_skill_name={self.generic_skill_name!r}, "
             "logparse_repo=<redacted>, logparse_config_path=<redacted>, "

@@ -5,7 +5,7 @@
       "id": "framework.self-test",
       "kind": "deterministic",
       "depends_on": [],
-      "gates": ["framework.config", "framework.node-tests", "docs.current"],
+      "gates": ["framework.config", "framework.node-tests", "framework.intake-usage", "docs.current"],
       "identity_set": "framework",
       "timeout_seconds": 300,
       "progress_class": "local",
@@ -38,7 +38,7 @@
       "id": "deterministic.full",
       "kind": "deterministic",
       "depends_on": ["deterministic.affected"],
-      "gates": ["det.evidence-v2-core", "det.contracts", "det.unit", "det.integration", "det.journey.same-job"],
+      "gates": ["det.evidence-v2-core", "det.contracts", "det.unit", "det.integration", "det.journey.same-job", "det.website-example"],
       "identity_set": "deterministic",
       "timeout_seconds": 600,
       "progress_class": "local",
@@ -242,8 +242,7 @@
       "identity_set": "cross-job-route",
       "timeout_seconds": 1200,
       "progress_class": "real",
-      "reuse": {"dev": "checkpoint-chain", "release": "never"},
-      "checkpoint": {"next_stage": "journey.cross-job.upload"},
+      "reuse": {"dev": "never", "release": "never"},
       "platforms": ["windows", "macos", "linux"]
     },
     {
@@ -254,8 +253,7 @@
       "identity_set": "cross-job-logparse",
       "timeout_seconds": 1200,
       "progress_class": "real",
-      "reuse": {"dev": "checkpoint-chain", "release": "never"},
-      "checkpoint": {"next_stage": "journey.cross-job.diagnose"},
+      "reuse": {"dev": "never", "release": "never"},
       "platforms": ["windows", "macos", "linux"]
     },
     {
@@ -266,8 +264,7 @@
       "identity_set": "cross-job-diagnose",
       "timeout_seconds": 1200,
       "progress_class": "real",
-      "reuse": {"dev": "checkpoint-chain", "release": "never"},
-      "checkpoint": {"next_stage": "journey.cross-job.publish-restart"},
+      "reuse": {"dev": "never", "release": "never"},
       "platforms": ["windows", "macos", "linux"]
     },
     {
@@ -278,8 +275,7 @@
       "identity_set": "cross-job",
       "timeout_seconds": 1200,
       "progress_class": "real",
-      "reuse": {"dev": "checkpoint-chain", "release": "never"},
-      "checkpoint": {"next_stage": null},
+      "reuse": {"dev": "never", "release": "never"},
       "platforms": ["windows", "macos", "linux"]
     }
   ]

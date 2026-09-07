@@ -431,7 +431,8 @@ def main() -> None:
     )
 
 
-try:
-    main()
-except Exception as error:
-    raise SystemExit(f"SERVICE_AGENT_USAGE_AUDIT_FAILED:{error}") from None
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as error:
+        raise SystemExit(f"SERVICE_AGENT_USAGE_AUDIT_FAILED:{error}") from None

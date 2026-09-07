@@ -379,11 +379,11 @@ function invocationCapsForStage(stage, profile, gates, {
     return [{ class: "isolated-agent", min_count: count, max_count: count, caps: cap }];
   }
   if (stage.id === "journey.cross-job.route") return [
-    { class: clientInvocationClass, execution_topology: clientExecutionTopology, min_count: 2, max_count: 2, caps: cap },
-    { class: "server-agent", min_count: 1, max_count: 1, caps: profile.real_caps.service_agent },
+    { class: "server-intake", phases: ["INTAKE:CLARIFICATION", "INTAKE:CREATE_CASE"], min_count: 2, max_count: 2, normal_count: 2, repair_max_count: 0, caps: profile.real_caps.service_intake },
+    { class: "server-agent", phases: ["ROUTE"], min_count: 1, max_count: 1, caps: profile.real_caps.service_agent },
   ];
   if (stage.id === "journey.cross-job.diagnose") return [
-    { class: clientInvocationClass, execution_topology: clientExecutionTopology, min_count: 1, max_count: 1, caps: cap },
+    { class: "server-intake", phases: ["INTAKE:SUBMIT_SUPPLEMENT"], min_count: 1, max_count: 1, normal_count: 1, repair_max_count: 0, caps: profile.real_caps.service_intake },
     { class: "server-agent", phases: ["SPECIALIST", "REVIEWER"], min_count: 2, max_count: 2, normal_count: 2, repair_max_count: 0, caps: profile.real_caps.service_agent },
   ];
   if (stage.id === "journey.cross-job.publish-restart") return [{ class: clientInvocationClass, execution_topology: clientExecutionTopology, min_count: 1, max_count: 1, caps: cap }];

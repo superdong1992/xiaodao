@@ -28,6 +28,7 @@ from problem_locator.contracts import (
     parse_canonical_json_bytes,
 )
 from problem_locator.entrypoints.settings import Settings
+from problem_locator.agent.intake import IntakeDecision
 from problem_locator.storage.layout import StorageLayout
 from problem_locator.storage.platform import FileInstanceLock
 
@@ -46,6 +47,7 @@ def _settings(
     reviewer_enabled: bool = False,
     route_command: str | None = None,
     diagnose_command: str | None = None,
+    intake_command: str | None = None,
 ) -> Settings:
     environ = {
         "DATA_ROOT": str(data_root),
@@ -64,6 +66,8 @@ def _settings(
         environ["ROUTE_CLAUDE_COMMAND"] = route_command
     if diagnose_command is not None:
         environ["DIAGNOSE_CLAUDE_COMMAND"] = diagnose_command
+    if intake_command is not None:
+        environ["INTAKE_CLAUDE_COMMAND"] = intake_command
     return Settings.load(environ=environ)
 
 
@@ -303,6 +307,69 @@ def test_asgi_lifespan_runs_recovery_before_ingress_and_releases_lock(
 
     assert graph.closed is True
     assert graph.instance_lock.is_acquired() is False
+
+
+@pytest.mark.parametrize("intake_command,expected", [
+    (None, "route-agent --fast"), ("intake-agent --restricted", "intake-agent --restricted"),
+])
+def test_production_composition_selects_intake_command_without_changing_other_roles(
+    tmp_path: Path, intake_command: str | None, expected: str,
+) -> None:
+    graph = build_service(_settings(tmp_path / "data", route_command="route-agent --fast",
+        diagnose_command="diagnose-agent --deep", intake_command=intake_command))
+    try:
+        assert graph.agent.intake_engine._backend._command == expected
+        assert graph.runtime._route_backend._command == "route-agent --fast"
+        assert graph.runtime._diagnose_backend._command == "diagnose-agent --deep"
+        assert graph.agent.store.repository is graph.repository
+        assert graph.agent.uploads.application is graph.application
+        assert graph.agent._thread is None
+    finally:
+        graph.close()
+
+
+def test_production_agent_thread_handles_http_intake_and_stops_before_lock_release(
+    tmp_path: Path,
+) -> None:
+    app = create_app(_settings(tmp_path / "data"))
+    graph = app.state.problem_locator_composition
+    assert graph is not None
+    processed = threading.Event()
+    thread_ids = []
+
+    class DeterministicIntake:
+        def intake(self, request):
+            thread_ids.append(threading.get_ident())
+            processed.set()
+            return IntakeDecision(action="NEED_CLARIFICATION", message="问题发生在哪个时间段？",
+                problem_fields=[], user_facts=[])
+
+    graph.agent.intake_engine = DeterministicIntake()
+    assert graph.agent._thread is None
+    with TestClient(app) as client:
+        worker = graph.agent._thread
+        assert worker is not None and worker.is_alive()
+        assert graph.agent.store.runtime_epoch == graph.scheduler.recovery_result.runtime_epoch
+        graph.start()
+        assert graph.agent._thread is worker
+        created = client.post("/api/v1/agent/conversations", json={"request_id": "production-agent-1"})
+        assert created.status_code == 200
+        conversation_id = created.json()["data"]["conversation_id"]
+        sent = client.post(f"/api/v1/agent/conversations/{conversation_id}/messages",
+            json={"request_id": "message-1", "text": "付款请求超时。"})
+        assert sent.status_code == 200
+        assert processed.wait(2)
+        assert graph.agent._processing.acquire(timeout=2)
+        graph.agent._processing.release()
+        view = client.get(f"/api/v1/agent/conversations/{conversation_id}").json()["data"]
+        assert view["status"] == "WAITING_INPUT"
+        assert view["current_questions"] == ["问题发生在哪个时间段？"]
+        assert graph.agent.list_events(conversation_id)["events"]
+        assert thread_ids == [worker.ident]
+        assert worker.ident != threading.get_ident()
+    assert not worker.is_alive()
+    assert graph.closed
+    assert not graph.instance_lock.is_acquired()
 
 
 def test_second_service_fails_closed_on_the_same_instance_lock(

@@ -1,0 +1,123 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import fs from "node:fs";
+import test from "node:test";
+import { runWebsiteStep, parseSseFrame, validateWebsiteEvidence, websiteUserDescription } from "../lib/website-agent.mjs";
+
+const conversationId = "conversation-1", caseId = "case-1";
+const driver = { problem: { statement: "订单超时", expected_behavior: "正常响应", actual_behavior: "等待超时", scope: "一个订单" }, initial_user_fact_names: ["order_id"], initial_user_fact_values: ["ORDER-123"] };
+const event = (sequence, type, data = {}, withCase = false) => ({ schema_version: 1, sequence, conversation_id: conversationId, case_id: withCase ? caseId : null, job_id: null, type, created_at: "2026-09-07T00:00:00Z", data });
+const frame = (value) => `id: ${value.sequence}\nevent: ${value.type}\ndata: ${JSON.stringify(value)}\n\n`;
+const json = (data) => Response.json({ ok: true, data, error: null }, { headers: { "x-problem-locator-correlation-id": "test-correlation" } });
+const sse = (events) => new Response(": heartbeat\n\n" + events.map(frame).join(""), { headers: { "Content-Type": "text/event-stream" } });
+
+async function route() {
+  const calls = []; let streams = 0;
+  const fetcher = async (url, options) => {
+    calls.push({ path: new URL(url).pathname, ...options });
+    if (url.endsWith("/events")) {
+      assert.equal(options.headers["Last-Event-ID"], streams === 0 ? "0" : "2");
+      return streams++ === 0 ? sse([event(1, "message.accepted"), event(2, "assistant.question", { message: "请补充问题描述、预期和实际表现。" })])
+        : sse([event(3, "message.accepted"), event(4, "agent.progress", { message: "正在整理问题" }), event(5, "case.updated", { status: "WAITING_ATTACHMENT", case_revision: 2 }, true)]);
+    }
+    if (url.endsWith("/conversations")) return json({ conversation_id: conversationId, request_id: "route", schema_version: 1 });
+    if (url.endsWith("/messages")) {
+      const body = JSON.parse(options.body);
+      assert.deepEqual(Object.keys(body).sort(), ["attachment_ids", "request_id", "text"]);
+      assert.equal(Object.hasOwn(body, "problem_spec"), false);
+      return json({ conversation_id: conversationId, message_id: "msg", request_id: body.request_id, event_id: streams, status: "ACCEPTED" });
+    }
+    return json({ conversation_id: conversationId, case_id: caseId, case_status: "WAITING_ATTACHMENT", status: "WAITING_INPUT" });
+  };
+  const evidence = await runWebsiteStep({ phase: "route", public_base_url: "http://localhost", request_id: "route", driver }, fetcher);
+  return { evidence, calls };
+}
+
+test("website route sends raw text, receives a real clarification, reconnects SSE and binds one Case", async () => {
+  const { evidence, calls } = await route();
+  assert.equal(validateWebsiteEvidence(evidence, { phase: "route", conversation_id: conversationId }), true);
+  assert.equal(calls.filter((item) => item.path.endsWith("/messages")).length, 2);
+  assert.match(calls.findLast((item) => item.path.endsWith("/messages")).body, /补充信息（order_id）：ORDER-123/);
+  assert.deepEqual(evidence.events.map((item) => item.sequence), [1, 2, 3, 4, 5]);
+  assert.deepEqual(evidence.records.filter((item) => "raw_sse" in item).map((item) => item.last_event_id), [0, 2]);
+});
+
+test("website input does not invent domain facts or send server structured goals", () => {
+  const text = websiteUserDescription(driver);
+  for (const value of Object.values(driver.problem)) assert.ok(text.includes(value));
+  assert.ok(text.includes("ORDER-123"));
+  assert.doesNotMatch(text, /problem_spec|completion_criteria|safety_constraints/);
+});
+
+test("SSE parser rejects a gap, wrong conversation, internal fields and execution failures", () => {
+  assert.equal(parseSseFrame(": heartbeat", conversationId, 0), null);
+  assert.throws(() => parseSseFrame(frame(event(2, "message.accepted")), conversationId, 0), /SEQUENCE/);
+  assert.throws(() => parseSseFrame(frame(event(1, "message.accepted")), "other", 0), /SEQUENCE/);
+  assert.throws(() => parseSseFrame(frame({ ...event(1, "message.accepted"), storage_path: "/private" }), conversationId, 0), /FIELDS/);
+  assert.throws(() => parseSseFrame(frame(event(1, "agent.failed")), conversationId, 0), /AGENT_FAILED/);
+  assert.throws(() => parseSseFrame(frame(event(1, "agent.progress", { message: "internal-only" })), conversationId, 0), /CHINESE/);
+});
+
+test("website evidence detects changed network bytes and omitted or reordered observed events", async () => {
+  const { evidence } = await route();
+  const changed = structuredClone(evidence);
+  changed.records.find((item) => "raw_sse" in item).raw_sse += "tampered";
+  assert.throws(() => validateWebsiteEvidence(changed), /SSE_HASH/);
+  const omitted = structuredClone(evidence); omitted.events.splice(1, 1);
+  assert.throws(() => validateWebsiteEvidence(omitted), /EVENT_SOURCE/);
+  const reordered = structuredClone(evidence); reordered.events.reverse();
+  assert.throws(() => validateWebsiteEvidence(reordered), /EVENT_SOURCE/);
+  assert.throws(() => validateWebsiteEvidence(evidence, { phase: "diagnose" }), /EVIDENCE_PHASE/);
+});
+
+const finalEvents = [event(6, "case.updated", { status: "REVIEWING", case_revision: 8 }, true), event(7, "result.available", { status: "RESOLVED", artifacts: [{ kind: "USER_RESULT" }], result_field: "final_result" }, true), event(8, "archive.updated", { status: "PENDING", artifacts: [] }, true), event(9, "archive.updated", { status: "READY", artifacts: [{ kind: "USER_RESULT_ARCHIVE" }] }, true), event(10, "conversation.completed", { status: "COMPLETED" }, true)];
+async function diagnosisOrRestart(phase = "diagnose", replayEvents = finalEvents.slice(-2)) {
+  const input = { phase, public_base_url: "http://localhost", request_id: phase, conversation_id: conversationId, case_id: caseId, cursor: phase === "diagnose" ? 5 : 8, attachment_id: "log-1", expected_events: finalEvents.slice(-2) };
+  const fetcher = async (url, options) => {
+    if (url.endsWith("/events")) return sse(phase === "diagnose" ? finalEvents : replayEvents);
+    if (url.endsWith("/messages")) { assert.deepEqual(JSON.parse(options.body).attachment_ids, ["log-1"]); assert.match(JSON.parse(options.body).text, /日志/); return json({ status: "ACCEPTED" }); }
+    if (url.endsWith("/artifacts")) return json({ artifacts: [] });
+    if (url.includes("/cases/")) return json({ case_view: { case_id: caseId, status: "RESOLVED" } });
+    return json({ conversation_id: conversationId, case_id: caseId, status: "COMPLETED", archive_status: "READY" });
+  };
+  return runWebsiteStep(input, fetcher);
+}
+
+test("diagnosis submits logs by message and proves REVIEWING then JSON before deferred ZIP", async () => {
+  const evidence = await diagnosisOrRestart();
+  assert.equal(validateWebsiteEvidence(evidence), true);
+  assert.deepEqual(evidence.events.map((item) => item.type), ["case.updated", "result.available", "archive.updated", "archive.updated", "conversation.completed"]);
+  assert.deepEqual(evidence.events.filter((item) => item.type === "archive.updated").map((item) => item.data.status), ["PENDING", "READY"]);
+  const missingPending = structuredClone(evidence);
+  const pending = missingPending.events.find((item) => item.type === "archive.updated" && item.data.status === "PENDING");
+  pending.data.status = "READY";
+  const stream = missingPending.records.find((item) => "raw_sse" in item);
+  stream.raw_sse = ": heartbeat\n\n" + missingPending.events.map(frame).join("");
+  stream.sha256 = createHash("sha256").update(stream.raw_sse).digest("hex");
+  assert.throws(() => validateWebsiteEvidence(missingPending), /PUBLICATION_ORDER/);
+});
+
+test("restart replays immutable completed conversation events with Last-Event-ID", async () => {
+  const evidence = await diagnosisOrRestart("restart");
+  assert.equal(validateWebsiteEvidence(evidence), true);
+  assert.equal(evidence.records[0].last_event_id, 8);
+  const changed = structuredClone(finalEvents.slice(-2)); changed[0].data.status = "FAILED";
+  await assert.rejects(() => diagnosisOrRestart("restart", changed), /RESTART_EVENTS_CHANGED/);
+});
+
+test("failed HTTP and incomplete event streams never produce a website PASS receipt", async () => {
+  await assert.rejects(() => runWebsiteStep({ phase: "route", public_base_url: "http://localhost", request_id: "r", driver }, async () => Response.json({ ok: false, error: { code: "FAIL" } })), /HTTP_REJECTED/);
+  await assert.rejects(() => runWebsiteStep({ phase: "upload", public_base_url: "http://localhost", conversation_id: conversationId, case_id: caseId, cursor: 0 }, async () => sse([])), /CLOSED_EARLY/);
+});
+
+test("official website gates freeze example ownership checks and disable active-Case checkpoint reuse", () => {
+  const config = (name) => JSON.parse(fs.readFileSync(new URL(`../config/${name}.v2.json`, import.meta.url), "utf8"));
+  const stages = config("stages").stages;
+  assert.ok(stages.find((item) => item.id === "deterministic.full").gates.includes("det.website-example"));
+  assert.deepEqual(config("gates").gates["det.website-example"].test_files, ["examples/website-agent/server.test.mjs"]);
+  assert.ok(config("identities").components["proof.deterministic"].paths.includes("examples/website-agent"));
+  for (const stage of stages.filter((item) => item.id.startsWith("journey.cross-job.") && !item.id.endsWith("environment"))) {
+    assert.deepEqual(stage.reuse, { dev: "never", release: "never" });
+    assert.equal(Object.hasOwn(stage, "checkpoint"), false);
+  }
+});

@@ -1,4 +1,10 @@
-# Problem Locator 7.0 预览版
+# Problem Locator 8.0 预览版
+
+## 内部网站 Agent 接入
+
+网站后端可以直接提交用户原话和日志附件，无需生成 `problem_spec`。新增 Agent 会话接口负责追问、补充和定位，SSE 返回可回放的阶段消息，完整报告仍由原有 Case 产物接口交付。一次会话对应一次定位，关闭页面不会停止任务。
+
+部署后先看 [网站 Agent 快速接入与联调清单](docs/website-agent-quickstart.md)，再查 [完整 API 参考](docs/website-agent-api.md) 和 [TypeScript 后端示例](examples/website-agent/README.md)。在线接口说明位于服务的 `/docs`，机器可读合同位于 `/openapi.json`。网站后端必须负责登录、会话归属校验和下载转发；部署方限制 xiaodao 的可达来源。新增六条 Agent 路由不改变现有 REST 路径和七个 MCP 工具。
 
 ## Methods V1 专有定位报告
 
@@ -6,9 +12,10 @@
 
 | 合同或资产 | 当前版本 |
 | --- | --- |
-| Problem Locator package | `7.0.0` |
-| State / Job / Outcome schema | `10` |
-| S00 contract revision | `v10-contract-r1` |
+| Problem Locator package | `8.0.0` |
+| State / Job / Outcome schema | `11` |
+| S00 contract revision | `v11-contract-r1` |
+| Agent conversation / event / INTAKE | `1` / `1` / `1.0.0` |
 | Methods package | `SKILL.md` + `methods.json@1` + `references/*.md` |
 | Product registration | `registration-template.json@1` |
 | Methods evaluation protocol | `Methods V1` |
@@ -17,7 +24,7 @@
 | Specialist / Reviewer profile | `7.0.0` / `7.0.0` |
 | Router / Diagnose / Review tool bundle | `3.0.0` / `4.0.0` / `3.0.0` |
 
-State、Job 和权威 Outcome 已切换到 V10。升级必须使用全新 `DATA_ROOT`；服务首次启动会写入 `data-format.json` 和 `completed.sqlite3`。旧数据目录原样保留，不迁移、不双写、不兼容读取。活动任务只保存在内存，服务退出后需要重新创建；已交付的终态报告、资源索引和归档任务保存在 SQLite 与资源目录中。
+State、Job 和权威 Outcome 已切换到 V11。升级必须使用全新 `DATA_ROOT`；服务首次启动会写入 `data-format.json` 和 `completed.sqlite3`。V1–V10 旧目录原样保留，不迁移、不删除、不兼容读取；历史报告使用旧版本只读查看或事先导出。活动 Case 只保存在内存，服务退出后不自动恢复；Agent 会话历史独立持久化，重启后未完成会话标记中断，必须由用户明确新建任务。已交付的报告、资源索引和待归档任务继续恢复。
 
 本仓库将故障定位能力分为四层：
 
@@ -60,7 +67,7 @@ Release 或物理局域网部署验收。
 
 Problem Locator 是一个单实例故障诊断服务。它接收结构化问题，收集事实与附件，执行固定版本的路由和诊断任务；Reviewer 默认关闭。专有定位以服务端验证后的 `diagnosis-result.json` 为用户报告，并按需提供含原始目标日志的 `result.zip`。Generic V2 终态继续发布 Markdown 结果。
 
-Problem Locator 7.0 的活动 Case、Job 和幂等记录保存在内存中，每个 Case 有独立锁和 revision。终态提交使用 SQLite WAL + FULL 同步：先持久化报告及引用资源，再提交数据库，最后通知客户端。历史 Case 按需读取，不在每次写操作中复制全库或重新读取历史附件。
+Problem Locator 8.0 的活动 Case、Job 和核心命令幂等记录保存在内存中，每个 Case 有独立锁和 revision。会话、消息、派发记录和公共事件存入 SQLite，继续使用 SQLite WAL + FULL 同步。终态结果与报告可用事件使用同一事务，归档状态与归档事件也使用同一事务；提交后才通知客户端。阶段事件不会增加 Case revision。历史 Case 按需读取，不在每次写操作中复制全库或重新读取历史附件。
 
 ## 环境要求与安装
 
@@ -94,6 +101,7 @@ uv lock --check
 | `PORT` | 否 | `8000` | Uvicorn 监听端口 |
 | `CLAUDE_COMMAND` | 否 | `claude` | 默认 Agent 命令；原生 Claude 的 ROUTE/Specialist 调用由服务固定 stream-json、最终响应及文件工具权限，保留模型和 settings 参数 |
 | `ROUTE_CLAUDE_COMMAND` | 否 | `CLAUDE_COMMAND` | ROUTE Agent 命令；可单独选择低延迟模型，不影响 DIAGNOSE 和 REVIEW |
+| `INTAKE_CLAUDE_COMMAND` | 否 | `ROUTE_CLAUDE_COMMAND` | 网站自然语言整理角色；每条消息最多调用一次，无日志读取、诊断工具或报告发布权限 |
 | `DIAGNOSE_CLAUDE_COMMAND` | 否 | `CLAUDE_COMMAND` | SPECIALIZED、GENERIC DIAGNOSE 和 REVIEW Agent 命令；专用诊断的 Logparse 预处理由服务进程直接执行，不使用该命令 |
 | `LOGPARSE_PYTHON` | 否 | 当前 Python | Logparse 使用的 Python 启动命令 |
 | `DFX_LOG_LEVEL` | 否 | `INFO` | 结构化诊断日志级别：`DEBUG`、`INFO`、`WARNING`、`ERROR` 或 `CRITICAL` |
@@ -404,7 +412,7 @@ INTERRUPTED 不伪造用户报告。`methods_result` 不属于当前客户端结
 
 ## 隔离重放指定 Job
 
-`replay-job` 是普通本地 CLI，不引入管理员角色、管理 API、认证或权限模型。它只接受当前 State V10 / `v10-contract-r1` 的已持久化 State/Job/Outcome 闭包，并在新的隔离安装中按当前固定资产执行指定阶段。活动任务不会在停服后保留，不能用这个命令恢复：
+`replay-job` 是普通本地 CLI，不引入管理员角色、管理 API、认证或权限模型。它只接受当前 State V11 / `v11-contract-r1` 的已持久化 State/Job/Outcome 闭包，并在新的隔离安装中按当前固定资产执行指定阶段。活动任务不会在停服后保留，不能用这个命令恢复：
 
 - `diagnose-only`：源 Job 必须是 DIAGNOSE；执行服务端终结，但不向隔离 State 提交诊断 Outcome。
 - `review-only`：源 Job 必须是 REVIEW；执行服务端终结，但不向隔离 State 提交 Review Outcome。

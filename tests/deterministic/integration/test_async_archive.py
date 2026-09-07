@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import zipfile
 from pathlib import Path
@@ -14,10 +15,17 @@ from problem_locator.contracts import ArtifactKind, CaseStatus
 from problem_locator.dispatch.archive import ArchiveService
 from problem_locator.storage.state_repository import CaseStateRepository
 from tests.deterministic.contracts.fakes import InMemoryStateChangeNotifier
-from tests.deterministic.journey.test_rpc_timeout import _Stack, _mcp, _query, ARCHIVE, PARAMETER_GROUP_A
+from tests.deterministic.journey.test_rpc_timeout import (
+    _Stack, _mcp, _query, _windows_extended_path, ARCHIVE, PARAMETER_GROUP_A,
+)
 
 
 def create_pending_archive(root: Path):
+    # Every consumer uses the same controlled directory. Normalizing here also
+    # covers standalone pytest and crash-child callers whose basetemp is not an
+    # extended Windows path; deep immutable staging names can exceed MAX_PATH.
+    if os.name == 'nt':
+        root = _windows_extended_path(root)
     stack = _Stack(root, logparse_record=root.parent/'logparse.json',
         agent_record=root.parent/'agent.jsonl', review_entered=root.parent/'entered',
         review_release=root.parent/'released', seed='archive-v10')
@@ -77,6 +85,42 @@ def _report(stack, case_id):
     assert hashlib.sha256(data).hexdigest() == report.sha256
     assert json.loads(data)['status'] == 'COMPLETED'
     return report, data
+
+
+def test_archive_helper_supports_deep_staging_from_unprefixed_root(tmp_path_factory):
+    root = tmp_path_factory.mktemp('archive-long') / ('a' * 100) / 'data'
+    # Formal Test Flow may already provide an extended basetemp. Remove that
+    # prefix only from this test input so the helper owns its normalization.
+    plain = str(root)
+    if plain.startswith('\\\\?\\UNC\\'):
+        root = Path('\\\\' + plain[8:])
+    elif plain.startswith('\\\\?\\'):
+        root = Path(plain[4:])
+    # The Logparse test checkout itself stays short enough for Git; the deep
+    # generated resource names, which caused the regression, exceed MAX_PATH.
+    assert not str(root).startswith('\\\\?\\')
+    parent = _windows_extended_path(root.parent) if os.name == 'nt' else root.parent
+    parent.mkdir(parents=True)
+    stack, case_id = create_pending_archive(root)
+    try:
+        if os.name == 'nt':
+            assert str(stack.data_root).startswith('\\\\?\\')
+        assert _query(stack.mcp, case_id)['archive_status'] == 'PENDING'
+        assert any(len(str(path).removeprefix('\\\\?\\')) > 260 for path in stack.data_root.rglob('*'))
+        report, report_bytes = _report(stack, case_id)
+        assert stack.archive.run_once()
+        assert _query(stack.mcp, case_id)['archive_status'] == 'READY'
+        assert _report(stack, case_id)[1] == report_bytes
+        archive = next(item for item in stack.repository.read_case(case_id).artifacts.values()
+            if item.kind is ArtifactKind.USER_RESULT_ARCHIVE)
+        with zipfile.ZipFile(stack.data_root / archive.storage_key) as result:
+            assert result.testzip() is None
+            for source in report.metadata.archive_plan.logs:
+                content = result.read(source.archive_name)
+                assert len(content) == source.size
+                assert hashlib.sha256(content).hexdigest() == source.sha256
+    finally:
+        stack.shutdown()
 
 
 def test_json_is_delivered_while_archive_worker_is_delayed(pending, monkeypatch):

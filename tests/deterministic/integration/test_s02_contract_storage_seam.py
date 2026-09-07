@@ -23,7 +23,7 @@ def _repository(tmp_path):
     )
 
 
-def test_real_case_repository_round_trips_the_v10_export(tmp_path) -> None:
+def test_real_case_repository_round_trips_the_v11_export(tmp_path) -> None:
     repository = _repository(tmp_path)
 
     assert isinstance(repository, StateRepository)
@@ -32,7 +32,7 @@ def test_real_case_repository_round_trips_the_v10_export(tmp_path) -> None:
 
     assert report.valid is True
     assert report.generation == snapshot.generation == 1
-    assert snapshot.contract_revision == "v10-contract-r1"
+    assert snapshot.contract_revision == "v11-contract-r1"
     assert repository.export_snapshot() == canonical_json_bytes(snapshot)
     assert not repository.layout.state.exists()
     repository.close()

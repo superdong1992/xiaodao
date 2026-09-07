@@ -5694,7 +5694,7 @@ class CaseAggregate(ContractModel):
 
 
 class StateFile(ContractModel):
-    schema_version: Literal[10]
+    schema_version: Literal[11]
     contract_revision: Literal[CONTRACT_REVISION]
     generation: NonNegativeInt
     installation_id: OpaqueId
@@ -6728,8 +6728,8 @@ class StateExportResource(ContractModel):
 
 
 class StateExport(ContractModel):
-    export_schema_version: Literal[10]
-    schema_version: Literal[10]
+    export_schema_version: Literal[11]
+    schema_version: Literal[11]
     contract_revision: Literal[CONTRACT_REVISION]
     source_generation: NonNegativeInt
     installation_id: OpaqueId
@@ -6798,7 +6798,7 @@ class ContractManifestEntry(ContractModel):
 
 
 class ContractManifest(ContractModel):
-    schema_version: Literal[10]
+    schema_version: Literal[11]
     contract_revision: Literal[CONTRACT_REVISION]
     generator_version: NonEmptyText
     files: list[ContractManifestEntry]

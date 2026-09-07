@@ -414,6 +414,12 @@ def test_openapi_and_swagger_publish_the_browser_contract() -> None:
     schema = openapi_response.json()
     expected_operations = {
         ("/live", "get"): "get_liveness",
+        ("/api/v1/agent/conversations", "post"): "create_agent_conversation",
+        ("/api/v1/agent/conversations/{conversation_id}", "get"): "get_agent_conversation",
+        ("/api/v1/agent/conversations/{conversation_id}/messages", "post"): "send_agent_message",
+        ("/api/v1/agent/conversations/{conversation_id}/events", "get"): "subscribe_agent_events",
+        ("/api/v1/agent/conversations/{conversation_id}/attachments", "post"): "prepare_agent_attachment",
+        ("/api/v1/agent/attachments/{attachment_id}/content", "put"): "upload_agent_attachment",
         ("/ready", "get"): "get_readiness",
         ("/api/v1/cases", "post"): "create_case",
         ("/api/v1/cases/{case_id}", "get"): "get_case",
@@ -516,6 +522,7 @@ def test_openapi_and_swagger_publish_the_browser_contract() -> None:
 def test_openapi_describes_every_parameter_and_reachable_model_field() -> None:
     schema = _app().openapi()
     uuid_names = {
+        "conversation_id",
         "case_id",
         "wait_for_job_id",
         "attachment_id",
@@ -850,6 +857,15 @@ def test_openapi_contract_matches_versioned_snapshot() -> None:
 
     response = _run(app, operation)
     assert response.content == actual
+
+
+def test_agent_sse_errors_are_json_and_success_uses_versioned_event_payloads() -> None:
+    schema = _app().openapi()
+    responses = schema["paths"]["/api/v1/agent/conversations/{conversation_id}/events"]["get"]["responses"]
+    assert set(responses["200"]["content"]) == {"text/event-stream"}
+    for status in ("400", "404", "409", "413", "422", "500", "503"):
+        assert set(responses[status]["content"]) == {"application/json"}
+    assert len(schema["components"]["schemas"]["AgentEvent"]["oneOf"]) == 11
 
 
 def test_wildcard_cors_allows_browser_preflight_without_credentials() -> None:

@@ -1,4 +1,4 @@
-"""V10 repository contract: active RAM, terminal SQLite, indexed history.
+"""V11 repository contract: active RAM, terminal SQLite, indexed history.
 
 The former state.json replacement/replay tests are superseded by these tests,
 test_case_store_v10.py (1k/10k history and independent revisions), and the real
@@ -79,8 +79,8 @@ def _finish(store):
 def test_empty_directory_initializes_generation_one_canonical_state(repository):
     snapshot = repository.read_snapshot()
     assert isinstance(repository, StateRepository)
-    assert snapshot.schema_version == SCHEMA_VERSION == 10
-    assert snapshot.contract_revision == CONTRACT_REVISION == "v10-contract-r1"
+    assert snapshot.schema_version == SCHEMA_VERSION == 11
+    assert snapshot.contract_revision == CONTRACT_REVISION == "v11-contract-r1"
     assert snapshot.generation == 1 and snapshot.cases == {}
     assert repository.export_snapshot() == canonical_json_bytes(snapshot)
     assert repository.layout.data_format_marker.read_bytes() == DATA_FORMAT_MARKER_BYTES
@@ -90,7 +90,7 @@ def test_empty_directory_initializes_generation_one_canonical_state(repository):
     assert repository._db.execute("PRAGMA synchronous").fetchone()[0] == 2
 
 
-@pytest.mark.parametrize("legacy_version", range(1, 10))
+@pytest.mark.parametrize("legacy_version", range(1, 11))
 def test_v1_through_v8_state_is_read_only_and_unsupported(tmp_path, legacy_version):
     # Name retained because affected Test Flow selects this guard explicitly.
     layout = StorageLayout.at(tmp_path)
@@ -113,6 +113,29 @@ def test_mismatched_data_format_marker_is_never_rewritten(tmp_path, marker):
     assert error.value.error.code in {ErrorCode.STATE_CORRUPT, ErrorCode.STATE_SCHEMA_UNSUPPORTED}
     assert (tmp_path / "data-format.json").read_bytes() == marker
     assert not (tmp_path / "completed.sqlite3").exists()
+
+
+def test_v10_database_directory_is_rejected_without_touching_any_bytes(tmp_path):
+    marker = canonical_json_bytes({"contract_revision": "v10-contract-r1",
+        "format_id": "problem-locator-data-v10", "schema_version": 10, "state_schema_version": 10})
+    (tmp_path / "data-format.json").write_bytes(marker)
+    database = tmp_path / "completed.sqlite3"
+    connection = sqlite3.connect(database)
+    connection.execute("CREATE TABLE historical_report (content BLOB)")
+    connection.execute("INSERT INTO historical_report VALUES (?)", (b"preserved V10 report",))
+    connection.commit()
+    connection.close()
+    report = tmp_path / "resources" / "report.json"
+    report.parent.mkdir()
+    report.write_bytes(b'{"historical":true}\n')
+    before = {path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in tmp_path.rglob("*") if path.is_file()}
+    with pytest.raises(ApplicationPortError) as error:
+        _open(tmp_path)
+    assert error.value.error.code is ErrorCode.STATE_SCHEMA_UNSUPPORTED
+    after = {path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in tmp_path.rglob("*") if path.is_file()}
+    assert after == before
 
 
 def test_corrupt_database_is_rejected_without_json_fallback(tmp_path):

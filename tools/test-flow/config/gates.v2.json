@@ -19,12 +19,20 @@
         "tools/test-flow/tests/docs-drift.test.mjs",
         "tools/test-flow/tests/evidence-v2-certification.test.mjs",
         "tools/test-flow/tests/evidence.test.mjs",
+        "tools/test-flow/tests/intake-usage.test.mjs",
         "tools/test-flow/tests/methods-oracle-production.test.mjs"
       ],
       "min_passed": 1,
       "evidence": [
         "node-test.tap"
       ]
+    },
+    "framework.intake-usage": {
+      "kind": "node-test",
+      "test_files": ["tools/test-flow/tests/intake-usage.test.mjs"],
+      "python_driver": true,
+      "min_passed": 9,
+      "evidence": ["node-test.tap"]
     },
     "docs.current": {
       "kind": "node-test",
@@ -61,6 +69,12 @@
       "evidence": [
         "repository-check.json"
       ]
+    },
+    "det.website-example": {
+      "kind": "node-test",
+      "test_files": ["examples/website-agent/server.test.mjs"],
+      "min_passed": 1,
+      "evidence": ["node-test.tap"]
     },
     "det.affected": {
       "kind": "pytest",
@@ -520,17 +534,14 @@
       "phase": "route",
       "runtime_profile": "release",
       "evidence_contract": {
-        "id": "cross-job-tool-call-v2",
+        "id": "cross-job-website-intake-v1",
         "event_stream": {
           "instance": "route",
           "pass_requires": [
-            "diagnostics",
-            "journey"
+            "agent"
           ],
           "pass_allows_empty": [],
-          "failure_allows_empty": [
-            "journey"
-          ]
+          "failure_allows_empty": []
         }
       },
       "evidence": [
@@ -542,17 +553,14 @@
       "phase": "upload",
       "runtime_profile": "release",
       "evidence_contract": {
-        "id": "cross-job-tool-call-v2",
+        "id": "cross-job-website-upload-v1",
         "event_stream": {
           "instance": "upload",
           "pass_requires": [
-            "diagnostics",
-            "journey"
+            "agent"
           ],
           "pass_allows_empty": [],
-          "failure_allows_empty": [
-            "journey"
-          ]
+          "failure_allows_empty": []
         }
       },
       "evidence": [
@@ -564,12 +572,13 @@
       "phase": "diagnose",
       "runtime_profile": "release",
       "evidence_contract": {
-        "id": "cross-job-methods-v1-reviewed-v1",
+        "id": "cross-job-website-methods-v1-reviewed-v1",
         "event_stream": {
-          "instance": "diagnose",
+          "instance": "route",
           "pass_requires": [
             "diagnostics",
-            "journey"
+            "journey",
+            "agent"
           ],
           "pass_allows_empty": [],
           "failure_allows_empty": [
@@ -586,12 +595,13 @@
       "phase": "publish-restart",
       "runtime_profile": "release",
       "evidence_contract": {
-        "id": "cross-job-publish-restart-v2",
+        "id": "cross-job-website-publish-restart-v1",
         "event_stream": {
           "instance": "restart",
           "pass_requires": [
             "diagnostics",
-            "journey"
+            "journey",
+            "agent"
           ],
           "pass_allows_empty": [
             "journey"

@@ -133,6 +133,7 @@ function crossJobGate(gate) {
 }
 
 function eventFile(contract, mode) {
+  if (mode === "agent") return `website-agent-${contract.id.includes("methods-v1") ? "diagnose" : contract.event_stream.instance}.ndjson`;
   return `parts/service-linux.${contract.event_stream.instance}.${mode}.ndjson`;
 }
 

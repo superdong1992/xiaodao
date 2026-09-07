@@ -41,6 +41,7 @@ import {
   validateMethodsV2ExecutionRecords,
 } from "./methods-oracle.mjs";
 import { validateMethodsGroundingExecutionRecord } from "./methods-v1-oracle.mjs";
+import { validateWebsiteEvidence } from "./website-agent.mjs";
 import {
   buildIsolatedAgentEnvironment,
   ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY,
@@ -3948,6 +3949,11 @@ async function crossJob(context, stage) {
   add("--service-agent-max-total-tokens", serviceCaps.max_total_tokens);
   add("--service-agent-max-budget-usd", serviceCaps.max_budget_usd);
   add("--service-agent-hard-timeout-seconds", serviceCaps.hard_timeout_seconds);
+  const intakeCaps = context.runtimeProfile.real_caps.service_intake;
+  add("--service-intake-max-turns", intakeCaps.max_turns);
+  add("--service-intake-max-total-tokens", intakeCaps.max_total_tokens);
+  add("--service-intake-max-budget-usd", intakeCaps.max_budget_usd);
+  add("--service-intake-hard-timeout-seconds", intakeCaps.hard_timeout_seconds);
   if (stage.id === "journey.cross-job.environment") adapterArguments.push("--fresh-data-root");
   if (context.restoredCheckpoint) {
     adapterArguments.push(
@@ -4009,6 +4015,23 @@ async function crossJob(context, stage) {
   if (receipt.status === "PASS" && stage.id === "journey.cross-job.environment" && !validLinuxClientBrowserCapabilityEvidence(context, receipt)) {
     return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CROSS_JOB_BROWSER_CAPABILITY_RECEIPT_INVALID" };
   }
+  if (receipt.status === "PASS" && stage.id !== "journey.cross-job.environment") {
+    try {
+      const expectedPhase = stage.id.endsWith("publish-restart") ? "restart" : stage.id.split(".").at(-1);
+      const file = path.join(context.attemptRoot, "payload", "stages", stage.id, `website-${expectedPhase}.json`);
+      const actual = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (receipt.website_agent?.sha256 !== sha256File(file) || receipt.website_agent?.phase !== expectedPhase) throw new Error("WEBSITE_RECEIPT_MISMATCH");
+      validateWebsiteEvidence(actual, { phase: expectedPhase });
+      if (expectedPhase === "restart") {
+        const prior = JSON.parse(fs.readFileSync(path.join(context.attemptRoot, "payload", "stages", "journey.cross-job.diagnose", "website-diagnose.json"), "utf8"));
+        if (JSON.stringify(actual.events) !== JSON.stringify(prior.events.slice(-2))
+          || JSON.stringify(actual.case_response) !== JSON.stringify(prior.case_response)
+          || JSON.stringify(actual.artifacts_response) !== JSON.stringify(prior.artifacts_response)) throw new Error("WEBSITE_RESTART_EVIDENCE_CHANGED");
+      }
+    } catch {
+      return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CROSS_JOB_WEBSITE_EVIDENCE_INVALID" };
+    }
+  }
   if (receipt.status === "PASS" && stage.id === "journey.cross-job.upload" && receipt.browser_upload?.status !== "PASS") {
     return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CROSS_JOB_BROWSER_UPLOAD_RECEIPT_INVALID" };
   }
@@ -4062,6 +4085,7 @@ async function crossJob(context, stage) {
       server_tool_calls: receipt.server_tool_calls ?? 0,
       checkpoint_ready: receipt.checkpoint_ready ?? false,
       restart_verified: receipt.restart_verified ?? false,
+      website_agent: receipt.website_agent ?? null,
       browser_upload: receipt.browser_upload ?? null,
       browser_api: receipt.browser_api ?? null,
       browser_capability: receipt.browser_capability ?? null,

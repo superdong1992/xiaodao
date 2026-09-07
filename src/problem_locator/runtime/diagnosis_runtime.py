@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from problem_locator.contracts import (
     ApplicationErrorDetail,
@@ -1004,6 +1004,7 @@ class DiagnosisRuntime:
         backend_test_limits: BackendExecutionLimits | None = None,
         generic_locator_executor: GenericLocatorExecutor | None = None,
         specialized_reviewer_enabled: bool = False,
+        public_progress: Callable[[str, str, str], None] | None = None,
     ) -> None:
         self._state_repository = state_repository
         self._resource_store = resource_store
@@ -1020,6 +1021,7 @@ class DiagnosisRuntime:
         self._clock = clock
         self._id_generator = id_generator
         self._specialized_reviewer_enabled = specialized_reviewer_enabled
+        self._public_progress = public_progress
         self._publisher = OutcomePublisher(execution_records, clock, id_generator)
         self._generic_locator_executor = generic_locator_executor or GenericLocatorExecutor(
             backend=self._diagnose_backend,
@@ -1034,6 +1036,10 @@ class DiagnosisRuntime:
         if job.job_type is JobType.ROUTE:
             return self._route_backend
         return self._diagnose_backend
+
+    def _announce(self, job: Job, stage: str) -> None:
+        if self._public_progress is not None:
+            self._public_progress(job.case_id, job.job_id, stage)
 
     def execute(
         self,
@@ -1102,6 +1108,12 @@ class DiagnosisRuntime:
         job: Job,
         cancellation: CancellationSignal,
     ) -> RuntimeExecutionReceipt:
+        if job.job_type is JobType.ROUTE:
+            self._announce(job, "ROUTING")
+        elif job.job_type is JobType.REVIEW:
+            self._announce(job, "REVIEWING")
+        elif job.diagnosis_mode is DiagnosisMode.GENERIC:
+            self._announce(job, "DIAGNOSING")
         resolving = record_stage_started(ExecutionStage.ASSET_RESOLUTION)
         try:
             assets = self._resolve_assets(job)
@@ -1303,6 +1315,7 @@ class DiagnosisRuntime:
             and workspace.manifest.resolved_logparse_plan is not None
         ):
             with self._shared_backend_log_sinks(job) as shared_log_sinks:
+                self._announce(job, "LOGPARSE")
                 methods_preprocessing = self._run_methods_preprocessing(
                     job=job,
                     aggregate=aggregate,
@@ -1311,6 +1324,7 @@ class DiagnosisRuntime:
                     cancellation=cancellation,
                 )
                 methods_skill = self._resolved_methods_skill(assets)
+                self._announce(job, "DIAGNOSING")
                 methods_skill_load = scan_method_markers(
                     skill=methods_skill,
                     target_logs=methods_preprocessing.frozen.target_logs,
@@ -1378,6 +1392,7 @@ class DiagnosisRuntime:
             )
         if broker_audit_bytes is not None:
             self._publish_audit_bytes(job, "broker_audit.json", broker_audit_bytes)
+        self._announce(job, "VERIFYING")
         validating = record_stage_started(ExecutionStage.OUTCOME_VALIDATE)
         try:
             if job.job_type is JobType.ROUTE:
@@ -1507,6 +1522,8 @@ class DiagnosisRuntime:
                 "decision_evidence.jsonl",
                 verification.decision_evidence_bytes,
             )
+        if job.job_type is not JobType.ROUTE:
+            self._announce(job, "REPORTING")
         finalized = finalize_server_outcome(
             workspace_root=workspace.root,
             job=job,

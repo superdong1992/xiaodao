@@ -121,6 +121,7 @@ _UUID_PATH_SCHEMA = {
     "pattern": _UUID_PATTERN,
 }
 _UUID_PARAMETER_NAMES = {
+    "conversation_id",
     "case_id",
     "wait_for_job_id",
     "attachment_id",
@@ -436,6 +437,20 @@ _SUCCESS_EXAMPLES: dict[str, dict[str, Any]] = {
 # enrich only the REST OpenAPI projection and therefore cannot change the
 # persisted or command/query schemas.
 _REST_FIELD_DESCRIPTIONS = {
+    "Content-Length": "原始字节数，必须与预约一致。Chrome 根据上传文件设置此请求头。",
+    "conversation_id": "一次定位会话的规范 UUID；网站后端负责校验归属。",
+    "message_id": "已持久接收的用户消息 UUID。",
+    "event_id": "该回执对应的会话事件序号。",
+    "last_event_id": "快照包含的最新事件序号；后续订阅使用 Last-Event-ID。",
+    "sequence": "从 1 开始、在会话内连续递增的持久事件序号。",
+    "type": "公共事件类型；data 必须匹配该类型的版本化结构。",
+    "text": "用户原话；全文保存在会话消息历史中。",
+    "notice": "消息是否已用于诊断的服务端提示。",
+    "messages": "按接收顺序排列的持久消息及采用状态。",
+    "current_questions": "当前等待用户回答的追问；不得据此推断定位结论。",
+    "case_status": "关联 Case 的最新状态；未创建 Case 时为 null。",
+    "case_attachment_id": "导入后对应的 Case 附件 UUID；未导入时为 null。",
+    "attachment": "会话日志附件的公开元数据和上传状态。",
     "Content-Type": "Canonical media type that must match the prepared attachment.",
     "Idempotency-Key": "Attachment UUID reused as the idempotency key for raw upload.",
     "X-Content-SHA256": "Lowercase SHA-256 digest of the complete byte stream.",
@@ -606,6 +621,12 @@ _REST_FIELD_DESCRIPTIONS = {
 }
 
 _SUCCESS_RESPONSE_DESCRIPTIONS = {
+    "create_agent_conversation": "会话已持久创建；相同 request_id 返回同一回执。",
+    "send_agent_message": "消息及接收事件已原子持久化；后续整理与定位异步执行。",
+    "get_agent_conversation": "返回会话历史、追问、附件状态和最新事件游标。",
+    "subscribe_agent_events": "SSE 帧 data 为 AgentEvent JSON，id 等于 sequence；按 Last-Event-ID 回放后持续订阅，每 15 秒发送注释心跳。断线不会停止任务。",
+    "prepare_agent_attachment": "返回稳定的会话附件预约、上传地址和必需请求头。",
+    "upload_agent_attachment": "原始字节的大小与 SHA-256 已验证，附件可供消息引用。",
     "get_liveness": "The process is live.",
     "get_readiness": "Every required subsystem is ready.",
     "create_case": "The Case creation write was durably accepted.",
@@ -618,6 +639,10 @@ _SUCCESS_RESPONSE_DESCRIPTIONS = {
 }
 
 _REQUEST_BODY_DESCRIPTIONS = {
+    "create_agent_conversation": "稳定 request_id；相同内容重试不创建新会话。",
+    "send_agent_message": "用户原话和已上传附件 ID 至少一项非空；无需生成结构化问题或命名事实。",
+    "prepare_agent_attachment": "声明会话归属、原始文件名、类型、字节数及 SHA-256。",
+    "upload_agent_attachment": "原始归档字节；四个请求头必须与预约完全一致。",
     "create_case": "Strict JSON body defining one new Case.",
     "submit_supplement": "Strict JSON body containing requested inputs and READY attachments.",
     "prepare_attachment": "Strict JSON body declaring immutable attachment metadata.",
@@ -699,6 +724,7 @@ def _apply_rest_openapi_overlay(schema: dict[str, Any]) -> None:
         {"name": "cases", "description": "Create, observe, and supplement diagnosis Cases."},
         {"name": "attachments", "description": "Reserve and upload immutable evidence files."},
         {"name": "artifacts", "description": "List and download immutable result artifacts."},
+        {"name": "Agent", "description": "自然语言会话、日志附件和可回放的公共进度。"},
     ]
 
     component_schemas = schema.setdefault("components", {}).setdefault("schemas", {})
@@ -735,6 +761,8 @@ def _apply_rest_openapi_overlay(schema: dict[str, Any]) -> None:
             # continue through the existing application validators so structured
             # validation errors remain wire-compatible.
             for parameter in operation.get("parameters", []):
+                if parameter.get("name") in _REST_FIELD_DESCRIPTIONS:
+                    parameter.setdefault("description", _REST_FIELD_DESCRIPTIONS[parameter["name"]])
                 if (
                     parameter.get("in") not in {"path", "query"}
                     or parameter.get("name") not in _UUID_PARAMETER_NAMES
@@ -956,6 +984,7 @@ def create_http_app(
     query_port: ApplicationQueryPort,
     state_admin: StateAdminPort,
     public_base_url: str,
+    agent_service: Any | None = None,
 ) -> FastAPI:
     """Create one ASGI application containing HTTP and stateless MCP routes."""
 
@@ -1011,6 +1040,10 @@ def create_http_app(
     )
     # Add diagnostics last so it wraps CORS-generated OPTIONS responses too.
     app.add_middleware(HttpDiagnosticsMiddleware)
+
+    from .agent_http import register_agent_routes
+
+    register_agent_routes(app, agent_service, public_base_url)
 
     @app.get("/openapi.json", include_in_schema=False)
     async def openapi_document() -> Response:

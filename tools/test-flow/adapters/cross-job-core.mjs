@@ -37,7 +37,9 @@ import {
   NEGATIVE_PROBE_VALIDATION_FIELDS,
   readRelayedEventPart,
   readServerMcpCorrespondence,
+  EventWriter,
 } from "../lib/events.mjs";
+import { runWebsiteStep, validateWebsiteEvidence } from "../lib/website-agent.mjs";
 import { recoverStageAuditProgress } from "../lib/evidence.mjs";
 import {
   discoverReleaseCaseRoot,
@@ -565,7 +567,7 @@ async function verifyRepositoryIdentity(configuration) {
   requireCondition(verification.status === "PASS", "RELEASE_SOURCE_SNAPSHOT_DRIFT", "BLOCKED", "INFRA");
 }
 
-async function run(command, args, { cwd = undefined, env = process.env, forward = true, maximumBytes = 64 * 1024 * 1024 } = {}) {
+async function run(command, args, { cwd = undefined, env = process.env, forward = true, forwardStderr = false, maximumBytes = 64 * 1024 * 1024 } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     const stdout = [];
@@ -581,7 +583,7 @@ async function run(command, args, { cwd = undefined, env = process.env, forward 
         return;
       }
       collection.push(chunk);
-      if (forward) target.write(chunk);
+      if (forward || (forwardStderr && target === process.stderr)) target.write(chunk);
     };
     child.stdout.on("data", (chunk) => consume(stdout, process.stdout, chunk));
     child.stderr.on("data", (chunk) => consume(stderr, process.stderr, chunk));
@@ -2567,6 +2569,8 @@ async function createContainer(configuration, state, containerName, mode, stageI
     "--env", `TEST_FLOW_SERVICE_MAX_TOTAL_TOKENS=${configuration.serviceAgentCaps.max_total_tokens}`,
     "--env", `TEST_FLOW_SERVICE_MAX_BUDGET_USD=${configuration.serviceAgentCaps.max_budget_usd}`,
     "--env", `TEST_FLOW_SERVICE_HARD_TIMEOUT_SECONDS=${configuration.serviceAgentCaps.hard_timeout_seconds}`,
+    "--env", `TEST_FLOW_INTAKE_MAX_TURNS=${configuration.serviceIntakeCaps.max_turns}`,
+    "--env", `TEST_FLOW_INTAKE_MAX_BUDGET_USD=${configuration.serviceIntakeCaps.max_budget_usd}`,
     "--tmpfs", "/root/.claude:rw,noexec,nosuid,nodev,mode=0700,size=536870912",
     "--tmpfs", "/run/plagent-claude:rw,noexec,nosuid,nodev,mode=0700,size=536870912",
     "--mount", `type=bind,src=${configuration.repoRoot},dst=/source/xiaodao,readonly`,
@@ -3116,6 +3120,101 @@ async function auditServiceAgentUsage(configuration, state, instance) {
   return { invocations: receipt.invocations, noModelJobs: receipt.no_model_jobs };
 }
 
+async function auditIntakeUsage(configuration, state) {
+  const caps = configuration.serviceIntakeCaps;
+  const output = `/evidence/stages/${configuration.stage}/intake-usage.json`;
+  const args = ["exec", state.active_container, "/opt/venvs/xiaodao/bin/python", "-I", "/test-flow-runtime/audit_intake_usage.py",
+    "--workspaces-root", "/var/lib/problem-locator/tmp/workspaces", "--output", output, "--model", RELEASE_MODEL,
+    "--max-turns", String(caps.max_turns), "--max-total-tokens", String(caps.max_total_tokens),
+    "--max-budget-usd", String(caps.max_budget_usd), "--hard-timeout-seconds", String(caps.hard_timeout_seconds)];
+  for (const executionId of state.audited_intake_ids ?? []) args.push("--exclude-execution-id", executionId);
+  await docker(configuration.dockerContext, args);
+  const receipt = readJson(path.join(configuration.stageRoot, "intake-usage.json"));
+  requireCondition(receipt.schema_version === 1 && receipt.status === "PASS"
+    && receipt.invocations.every((item) => validSuccessfulInvocationReceipt(item) && item.class === "server-intake"
+      && item.phase === "INTAKE" && UUID.test(item.execution_id) && SHA256.test(item.stdout_sha256)), "INTAKE_USAGE_INVALID", "FAIL", "CONTRACT");
+  state.audited_intake_ids = [...(state.audited_intake_ids ?? []), ...receipt.new_execution_ids];
+  atomicState(configuration.statePath, state);
+  return receipt.invocations;
+}
+
+async function websiteStep(configuration, state, phase, extra = {}) {
+  const input = { phase, public_base_url: state.public_base_url, request_id: `${state.run_id}-website-${phase}`,
+    conversation_id: state.conversation_id, case_id: state.case_id, cursor: state.website_cursor ?? 0, ...extra };
+  let evidence;
+  if (configuration.topology === DUAL_LINUX_TOPOLOGY) {
+    const execution = await docker(configuration.dockerContext, ["exec", state.client_container, "/usr/bin/node",
+      "/workspace/tools/test-flow/lib/website-agent.mjs", JSON.stringify(input)], { forward: false, forwardStderr: true });
+    evidence = JSON.parse(execution.stdout);
+  } else evidence = await runWebsiteStep(input);
+  validateWebsiteEvidence(evidence, { conversation_id: state.conversation_id });
+  writeNew(path.join(configuration.stageRoot, `website-${phase}.json`), evidence);
+  if (phase !== "prepare") {
+    const writer = new EventWriter({ attemptRoot: configuration.attemptRoot, runId: state.run_id,
+      producerId: `website-agent-${phase}`, producerType: "website-rest-client" });
+    try {
+      for (const event of evidence.events) writer.write("website.agent.observed", { stageId: configuration.stage, scenario: "CrossJob",
+        caseId: event.case_id, jobId: event.job_id, data: { conversation_id: event.conversation_id,
+          sequence: event.sequence, type: event.type, event_sha256: sha256Bytes(canonicalJson(event)) } });
+    } finally { writer.close(); }
+  }
+  if (phase !== "restart") {
+    state.conversation_id = evidence.conversation_id;
+    state.website_cursor = evidence.events.at(-1)?.sequence ?? state.website_cursor;
+    state.website_events = [...(state.website_events ?? []), ...evidence.events];
+  }
+  atomicState(configuration.statePath, state);
+  return evidence;
+}
+
+function websiteReceipt(configuration, phase) {
+  const file = path.join(configuration.stageRoot, `website-${phase}.json`);
+  return { schema_version: 1, status: "PASS", phase, path: path.relative(configuration.attemptRoot, file).split(path.sep).join("/"), sha256: sha256File(file) };
+}
+
+async function uploadWebsiteAttachment(configuration, state) {
+  const prepared = await websiteStep(configuration, state, "prepare", { archive: state.archive });
+  const descriptor = prepared.prepared.upload;
+  const attachmentId = prepared.prepared.attachment.attachment_id;
+  requireCondition(descriptor.url === `${state.public_base_url}/api/v1/agent/attachments/${attachmentId}/content`, "WEBSITE_UPLOAD_URL_INVALID");
+  const bytes = fs.readFileSync(path.join(configuration.attemptRoot, "payload", state.archive.name));
+  requireCondition(bytes.length === state.archive.size && sha256Bytes(bytes) === state.archive.sha256, "WEBSITE_ARCHIVE_FIXTURE_INVALID");
+  const page = `<!doctype html><html><head><title>PENDING</title></head><body><script>
+const descriptor=${scriptJson(descriptor)};
+(async()=>{const bytes=await(await fetch('/fixture')).arrayBuffer();const response=await fetch(descriptor.url,{method:'PUT',headers:descriptor.required_headers,body:bytes});const data=await response.json();document.documentElement.dataset.result=btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify({ok:response.ok,status:response.status,data}))));document.title='DONE';})().catch(()=>{document.documentElement.dataset.result=btoa(JSON.stringify({ok:false}));document.title='FAILED';});
+</script></body></html>`;
+  const browser = await runChromePage(configuration, state, "upload", page, bytes);
+  if (!(browser.result.ok === true && browser.result.data?.ok === true)) browser.failBrowser?.("CHROME_UPLOAD_RESPONSE_INVALID");
+  requireCondition(browser.result.ok === true && browser.result.data?.ok === true, "WEBSITE_CHROME_UPLOAD_FAILED", "FAIL", "BROWSER");
+  const browserUpload = { schema_version: 1, status: "PASS", browser: browser.chrome, attachment_id: attachmentId,
+    declared_size: state.archive.size, declared_sha256: state.archive.sha256, response: browser.result };
+  writeNew(path.join(configuration.stageRoot, "chrome-upload.json"), browserUpload);
+  state.website_attachment_id = attachmentId;
+  const evidence = await websiteStep(configuration, state, "upload");
+  requireCondition(evidence.view.attachments.some((item) => item.attachment_id === attachmentId && item.status === "READY"
+    && item.size === state.archive.size && item.sha256 === state.archive.sha256), "WEBSITE_UPLOAD_METADATA_INVALID");
+  return browserUpload;
+}
+
+export function websiteTerminalSummary(evidence, state, releaseCase) {
+  const view = evidence.case_response?.case_view;
+  const artifacts = evidence.artifacts_response?.artifacts;
+  requireCondition(view?.case_id === state.case_id && view.status === releaseCase.result_expectation.case_status
+    && view.final_result?.status === "ACCEPTED" && view.final_result.resolution_status === releaseCase.result_expectation.resolution_status
+    && !view.methods_result && view.archive_status === "READY", "WEBSITE_TERMINAL_CASE_INVALID", "FAIL", "CONTRACT");
+  requireCondition(Array.isArray(artifacts) && artifacts.length === 2 && view.artifacts.length === 2, "WEBSITE_ARTIFACTS_INVALID", "FAIL", "CONTRACT");
+  const report = artifacts.find((item) => item.kind === "USER_RESULT");
+  const archive = artifacts.find((item) => item.kind === "USER_RESULT_ARCHIVE");
+  for (const item of [report, archive]) {
+    const summary = view.artifacts.find((candidate) => candidate.artifact_id === item?.artifact_id);
+    requireCondition(item && summary && item.size > 0 && SHA256.test(item.sha256) && item.size === summary.size
+      && item.sha256 === summary.sha256 && summary.created_by_job_id === view.final_result.proposed_by_job_id,
+    "WEBSITE_ARTIFACT_BINDING_INVALID", "FAIL", "CONTRACT");
+  }
+  return { resolved_case_revision: view.case_revision, public_artifact: report, public_result_archive: archive,
+    observed_statuses: evidence.events.filter((event) => event.type === "case.updated").map((event) => event.data.status), rest_supplements: [] };
+}
+
 async function captureMethodsGroundingOracle(configuration, state, serviceInvocations) {
   const diagnosisJobIds = [...new Set(serviceInvocations
     .filter((invocation) => invocation.job_type === "DIAGNOSE")
@@ -3462,70 +3561,45 @@ async function execute(configuration) {
   if (configuration.restoredDataRoot) await applyRestoredCheckpoint(configuration, state);
 
   if (configuration.stage === "journey.cross-job.route") {
-    requireCondition(configuration.hardCaps !== null, "ROUTE_HARD_CAPS_MISSING", "BLOCKED", "INFRA");
-    const phaseOneAudit = await runClaude(configuration, state, configuration.stageRoot, "phase1", phaseOnePrompt(), configuration.hardCaps.max_turns, configuration.hardCaps.max_budget_usd);
-    const phaseOneSummary = validatePhaseOne(phaseOneAudit, configuration.releaseCase, state.request_ids);
-    Object.assign(state, phaseOneSummary);
-    state.client_calls.push(...phaseOneAudit.records.map((record, index) => ({ phase: "phase1", ordinal: state.client_calls.length + index, tool_name: record.tool_name, input: record.input })));
-    addUsage(state, phaseOneAudit.usage);
-    atomicState(configuration.statePath, state);
-    const phaseTwoAudit = await runClaude(configuration, state, configuration.stageRoot, "phase2", phaseTwoPrompt(state, configuration.releaseCase, state.archive), configuration.hardCaps.max_turns, configuration.hardCaps.max_budget_usd);
-    const phaseTwoSummary = validatePhaseTwo(phaseTwoAudit, state, configuration.releaseCase, state.request_ids, state.archive, state.public_base_url);
-    Object.assign(state, phaseTwoSummary);
-    state.client_calls.push(...phaseTwoAudit.records.map((record, index) => ({ phase: "phase2", ordinal: state.client_calls.length + index, tool_name: record.tool_name, input: record.input })));
-    addUsage(state, phaseTwoAudit.usage);
-    atomicState(configuration.statePath, state);
-    const correspondence = await stopService(configuration, state);
-    const jobTypes = correspondence.service_invocations.map((invocation) => invocation.job_type).sort();
+    const evidence = await websiteStep(configuration, state, "route", { driver: configuration.releaseCase.driver });
+    state.case_id = evidence.view.case_id;
+    const caseView = evidence.case_response?.case_view;
+    requireCondition(caseView?.case_id === state.case_id && caseView.status === "WAITING_ATTACHMENT"
+      && caseView.artifacts.length === 0 && !caseView.final_result
+      && caseView.selected_skill_ref?.id === configuration.releaseCase.skill.runtime_ref_id
+      && caseView.selected_skill_ref?.version === configuration.releaseCase.skill.version,
+    "WEBSITE_ROUTE_CASE_INVALID", "FAIL", "CONTRACT");
+    state.case_revision = caseView.case_revision;
+    const requestedBy = [...new Set(openRequirements(caseView, "ATTACHMENT").map((item) => item.requested_by_job_id))];
+    requireCondition(requestedBy.length === 1 && UUID.test(requestedBy[0] ?? ""), "WEBSITE_ROUTE_PREFLIGHT_ID_INVALID");
+    state.methods_preflight_job_id = requestedBy[0];
+    const serviceUsage = await auditServiceAgentUsage(configuration, state, "website-route");
+    const intakeUsage = await auditIntakeUsage(configuration, state);
+    const jobTypes = serviceUsage.invocations.map((invocation) => invocation.job_type).sort();
     requireCondition(jobTypes.length === 1 && jobTypes[0] === "ROUTE", "ROUTE_SERVICE_AGENT_INVOCATIONS", "FAIL", "CONTRACT");
-    requireCondition(
-      validRouteMethodsPreflightEvidence(correspondence.service_no_model_jobs, {
-        registrationId: configuration.generatedSkill.registration_id,
-        expectedJobId: state.methods_preflight_job_id,
-      }),
-      "ROUTE_METHODS_PREFLIGHT_JOBS",
-      "FAIL",
-      "CONTRACT",
-    );
-    const checkpoint = await createCheckpointSource(configuration, state, {
-      case_id: state.case_id,
-      attachment_id: state.attachment_id,
-      prepared_case_revision: state.prepared_case_revision,
-      request_ids: Object.values(state.request_ids),
-    });
-    if (!configuration.terminalAfterStage) await startService(configuration, state, "upload");
-    const invocations = [
-      clientInvocation(configuration, "route-intake", phaseOneAudit, configuration.hardCaps),
-      clientInvocation(configuration, "route-supplement", phaseTwoAudit, configuration.hardCaps),
-      ...correspondence.service_invocations,
-    ];
-    await stageReceipt(configuration, { status: "PASS", client_tool_calls: phaseOneAudit.records.length + phaseTwoAudit.records.length, server_tool_calls: correspondence.server_completed, checkpoint_ready: checkpoint.status === "PASS", invocations });
+    requireCondition(intakeUsage.length === 2 && intakeUsage.some((item) => item.action === "NEED_CLARIFICATION")
+      && intakeUsage.some((item) => item.action === "CREATE_CASE"), "WEBSITE_INTAKE_ROUTE_CARDINALITY", "FAIL", "CONTRACT");
+    requireCondition(validRouteMethodsPreflightEvidence(serviceUsage.noModelJobs, {
+      registrationId: configuration.generatedSkill.registration_id, expectedJobId: state.methods_preflight_job_id,
+    }), "WEBSITE_PREFLIGHT_INVALID", "FAIL", "CONTRACT");
+    atomicState(configuration.statePath, state);
+    if (configuration.terminalAfterStage) await stopService(configuration, state);
+    await stageReceipt(configuration, { status: "PASS", client_tool_calls: 0, server_tool_calls: 0, checkpoint_ready: false,
+      website_agent: websiteReceipt(configuration, "route"), invocations: [...intakeUsage, ...serviceUsage.invocations] });
     return;
   }
 
   if (configuration.stage === "journey.cross-job.upload") {
-    const upload = await uploadAttachment(configuration, state, configuration.stageRoot);
-    Object.assign(state, upload);
-    atomicState(configuration.statePath, state);
-    const correspondence = await stopService(configuration, state);
-    requireCondition(correspondence.service_invocations.length === 0, "UPLOAD_UNEXPECTED_MODEL_INVOCATION", "FAIL", "CONTRACT");
-    requireCondition(correspondence.service_no_model_jobs.length === 0, "UPLOAD_UNEXPECTED_PREFLIGHT_ACTIVITY", "FAIL", "CONTRACT");
-    const checkpoint = await createCheckpointSource(configuration, state, {
-      case_id: state.case_id,
-      attachment_id: state.attachment_id,
-      case_revision: state.case_revision,
-      attachment_status: state.status,
-      request_ids: Object.values(state.request_ids),
-    });
-    if (!configuration.terminalAfterStage) await startService(configuration, state, "diagnose");
-    await stageReceipt(configuration, { status: "PASS", client_tool_calls: 0, server_tool_calls: correspondence.server_completed, checkpoint_ready: checkpoint.status === "PASS", browser_upload: upload.browser_upload, invocations: [] });
+    const browserUpload = await uploadWebsiteAttachment(configuration, state);
+    if (configuration.terminalAfterStage) await stopService(configuration, state);
+    await stageReceipt(configuration, { status: "PASS", client_tool_calls: 0, server_tool_calls: 0, checkpoint_ready: false,
+      website_agent: websiteReceipt(configuration, "upload"), browser_upload: browserUpload, invocations: [] });
     return;
   }
 
   if (configuration.stage === "journey.cross-job.diagnose") {
-    requireCondition(configuration.hardCaps !== null, "DIAGNOSE_HARD_CAPS_MISSING", "BLOCKED", "INFRA");
-    const audit = await runClaude(configuration, state, configuration.stageRoot, "phase3", phaseThreePrompt(state, configuration.releaseCase), configuration.hardCaps.max_turns, configuration.hardCaps.max_budget_usd);
-    const summary = validatePhaseThree(audit, state, configuration.releaseCase);
+    const evidence = await websiteStep(configuration, state, "diagnose", { attachment_id: state.website_attachment_id });
+    const summary = websiteTerminalSummary(evidence, state, configuration.releaseCase);
     const browserApi = await verifyResolvedWebApi(
       configuration,
       state,
@@ -3533,9 +3607,10 @@ async function execute(configuration) {
       configuration.stageRoot,
     );
     Object.assign(state, summary);
-    state.client_calls.push(...audit.records.map((record, index) => ({ phase: "phase3", ordinal: state.client_calls.length + index, tool_name: record.tool_name, input: record.input })));
-    addUsage(state, audit.usage);
+    state.attachment_id = evidence.view.attachments.find((item) => item.attachment_id === state.website_attachment_id)?.case_attachment_id;
     atomicState(configuration.statePath, state);
+    const intakeUsage = await auditIntakeUsage(configuration, state);
+    requireCondition(intakeUsage.length === 1 && intakeUsage[0].action === "SUBMIT_SUPPLEMENT", "WEBSITE_INTAKE_SUPPLEMENT_CARDINALITY", "FAIL", "CONTRACT");
     const correspondence = await stopService(configuration, state);
     requireCondition(
       validDirectMethodsServiceInvocations(correspondence.service_invocations),
@@ -3549,16 +3624,9 @@ async function execute(configuration) {
       state,
       correspondence.service_invocations,
     );
-    const checkpoint = await createCheckpointSource(configuration, state, {
-      case_id: state.case_id,
-      attachment_id: state.attachment_id,
-      resolved_case_revision: state.resolved_case_revision,
-      public_artifact_id: state.public_artifact.artifact_id,
-      public_archive_id: state.public_result_archive.artifact_id,
-      observed_statuses: state.observed_statuses,
-    });
-    const invocations = [clientInvocation(configuration, "diagnose", audit, configuration.hardCaps), ...correspondence.service_invocations];
-    await stageReceipt(configuration, { status: "PASS", client_tool_calls: audit.records.length, server_tool_calls: correspondence.server_completed, checkpoint_ready: checkpoint.status === "PASS", browser_api: browserApi, methods_grounding: methodsGrounding, invocations });
+    const invocations = [...intakeUsage, ...correspondence.service_invocations];
+    await stageReceipt(configuration, { status: "PASS", client_tool_calls: 0, server_tool_calls: correspondence.server_completed, checkpoint_ready: false,
+      website_agent: websiteReceipt(configuration, "diagnose"), browser_api: browserApi, methods_grounding: methodsGrounding, invocations });
     return;
   }
 
@@ -3571,6 +3639,11 @@ async function execute(configuration) {
     // business Journey writer has no state transition to emit. Diagnostics
     // remain mandatory and are still used for exact MCP correspondence.
     await startService(configuration, state, "restart", { allowEmptyJourney: true });
+    const expectedEvents = state.website_events.slice(-2);
+    const replay = await websiteStep(configuration, state, "restart", { cursor: expectedEvents[0].sequence - 1, expected_events: expectedEvents });
+    const replaySummary = websiteTerminalSummary({ ...replay, events: state.website_events }, state, configuration.releaseCase);
+    requireCondition(canonicalJson(replaySummary.public_artifact) === canonicalJson(state.public_artifact)
+      && canonicalJson(replaySummary.public_result_archive) === canonicalJson(state.public_result_archive), "WEBSITE_RESTART_REPORT_CHANGED", "FAIL", "CONTRACT");
     requireCondition(configuration.hardCaps !== null, "PUBLISH_RESTART_HARD_CAPS_MISSING", "BLOCKED", "INFRA");
     const audit = await runClaude(configuration, state, configuration.stageRoot, "restart", restartPrompt(state), configuration.hardCaps.max_turns, configuration.hardCaps.max_budget_usd);
     validateRestart(audit, state, configuration.releaseCase);
@@ -3581,15 +3654,9 @@ async function execute(configuration) {
     const correspondence = await stopService(configuration, state);
     requireCondition(correspondence.service_invocations.length === 0, "RESTART_UNEXPECTED_MODEL_INVOCATION", "FAIL", "CONTRACT");
     requireCondition(correspondence.service_no_model_jobs.length === 0, "RESTART_UNEXPECTED_PREFLIGHT_ACTIVITY", "FAIL", "CONTRACT");
-    const checkpoint = await createCheckpointSource(configuration, state, {
-      case_id: state.case_id,
-      resolved_case_revision: state.resolved_case_revision,
-      public_artifact_id: state.public_artifact.artifact_id,
-      public_archive_id: state.public_result_archive.artifact_id,
-      restart_verified: true,
-    });
     writeNew(path.join(configuration.stageRoot, "client-server-correspondence.json"), { schema_version: 1, ...correspondence });
-    await stageReceipt(configuration, { status: "PASS", client_tool_calls: audit.records.length, server_tool_calls: correspondence.server_completed, checkpoint_ready: checkpoint.status === "PASS", restart_verified: true, invocations: [clientInvocation(configuration, "publish-restart", audit, configuration.hardCaps)] });
+    await stageReceipt(configuration, { status: "PASS", client_tool_calls: audit.records.length, server_tool_calls: correspondence.server_completed, checkpoint_ready: false,
+      website_agent: websiteReceipt(configuration, "restart"), restart_verified: true, invocations: [clientInvocation(configuration, "publish-restart", audit, configuration.hardCaps)] });
     return;
   }
 
@@ -3644,6 +3711,12 @@ const configuration = {
     max_total_tokens: Number(values.service_agent_max_total_tokens),
     max_budget_usd: Number(values.service_agent_max_budget_usd),
     hard_timeout_seconds: Number(values.service_agent_hard_timeout_seconds),
+  },
+  serviceIntakeCaps: {
+    max_turns: Number(values.service_intake_max_turns),
+    max_total_tokens: Number(values.service_intake_max_total_tokens),
+    max_budget_usd: Number(values.service_intake_max_budget_usd),
+    hard_timeout_seconds: Number(values.service_intake_hard_timeout_seconds),
   },
 };
 configuration.statePath = configuration.attemptRoot && path.join(configuration.attemptRoot, "scratch", "cross-job", "state.json");

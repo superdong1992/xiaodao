@@ -1,9 +1,24 @@
 # 已修复问题台账
 
-更新时间：2026-09-05
+更新时间：2026-09-07
 
 本文件记录已经在当前工作区验证、修复并由专项回归测试保护的问题。活跃待办仍只写入
 [`TODO.md`](TODO.md)；同一问题再次回归时更新原条目，不另建一个缺少历史关联的条目。
+
+## PL-FIX-058：网站接入要求手工整理问题，缺少对话与实时进度
+
+- **状态**：8.0 实现完成，Dev 验证状态以本条最终元数据为准；真实 Release 尚未通过。
+- **症状与受影响版本**：7.0.0 / `fdca5c3` 只提供结构化 Case 输入和状态查询，网站必须自行生成问题字段、处理追问，无法订阅可恢复的用户进度。当前版本入口与路由表已在修改前核对。
+- **根因**：缺少独立自然语言整理层、持久会话和公共事件合同；内部执行日志不能直接作为用户输出。
+- **修复历史**：2026-09-07 新增 INTAKE、六条 Agent REST 路由、SQLite 会话/消息/命令派发/事件表、SSE 回放，以及网站后端接入示例。升级为 8.0.0 / V11，保留旧 Case/MCP、Methods V1、可选 Reviewer、Generic 和异步 ZIP 行为。联调补齐长附件名、长会话文本、文件流归属、严格事件类型和命令采纳竞态的专项回归。
+- **不可回归行为**：消息回执持久后立即返回；同一请求幂等冲突不得重跑模型；只采用用户原文可溯源字段和当前合法补充。消息采用状态与核心命令提交一致。审核前不泄露报告，报告与公共事件同事务；JSON 就绪即可交付，ZIP 失败不撤销报告。SSE 有界、可回放，断线不取消，重启不重跑活动模型。旧 V1–V10 数据根不迁移或修改。
+- **专项回归测试**：`tests/deterministic/integration/test_website_agent.py`；`tests/deterministic/unit/agent/test_intake.py`；`tests/deterministic/unit/agent/test_store.py`；`tests/deterministic/unit/interfaces/test_agent_http.py`；`tests/deterministic/integration/test_bootstrap_composition.py::test_production_agent_thread_handles_http_intake_and_stops_before_lock_release`；`examples/website-agent/server.test.mjs`；`tools/test-flow/tests/website-agent.test.mjs`。OpenAPI 逐字段与快照仍由 `test_web_api.py` 校验。
+- **发布边界**：网站后端必须实现登录、会话归属、订阅及下载权限，示例默认拒绝未接入的身份回调。Linux 是唯一 Server 平台；当前环境 Docker daemon 未启动，不能把零模型 Dev 或计划输出当作真实 Release 证明。
+- **网站指导补充（2026-09-07，8.0 预览版）**：当前 API 参考缺少部署后快速入口；原 EventSource 示例提前推进游标，且异步回调不串行，已用暂挂报告下载再送入完成事件的最小复现确认。补充版本/就绪检查、前后端职责、Linux 示例启动与联调验收；文档事件消费者改为有界串行处理，成功后推进游标，报告失败关闭并提示从历史重放，不让完成事件掩盖失败。此项不改变服务 API。
+- **网站指导专项回归**：`tools/test-flow/tests/website-agent-guide.test.mjs` 直接执行文档 SSE 示例，覆盖报告下载未完成时的游标与终态顺序、失败后不推进、重复事件去重和有界队列；同时核对快速指南入口、服务路径、版本、鉴权回调与源码合同。文档链接由 `docs-drift.test.mjs` 校验，逐字段 API 参考由 `rest-api-guide.test.mjs` 校验。
+- **最新 Test Flow verdict（8.0）**：Dev [run-20260907T071932Z-978e8711](.tmp/test-flow-evidence/run-20260907T071932Z-978e8711/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:94db9e4d48988e2c210d1d5fd4ae6e8d71c6907bef2adbdc1d273994982ea5d8`（787 files）；合同 576、单元 2,042、集成 61、SameJob 5 项通过，68 项平台跳过；Core 32 项、网站示例 12 项通过。此行是验证完成后的元数据回填，不属于所引用快照；未宣称真实 Release 通过。
+
+- **最新 Test Flow verdict（8.0 网站指导补充）**：Dev [run-20260907T085350Z-d3b1a48d](.tmp/test-flow-evidence/run-20260907T085350Z-d3b1a48d/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:33f493b793bf9526c0b01993303f29b2159d0342ab23d00b8b082b290507f3e4`（789 files）；verdict digest `d9f1b386df7f7ba2105db6a1dd2ad158cfd98496b0d0516a6de1b5468b04a0d6`。网站指导专项 20 项纳入 framework.node-tests 的 400 PASS / 30 项平台跳过；完整确定性合同 576、单元 2,042、集成 61、SameJob 5 项通过，68 项平台跳过，网站后端示例 12 项通过。零真实模型调用，未访问公司内网，不代表部署环境或真实 Release 已通过。此行是验证完成后的元数据回填，不属于所引用快照。
 
 ## PL-FIX-056：活动状态更新复制全库并反复读取历史资源
 
@@ -358,26 +373,41 @@
 - **症状**：Windows `dev.default` 的 affected pytest 在多个真实存储集成用例中统一返回
   `RESOURCE_STAGE_FAILED`；相同用例使用极短临时根时通过。
 - **受影响版本**：Problem Locator 3.0.0，当前基线 `f99a3d5`。
+  2026-09-07 在 8.0.0 / V11 候选的独立确定性测试中回归：新异步归档 helper 接收普通
+  Windows 路径，未沿用已有的扩展路径处理。
 - **根因**：Test Flow 虽已缩短 Windows pytest scratch 目录名，但 `--basetemp` 仍使用普通
   Win32 路径；pytest 的测试名、proposal hash、Job UUID 和原子临时文件名组合后超过传统
   `MAX_PATH`，底层文件创建失败。
+  8.0.0 回归来自 `create_pending_archive()` 的新调用入口；直接运行 pytest 或进程崩溃测试时，
+  该入口没有经过 Test Flow 的 `pytestBaseTempPath`。缩短目录只能推迟失败，深层 proposal
+  staging 仍可能返回 `RESOURCE_STAGE_FAILED`，更长目录还会出现 `RESOURCE_NOT_FOUND`。
 - **不可回归行为**：Windows pytest 使用同一受控 scratch 目录的扩展长度绝对路径，固定
   SameJob/CrossJob 确定性旅程的受控数据根也使用扩展长度路径；不移动 scratch、不放宽清理
   边界，也不改变 Linux/macOS 路径。真实文件和目录 staging 集成测试必须能在标准 Codex
   worktree 深度下通过。
+  复用异步归档 helper 的全部用例必须在同一入口获得扩展路径；普通 `DATA_ROOT` 生成的深层
+  资源路径超过 260 字符时，必须完成真实 JSON 发布、ZIP 生成及日志逐字节校验，不得弱化断言或改动产品路径协议。
 - **修复历史**：2026-08-18 为 Test Flow 增加跨平台 `pytestBaseTempPath`；Windows drive 和 UNC
   路径分别转换为 `\\?\` 与 `\\?\UNC\`，其他平台保持普通绝对路径；同时让两个复用 `.s08`
   数据根的确定性旅程在 Windows 使用相同扩展路径语义。
+  2026-09-07：确认 8.0.0 独立完整确定性测试和 Agent 待归档重启测试复现相同路径问题后，
+  在异步归档 helper 入口复用 `_windows_extended_path`，覆盖全部现有调用者；新增输入为
+  普通长路径的完整 JSON/ZIP 回归。该调整仅规范测试目录表示，不移动数据、不改变生产行为。
 - **专项回归测试**：
   - `tools/test-flow/tests/actions.test.mjs` 中 `Windows pytest base temp uses an extended-length path without moving scratch`
   - `tests/deterministic/integration/test_bootstrap_resource_export.py::test_nonempty_state_export_is_complete_canonical_and_generation_consistent`
   - `tests/deterministic/journey/test_rpc_timeout.py::test_r01_r14_rpc_timeout_is_one_durable_cross_module_path`
   - `tests/deterministic/journey/test_rpc_timeout.py::test_same_job_uses_initial_order_fact_and_survives_restart`
+  - `tests/deterministic/integration/test_async_archive.py::test_archive_helper_supports_deep_staging_from_unprefixed_root`
+  - `tests/deterministic/integration/test_async_archive.py::test_pending_or_interrupted_archive_resumes_after_database_reopen`
+  - `tests/deterministic/integration/test_terminal_crash.py::test_terminal_report_survives_only_after_durable_commit`
 - **最新 Test Flow verdict**：fresh Release `run-20260820T045247Z-bbd8abff`，
   `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为
   `NOT_CALIBRATED`；验证源码快照
   `git-visible-worktree-v1:9eacd6a22cec2cb37b88503a2663f0825eccca76397b31b5199af687ccfa2051`
   （603 files）。
+
+- **最新 Test Flow verdict（8.0 回归）**：Dev [run-20260907T071932Z-978e8711](.tmp/test-flow-evidence/run-20260907T071932Z-978e8711/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:94db9e4d48988e2c210d1d5fd4ae6e8d71c6907bef2adbdc1d273994982ea5d8`（787 files）；深层归档及进程崩溃专项纳入已通过的完整确定性门禁。此行是验证完成后的元数据回填，不属于所引用快照。
 
 ## PL-FIX-013：等待用户材料的 Diagnose Agent 因无意义逐规则 claims 超出 token cap
 

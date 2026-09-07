@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from problem_locator.contracts.ports import (
     ApplicationCommandPort,
@@ -17,6 +18,7 @@ class InterfaceDependencies:
     query_port: ApplicationQueryPort
     state_admin: StateAdminPort
     public_base_url: str
+    agent_service: Any | None = None
 
 
 def create_asgi_app(dependencies: InterfaceDependencies):
@@ -29,6 +31,7 @@ def create_asgi_app(dependencies: InterfaceDependencies):
         query_port=dependencies.query_port,
         state_admin=dependencies.state_admin,
         public_base_url=dependencies.public_base_url,
+        agent_service=dependencies.agent_service,
     )
 
 

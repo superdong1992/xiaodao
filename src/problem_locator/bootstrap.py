@@ -21,6 +21,9 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from problem_locator.application import ApplicationService, build_application_service
+from problem_locator.agent.intake import ClaudeIntakeEngine
+from problem_locator.agent.service import AgentConversationService
+from problem_locator.agent.store import AgentStore
 from problem_locator.contracts import (
     ERROR_SPECS,
     ApplicationError,
@@ -284,6 +287,7 @@ def _layout_directories(layout: StorageLayout) -> tuple[Path, ...]:
         layout.data_root,
         layout.resources,
         layout.cases_resources,
+        layout.conversation_uploads,
         layout.jobs,
         layout.temporary,
         layout.uploads,
@@ -785,6 +789,7 @@ class ServiceComposition:
     scheduler: SchedulerService
     retention: RetentionService
     archive: ArchiveService
+    agent: AgentConversationService
     state_admin: ServiceStateAdmin
     _lifecycle_lock: threading.Lock = field(
         default_factory=threading.Lock,
@@ -838,6 +843,7 @@ class ServiceComposition:
         try:
             result = self.scheduler.start()
             if result.completed:
+                self.agent.start(result.runtime_epoch)
                 self.archive.start()
                 self.retention.start()
         finally:
@@ -863,7 +869,8 @@ class ServiceComposition:
             self._closing = True
 
         deadline = time.monotonic() + timeout_seconds
-        scheduler_stopped = self.scheduler.shutdown(timeout_seconds)
+        agent_stopped = self.agent.shutdown(max(0.0, deadline - time.monotonic()))
+        scheduler_stopped = self.scheduler.shutdown(max(0.0, deadline - time.monotonic()))
         retention_stopped = self.retention.shutdown(
             max(0.0, deadline - time.monotonic())
         )
@@ -876,6 +883,7 @@ class ServiceComposition:
                 )
             safe_to_release = (
                 scheduler_stopped
+                and agent_stopped
                 and retention_stopped
                 and archive_stopped
                 and not self._start_in_progress
@@ -1206,6 +1214,10 @@ def _assemble(
         diagnose_backend = AgentBackend(
             settings.diagnose_claude_command or settings.claude_command
         )
+        agent_store = AgentStore(repository, clock, ids)
+        agent = AgentConversationService(agent_store, application,
+            ClaudeIntakeEngine(settings.intake_claude_command or settings.route_claude_command
+                or settings.claude_command, workspace_root=layout.workspaces), layout)
         runtime = DiagnosisRuntime(
             state_repository=repository,
             resource_store=resource_store,
@@ -1219,6 +1231,7 @@ def _assemble(
             route_backend=route_backend,
             diagnose_backend=diagnose_backend,
             specialized_reviewer_enabled=settings.specialized_reviewer_enabled,
+            public_progress=agent_store.append_case_progress,
         )
         scheduler = SchedulerService(
             repository,
@@ -1275,6 +1288,7 @@ def _assemble(
             scheduler=scheduler,
             retention=retention,
             archive=archive,
+            agent=agent,
             state_admin=state_admin,
         )
     except Exception as exc:
@@ -1387,6 +1401,7 @@ def _create_app(settings: Settings, *, allow_test_skills: bool) -> Any:
             query_port=composition.application,
             state_admin=composition.state_admin,
             public_base_url=settings.public_base_url,
+            agent_service=composition.agent,
         )
     )
     app.state.problem_locator_composition = composition

@@ -9,6 +9,7 @@ import sqlite3
 import json
 import threading
 import weakref
+from contextlib import contextmanager
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,10 @@ class CaseStateRepository:
         self._requests: dict[str, str] = {}
         self._state_failure: ApplicationError | None = None
         self.on_terminal: Callable[[str], None] = lambda case_id: None
+        # Projection receives only the candidate aggregate and the shared SQL
+        # transaction. It must never acquire a Case lock or re-read repository.
+        self.on_case_projection: Callable[[sqlite3.Connection, StateFile], None] | None = None
+        self.on_case_committed: Callable[[str], None] = lambda case_id: None
         try:
             self._layout.initialize_v2_data_root(self._file_sync)
         except UnsupportedDataFormatError as exc:
@@ -106,6 +111,24 @@ class CaseStateRepository:
     @property
     def layout(self) -> StorageLayout:
         return self._layout
+
+    @contextmanager
+    def database_read(self):
+        """Serialize access to the connection shared with durable adapters."""
+        with self._database_lock:
+            yield self._db
+
+    @contextmanager
+    def database_transaction(self):
+        """One FULL-WAL transaction; callers must not acquire Case locks."""
+        with self._database_lock:
+            self._db.execute('BEGIN IMMEDIATE')
+            try:
+                yield self._db
+                self._db.execute('COMMIT')
+            except BaseException:
+                self._db.execute('ROLLBACK')
+                raise
 
     def _lock_for(self, case_id: str) -> threading.RLock:
         with self._index_lock:
@@ -260,6 +283,8 @@ class CaseStateRepository:
                 if aggregate.case.archive_status in {'READY', 'FAILED'}:
                     self._db.execute('UPDATE archive_tasks SET status=? WHERE case_id=?',
                         (aggregate.case.archive_status, case_id))
+                if self.on_case_projection is not None:
+                    self.on_case_projection(self._db, state)
                 self._db.execute('COMMIT')
             except BaseException:
                 self._db.execute('ROLLBACK')
@@ -300,6 +325,9 @@ class CaseStateRepository:
                 terminal = aggregate.case.status in _TERMINAL
                 if terminal:
                     self._persist(case_id, candidate)
+                elif self.on_case_projection is not None:
+                    with self.database_transaction() as database:
+                        self.on_case_projection(database, candidate)
                 with self._index_lock:
                     if terminal:
                         self._live.pop(case_id, None)
@@ -315,6 +343,7 @@ class CaseStateRepository:
                         for key in candidate.idempotency_records:
                             self._requests.pop(key, None)
                         self.on_terminal(case_id)
+                self.on_case_committed(case_id)
             except (sqlite3.Error, OSError) as exc:
                 with self._index_lock:
                     for key in reserved:

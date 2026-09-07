@@ -24,8 +24,8 @@ DATA_FORMAT_MARKER_BYTES = (
     json.dumps(
         {
             "contract_revision": CONTRACT_REVISION,
-            "format_id": "problem-locator-data-v10",
-            "schema_version": 10,
+            "format_id": "problem-locator-data-v11",
+            "schema_version": 11,
             "state_schema_version": SCHEMA_VERSION,
         },
         ensure_ascii=False,
@@ -59,7 +59,7 @@ def _is_empty_fixed_layout(
         frozenset({"resources", "jobs", "tmp"}) | allowed_root_files,
     ):
         return False
-    if not _directory_has_only(layout.resources, frozenset({"cases"})):
+    if not _directory_has_only(layout.resources, frozenset({"cases", "conversations"})):
         return False
     if not _directory_has_only(
         layout.temporary,
@@ -70,6 +70,7 @@ def _is_empty_fixed_layout(
         _directory_has_only(directory, _EMPTY)
         for directory in (
             layout.cases_resources,
+            layout.conversation_uploads,
             layout.jobs,
             layout.uploads,
             layout.proposals,
@@ -113,6 +114,10 @@ class StorageLayout:
         return self.resources / "cases"
 
     @property
+    def conversation_uploads(self) -> Path:
+        return self.resources / "conversations"
+
+    @property
     def jobs(self) -> Path:
         return self.data_root / "jobs"
 
@@ -152,6 +157,7 @@ class StorageLayout:
             self.data_root,
             self.resources,
             self.cases_resources,
+            self.conversation_uploads,
             self.jobs,
             self.temporary,
             self.uploads,
