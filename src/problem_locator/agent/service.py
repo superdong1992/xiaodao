@@ -6,13 +6,13 @@ from typing import Any
 
 from problem_locator.contracts import (
     ApplicationPortError, ApplicationResponse, CancellationReason, CreateCase,
-    PrepareAttachment, SubmitSupplement, UserFactInput,
+    PrepareAttachment, SubmitSupplement,
 )
 from problem_locator.contracts.models import ProblemSpecInput
 
 from .intake import (
     ClaudeIntakeEngine, IntakeAttachment, IntakeDecision, IntakeInput, IntakeMessage,
-    IntakeRequirement, IntakeValue, validate_intake_decision,
+    IntakeRequirement, IntakeValue, build_initial_problem_spec, validate_intake_decision,
 )
 from .models import AgentStoreError
 from .uploads import ConversationUploads
@@ -198,6 +198,22 @@ class AgentConversationService:
                 break
         self.store.set_message_status(conversation_id, message.message_id, "PROCESSING")
         draft = self.store.get_draft(conversation_id)
+        if case_view is None:
+            if not message.text.strip():
+                self.store.set_message_status(conversation_id, message.message_id, "APPLIED")
+                self.store.update_intake(conversation_id, draft, ["请描述需要定位的问题。"])
+                return True
+            # Creation is deterministic. Retain the full original message and
+            # let the Case produce requirements before extracting any facts.
+            spec = build_initial_problem_spec(message.text)
+            self.store.update_intake(conversation_id, draft, [], "RUNNING")
+            self.store.expect_case(conversation_id, "agent-create-" + conversation_id)
+            self._execute_command(conversation_id, "create", CreateCase(
+                idempotency_key="agent-create-" + conversation_id,
+                raw_problem_text=message.text, problem_spec=spec,
+                initial_user_facts=[], wait_seconds=0,
+            ), message_id=message.message_id)
+            return True
         request = self._intake_input(view, prefix, draft, case_view)
         operation_id = conversation_id + ":intake:" + message.message_id
         prior = self.store.get_dispatch(conversation_id, operation_id)
@@ -231,21 +247,8 @@ class AgentConversationService:
         self.store.set_draft(conversation_id, draft)
         if decision.action == "NEED_CLARIFICATION":
             self.store.set_message_status(conversation_id, message.message_id, "APPLIED")
-            self.store.update_intake(conversation_id, draft, [decision.message])
-            return True
-        if decision.action == "CREATE_CASE":
-            self.store.update_intake(conversation_id, draft, [], "RUNNING")
-            key = "agent-create-" + conversation_id
-            self.store.expect_case(conversation_id, key)
-            # Full original messages remain in the durable conversation. The
-            # legacy Case text is the validated, exact user statement; joining
-            # independently accepted messages could exceed its byte contract.
-            original = decision.problem_spec.statement
-            self._execute_command(conversation_id, "create", CreateCase(
-                idempotency_key=key, raw_problem_text=original, problem_spec=decision.problem_spec,
-                initial_user_facts=[UserFactInput(name=item["name"], value=item["value"]) for item in known.values()],
-                wait_seconds=0,
-            ), message_id=message.message_id)
+            questions = [item.prompt for item in case_view.pending_requirements if item.status.value == "OPEN"]
+            self.store.update_intake(conversation_id, draft, questions)
             return True
         inputs = {item.name: item.value for item in decision.user_facts}
         attachment_ids = self._available_attachments(view, case_view, prefix)

@@ -18,7 +18,6 @@ from problem_locator.contracts import (
     OutcomeDisposition,
     RuntimeExecutionReceipt,
     StateFile,
-    canonical_json_bytes,
 )
 from problem_locator.dispatch import CancellationController, JobWorker, RuntimeEpochContext
 from problem_locator.domain import DomainCoordinator, PureContextSnapshotProjector
@@ -43,6 +42,7 @@ from tests.deterministic.contracts.fakes import (
     RecordingDispatcher,
 )
 from tests.deterministic.contracts.scenario_fakes import assets_for_bindings, bindings_from_job
+from tests.deterministic.unit.storage.test_state_repository import _empty_mutation
 from tests.process_tree_test_support import ChildPidReadyMonotonic
 
 
@@ -167,10 +167,10 @@ def test_host_timeout_kills_the_real_child_tree_without_rerunning_agent(
     state = StateFile.model_validate_json(
         (FIXTURES / "state.json").read_text(encoding="utf-8")
     )
-    route_job = state.cases[CASE_ID].jobs[ROUTE_JOB_ID]
+    aggregate = state.cases[CASE_ID]
+    route_job = aggregate.jobs[ROUTE_JOB_ID]
     with publication_guard.acquire():
         records.publish_job(route_job)
-    layout.state.write_bytes(canonical_json_bytes(state))
     repository = CaseStateRepository(
         data_root,
         coordination_lock,
@@ -178,6 +178,15 @@ def test_host_timeout_kills_the_real_child_tree_without_rerunning_agent(
         ids,
         execution_record_store=records,
     )
+    repository.commit(
+        1,
+        None,
+        _empty_mutation(
+            upsert_case=aggregate.case,
+            insert_jobs=list(aggregate.jobs.values()),
+        ),
+    )
+    assert repository.read_job(ROUTE_JOB_ID) == route_job
     resources = FileResourceStore(
         layout,
         coordination_lock,

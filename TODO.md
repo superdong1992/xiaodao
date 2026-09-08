@@ -11,9 +11,13 @@
 ## P0：8.0 网站 Agent 真实 Release 与内部网站联调
 
 - Agent REST、自然语言追问、持久 SSE、报告下载和网站后端示例已实现。正式 Dev 验证以当前源码快照的 `verdict.json` 为准。
-- `release.full` 已改为一条网站原话 → 追问 → 附件上传 → Reviewer → 报告下载 → 重启检查旅程；中间不再重启丢失活动 Case。真实调用预算包含 3 次 INTAKE，正常/硬上限均为 8 次，不允许 repair。
-- 2026-09-07 已查看官方 `--plan-only`，未运行真实模型。当前 Windows 主机的 Docker Linux daemon 未启动；规划还需显式绑定官方 Claude CLI/settings 及固定版本 Logparse/MCP 源码。依赖齐备后重新查看身份、预算和 blocker，再从全新 V11 数据根执行 fresh Release。
+- `release.full` 已改为一条网站原话 → 建案与权威追问 → 附件上传 → Reviewer → 报告下载 → 重启检查旅程；中间不再重启丢失活动 Case。首条非空原话直接建案，补充字段和提交附件各调用一次 INTAKE，正常/硬上限均为 7 次真实模型调用，不允许 repair。
+- 2026-09-07 的官方 `--plan-only` 因当时 Docker Linux daemon 未启动、外部依赖未对齐而未进入真实模型。fresh Release 仍须从全新 V11 数据根执行，不能用 Dev 检查代替。
+- 2026-09-08 本地 Docker 已恢复，Windows Client、Linux 镜像、Claude 2.1.89 和 DeepSeek Flash 测试配置已对齐。`dev.real` 的完整 Web CrossJob 前几轮被过期的安装版本/Skill 哈希断言、旧 `state.json` 夹具初始化，以及并行修改中的网站测试拦住；这些轮次均未进入真实网站与模型生成。已修正平台夹具并等待网页先建案改动完成，后续按合并后的源码重新规划并执行完整旅程，结果以对应 verdict 为准。服务端 INTAKE 对 Markdown 围栏的拒绝已在本地复现，仍需结合真实 Web 输出与内网实际模型核对。
+- 合并后的完整旅程计划已通过环境准入，但实际执行被自动审批拒绝：需用户明确批准向 `api.deepseek.com` 发送本地测试提示词、Skill 和诊断材料，最多 7 次调用、费用硬上限 22 美元。批准前只运行零真实模型的正式 Dev 检查；Linux 平台修正和完整真实 Web 旅程仍待复验，不以计划或确定性通过代替。
+- **本轮验证元数据**：Dev `run-20260908T081857Z-5a9f18d6` 为 `FAIL`；默认基线下 affected 597 passed / 24 skipped，但 66.806 秒超过 60 秒门槛，full 未运行。源码快照 `git-visible-worktree-v1:5921b281a8e2cadb6005c99787a88fdaa301c425195767f9031ce9534f502e41`，源码核验 `PASS`、真实模型调用为 0；继续前需解决该耗时阻塞并取得上述外部模型授权。此行是验证后的状态回填，不属于所引用快照。
 - 网站开发者需把示例中的登录与归属回调接入内部网站后端，并部署来源访问限制。未经这些接入和真实 Release，不宣称已在内部网站生产可用。
+- **推送前 Dev 复验元数据（2026-09-08）**：`run-20260908T082640Z-197109e5` 为 `PASS_WITH_WARNINGS`，基线为网站引入提交 `8b53bc5`，受影响范围按既定规则移交全量；完整确定性阶段、功能、运行及源码核验均通过，性能基线尚未校准。源码快照 `git-visible-worktree-v1:5167e26963def74008b0e1c760d7e7e6c8c73377393a83d04780ef098aacaf28`，零真实模型调用。此前默认快速阶段超时记录保留，外部模型授权、完整真实 Web 旅程和 Linux 平台复验仍待完成。本行是验证后的元数据回填，不属于所引用快照。
 
 ## P0：Methods V1 Reviewer 最长链路 Release
 

@@ -5,20 +5,27 @@ import test from "node:test";
 import { runWebsiteStep, parseSseFrame, validateWebsiteEvidence, websiteUserDescription } from "../lib/website-agent.mjs";
 
 const conversationId = "conversation-1", caseId = "case-1";
-const driver = { problem: { statement: "订单超时", expected_behavior: "正常响应", actual_behavior: "等待超时", scope: "一个订单" }, initial_user_fact_names: ["order_id"], initial_user_fact_values: ["ORDER-123"] };
+const driver = { problem: { raw_problem_text: "订单超时，请定位。", statement: "订单超时", expected_behavior: "正常响应", actual_behavior: "等待超时", scope: "一个订单" }, initial_user_fact_names: ["order_id"], initial_user_fact_values: ["ORDER-123"] };
+const requirements = [{ status: "OPEN", kind: "INPUT", name: "order_id", prompt: "请提供订单 ID。" }];
+const initialCase = { case_id: caseId, status: "WAITING_INPUT", raw_problem_text: driver.problem.raw_problem_text,
+  problem_spec: { statement: driver.problem.raw_problem_text, actual_behavior: driver.problem.raw_problem_text,
+    expected_behavior: "用户未单独说明；以 raw_problem_text 为准。", scope: "仅定位 raw_problem_text 所述问题。",
+    goals: ["定位问题原因并给出结论。"], non_goals: [], constraints: [], completion_criteria: ["给出基于证据的结论；证据不足时明确说明。"] },
+  user_facts: [], pending_requirements: requirements };
 const event = (sequence, type, data = {}, withCase = false) => ({ schema_version: 1, sequence, conversation_id: conversationId, case_id: withCase ? caseId : null, job_id: null, type, created_at: "2026-09-07T00:00:00Z", data });
 const frame = (value) => `data: ${JSON.stringify(value)}\n\n`;
 const json = (data) => Response.json({ ok: true, data, error: null }, { headers: { "x-problem-locator-correlation-id": "test-correlation" } });
 const sse = (events) => new Response(": connected\n\n: heartbeat\n\n" + events.map(frame).join(""), { headers: { "Content-Type": "text/event-stream" } });
 
-async function route() {
+async function route({ beforeCaseQuestion = false, caseOverride = {} } = {}) {
   const calls = []; let streams = 0;
   const fetcher = async (url, options) => {
     calls.push({ path: new URL(url).pathname, ...options });
     if (url.endsWith("/events")) {
-      assert.equal(options.headers["Last-Event-ID"], streams === 0 ? "0" : "2");
-      return streams++ === 0 ? sse([event(1, "message.accepted"), event(2, "assistant.question", { message: "请补充问题描述、预期和实际表现。" })])
-        : sse([event(3, "message.accepted"), event(4, "agent.progress", { message: "正在整理问题" }), event(5, "case.updated", { status: "WAITING_ATTACHMENT", case_revision: 2 }, true)]);
+      assert.equal(options.headers["Last-Event-ID"], streams === 0 ? "0" : "3");
+      return streams++ === 0 ? sse([event(1, "message.accepted"), event(2, "case.updated", { status: "WAITING_INPUT", case_revision: 2 }, true),
+        event(3, "assistant.question", { questions: [requirements[0].prompt] }, !beforeCaseQuestion)])
+        : sse([event(4, "message.accepted", {}, true), event(5, "agent.progress", { message: "正在整理补充信息" }, true), event(6, "case.updated", { status: "WAITING_ATTACHMENT", case_revision: 3 }, true)]);
     }
     if (url.endsWith("/conversations")) return json({ conversation_id: conversationId, request_id: "route", schema_version: 1 });
     if (url.endsWith("/messages")) {
@@ -27,26 +34,38 @@ async function route() {
       assert.equal(Object.hasOwn(body, "problem_spec"), false);
       return json({ conversation_id: conversationId, message_id: "msg", request_id: body.request_id, event_id: streams, status: "ACCEPTED" });
     }
-    return json({ conversation_id: conversationId, case_id: caseId, case_status: "WAITING_ATTACHMENT", status: "WAITING_INPUT" });
+    if (url.includes("/cases/")) return json({ case_view: { ...initialCase, ...caseOverride } });
+    return json({ conversation_id: conversationId, case_id: caseId, case_status: streams === 1 ? "WAITING_INPUT" : "WAITING_ATTACHMENT", status: "WAITING_INPUT", current_questions: [requirements[0].prompt] });
   };
   const evidence = await runWebsiteStep({ phase: "route", public_base_url: "http://localhost", request_id: "route", driver }, fetcher);
   return { evidence, calls };
 }
 
-test("website route sends raw text, receives a real clarification, reconnects SSE and binds one Case", async () => {
+test("website route creates from sparse raw text before OPEN requirements, reconnects SSE and supplements the same Case", async () => {
   const { evidence, calls } = await route();
   assert.equal(validateWebsiteEvidence(evidence, { phase: "route", conversation_id: conversationId }), true);
   assert.equal(calls.filter((item) => item.path.endsWith("/messages")).length, 2);
+  assert.equal(JSON.parse(calls.find((item) => item.path.endsWith("/messages")).body).text, driver.problem.raw_problem_text);
   assert.match(calls.findLast((item) => item.path.endsWith("/messages")).body, /补充信息（order_id）：ORDER-123/);
-  assert.deepEqual(evidence.events.map((item) => item.sequence), [1, 2, 3, 4, 5]);
-  assert.deepEqual(evidence.records.filter((item) => "raw_sse" in item).map((item) => item.last_event_id), [0, 2]);
+  assert.deepEqual(evidence.initial_case_response.case_view.user_facts, []);
+  assert.deepEqual(evidence.events.map((item) => item.sequence), [1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(evidence.records.filter((item) => "raw_sse" in item).map((item) => item.last_event_id), [0, 3]);
 });
 
-test("website input does not invent domain facts or send server structured goals", () => {
-  const text = websiteUserDescription(driver);
-  for (const value of Object.values(driver.problem)) assert.ok(text.includes(value));
-  assert.ok(text.includes("ORDER-123"));
+test("website supplement contains only requested OPEN INPUT values", () => {
+  const text = websiteUserDescription(driver, [...requirements, { status: "FULFILLED", kind: "INPUT", name: "old" }, { status: "OPEN", kind: "ATTACHMENT", name: "logs" }]);
+  assert.equal(text, "补充信息（order_id）：ORDER-123");
+  for (const value of Object.values(driver.problem)) assert.ok(!text.includes(value));
   assert.doesNotMatch(text, /problem_spec|completion_criteria|safety_constraints/);
+  assert.throws(() => websiteUserDescription(driver, []), /INPUT_REQUIREMENTS_MISSING/);
+  assert.throws(() => websiteUserDescription(driver, [{ status: "OPEN", kind: "INPUT", name: "unknown" }]), /REQUIRED_INPUT_UNAVAILABLE/);
+});
+
+test("website route rejects creation-time intake questions, inferred facts and non-neutral defaults", async () => {
+  await assert.rejects(route({ beforeCaseQuestion: true }), /QUESTION_BEFORE_CASE/);
+  await assert.rejects(route({ caseOverride: { user_facts: [{ name: "order_id", value: "ORDER-123" }] } }), /CASE_FIRST_DEFAULTS/);
+  await assert.rejects(route({ caseOverride: { problem_spec: { ...initialCase.problem_spec, expected_behavior: "正常响应" } } }), /CASE_FIRST_DEFAULTS/);
+  await assert.rejects(route({ caseOverride: { pending_requirements: [{ ...requirements[0], prompt: "请补充预期行为。" }] } }), /REQUIREMENT_PROMPTS_CHANGED/);
 });
 
 test("SSE parser accepts one data-only business line and ignores connection comments", () => {

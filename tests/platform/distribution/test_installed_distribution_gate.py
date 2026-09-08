@@ -29,10 +29,10 @@ RPC_REGISTRATION_SHA256 = (
     "a1f8f59d5c3904ed545c5ae54b4d9a3b5e80e80bdd74e4cc51dff2b7adb8bcde"
 )
 RPC_PACKAGE_TREE_SHA256 = (
-    "eb89a0b95f5bee5b75515099906ff8147ea178c6c28ea896f43e991aa0eb8fa0"
+    "5cdcdcc0e8fef4262ba85183000751471a86f535332209f7168b373f91b6332a"
 )
 RPC_COMBINED_SHA256 = (
-    "3d495cd1f56172be0b005502a87663c38d6f29d696ad2c953995cef0ab1f41d6"
+    "810fec1e5cf1877b1396adb4439ce4b5b1411296cba524a448adf06229b7e6aa"
 )
 RPC_REGISTRATION = (
     ROOT
@@ -61,7 +61,7 @@ EXPECTED_RUNTIME_VERSIONS = {
     "fastapi": "0.139.2",
     "httpx": "0.28.1",
     "mcp": "1.29.0",
-    "problem-locator": "7.0.0",
+    "problem-locator": "8.0.0",
     "pydantic": "2.13.4",
     "python-dotenv": "1.2.2",
     "starlette": "1.3.1",
@@ -755,5 +755,5 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
     state_export = StateExport.model_validate_json(export_bytes)
     assert export_bytes == canonical_json_bytes(state_export)
     assert state_export.object_counts.cases == 0
-    assert state_export.object_counts.runtime_epochs == 1
-    assert state_export.object_counts.recovery_processing_records == 1
+    assert state_export.object_counts.runtime_epochs == 0
+    assert state_export.object_counts.recovery_processing_records == 0

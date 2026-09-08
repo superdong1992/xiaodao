@@ -44,6 +44,8 @@ node examples/website-agent/server.ts
 
 这里的 `/api/agent` 是**网站同源路径**；xiaodao 上游使用 `/api/v1/agent`。服务端 `PUBLIC_BASE_URL` 与本例 `XIAODAO_BASE_URL` 的协议、地址、路径前缀须一致，示例会严格核对下载描述符地址；上传地址会改写为网站同源路径。
 
+收到非空问题原话后，服务端按 MCP 客户端的固定中性模板创建 Case，初始事实为空。网站不应先要求用户填写预期行为、范围或日志；创建前不调用 INTAKE。建案后只按原文展示 OPEN requirements 的追问，并用消息接口提交回答。没有 OPEN requirements 时不额外追问。
+
 - 创建、发送消息、查询、订阅、预约和上传：使用 `/api/agent/...` 对应路径，详见 [API 参考](../../docs/website-agent-api.md)。
 - `GET /api/agent/conversations/{id}/report`：收到 `result.available` 后调用，返回校验后的 JSON 或 Generic Markdown 和展示结构。
 - `GET /api/agent/conversations/{id}/artifacts`：查询授权后的产物，下载地址已改为网站同源路径。

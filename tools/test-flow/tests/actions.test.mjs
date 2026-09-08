@@ -841,13 +841,13 @@ test("INTAKE-only Python gate does not reject unrelated framework platform skips
   assert.ok(framework.exclude.includes("tools/test-flow/tests/intake-usage.test.mjs"));
   assert.deepEqual(intake.test_files, ["tools/test-flow/tests/intake-usage.test.mjs"]);
   assert.equal(intake.python_driver, true);
-  assert.equal(intake.min_passed, 9);
+  assert.equal(intake.min_passed, 12);
   // Exact summary from the official failure: all Python audits passed, but
   // independent Windows/Darwin/POSIX applicability checks legitimately skipped.
   assert.deepEqual(evaluateNodeTestSummary({ tests: 416, passed: 386, failed: 0, skipped: 30 }, framework), { status: "PASS", failure_domain: null, code: null });
-  assert.deepEqual(evaluateNodeTestSummary({ tests: 9, passed: 9, failed: 0, skipped: 0 }, intake), { status: "PASS", failure_domain: null, code: null });
-  assert.equal(evaluateNodeTestSummary({ tests: 9, passed: 8, failed: 0, skipped: 1 }, intake).status, "FAIL");
-  assert.equal(evaluateNodeTestSummary({ tests: 10, passed: 9, failed: 0, skipped: 1 }, intake).code, "NODE_TEST_PYTHON_DRIVER_SKIPPED");
+  assert.deepEqual(evaluateNodeTestSummary({ tests: 12, passed: 12, failed: 0, skipped: 0 }, intake), { status: "PASS", failure_domain: null, code: null });
+  assert.equal(evaluateNodeTestSummary({ tests: 11, passed: 10, failed: 0, skipped: 1 }, intake).status, "FAIL");
+  assert.equal(evaluateNodeTestSummary({ tests: 13, passed: 12, failed: 0, skipped: 1 }, intake).code, "NODE_TEST_PYTHON_DRIVER_SKIPPED");
 });
 
 test("the INTAKE gate fails closed before launching Node when its Python runtime is missing", async () => {

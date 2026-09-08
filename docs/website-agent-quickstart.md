@@ -1,6 +1,6 @@
 # 网站 Agent 接入：部署后的第一轮联调
 
-面向网站前后端开发和 Linux 测试环境运维，适用于 xiaodao `8.0.0` / V11。目标是跑通一次“用户原话 → 追问 → 日志 → 实时进度 → 具体定位报告”。本文不代表你的测试服务已通过验收。
+面向网站前后端开发和 Linux 测试环境运维，适用于 xiaodao `8.0.0` / V11。目标是跑通一次“用户原话 → 创建任务 → 按要求补充 → 日志 → 实时进度 → 具体定位报告”。本文不代表你的测试服务已通过验收。
 
 网站保留原有问答，新建一个 Agent 入口。调用关系是：**浏览器 → 网站后端 → xiaodao**。网站不用安装 MCP 客户端，也不用把用户原话加工成 `problem_spec`。
 
@@ -13,7 +13,7 @@
 | 接口合同 | 在线 `GET /openapi.json`；可视化入口 `GET /docs`；仓库 [OpenAPI 快照](../schemas/v2/web-api.openapi.snapshot.json) |
 | 完整说明 | [Agent API 参考](website-agent-api.md)：请求响应、附件、SSE、字段、错误与报告校验 |
 | 网站后端示例 | [TypeScript 示例和启动说明](../examples/website-agent/README.md)：登录/归属回调、上传、SSE、报告下载 |
-| 联调样本 | 经批准可用于测试的真实问题、正常预期、发生时间和配套压缩日志；不要用虚构事实补齐追问 |
+| 联调样本 | 经批准可用于测试的真实问题和配套压缩日志；时间、环境等信息按任务要求补充，预期行为不作为建案前置条件，不要用虚构事实补齐追问 |
 | 网络和运行约束 | 允许访问的后端来源、反向代理配置、上传限制、模型调用预算、测试负责人 |
 
 在线合同以**实际部署的服务**为准。如果在线版本、路由与本仓库不同，先对齐部署，不要让网站适配旧版本。示例的 `XIAODAO_BASE_URL` 与服务端 `PUBLIC_BASE_URL` 应保持相同的地址和路径前缀，否则下载地址校验会拒绝请求。
@@ -66,8 +66,8 @@ Content-Type: application/json
 | --- | --- | --- |
 | 创建会话 | `POST /api/v1/agent/conversations`，保存用户归属 | 拿到 `conversation_id` |
 | 订阅进度 | `GET /api/v1/agent/conversations/{conversation_id}/events` | `text/event-stream`；每条业务消息为一行 `data: <JSON>` 加空行，`onmessage` 可直接接收；空闲每 15 秒有注释心跳 |
-| 发送原话 | `POST /api/v1/agent/conversations/{conversation_id}/messages` | 立即收到 `ACCEPTED` 回执；后续显示“正在整理问题” |
-| 回答追问 | 按原文展示 `assistant.question`，仍调用同一消息接口回答 | 用户事实不足就继续追问，不要求网站生成诊断字段 |
+| 发送原话 | `POST /api/v1/agent/conversations/{conversation_id}/messages` | 立即收到 `ACCEPTED` 回执；非空问题文本按 MCP 固定中性模板创建 Case，初始事实为空，创建前不调用 INTAKE、不追问预期行为 |
+| 回答追问 | Case 创建后按原文展示 OPEN requirements 的 `assistant.question`，仍调用同一消息接口回答 | 仅补充任务当前要求；没有 OPEN requirements 就不追问，不要求网站生成诊断字段 |
 | 补充日志 | 预约附件 → 按描述符 PUT 原始字节 → 发消息引用 `attachment_ids` | 上传为 `READY`；消息是否被采用另看 `APPLIED` / `notice` |
 | 显示进度 | 展示 `agent.progress`，同步 `case.updated` | 能看到实际执行阶段；审核前没有根因或 Candidate 报告 |
 | 展示报告 | 收到 `result.available` 后查 Case 和产物列表，下载并校验 JSON；采用示例时调用网站 `/report` | 页面展示具体结论、依据、完成条件、限制和建议，不只是“定位完成” |
@@ -99,7 +99,7 @@ Content-Type: application/json
 ## 6. 联调验收清单
 
 - [ ] 从网站后端机器确认服务版本、就绪状态、Agent 创建和查询都正常。
-- [ ] 真实问题能完成追问、补充、日志上传和定位；最终显示具体报告。
+- [ ] 仅有非空问题原话也能先创建 Case，未提供预期行为或范围不会阻塞；随后按 OPEN requirements 原文完成补充、日志上传和定位，最终显示具体报告。
 - [ ] 日志上传同时核对类型、字节数和 SHA-256；同一预约、消息重试不重复创建。
 - [ ] SSE 每条业务消息只有一行 `data:` 加空行，`onmessage` 能实时收到；断线重放、手动游标续传、刷新和重复事件不丢报告、不重复消息。
 - [ ] JSON 不等待 ZIP；ZIP 仅在确认后下载，下载前完成大小和 SHA-256 校验。

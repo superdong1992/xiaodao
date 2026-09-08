@@ -10,7 +10,7 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
-from problem_locator.agent.intake import IntakeDecision, IntakeValue
+from problem_locator.agent.intake import INTAKE_RESOURCE_LIMITS, IntakeDecision, IntakeValue, build_intake_prompt
 from problem_locator.agent.service import AgentConversationService
 from problem_locator.agent.store import AgentStore
 from problem_locator.contracts import CreateCase, ReviewPolicy, canonical_json_bytes
@@ -28,23 +28,19 @@ class ScriptedIntake:
 
     def intake(self, request):
         self.calls.append(request)
+        assert request.frozen_problem_spec is not None, "新问题必须先创建 Case，不能先调用 INTAKE。"
         last = next(item for item in reversed(request.messages) if item.role == "USER")
 
         def value(name, text):
             return IntakeValue(name=name, value=text, source_message_id=last.message_id, source_quote=text)
 
-        if request.frozen_problem_spec is not None:
+        facts = [value(item.name, PARAMETER_GROUP_A[item.name]) for item in request.requirements
+            if item.kind == "INPUT" and PARAMETER_GROUP_A[item.name] in last.text]
+        if facts:
             return IntakeDecision(action="SUBMIT_SUPPLEMENT", message="已收到补充信息。", problem_fields=[],
-                user_facts=[value(item.name, PARAMETER_GROUP_A[item.name]) for item in request.requirements
-                    if item.kind == "INPUT"])
-        if "RPC completes" not in last.text:
-            return IntakeDecision(action="NEED_CLARIFICATION", message="请补充预期表现、实际表现和定位范围。",
-                problem_fields=[value("statement", "RPC timeout")], user_facts=[])
-        return IntakeDecision(action="CREATE_CASE", message="问题信息已完整，开始定位。",
-            problem_fields=[value(name, text) for name, text in {
-                "statement": "RPC timeout", "expected_behavior": "RPC completes",
-                "actual_behavior": "RPC timeout", "scope": "payment-to-inventory RPC",
-            }.items()], user_facts=[value("order_id", "synthetic-order-0001")])
+                user_facts=facts)
+        return IntakeDecision(action="NEED_CLARIFICATION", message="请补充预期表现、实际表现和定位范围。",
+            problem_fields=[], user_facts=[])
 
 
 @pytest.fixture
@@ -77,10 +73,7 @@ def _post(client, path, data):
     return response.json()["data"]
 
 
-def _converse_to_waiting(website):
-    stack, store, engine, service, client = website
-    conversation = _post(client, "/api/v1/agent/conversations", {"request_id": "create:1"})["conversation_id"]
-    prefix = f"/api/v1/agent/conversations/{conversation}"
+def _preupload(client, prefix):
     data = ARCHIVE.read_bytes()
     prepared = _post(client, prefix + "/attachments", {"request_id": "logs:1", "name": "logs.zip",
         "content_type": "application/zip", "declared_size": len(data), "declared_sha256": hashlib.sha256(data).hexdigest()})
@@ -88,22 +81,141 @@ def _converse_to_waiting(website):
     uploaded = client.put(upload["url"], content=data,
         headers={key: value for key, value in upload["required_headers"].items() if value is not None})
     assert uploaded.status_code == 200, uploaded.text
-    attachment_id = prepared["attachment"]["attachment_id"]
+    return prepared["attachment"]["attachment_id"]
+
+
+def _converse_to_waiting(website):
+    stack, store, engine, service, client = website
+    conversation = _post(client, "/api/v1/agent/conversations", {"request_id": "create:1"})["conversation_id"]
+    prefix = f"/api/v1/agent/conversations/{conversation}"
+    attachment_id = _preupload(client, prefix)
     first = {"request_id": "message:1", "text": "RPC timeout", "attachment_ids": [attachment_id]}
     accepted = _post(client, prefix + "/messages", first)
     assert _post(client, prefix + "/messages", first) == accepted
-    assert service.run_once(conversation)
-    assert service.get_conversation(conversation).current_questions
-    assert service.get_conversation(conversation).case_id is None
-    _post(client, prefix + "/messages", {"request_id": "message:2", "text":
-        "故障：RPC timeout\n预期：RPC completes\n实际：RPC timeout\n范围：payment-to-inventory RPC\n订单：synthetic-order-0001"})
     assert service.run_once(conversation)
     assert stack.scheduler.wait_until_idle(15)
     view = service.get_conversation(conversation)
     assert view.case_id
     assert view.case_status == "WAITING_INPUT", view
-    assert len(engine.calls) == 2
+    assert engine.calls == []
     return conversation, prefix, attachment_id
+
+
+@pytest.mark.parametrize("original", [
+    "RPC timeout",
+    "  RPC timeout\n预期：RPC completes\n订单：synthetic-order-0001\n  ",
+])
+def test_first_problem_creates_case_with_exact_original_and_mcp_defaults_without_intake(website, monkeypatch, original):
+    stack, store, engine, service, client = website
+    commands = []
+    execute = stack.application.execute
+
+    def recorded(command):
+        if isinstance(command, CreateCase):
+            commands.append(command)
+        return execute(command)
+
+    monkeypatch.setattr(type(stack.application), "execute", lambda self, command: recorded(command))
+    conversation = service.create_conversation("case-first").conversation_id
+    prefix = f"/api/v1/agent/conversations/{conversation}"
+    message = {"request_id": "first", "text": original}
+    receipt = _post(client, prefix + "/messages", message)
+    assert _post(client, prefix + "/messages", message) == receipt
+    assert service.run_once(conversation)
+    assert stack.scheduler.wait_until_idle(15)
+    assert not service.run_once(conversation)
+    assert _post(client, prefix + "/messages", message) == receipt
+    assert len(commands) == 1
+    command = commands[0]
+    assert command.raw_problem_text == original
+    assert command.problem_spec.model_dump() == {
+        "statement": original,
+        "expected_behavior": "用户未单独说明；以 raw_problem_text 为准。",
+        "actual_behavior": original,
+        "scope": "仅定位 raw_problem_text 所述问题。",
+        "goals": ["定位问题原因并给出结论。"],
+        "non_goals": [],
+        "constraints": [],
+        "completion_criteria": ["给出基于证据的结论；证据不足时明确说明。"],
+    }
+    assert command.initial_user_facts == [] and command.wait_seconds == 0
+    view = service.get_conversation(conversation)
+    case = stack.application.get_case(view.case_id).case_view
+    assert view.messages[0].status == "APPLIED"
+    assert case.raw_problem_text == original and case.user_facts == []
+    assert engine.calls == []
+    events = store.list_events(conversation, limit=500)
+    created = next(item for item in events if item.type == "case.updated")
+    assert not any(item.type == "assistant.question" for item in events if item.sequence < created.sequence)
+    expected_questions = [item.prompt for item in case.pending_requirements if item.status.value == "OPEN"]
+    assert view.current_questions == expected_questions
+    assert all(item.data["questions"] == expected_questions for item in events if item.type == "assistant.question")
+
+
+def test_attachment_only_message_waits_only_for_description_and_is_imported_after_case_exists(website):
+    stack, store, engine, service, client = website
+    conversation = service.create_conversation("attachment-first").conversation_id
+    prefix = f"/api/v1/agent/conversations/{conversation}"
+    attachment_id = _preupload(client, prefix)
+    message = {"request_id": "logs-only", "text": None, "attachment_ids": [attachment_id]}
+    receipt = _post(client, prefix + "/messages", message)
+    assert service.run_once(conversation)
+    view = service.get_conversation(conversation)
+    assert view.case_id is None and view.messages[0].status == "APPLIED"
+    assert view.current_questions == ["请描述需要定位的问题。"]
+    assert engine.calls == []
+    assert store.get_attachment(attachment_id).status == "READY"
+    assert not service.run_once(conversation)
+    assert _post(client, prefix + "/messages", message) == receipt
+    service.send_message(conversation, "description", "RPC timeout")
+    assert service.run_once(conversation)
+    assert stack.scheduler.wait_until_idle(15)
+    view = service.get_conversation(conversation)
+    assert view.case_id and engine.calls == []
+    assert stack.application.get_case(view.case_id).case_view.raw_problem_text == "RPC timeout"
+    assert service.run_once(conversation)
+    assert store.get_attachment(attachment_id).status == "IMPORTED"
+    assert len(stack.repository.read_case(view.case_id).attachments) == 1
+    assert not service.run_once(conversation)
+
+
+def test_followup_clarification_only_repeats_open_requirement_prompts(website):
+    stack, store, engine, service, _ = website
+    conversation, _, _ = _converse_to_waiting(website)
+    before = service.get_conversation(conversation)
+    case = stack.application.get_case(before.case_id).case_view
+    expected = [item.prompt for item in case.pending_requirements if item.status.value == "OPEN"]
+    service.send_message(conversation, "unclear", "暂时没有更多信息。")
+    assert service.run_once(conversation)
+    view = service.get_conversation(conversation)
+    assert view.case_id == before.case_id and view.current_questions == expected
+    assert view.messages[-1].status == "APPLIED"
+    assert len(engine.calls) == 1
+    assert stack.application.get_case(view.case_id).case_view.case_revision == case.case_revision
+    questions = [item for item in store.list_events(conversation, limit=500) if item.type == "assistant.question"]
+    assert questions and all(item.data["questions"] == expected for item in questions)
+
+
+def test_followup_correction_keeps_frozen_problem_and_requires_new_case(website, monkeypatch):
+    stack, _, engine, service, _ = website
+    conversation, _, _ = _converse_to_waiting(website)
+    before = service.get_conversation(conversation)
+    case = stack.application.get_case(before.case_id).case_view
+
+    def correction(request):
+        last = next(item for item in reversed(request.messages) if item.role == "USER")
+        return IntakeDecision(action="NEED_CLARIFICATION", message="收到更正。", user_facts=[],
+            problem_fields=[IntakeValue(name="statement", value=last.text,
+                source_message_id=last.message_id, source_quote=last.text)])
+
+    monkeypatch.setattr(engine, "intake", correction)
+    service.send_message(conversation, "correction", "实际问题是数据库连接失败。")
+    assert service.run_once(conversation)
+    view = service.get_conversation(conversation)
+    assert view.case_id == before.case_id and view.messages[-1].status == "UNUSED"
+    assert "新建定位任务" in view.messages[-1].notice
+    after = stack.application.get_case(view.case_id).case_view
+    assert after.problem_spec == case.problem_spec and after.case_revision == case.case_revision
 
 
 @pytest.mark.parametrize("review", [False, True])
@@ -111,7 +223,7 @@ def test_raw_conversation_preupload_sse_and_final_report(website, review):
     stack, store, engine, service, client = website
     stack.catalog._specialized_review_policy = ReviewPolicy.INDEPENDENT if review else ReviewPolicy.NONE
     conversation, prefix, attachment_id = _converse_to_waiting(website)
-    message = {"request_id": "message:3",
+    message = {"request_id": "message:2",
         "text": "\n".join(f"{name}={value}" for name, value in PARAMETER_GROUP_A.items())}
     accepted = _post(client, prefix + "/messages", message)
     assert service.run_once(conversation)
@@ -132,7 +244,7 @@ def test_raw_conversation_preupload_sse_and_final_report(website, review):
         assert not any(event.type == "result.available" for event in events if event.sequence <= reviewing.sequence)
     assert store.get_attachment(attachment_id).status == "IMPORTED"
     assert len(stack.repository.read_case(view.case_id).attachments) == 1
-    assert len(engine.calls) == 3
+    assert len(engine.calls) == 1
     assert _post(client, prefix + "/messages", message) == accepted
     assert client.post(prefix + "/messages", json={"request_id": "later", "text": "新问题"}).status_code == 409
     artifacts = client.get(f"/api/v1/cases/{view.case_id}/artifacts").json()["data"]["artifacts"]
@@ -152,7 +264,7 @@ def test_raw_conversation_preupload_sse_and_final_report(website, review):
     assert any(item["type"] == "archive.updated" and item["data"]["status"] == "READY" for item in streamed)
     assert streamed[-1]["type"] == "conversation.completed"
     assert all(item["sequence"] > result.sequence and item["type"] != "result.available" for item in streamed)
-    assert len(engine.calls) == 3
+    assert len(engine.calls) == 1
 
 
 def test_restart_retains_history_and_requires_explicit_new_task(website):
@@ -227,21 +339,26 @@ def test_invalid_upload_can_retry_without_adopting_different_bytes(website):
     assert "storage_path" not in json.dumps(service.get_conversation(conversation).model_dump())
 
 
-def test_long_multi_round_history_does_not_overflow_legacy_case_text(website):
+def test_long_multi_round_history_keeps_complete_first_message_as_case_text(website):
     stack, _, engine, service, client = website
     conversation = service.create_conversation("long-history").conversation_id
-    first = "RPC timeout\n" + "x" * 40000
-    second = "RPC timeout RPC completes payment-to-inventory RPC synthetic-order-0001\n" + "y" * 40000
+    first = "RPC timeout\n" + "x" * 33000
+    second = "补充说明\n" + "y" * 33000
     service.send_message(conversation, "first", first)
     assert service.run_once(conversation)
+    assert stack.scheduler.wait_until_idle(15)
+    assert engine.calls == []
     service.send_message(conversation, "second", second)
     assert service.run_once(conversation)
-    assert stack.scheduler.wait_until_idle(15)
     view = service.get_conversation(conversation)
     assert view.case_status == "WAITING_INPUT", view
     assert [item.text for item in view.messages] == [first, second]
-    assert len(engine.calls) == 2
-    assert stack.application.get_case(view.case_id).case_view.raw_problem_text == "RPC timeout"
+    assert len((first + second).encode("utf-8")) > 65_536
+    assert len(engine.calls) == 1
+    assert len(build_intake_prompt(engine.calls[0]).encode("utf-8")) <= INTAKE_RESOURCE_LIMITS.context_bytes
+    case = stack.application.get_case(view.case_id).case_view
+    assert case.raw_problem_text == first
+    assert case.problem_spec.statement == case.problem_spec.actual_behavior == first
 
 
 def test_rejected_case_command_never_claims_the_message_was_adopted(website, monkeypatch):
@@ -267,7 +384,7 @@ def test_rejected_case_command_never_claims_the_message_was_adopted(website, mon
 
 def test_concurrent_message_is_persisted_and_waits_for_serial_intake(website, monkeypatch):
     _, _, engine, service, _ = website
-    conversation = service.create_conversation("concurrent").conversation_id
+    conversation, _, _ = _converse_to_waiting(website)
     entered, released = threading.Event(), threading.Event()
     intake = engine.intake
 
@@ -277,15 +394,15 @@ def test_concurrent_message_is_persisted_and_waits_for_serial_intake(website, mo
         return intake(request)
 
     monkeypatch.setattr(engine, "intake", blocked)
-    service.send_message(conversation, "one", "RPC timeout")
+    service.send_message(conversation, "one", "暂时没有更多信息。")
     worker = threading.Thread(target=lambda: service.run_once(conversation))
     worker.start()
     try:
         assert entered.wait(5)
-        receipt = service.send_message(conversation, "two", "RPC timeout RPC completes payment-to-inventory RPC synthetic-order-0001")
+        receipt = service.send_message(conversation, "two", "\n".join(f"{name}={value}" for name, value in PARAMETER_GROUP_A.items()))
         assert receipt.status == "ACCEPTED"
         assert not service.run_once(conversation)
-        assert [item.status for item in service.get_conversation(conversation).messages] == ["PROCESSING", "QUEUED"]
+        assert [item.status for item in service.get_conversation(conversation).messages] == ["APPLIED", "PROCESSING", "QUEUED"]
     finally:
         released.set()
         worker.join(10)

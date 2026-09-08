@@ -38,7 +38,9 @@ def main():
         if inits[0].get("tools") != []:
             raise ValueError("INTAKE_TOOLS_NOT_DISABLED")
         response = json.loads(terminals[0]["result"])
-        if response.get("action") not in {"NEED_CLARIFICATION", "CREATE_CASE", "SUBMIT_SUPPLEMENT"}:
+        if type(response.get("schema_version")) is not int or response["schema_version"] != 1:
+            raise ValueError("INTAKE_SCHEMA_VERSION_INVALID")
+        if response.get("action") not in {"NEED_CLARIFICATION", "SUBMIT_SUPPLEMENT", "NEW_CASE_REQUIRED"}:
             raise ValueError("INTAKE_ACTION_INVALID")
         receipt = helper._model_invocation(job_id=root.name, job_type="INTAKE", init=inits[0],
             final=terminals[0], ordinal=1, count=1, arguments=args)

@@ -2164,7 +2164,7 @@ export function validateRestart(audit, state, releaseCase) {
   return { case_view: view, artifacts, artifact_projection_source: projection.source };
 }
 
-async function downloadArtifacts(configuration, state, stageRoot) {
+async function downloadArtifacts(configuration, state, stageRoot, completionCriteria) {
   for (const [label, artifact] of [["diagnosis-result", state.public_artifact], ["result-archive", state.public_result_archive]]) {
     const startedAtUtc = new Date().toISOString();
     const started = process.hrtime.bigint();
@@ -2210,7 +2210,7 @@ async function downloadArtifacts(configuration, state, stageRoot) {
         validateReleaseDiagnosisReport({
           report,
           expectation: configuration.releaseCase.result_expectation,
-          completionCriteria: configuration.releaseCase.driver.problem.completion_criteria,
+          completionCriteria,
           requiredSafetyPhrases: configuration.releaseCase.oracle.required_safety_phrases,
         });
       } catch (error) {
@@ -3577,8 +3577,8 @@ async function execute(configuration) {
     const intakeUsage = await auditIntakeUsage(configuration, state);
     const jobTypes = serviceUsage.invocations.map((invocation) => invocation.job_type).sort();
     requireCondition(jobTypes.length === 1 && jobTypes[0] === "ROUTE", "ROUTE_SERVICE_AGENT_INVOCATIONS", "FAIL", "CONTRACT");
-    requireCondition(intakeUsage.length === 2 && intakeUsage.some((item) => item.action === "NEED_CLARIFICATION")
-      && intakeUsage.some((item) => item.action === "CREATE_CASE"), "WEBSITE_INTAKE_ROUTE_CARDINALITY", "FAIL", "CONTRACT");
+    requireCondition(intakeUsage.length === 1 && intakeUsage[0].action === "SUBMIT_SUPPLEMENT",
+      "WEBSITE_INTAKE_ROUTE_CARDINALITY", "FAIL", "CONTRACT");
     requireCondition(validRouteMethodsPreflightEvidence(serviceUsage.noModelJobs, {
       registrationId: configuration.generatedSkill.registration_id, expectedJobId: state.methods_preflight_job_id,
     }), "WEBSITE_PREFLIGHT_INVALID", "FAIL", "CONTRACT");
@@ -3646,11 +3646,11 @@ async function execute(configuration) {
       && canonicalJson(replaySummary.public_result_archive) === canonicalJson(state.public_result_archive), "WEBSITE_RESTART_REPORT_CHANGED", "FAIL", "CONTRACT");
     requireCondition(configuration.hardCaps !== null, "PUBLISH_RESTART_HARD_CAPS_MISSING", "BLOCKED", "INFRA");
     const audit = await runClaude(configuration, state, configuration.stageRoot, "restart", restartPrompt(state), configuration.hardCaps.max_turns, configuration.hardCaps.max_budget_usd);
-    validateRestart(audit, state, configuration.releaseCase);
+    const restarted = validateRestart(audit, state, configuration.releaseCase);
     state.client_calls.push(...audit.records.map((record, index) => ({ phase: "restart", ordinal: state.client_calls.length + index, tool_name: record.tool_name, input: record.input })));
     addUsage(state, audit.usage);
     atomicState(configuration.statePath, state);
-    await downloadArtifacts(configuration, state, configuration.stageRoot);
+    await downloadArtifacts(configuration, state, configuration.stageRoot, restarted.case_view.problem_spec.completion_criteria);
     const correspondence = await stopService(configuration, state);
     requireCondition(correspondence.service_invocations.length === 0, "RESTART_UNEXPECTED_MODEL_INVOCATION", "FAIL", "CONTRACT");
     requireCondition(correspondence.service_no_model_jobs.length === 0, "RESTART_UNEXPECTED_PREFLIGHT_ACTIVITY", "FAIL", "CONTRACT");

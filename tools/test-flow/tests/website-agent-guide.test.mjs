@@ -94,7 +94,7 @@ test("documented wire frames dispatch through onmessage and ignore connection an
   const page = browser();
   page.emitWire(wire);
   await page.drain();
-  assert.deepEqual(page.trace, ["13:agent.progress", "14:assistant.question"]);
+  assert.deepEqual(page.trace, ["13:case.updated", "14:assistant.question"]);
   assert.equal(page.cursor, 14);
   assert.equal(page.pending, 0);
   assert.deepEqual(page.retries, []);

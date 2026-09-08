@@ -53,7 +53,7 @@ Specialist profile 更新为 `8.0.0`，DIAGNOSE output contract 更新为 `11.0.
 | --- | --- | --- |
 | 模型关键路径 | ROUTE 已输出三字段最终 JSON；小 Specialist 已完整内联并直接输出 JSON。历史 7.0 单样本约 54 秒，其中 Specialist 约 48 秒。 | 单 Case、小日志仍慢时，先核对当前模型窗口、输出 token、缓存与工具回合，再做同输入、同身份的多次测量。旧样本不能证明当前 8.0 的根因。 |
 | Reviewer | 当前仍要求 Read 输入并 Write 草稿；内存构造现有 REVIEW fixture 和生产角色资产得到 8,777 字节上下文，同一 918 字节 Candidate 精确出现 3 次。 | 仅显式启用 `SPECIALIZED_REVIEWER_ENABLED` 时影响主链路。优先评估重复上下文收敛和最终 JSON 输出，同时保留独立审核、证据核验与失败收口。 |
-| 网站会话排队 | 全部会话共用一个 INTAKE worker。真实服务对象配合阻塞式假模型：A 未结束时 `run_once(B)` 返回 false，B 保持 QUEUED；释放后才开始 B。 | 多会话并发时评估跨会话有界并发，同一会话仍串行。增加 DIAGNOSE worker 不会消除 INTAKE 队列。 |
+| 网站会话排队 | 全部会话共用一个会话 worker。真实服务对象配合阻塞式假模型：A 的补充整理未结束时 `run_once(B)` 返回 false，B 保持 QUEUED；释放后才开始 B。非空问题文本建案不调用 INTAKE，但仍经过同一调度入口。 | 多会话并发时评估跨会话有界并发，同一会话仍串行。增加 DIAGNOSE worker 不会消除会话队列。 |
 | 网站空闲负载 | SSE 每 0.5 秒查事件，再构建完整会话。SQLite trace 中，一个无新事件批次执行 5 条 SELECT；两个无待处理消息的 WAITING_INPUT 会话，一次后台扫描执行 23 条 SELECT，其中 6 次加载消息全历史。 | 长历史或长期保留大量未关闭会话时，评估轻量状态查询与只调度有新工作的会话。计数证明冗余，不证明已产生秒级延迟。 |
 | 大附件 I/O | 网站上传先 hash 并保存会话 payload；导入 Case 再完整 hash，回到文件开头后经原上传端口再次 hash 和复制。65,536 字节内存流复现导入阶段两次完整读取和一次写入。 | 首次上传加导入至少 3 次全量 hash、2 份落盘，仅适用于网站 Agent。先测目标机读取字节和阶段耗时，再评估不可变暂存资源复用；不能直接删除完整性校验。 |
 | 多日志目标 | 首次解析 N 个 anchor 时，当前 broker 顺序启动 1 次 parse 和 N 次 target 子进程，默认 Logparse 并发为 1。 | 多目标场景先测 1/2/4/8 个 anchor 的启动、TARGET 和排队时间，再评估批处理。当前没有生产量级对照。 |
@@ -73,7 +73,7 @@ Specialist profile 更新为 `8.0.0`，DIAGNOSE output contract 更新为 `11.0.
 
 已有服务端 Journey 包含排队、预处理、模型调用和上传阶段。慢 Case 先查看 `job.inputs.prepared` 的 `inputs_inlined`、`complete_input_bytes`，以及 Backend 遥测中的 turns、input/output/cache token 和模型 API 耗时。CLI/API 自报时间与服务端观察窗口不一定可直接相减，必须保留各自口径。
 
-网站入口还要从收到用户消息开始计时，覆盖 INTAKE 排队、整理和附件导入。初次整理发生在 Case 创建前，现有 `render-journey` 按 Case ID 筛选，所以 Case `brief.log` 不能代表完整网站体验。需把会话事件与服务端阶段对齐，不能把未覆盖的时间当作零。
+网站入口还要从收到用户消息开始计时，覆盖会话排队、Case 创建、后续补充信息的 INTAKE 整理和附件导入。非空问题文本建案前不调用 INTAKE；但现有 `render-journey` 按 Case ID 筛选，仍未覆盖创建前的消息接收和排队，所以 Case `brief.log` 不能代表完整网站体验。需把会话事件与服务端阶段对齐，不能把未覆盖的时间当作零。
 
 现有 MCP 的 30 秒长轮询在状态变化后可提前返回，不是每轮固定休眠 30 秒。调整轮询频率前，先区分服务端工作时间、客户端模型思考及两次调用间的空档。
 

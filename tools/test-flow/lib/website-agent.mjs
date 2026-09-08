@@ -8,10 +8,27 @@ const EVENT_FIELDS = ["schema_version", "sequence", "conversation_id", "case_id"
 const sha = (value) => crypto.createHash("sha256").update(value).digest("hex");
 function check(value, code) { if (!value) throw new Error(code); }
 
-export function websiteUserDescription(driver) {
-  const labels = { statement: "问题描述", expected_behavior: "正常情况", actual_behavior: "实际表现", scope: "影响范围" };
-  return Object.entries(labels).map(([name, label]) => `${label}：${driver.problem[name]}`)
-    .concat(driver.initial_user_fact_names.map((name, index) => `补充信息（${name}）：${driver.initial_user_fact_values[index]}`)).join("\n");
+export function websiteUserDescription(driver, requirements) {
+  const names = requirements.filter((item) => item.status === "OPEN" && item.kind === "INPUT").map((item) => item.name);
+  check(names.length > 0 && new Set(names).size === names.length, "WEBSITE_INPUT_REQUIREMENTS_MISSING");
+  return names.map((name) => {
+    const index = driver.initial_user_fact_names.indexOf(name);
+    check(index >= 0, "WEBSITE_REQUIRED_INPUT_UNAVAILABLE");
+    return `补充信息（${name}）：${driver.initial_user_fact_values[index]}`;
+  }).join("\n");
+}
+
+function checkInitialCase(view, caseView, raw) {
+  check(view.case_id && caseView?.case_id === view.case_id && view.case_status === "WAITING_INPUT"
+    && caseView.status === "WAITING_INPUT", "WEBSITE_CASE_FIRST_REQUIRED");
+  const expected = { statement: raw, expected_behavior: "用户未单独说明；以 raw_problem_text 为准。",
+    actual_behavior: raw, scope: "仅定位 raw_problem_text 所述问题。", goals: ["定位问题原因并给出结论。"],
+    non_goals: [], constraints: [], completion_criteria: ["给出基于证据的结论；证据不足时明确说明。"] };
+  check(caseView.raw_problem_text === raw && caseView.user_facts?.length === 0
+    && Object.entries(expected).every(([name, value]) => JSON.stringify(caseView.problem_spec?.[name]) === JSON.stringify(value)), "WEBSITE_CASE_FIRST_DEFAULTS");
+  const questions = caseView.pending_requirements.filter((item) => item.status === "OPEN").map((item) => item.prompt);
+  check(questions.length > 0 && JSON.stringify(view.current_questions) === JSON.stringify(questions), "WEBSITE_REQUIREMENT_PROMPTS_CHANGED");
+  return questions;
 }
 
 export function parseSseFrame(frame, conversationId, after) {
@@ -80,14 +97,19 @@ export async function runWebsiteStep(input, fetchImpl = fetch) {
     conversationId = created.conversation_id;
     const replay = await request("POST", "/api/v1/agent/conversations", { request_id: input.request_id });
     check(JSON.stringify(replay) === JSON.stringify(created), "WEBSITE_CREATE_REPLAY_CHANGED");
-    await observe(0, () => message("-initial", "我需要定位一个问题，请先告诉我需要提供哪些信息。"), (event) => event?.type === "assistant.question");
-    check(events.every((event) => event.case_id === null), "WEBSITE_INTAKE_CREATED_CASE_WITHOUT_FACTS");
-    const complete = websiteUserDescription(input.driver);
+    const raw = input.driver.problem.raw_problem_text ?? input.driver.problem.statement;
+    await observe(0, () => message("-initial", raw), (event) => event?.type === "assistant.question");
+    check(events.at(-1).case_id, "WEBSITE_QUESTION_BEFORE_CASE");
+    const initial_view = await request("GET", `/api/v1/agent/conversations/${conversationId}`);
+    const initial_case_response = await request("GET", `/api/v1/cases/${initial_view.case_id}`);
+    const questions = checkInitialCase(initial_view, initial_case_response.case_view, raw);
+    check(JSON.stringify(events.at(-1).data.questions) === JSON.stringify(questions), "WEBSITE_REQUIREMENT_PROMPTS_CHANGED");
+    const complete = websiteUserDescription(input.driver, initial_case_response.case_view.pending_requirements);
     await observe(cursor(), () => message("-details", complete), (event) => event?.type === "case.updated" && ["WAITING_INPUT", "WAITING_ATTACHMENT"].includes(event.data.status));
     const view = await request("GET", `/api/v1/agent/conversations/${conversationId}`);
-    check(view.case_id && view.case_status === "WAITING_ATTACHMENT", "WEBSITE_REQUIRED_FACTS_NOT_EXTRACTED");
+    check(view.case_id === initial_view.case_id && view.case_status === "WAITING_ATTACHMENT", "WEBSITE_REQUIRED_FACTS_NOT_EXTRACTED");
     const case_response = await request("GET", `/api/v1/cases/${view.case_id}`);
-    return { schema_version: 1, phase: input.phase, conversation_id: conversationId, view, case_response, events, records };
+    return { schema_version: 1, phase: input.phase, conversation_id: conversationId, initial_view, initial_case_response, view, case_response, events, records };
   }
   if (input.phase === "prepare") {
     const prepared = await request("POST", `/api/v1/agent/conversations/${conversationId}/attachments`, {
@@ -145,8 +167,14 @@ export function validateWebsiteEvidence(evidence, expected = {}) {
     const creates = evidence.records.filter((record) => record.method === "POST" && record.path === "/api/v1/agent/conversations");
     const messages = evidence.records.filter((record) => record.method === "POST" && record.path.endsWith("/messages"));
     check(creates.length === 2 && messages.length === 2 && messages.every((record) => Object.keys(record.request).sort().join(",") === "attachment_ids,request_id,text"), "WEBSITE_EVIDENCE_RAW_INPUT");
-    check(evidence.events.some((event) => event.type === "assistant.question" && event.case_id === null), "WEBSITE_EVIDENCE_CLARIFICATION");
-    check(evidence.view.case_status === "WAITING_ATTACHMENT", "WEBSITE_EVIDENCE_WAITING_ATTACHMENT");
+    const initialCase = evidence.initial_case_response?.case_view;
+    const questions = checkInitialCase(evidence.initial_view, initialCase, messages[0].request.text);
+    check(evidence.records.some((record) => record.path === `/api/v1/cases/${initialCase.case_id}`
+      && JSON.stringify(record.response?.data) === JSON.stringify(evidence.initial_case_response)), "WEBSITE_EVIDENCE_INITIAL_CASE_SOURCE");
+    const asked = evidence.events.filter((event) => event.type === "assistant.question");
+    check(asked.length > 0 && asked.every((event) => event.case_id === initialCase.case_id)
+      && JSON.stringify(asked[0].data.questions) === JSON.stringify(questions), "WEBSITE_EVIDENCE_REQUIREMENT_QUESTIONS");
+    check(evidence.view.case_status === "WAITING_ATTACHMENT" && evidence.view.case_id === initialCase.case_id, "WEBSITE_EVIDENCE_WAITING_ATTACHMENT");
   }
   if (evidence.phase === "diagnose") {
     const reportIndex = evidence.events.findIndex((event) => event.type === "result.available");

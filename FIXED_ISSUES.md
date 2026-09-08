@@ -189,6 +189,23 @@
   将冻结 hash 更新为 `7f0447460e4a56f882a1f46493ceb645930c0a527bccb303c7929a1d7b3cbe9e`。
 - **专项回归测试**：
   - `tests/platform/distribution/test_installed_distribution_gate.py::test_clean_installed_distribution_import_cli_and_server_gate`
+- **8.0 回归与修复（2026-09-08）**：`8.0.0 / f7a9845` 的本地 Web CrossJob 在
+  `run-20260908T072909Z-e823d6f8` 再次被安装包能力测试拦住。这次安装及七项依赖版本均正确，
+  但测试仍将 `problem-locator` 冻结为 `7.0.0`。将安装包预期同步为 `8.0.0`，并在现有
+  `tests/deterministic/unit/test_release_version.py::test_runtime_project_and_lock_publish_one_v4_release_version`
+  中直接比较平台安装合同、运行时、项目和 lock 的发布版本，防止只更新产品版本而遗漏平台合同。
+  原安装、独立目录导入、依赖及启动检查继续保留；本轮验证结果以追加的 verdict 元数据为准。
+- **8.0 后续哈希回归（2026-09-08）**：版本检查修正后，`run-20260908T073525Z-fccc730a`
+  的 Linux 进程树与启动用例通过，安装用例继续暴露旧 RPC package/combined 哈希。
+  当前 Windows 源码、Linux 安装探针和现有 S07 集成测试的结果一致；`32f8db9` 更新 Methods V1
+  Skill 时同步了集成测试，但漏改平台常量。将两项冻结预期同步为当前夹具，并新增
+  `test_release_version.py::test_installed_distribution_skill_hashes_match_current_fixture`，直接加载
+  夹具后对照平台的三项冻结哈希，防止确定性测试通过却到平台安装阶段才发现过期预期。
+- **V11 导出合同同步（2026-09-08）**：同一安装测试末尾仍要求停止服务、重新打开仓库后
+  导出一项 runtime epoch 和 recovery record。当前仓库不恢复这些运行期记录，现有
+  `test_bootstrap_composition.py::test_unique_object_graph_recovery_export_and_shutdown_lock_order`
+  已直接检查两项均为零。平台测试同步精确的零计数，保留导出字节、完整验证和空 Case 断言。
+- **本轮 Test Flow 元数据（2026-09-08）**：Dev `run-20260908T081857Z-5a9f18d6` 为 `FAIL`，原因是 affected 耗时 66.806 秒超过 60 秒上限；597 passed / 24 skipped、零 failure/error，full 未运行。版本、三项 Skill 哈希和 V11 空仓库导出专项均执行通过；当前快照的 Linux 安装专项尚待复验，不登记为平台验证通过。源码快照 `git-visible-worktree-v1:5921b281a8e2cadb6005c99787a88fdaa301c425195767f9031ce9534f502e41`（790 files），工作树与物化源码核验均为 `PASS`，真实模型调用、token 和费用均为 0。此行是验证后的元数据回填，不属于所引用快照。
 - **最新 Test Flow verdict**：fresh Release `run-20260818T030707Z-26372dce`，
   `PASS_WITH_WARNINGS`；`platform.server-linux-capability`、functional、operation、verification
   均为 `PASS`，performance 为 `NOT_CALIBRATED`；验证源码快照
@@ -1027,6 +1044,13 @@
   - `tests/deterministic/unit/runtime/test_agent_backend.py::test_timeout_terminates_complete_windows_child_tree`
   - `tests/platform/compat/test_macos_process_tree_gate.py::test_host_timeout_kills_the_real_child_tree_without_rerunning_agent`
   - `tests/deterministic/unit/runtime/test_agent_backend.py::test_backend_fixture_manifest_is_exact`
+- **V11 回归与修复（2026-09-08）**：`8.0.0 / f7a9845` 的本地 Web CrossJob
+  `run-20260908T072909Z-e823d6f8` 在同一平台用例中报 `JOB_NOT_FOUND`，尚未执行超时 Runtime。
+  夹具虽已是 V11，测试仍只向 `state.json` 写入 Case/Job；当前活动仓库不会从该文件加载任务。
+  测试改用当前 `repository.commit` 装载同一夹具，并在执行前确认 `read_job` 返回目标 Job。
+  原真实子进程终止、失败发布和重复领取不重跑断言全部保留，不改生产存储或进程清理机制。
+  该平台用例直接覆盖本次回归；验证结果以追加的 verdict 元数据为准。
+- **本轮 Test Flow 元数据（2026-09-08）**：Dev `run-20260908T081857Z-5a9f18d6` 为 `FAIL`，affected 597 passed / 24 skipped，但耗时 66.806 秒超过 60 秒门槛，full 未运行；本轮不含 Linux 进程树专项。较早的 `run-20260908T073525Z-fccc730a` 已实际通过修改后的 Linux 进程树测试，但不能代替合并后快照的完整平台复验。最新源码快照 `git-visible-worktree-v1:5921b281a8e2cadb6005c99787a88fdaa301c425195767f9031ce9534f502e41`（790 files），工作树与物化源码核验均为 `PASS`，零真实模型调用。此行是验证后的元数据回填，不属于所引用快照。
 - **最新 Test Flow verdict**：修复后 Dev `run-20260823T231924Z-103252bb` 为
   `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为
   `NOT_CALIBRATED`；验证源码快照
@@ -1916,11 +1940,12 @@
 
 ## PL-FIX-045：Client 在创建 Case 前自行推测并追问问题细节
 
-- **状态**：客户端合同与确定性生产入口已修复；真实 Client model-cert 待 V2 adapter 迁移后执行。
+- **状态**：MCP 与网页的先建案规则已统一；2026-09-08 的验证范围以本条最新元数据为准，未执行真实模型。
 - **症状**：用户已经给出问题描述，Client 仍在调用 `problem_locator_create_case` 前根据文本和 Skill
   自行推测“还缺哪些信息”，先连续追问一批字段；实际服务端 requirements 尚未生成，提问内容可能与
   Case 建立后的权威需求不同。
-- **受影响版本**：Evidence V2 之前的 `problem-locator-client` 交互说明与旧真实旅程。
+- **受影响版本**：Evidence V2 之前的 `problem-locator-client` 交互说明与旧真实旅程；
+  8.0.0 / V11 的网站 Agent 在 `8b53bc5` 引入同类回归。
 - **根因**：客户端说明把“帮助整理问题描述”和“决定服务端缺失输入”混成一步，测试只检查工具文本或
   理想调用，没有从真实 create → requirements → supplement 入口约束首个业务动作。
 - **不可回归行为**：只要用户提供了可创建 Case 的问题描述，Client 的首个业务动作必须是
@@ -1929,17 +1954,36 @@
   `result.zip` 或自行重写证据结论。
 - **修复历史**：2026-08-28 重写 Client Skill 的 intake 和终态展示规则；SameJob 旅程改为真实
   create、requirements、supplement、单次 Logparse、Specialist、Reviewer、Outcome 和 restart 链路。
+- **2026-09-08 网页回归修复**：8.0.0 / V11 在 `8b53bc5` 新增网站 Agent 时，重新引入建案前的
+  INTAKE 追问及四字段来源门槛。当前版本仅提供“视频卡顿”并申请建案会返回
+  `INTAKE_OUTPUT_INVALID`。根因是网站使用独立的四字段整理流程，没有沿用 MCP 客户端的先建案规则。
+  网页现在收到非空原文就确定性创建 Case，完整保留 `raw_problem_text`、`statement` 和
+  `actual_behavior`，其余字段逐项采用 MCP 相同的中性默认值，初始事实为空，创建阶段模型调用为零。
+  只有附件时仅询问问题描述；建案后按 OPEN requirements 提交附件和事实，追问逐字展示服务端 prompt。
+  INTAKE 1.1.0 只处理已有 Case 的补充与冻结信息更正，不再接受模型创建动作。真实旅程和预算同步
+  改为先创建、再补充，保留上传、审核、发布与重启验证；本次仅执行 Dev 确定性验证，不宣称真实模型通过。
+  完整原文在补充提示词中重复展开会放大会话大小；已用两条约 33 KB 消息复现
+  `INTAKE_CONTEXT_LIMIT`。提示词现在对与 USER 消息完全相同的冻结原文字段使用消息引用，
+  不截断会话、不改持久化内容，来源校验仍读取完整原始请求，并直接校验实际提示词的字节预算。
 - **专项回归测试**：
   - `tests/deterministic/unit/interfaces/test_client_access_skill.py::test_skill_creates_case_before_requesting_missing_details`
   - 同文件 `test_skill_presents_methods_v2_without_waiting_for_an_artifact`
   - `tests/deterministic/journey/test_rpc_timeout.py::test_rpc_timeout_methods_v2_is_one_durable_same_job_path`
+  - `tests/deterministic/unit/agent/test_intake.py::test_initial_problem_spec_matches_current_mcp_client_create_example`
+  - 同文件 `test_model_cannot_create_cases_or_choose_unknown_actions` 和 `test_every_intake_action_requires_existing_case`
+  - `tests/deterministic/integration/test_website_agent.py::test_first_problem_creates_case_with_exact_original_and_mcp_defaults_without_intake`
+  - 同文件 `test_attachment_only_message_waits_only_for_description_and_is_imported_after_case_exists`、
+    `test_followup_clarification_only_repeats_open_requirement_prompts` 和
+    `test_followup_correction_keeps_frozen_problem_and_requires_new_case`
 - **最新 Test Flow verdict**：前置 Dev `run-20260828T110620Z-25ef1b05` 的确定性闭包为
   `PASS_WITH_WARNINGS`，SameJob 3/3 PASS，模型调用为 0。该 verdict 证明客户端合同和服务入口，不证明
   尚未迁移的真实 Client 模型行为；P1/P2 model-cert 仍被
   `EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED` 阻断。
+- **2026-09-08 最新 Test Flow 元数据**：`tools/test-flow/run.ps1 --track dev --goal dev.default --base 8b53bc5`，run ID `run-20260908T081132Z-8d0e2f67`，权威结论 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`（全量 146.728 秒，未超过 300 秒硬上限）。源码快照 `git-visible-worktree-v1:246e0129767c809690ea00f80355b989b2613702775d332037245fd0e60f6313`（790 files）；合同 576、Core 32、unit 2085、integration 66、SameJob 5、网站示例 12 项全部 PASS，unit 68 项按条件跳过，模型调用及 token/cost 为 0。按网站引入提交扩大比较范围后，affected 由编排器以 `AFFECTED_SCOPE_DEFERRED_TO_FULL` 移交完整验证。同源码的 `run-20260908T080303Z-3bbd2a8c` 保留了 affected 597 项功能通过但耗时 64.338 秒超过 60 秒门槛的失败记录；系统长临时目录实验 `run-20260908T080727Z-860cd7a3` 的既有长路径测试失败证据也保留，最终验证恢复仓库默认短目录。本元数据行在验证后追加，本身不宣称被所引源码快照覆盖。
   **最终复验元数据**：Dev `run-20260828T112351Z-3d7ee53b` 为 `PASS`，源码快照
   `git-visible-worktree-v1:b3f3ff6e28d9e1cccee712d8f617d470501aa97a53d662b49222b5a6d7d85968`
   （718 files）；真实 Client model-cert 仍未执行。本元数据行本身不宣称被该快照覆盖。
+- **推送前最终复验元数据（2026-09-08）**：`tools/test-flow/run.ps1 --track dev --goal dev.default --base 8b53bc5`，run ID `run-20260908T082640Z-197109e5`，结论 `PASS_WITH_WARNINGS`；functional、operation、verification 及源码一致性均为 `PASS`，performance 为 `NOT_CALIBRATED`，完整确定性阶段耗时 146.970 秒。源码快照 `git-visible-worktree-v1:5167e26963def74008b0e1c760d7e7e6c8c73377393a83d04780ef098aacaf28`（790 files），真实模型调用、token/cost 均为 0。该快照包含并行任务已完成的台账与待办回填；所有正式 Dev Gate 均通过或按既定范围规则移交全量，不宣称真实 Release 或 Linux 平台专项已完成。本元数据行在验证后追加，本身不属于所引用快照。
 
 ## PL-FIX-046：Workspace hardlink 清理会改变正式附件权限并破坏后续读取
 

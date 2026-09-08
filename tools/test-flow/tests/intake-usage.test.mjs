@@ -11,7 +11,7 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../.
 const localPython = path.join(repo, ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
 const python = process.env.TEST_FLOW_QUICK_PYTHON || (fs.existsSync(localPython) ? localPython : "python3");
 const init = { type: "system", subtype: "init", model: "test-model", tools: [] };
-const terminal = { type: "result", subtype: "success", is_error: false, num_turns: 1, result: JSON.stringify({ action: "CREATE_CASE" }), total_cost_usd: 0.05,
+const terminal = { type: "result", subtype: "success", is_error: false, num_turns: 1, result: JSON.stringify({ schema_version: 1, action: "SUBMIT_SUPPLEMENT" }), total_cost_usd: 0.05,
   usage: { input_tokens: 100, output_tokens: 50, cache_creation_input_tokens: 10, cache_read_input_tokens: 20 } };
 
 function audit(lines, { exclude = false } = {}) {
@@ -40,7 +40,7 @@ test("INTAKE usage audits the actual one-call terminal without inventing a domai
   const [invocation] = result.receipt.invocations;
   assert.equal(invocation.class, "server-intake");
   assert.equal(invocation.phase, "INTAKE");
-  assert.equal(invocation.action, "CREATE_CASE");
+  assert.equal(invocation.action, "SUBMIT_SUPPLEMENT");
   assert.equal(invocation.usage.total_tokens, 180);
   assert.equal(invocation.usage.cost_usd, 0.05);
   assert.equal(invocation.stdout_sha256, crypto.createHash("sha256").update(result.raw).digest("hex"));
@@ -56,7 +56,10 @@ for (const [name, lines, failure] of [
   ["wrong model", [{ ...init, model: "other-model" }, terminal], "MODEL_IDENTITY_MISMATCH"],
   ["excessive turns", [init, { ...terminal, num_turns: 2 }], "MODEL_TERMINAL_INVALID"],
   ["over budget", [init, { ...terminal, total_cost_usd: 1.01 }], "MODEL_BUDGET_CAP_EXCEEDED"],
-  ["report creation", [init, { ...terminal, result: JSON.stringify({ action: "CREATE_RESULT" }) }], "INTAKE_ACTION_INVALID"],
+  ["report creation", [init, { ...terminal, result: JSON.stringify({ schema_version: 1, action: "CREATE_RESULT" }) }], "INTAKE_ACTION_INVALID"],
+  ["legacy case creation", [init, { ...terminal, result: JSON.stringify({ schema_version: 1, action: "CREATE_CASE" }) }], "INTAKE_ACTION_INVALID"],
+  ["unsupported schema", [init, { ...terminal, result: JSON.stringify({ schema_version: 2, action: "SUBMIT_SUPPLEMENT" }) }], "INTAKE_SCHEMA_VERSION_INVALID"],
+  ["boolean schema", [init, { ...terminal, result: JSON.stringify({ schema_version: true, action: "SUBMIT_SUPPLEMENT" }) }], "INTAKE_SCHEMA_VERSION_INVALID"],
 ]) test(`INTAKE proof rejects ${name}`, () => {
   const result = audit(lines);
   assert.notEqual(result.status, 0);

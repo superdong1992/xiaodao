@@ -31,7 +31,7 @@
       "kind": "node-test",
       "test_files": ["tools/test-flow/tests/intake-usage.test.mjs"],
       "python_driver": true,
-      "min_passed": 9,
+      "min_passed": 12,
       "evidence": ["node-test.tap"]
     },
     "docs.current": {

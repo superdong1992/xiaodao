@@ -21,6 +21,8 @@ from problem_locator.bootstrap import (
 )
 from problem_locator.contracts import (
     CLI_EXIT_CONFIG_OR_STATE_CORRUPT,
+    CreateCase,
+    DispatchReceipt,
     ErrorCode,
     Job,
     StateExport,
@@ -28,7 +30,6 @@ from problem_locator.contracts import (
     parse_canonical_json_bytes,
 )
 from problem_locator.entrypoints.settings import Settings
-from problem_locator.agent.intake import IntakeDecision
 from problem_locator.storage.layout import StorageLayout
 from problem_locator.storage.platform import FileInstanceLock
 
@@ -328,23 +329,39 @@ def test_production_composition_selects_intake_command_without_changing_other_ro
         graph.close()
 
 
-def test_production_agent_thread_handles_http_intake_and_stops_before_lock_release(
-    tmp_path: Path,
+def test_production_agent_thread_creates_case_from_http_message_and_stops_before_lock_release(
+    tmp_path: Path, monkeypatch,
 ) -> None:
     app = create_app(_settings(tmp_path / "data"))
     graph = app.state.problem_locator_composition
     assert graph is not None
     processed = threading.Event()
     thread_ids = []
+    commands = []
+    jobs = []
 
     class DeterministicIntake:
         def intake(self, request):
-            thread_ids.append(threading.get_ident())
-            processed.set()
-            return IntakeDecision(action="NEED_CLARIFICATION", message="问题发生在哪个时间段？",
-                problem_fields=[], user_facts=[])
+            pytest.fail("首条问题描述不应调用 INTAKE。")
+
+    execute = graph.application.execute
+
+    def create_case(command):
+        assert isinstance(command, CreateCase)
+        thread_ids.append(threading.get_ident())
+        commands.append(command)
+        result = execute(command)
+        processed.set()
+        return result
+
+    def accept_without_backend(job_id):
+        jobs.append(job_id)
+        return DispatchReceipt(job_id=job_id, accepted=True, duplicate=False)
 
     graph.agent.intake_engine = DeterministicIntake()
+    monkeypatch.setattr(type(graph.application), "execute", lambda self, command: create_case(command))
+    # Keep the real Case commit and worker wiring, but never start a model Job.
+    monkeypatch.setattr(graph.dispatcher, "submit", accept_without_backend)
     assert graph.agent._thread is None
     with TestClient(app) as client:
         worker = graph.agent._thread
@@ -362,8 +379,15 @@ def test_production_agent_thread_handles_http_intake_and_stops_before_lock_relea
         assert graph.agent._processing.acquire(timeout=2)
         graph.agent._processing.release()
         view = client.get(f"/api/v1/agent/conversations/{conversation_id}").json()["data"]
-        assert view["status"] == "WAITING_INPUT"
-        assert view["current_questions"] == ["问题发生在哪个时间段？"]
+        assert view["status"] == "RUNNING" and view["case_id"] is not None
+        assert view["current_questions"] == []
+        assert view["messages"][0]["status"] == "APPLIED"
+        assert len(commands) == len(jobs) == 1
+        assert commands[0].raw_problem_text == "付款请求超时。"
+        assert commands[0].initial_user_facts == []
+        case = graph.application.get_case(view["case_id"]).case_view
+        assert case.raw_problem_text == commands[0].raw_problem_text
+        assert case.active_job.job_id == jobs[0]
         assert graph.agent.list_events(conversation_id)["events"]
         assert thread_ids == [worker.ident]
         assert worker.ident != threading.get_ident()

@@ -9,15 +9,15 @@
 ## 1. 网站开发者需要实现的流程
 
 1. 创建会话，保存网站用户与 `conversation_id` 的归属关系。
-2. 用户发送原话，或先预约并上传日志，再发送附件 ID。网站不需要构造 `problem_spec` 或命名事实。
-3. 订阅 SSE。显示 `assistant.question` 的追问；用户继续调用消息接口回答。显示 `agent.progress` 的阶段消息。
+2. 用户发送非空的问题原话，服务端立即按 MCP 客户端的固定中性模板创建 Case；创建前不追问预期行为、范围、日志或时间，也不调用 INTAKE。网站不需要构造 `problem_spec` 或命名事实。日志可先上传，再随问题消息发送附件 ID。
+3. 订阅 SSE。Case 创建后，只按原文显示当前 OPEN requirements 对应的 `assistant.question`；用户继续调用消息接口回答。没有 OPEN requirements 时不额外追问。显示 `agent.progress` 的阶段消息。
 4. 收到 `result.available` 后查询关联 Case 和产物列表，校验并下载报告 JSON，按中文结构展示。不要等待 ZIP 才展示报告。
 5. `archive.updated` 的状态变为 `READY` 后提供 ZIP 下载按钮。用户点击并确认包含原始目标日志后才下载。
 6. 收到 `conversation.completed` 后关闭订阅。报告完成后的新问题另建会话。
 
 关闭页面或断开事件流不会停止后台任务。刷新页面后可查询会话快照并回放历史。服务重启后，未完成任务会明确标为 `INTERRUPTED`；用户需重新创建会话。已完成报告保留，待生成 ZIP 继续按既有归档机制恢复。
 
-全部用户原话保存在会话历史中。关联 Case 的 `raw_problem_text` 使用经过来源校验的问题描述片段，不拼接整段聊天记录；网站展示原话时读取会话消息，不把该字段当作聊天历史。
+全部用户原话保存在会话历史中。关联 Case 的 `raw_problem_text` 保留创建任务的完整用户原话，`statement` 和 `actual_behavior` 使用同一文本。其余问题字段使用 MCP 客户端的固定中性默认值，初始事实为空；`expected_behavior` 不要求用户单独填写。后续消息按当前 OPEN requirements 补充，不拼接进 `raw_problem_text`；网站展示聊天历史时读取会话消息。只有附件、没有问题文本时，服务端先提示用户提供问题原话。
 
 ## 2. 接口和公共合同
 
@@ -104,7 +104,7 @@ Content-Type: application/json
 }
 ```
 
-`ACCEPTED` 只表示消息已持久接收。后台 INTAKE 负责整理问题和追问；事实缺失时不会替用户编造。定位运行期间的新消息显示“已收到，尚未用于本次诊断”，只在合法补充点采用。更正已冻结事实或任务目标时应另建任务。
+`ACCEPTED` 只表示消息已持久接收。后台收到首条非空问题文本就创建 Case；建案本身不调用 INTAKE，随后路由和诊断仍可能调用模型。INTAKE 仅在 Case 创建后的合法补充点整理用户输入，按 OPEN INPUT requirements 提取有原文来源的事实；公开追问始终使用 requirements 的原始 prompt。定位运行期间的新消息显示“已收到，尚未用于本次诊断”。更正已冻结事实或任务目标时应另建任务。
 
 ### 预约和上传日志
 
@@ -269,9 +269,9 @@ curl --no-buffer --fail-with-body \
 ```text
 : connected
 
-data: {"schema_version":1,"sequence":13,"conversation_id":"10000000-0000-0000-0000-000000000001","case_id":null,"job_id":null,"type":"agent.progress","created_at":"2026-09-07T08:00:01.000Z","data":{"stage":"INTAKE","message":"正在整理问题"}}
+data: {"schema_version":1,"sequence":13,"conversation_id":"10000000-0000-0000-0000-000000000001","case_id":"40000000-0000-0000-0000-000000000001","job_id":null,"type":"case.updated","created_at":"2026-09-07T08:00:01.000Z","data":{"status":"WAITING_INPUT","case_revision":2}}
 
-data: {"schema_version":1,"sequence":14,"conversation_id":"10000000-0000-0000-0000-000000000001","case_id":null,"job_id":null,"type":"assistant.question","created_at":"2026-09-07T08:00:02.000Z","data":{"questions":["问题发生在哪个时间段？正常情况下预期是什么？"]}}
+data: {"schema_version":1,"sequence":14,"conversation_id":"10000000-0000-0000-0000-000000000001","case_id":"40000000-0000-0000-0000-000000000001","job_id":null,"type":"assistant.question","created_at":"2026-09-07T08:00:02.000Z","data":{"questions":["问题发生在哪个时间段？"]}}
 
 : heartbeat
 
@@ -414,6 +414,6 @@ node --test examples/website-agent/server.test.mjs
 
 本次调整的是现有 `8.0.0` 预览版的 SSE 传输格式，持久会话与事件仍为 `schema_version=1`，V11 数据合同不变。已按旧版 `event:` 注册命名监听器的网站须改用 `onmessage`，从 JSON 读取 `type` 和 `sequence`，不再依赖 `lastEventId` 或服务端 `retry:`。更新部署时核对实际响应字节和对应源码版本，不能只看 `info.version=8.0.0`。此传输调整本身不要求重建已经使用的 V11 数据根。
 
-`INTAKE_CLAUDE_COMMAND` 配置独立问题整理角色；缺省沿用路由角色命令。该角色只整理用户消息和公开 requirements，不获得诊断工具、日志读取或发布结果权限。`SPECIALIZED_REVIEWER_ENABLED` 延续现有配置：关闭时通过服务端验证的 Candidate 可直接交付；开启时只在 Review PASS 后公开正式报告。
+`INTAKE_CLAUDE_COMMAND` 配置独立补充信息整理角色；缺省沿用路由角色命令。该角色只在已建 Case 的补充点整理用户消息和公开 requirements，不负责创建任务，不获得诊断工具、日志读取或发布结果权限。`SPECIALIZED_REVIEWER_ENABLED` 延续现有配置：关闭时通过服务端验证的 Candidate 可直接交付；开启时只在 Review PASS 后公开正式报告。
 
 V11 使用全新空 `DATA_ROOT`。不要把旧版本目录直接切给新版本，也不要删除旧数据。旧报告可由原版本只读查看或事先导出；不存在自动迁移或从旧 `methods_result` 反推报告的步骤。MCP 仍为原来的七个工具，输入继续根层扁平；网站接入只增加 REST Agent 接口。
