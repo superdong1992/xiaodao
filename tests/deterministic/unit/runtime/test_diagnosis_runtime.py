@@ -13,6 +13,7 @@ import zipfile
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -2953,6 +2954,59 @@ def test_methods_v1_specialist_publishes_json_and_durable_archive_plan() -> None
     temporary.cleanup()
 
 
+def test_methods_v1_specialist_prompt_uses_this_jobs_frozen_marker_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, job, _factory, backend, _resources = _public_fake_claiming_runtime(
+        tmp_path, "success",
+    )
+    scan = diagnosis_runtime_module.scan_method_markers
+    build_prompt = diagnosis_runtime_module.specialist_prompt
+    scanned: list[tuple[Any, Any, Any]] = []
+    prompt_calls = 0
+
+    def capture_scan(*, skill: Any, target_logs: Any) -> Any:
+        receipt = scan(skill=skill, target_logs=target_logs)
+        scanned.append((skill, target_logs, receipt))
+        return receipt
+
+    def check_prompt_inputs(context: str, root: Path, target_logs: Any, **kwargs: Any) -> Any:
+        nonlocal prompt_calls
+        prompt_calls += 1
+        assert len(scanned) == 1
+        skill, frozen_logs, receipt = scanned[0]
+        assert kwargs["skill"] is skill
+        assert kwargs["skill_load"] is receipt
+        assert target_logs is frozen_logs
+        return build_prompt(context, root, target_logs, **kwargs)
+
+    monkeypatch.setattr(diagnosis_runtime_module, "scan_method_markers", capture_scan)
+    monkeypatch.setattr(diagnosis_runtime_module, "specialist_prompt", check_prompt_inputs)
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.error is None
+    assert receipt.job_outcome.result_type is OutcomeResultType.COMPLETED
+    assert prompt_calls == 1
+    assert len(backend.calls) == 1
+    call = backend.calls[0]
+    assert call["backend_phase"] == "METHODS_SPECIALIST"
+    assert call["file_access"] == "none"
+    prompt = call["prompt"]
+    index = json.loads(prompt.split("<<<SERVER_MARKER_INDEX>>>\n", 1)[1].split(
+        "\n<<<END SERVER_MARKER_INDEX>>>", 1,
+    )[0])
+    assert index["complete"] is True
+    assert index["source_hits"] == {
+        "client": {"rpc deadline exceeded": [1]},
+        "server": {"connection pool wait": [1]},
+    }
+    assert "rpc deadline exceeded request_id=42" in prompt
+    assert "connection pool wait request_id=42" in prompt
+    assert json.loads(backend.written_draft_bytes)["schema_version"] == 1
+
+
 @pytest.mark.parametrize("missing_binding", ("user_facts", "attachment"))
 def test_methods_preflight_publishes_waiting_without_backend_or_broker(
     missing_binding: str,
@@ -3257,6 +3311,174 @@ def test_direct_methods_preprocessing_rejects_precancel_without_opening_broker(
     assert backend.calls == []
 
 
+def test_direct_methods_preprocessing_scans_once_per_second_during_fast_polls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, job, factory, backend, _ = _public_fake_claiming_runtime(
+        tmp_path, "success",
+    )
+    now = [0.0]
+    monkeypatch.setattr(
+        diagnosis_runtime_module, "time",
+        SimpleNamespace(monotonic=lambda: now[0], perf_counter=time.perf_counter),
+    )
+    measure_workspace = diagnosis_runtime_module._temporary_workspace_bytes
+    scans: list[tuple[float, bool]] = []
+
+    def count_workspace_bytes(*args: Any, **kwargs: Any) -> int:
+        scans.append((now[0], kwargs["allow_transient_changes"]))
+        return measure_workspace(*args, **kwargs)
+
+    monkeypatch.setattr(
+        diagnosis_runtime_module, "_temporary_workspace_bytes", count_workspace_bytes,
+    )
+    complete_preprocessing = factory.preprocessing_executor
+    assert complete_preprocessing is not None
+
+    def poll_during_preprocessing(
+        session: object,
+        operation: str,
+        request_path: str,
+        result_path: str,
+    ) -> None:
+        signal = factory.open_calls[-1][3]
+        for poll in range(200):
+            now[0] = poll / 20
+            assert signal.is_cancelled() is False
+        # The initial forced scan plus nine periodic scans cover 9.95 seconds.
+        assert scans == [(0.0, False), *[(float(i), True) for i in range(1, 10)]]
+        complete_preprocessing(session, operation, request_path, result_path)
+
+    factory.preprocessing_executor = poll_during_preprocessing
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.error is None
+    assert len(backend.calls) == 1
+    assert len(scans) == 11
+    assert scans[-1] == (9.95, False)
+
+
+@pytest.mark.parametrize(
+    ("reason", "wall_time", "expected_code"),
+    [
+        (CancellationReason.USER_CANCEL, 30.0, ErrorCode.BACKEND_CANCELLED),
+        (None, 0.05, ErrorCode.BACKEND_TIMEOUT),
+        (CancellationReason.USER_CANCEL, 0.05, ErrorCode.BACKEND_CANCELLED),
+    ],
+)
+def test_direct_methods_preprocessing_checks_cancellation_and_timeout_between_scans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: CancellationReason | None,
+    wall_time: float,
+    expected_code: ErrorCode,
+) -> None:
+    runtime, job, factory, backend, _ = _public_fake_claiming_runtime(
+        tmp_path, "success",
+    )
+    now = [0.0]
+    monkeypatch.setattr(
+        diagnosis_runtime_module, "time",
+        SimpleNamespace(monotonic=lambda: now[0], perf_counter=time.perf_counter),
+    )
+    runtime._backend_test_limits = BackendExecutionLimits(
+        wall_time_seconds=wall_time,
+        stdout_stderr_bytes=1_000_000,
+        workspace_bytes=1_000_000,
+    )
+    cancellation = InMemoryCancellationSignal()
+    measure_workspace = diagnosis_runtime_module._temporary_workspace_bytes
+    scans = 0
+
+    def count_workspace_bytes(*args: Any, **kwargs: Any) -> int:
+        nonlocal scans
+        scans += 1
+        return measure_workspace(*args, **kwargs)
+
+    monkeypatch.setattr(
+        diagnosis_runtime_module, "_temporary_workspace_bytes", count_workspace_bytes,
+    )
+
+    def stop_between_scans(
+        _session: object,
+        _operation: str,
+        _request_path: str,
+        _result_path: str,
+    ) -> None:
+        now[0] = 0.05
+        if reason is not None:
+            cancellation.cancel(reason)
+        assert factory.open_calls[-1][3].is_cancelled() is True
+
+    factory.preprocessing_executor = stop_between_scans
+
+    receipt = runtime.execute(job, cancellation)
+
+    failure = receipt.job_outcome.error
+    assert failure is not None
+    assert failure.code is expected_code
+    assert scans == 1
+    assert backend.calls == []
+    assert factory.sessions[0].closed is True  # type: ignore[attr-defined]
+
+
+def test_direct_methods_preprocessing_forced_exit_scan_detects_new_overflow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, job, factory, backend, _ = _public_fake_claiming_runtime(
+        tmp_path, "success",
+    )
+    now = [0.0]
+    monkeypatch.setattr(
+        diagnosis_runtime_module, "time",
+        SimpleNamespace(monotonic=lambda: now[0], perf_counter=time.perf_counter),
+    )
+    runtime._backend_test_limits = BackendExecutionLimits(
+        wall_time_seconds=30.0,
+        stdout_stderr_bytes=1_000_000,
+        workspace_bytes=64_000,
+    )
+    complete_preprocessing = factory.preprocessing_executor
+    assert complete_preprocessing is not None
+    measure_workspace = diagnosis_runtime_module._temporary_workspace_bytes
+    scans: list[bool] = []
+
+    def count_workspace_bytes(*args: Any, **kwargs: Any) -> int:
+        scans.append(kwargs["allow_transient_changes"])
+        return measure_workspace(*args, **kwargs)
+
+    monkeypatch.setattr(
+        diagnosis_runtime_module, "_temporary_workspace_bytes", count_workspace_bytes,
+    )
+
+    def finish_with_overflow(
+        session: object,
+        operation: str,
+        request_path: str,
+        result_path: str,
+    ) -> None:
+        complete_preprocessing(session, operation, request_path, result_path)
+        now[0] = 0.05
+        workspace_root = Path(getattr(session, "workspace_root"))
+        (workspace_root / "output/overflow.bin").write_bytes(b"x" * 80_000)
+        assert factory.open_calls[-1][3].is_cancelled() is False
+        assert scans == [False]
+
+    factory.preprocessing_executor = finish_with_overflow
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    failure = receipt.job_outcome.error
+    assert failure is not None
+    assert failure.code is ErrorCode.WORKSPACE_LIMIT
+    assert scans == [False, False]
+    assert backend.calls == []
+    assert factory.sessions[0].closed is True  # type: ignore[attr-defined]
+
+
 def test_direct_methods_preprocessing_hang_obeys_frozen_wall_time_and_closes_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3306,7 +3528,7 @@ def test_direct_methods_preprocessing_hang_obeys_frozen_wall_time_and_closes_ses
     assert failure.stage is ExecutionStage.BACKEND_EXECUTE
     assert failure.code is ErrorCode.BACKEND_TIMEOUT
     assert failure.retryable is True
-    assert workspace_scan_calls >= 2
+    assert workspace_scan_calls == 1
     assert backend.calls == []
     session = factory.sessions[0]
     assert session.closed is True  # type: ignore[attr-defined]
@@ -3370,13 +3592,19 @@ def test_direct_methods_preprocessing_observes_midprocess_user_cancellation(
 
 def test_direct_methods_preprocessing_allows_live_workspace_writes_below_limit(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime, job, factory, backend, _ = _public_fake_claiming_runtime(
         tmp_path,
         "success",
     )
+    now = [0.0]
+    monkeypatch.setattr(
+        diagnosis_runtime_module, "time",
+        SimpleNamespace(monotonic=lambda: now[0], perf_counter=time.perf_counter),
+    )
     runtime._backend_test_limits = BackendExecutionLimits(  # noqa: SLF001
-        wall_time_seconds=1.0,
+        wall_time_seconds=30.0,
         stdout_stderr_bytes=1_000_000,
         workspace_bytes=1_000_000,
         poll_interval_seconds=0.001,
@@ -3384,6 +3612,29 @@ def test_direct_methods_preprocessing_allows_live_workspace_writes_below_limit(
     )
     complete_preprocessing = factory.preprocessing_executor
     assert complete_preprocessing is not None
+    writer_started = threading.Event()
+    writer_active = threading.Event()
+    periodic_scan_started = threading.Event()
+    writer_updated = threading.Event()
+    scan_finished = threading.Event()
+    live_scans: list[tuple[float, bool]] = []
+    measure_workspace = diagnosis_runtime_module._temporary_workspace_bytes
+
+    def scan_while_writer_is_active(*args: Any, **kwargs: Any) -> int:
+        if not kwargs["allow_transient_changes"]:
+            return measure_workspace(*args, **kwargs)
+        assert writer_active.is_set()
+        periodic_scan_started.set()
+        assert writer_updated.wait(1.0)
+        live_scans.append((now[0], kwargs["allow_transient_changes"]))
+        try:
+            return measure_workspace(*args, **kwargs)
+        finally:
+            scan_finished.set()
+
+    monkeypatch.setattr(
+        diagnosis_runtime_module, "_temporary_workspace_bytes", scan_while_writer_is_active,
+    )
 
     def write_while_runtime_scans(
         session: object,
@@ -3395,19 +3646,35 @@ def test_direct_methods_preprocessing_allows_live_workspace_writes_below_limit(
         live_path = workspace_root / "output/live-write.bin"
 
         def writer() -> None:
-            with live_path.open("wb") as handle:
-                for _ in range(40):
+            try:
+                with live_path.open("wb") as handle:
                     handle.write(b"x" * 128)
                     handle.flush()
-                    time.sleep(0.001)
+                    writer_active.set()
+                    writer_started.set()
+                    if not periodic_scan_started.wait(1.0):
+                        return
+                    while not scan_finished.is_set():
+                        handle.write(b"x" * 128)
+                        handle.flush()
+                        writer_updated.set()
+                        scan_finished.wait(0.001)
+            finally:
+                writer_active.clear()
 
         thread = threading.Thread(target=writer)
         thread.start()
-        signal = factory.open_calls[-1][3]
-        while thread.is_alive():
+        try:
+            assert writer_started.wait(1.0)
+            now[0] = 1.0
+            signal = factory.open_calls[-1][3]
             assert signal.is_cancelled() is False
-            signal.wait(0.001)
-        thread.join(timeout=1.0)
+        finally:
+            scan_finished.set()
+            periodic_scan_started.set()
+            thread.join(timeout=1.0)
+        assert thread.is_alive() is False
+        assert live_scans == [(1.0, True)]
         complete_preprocessing(session, operation, request_path, result_path)
         return None
 
@@ -3430,7 +3697,7 @@ def test_direct_methods_preprocessing_workspace_overflow_stops_and_closes_sessio
         "success",
     )
     runtime._backend_test_limits = BackendExecutionLimits(  # noqa: SLF001
-        wall_time_seconds=1.0,
+        wall_time_seconds=3.0,
         stdout_stderr_bytes=1_000_000,
         workspace_bytes=64_000,
         poll_interval_seconds=0.005,

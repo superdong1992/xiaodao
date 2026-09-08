@@ -43,6 +43,9 @@
 
 ## P1：下一轮性能优化与目标机复测
 
+- Specialist marker 索引已实现，但正式 Dev 验证未完成：`run-20260907T143410Z-1b5e8749` 的 affected 535 passed / 24 skipped，60.637 秒超过既有 60 秒门槛，full 未运行；此前同快照为 61.710 秒。继续定位测试运行开销时保留两次 FAIL，不扩大测试选择或放宽门槛来获取 PASS。详细源码身份与 verdict 见 `FIXED_ISSUES.md` 的 PL-FIX-053 本轮元数据。本行是验证后的状态回填，不属于所引用快照。
+- 2026-09-07 用户确认当前慢请求为固定内部模型的单轮 Specialist，无 Reviewer：BACKEND_EXECUTE 677 秒、API 656.1 秒、input/output 43,413/20,281 tokens，thinking 65.4 KB、最终 JSON/text 1.4 KB。优先在该环境对比有无完整 marker 索引的 thinking、API 时长和诊断质量；输出协议压缩不是此例首选。原始日志、部署身份及真实 A/B 尚未取得，不能从本地确定性测试外推分钟级降幅。
+- 2026-09-07 已按 `8b53bc5` / 8.0.0 核对模型、Reviewer、网站会话、附件和 Logparse 路径；当前复现证据与目标机测量口径见 [`docs/performance-v11.md`](docs/performance-v11.md)。待评估项包括 Reviewer 重复上下文与文件工具回合、网站单 INTAKE worker、SSE/空闲扫描重复加载全历史，以及会话附件导入的重复 hash/复制。网站测量须从收到消息开始，Case brief 不覆盖首次 INTAKE。
 - 第一轮保留自动 ROUTE 和 Agent CLI。直接模型 API、常驻 CLI 进程池、Logparse 多 target 批处理分别评估，避免一次改变模型协议、进程生命周期和日志解析合同。
 - 7.0 原生 WSL 单样本已将 ROUTE/Specialist 降为各 1 turn、零文件工具，但 Specialist 约 48 秒，较前次约 18 秒更慢。下一轮对同输入重复采样，区分提示词、推理输出长度、缓存和服务负载；评估模型推理设置时同时检查证据与诊断质量，不仅追求总耗时下降。详见 `docs/performance-v10.md`。
 - 在目标 4 核、8 GB Linux Server 上采集并发 1/2/3 Case 的吞吐、队列 P50/P95/P99、进程树峰值 RSS、磁盘读写量和上传吞吐。默认 ROUTE 1、DIAGNOSE 2、Logparse 1、ZIP 1 只是起点，需要真实负载校准。

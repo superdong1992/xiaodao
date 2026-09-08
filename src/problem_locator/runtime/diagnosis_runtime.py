@@ -478,9 +478,9 @@ class _DirectPreprocessingCancellation:
             except Exception:
                 workspace_failure = _preprocessing_workspace_limit_failure()
             observed = time.monotonic()
-            self._next_workspace_scan = (
-                observed + self._limits.poll_interval_seconds
-            )
+            # Match AgentBackend's scan cadence without delaying cancellation
+            # or wall-time checks on the roughly 50 ms process poll.
+            self._next_workspace_scan = observed + 1.0
             # Match AgentBackend's race precedence: explicit cancellation,
             # then wall time, then Workspace measurement/size.
             if self._source.is_cancelled():
@@ -1347,6 +1347,8 @@ class DiagnosisRuntime:
                 )
                 methods_prompt, inputs_inlined, complete_input_bytes = specialist_prompt(
                     context.body, workspace.root, methods_preprocessing.frozen.target_logs,
+                    skill_load=methods_skill_load,
+                    skill=methods_skill,
                 )
                 record_journey_event("job.inputs.prepared", data={
                     "inputs_inlined": inputs_inlined, "complete_input_bytes": complete_input_bytes,

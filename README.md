@@ -19,9 +19,9 @@
 | Methods package | `SKILL.md` + `methods.json@1` + `references/*.md` |
 | Product registration | `registration-template.json@1` |
 | Methods evaluation protocol | `Methods V1` |
-| ROUTE / DIAGNOSE / REVIEW output contract | `5.0.0` / `10.0.0` / `10.0.0` |
+| ROUTE / DIAGNOSE / REVIEW output contract | `5.0.0` / `11.0.0` / `10.0.0` |
 | GENERIC output contract / profile | `2.0.0` / `2.0.0` |
-| Specialist / Reviewer profile | `7.0.0` / `7.0.0` |
+| Specialist / Reviewer profile | `8.0.0` / `7.0.0` |
 | Router / Diagnose / Review tool bundle | `3.0.0` / `4.0.0` / `3.0.0` |
 
 State、Job 和权威 Outcome 已切换到 V11。升级必须使用全新 `DATA_ROOT`；服务首次启动会写入 `data-format.json` 和 `completed.sqlite3`。V1–V10 旧目录原样保留，不迁移、不删除、不兼容读取；历史报告使用旧版本只读查看或事先导出。活动 Case 只保存在内存，服务退出后不自动恢复；Agent 会话历史独立持久化，重启后未完成会话标记中断，必须由用户明确新建任务。已交付的报告、资源索引和待归档任务继续恢复。
