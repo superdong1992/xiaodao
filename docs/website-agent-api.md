@@ -238,7 +238,7 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `ConversationView` | `created_at` | 会话创建时间。 |
 | `ConversationView` | `updated_at` | 最近一次会话持久更新的时间。 |
 | `AgentEvent` | `schema_version` | 公共事件合同版本，固定为 `1`。 |
-| `AgentEvent` | `sequence` | 会话内递增序号；SSE `id` 与它一致，用于去重和续传。 |
+| `AgentEvent` | `sequence` | 会话内递增序号；用于去重和手动续传，不另发送 SSE `id` 行。 |
 | `AgentEvent` | `conversation_id` | 事件所属会话 UUID。 |
 | `AgentEvent` | `case_id` | 事件关联 Case UUID，创建前为 `null`。 |
 | `AgentEvent` | `job_id` | 事件关联 Job UUID，没有关联时为 `null`。 |
@@ -255,6 +255,8 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 
 ## 3. 实时事件、历史和状态显示
 
+响应是 UTF-8 `text/event-stream`，每个业务事件只发送一行 `data: <AgentEvent JSON>`，后接一个空行（`\n\n`）。JSON 内的换行会转义，不能把网络分块当作事件边界。浏览器统一用 `onmessage` 接收，再按 JSON 的 `type` 分发；不需要注册命名事件。
+
 ```bash
 curl --no-buffer --fail-with-body \
   --header 'Accept: text/event-stream' \
@@ -265,21 +267,19 @@ curl --no-buffer --fail-with-body \
 省略 `Last-Event-ID` 或传 `0` 时回放全部历史；传 `12` 只回放序号大于 12 的事件，然后持续订阅。游标必须是非负规范十进制整数，不接受重复头、负数、小数、前导零或超出已有历史的值。
 
 ```text
-retry: 2000
+: connected
 
-id: 13
-event: agent.progress
 data: {"schema_version":1,"sequence":13,"conversation_id":"10000000-0000-0000-0000-000000000001","case_id":null,"job_id":null,"type":"agent.progress","created_at":"2026-09-07T08:00:01.000Z","data":{"stage":"INTAKE","message":"正在整理问题"}}
 
-id: 14
-event: assistant.question
 data: {"schema_version":1,"sequence":14,"conversation_id":"10000000-0000-0000-0000-000000000001","case_id":null,"job_id":null,"type":"assistant.question","created_at":"2026-09-07T08:00:02.000Z","data":{"questions":["问题发生在哪个时间段？正常情况下预期是什么？"]}}
 
 : heartbeat
 
 ```
 
-所有业务事件都有同一外层字段，`sequence` 在会话内单调递增。`id`、`event` 分别等于 JSON 中的 `sequence`、`type`。心跳是注释，不是业务事件，不更新游标。服务端每 15 秒发送一次空闲心跳；网站代理需关闭响应缓冲、保持流式转发，并将读取超时设为大于心跳间隔，例如 60 秒。
+所有业务事件都有同一外层字段，`sequence` 在会话内单调递增。不发送 `id:`、`event:`、`retry:` 行，也不发送 `[DONE]`；结束标志是 JSON 中的 `type=conversation.completed`。这是基础 SSE 传输，不是 OpenAI `choices` / `delta` 响应合同。
+
+连接建立后立即发送 `: connected` 注释，服务端每 15 秒发送一次空闲 `: heartbeat` 注释。注释不触发 `onmessage`，不是业务事件，也不更新游标。网站代理需关闭响应缓冲、保持流式转发，并将读取超时设为大于心跳间隔，例如 60 秒。
 
 | 事件类型 | `data` 内容与网站行为 |
 | --- | --- |
@@ -310,7 +310,7 @@ data: {"schema_version":1,"sequence":14,"conversation_id":"10000000-0000-0000-00
 
 `GET conversation` 的 `data` 含 `schema_version`、`conversation_id`、`status`、`case_id`、`job_id`、`case_status`、`archive_status`、`current_questions`、`messages`、`attachments`、`last_event_id`、`created_at`、`updated_at`。快照和 SSE 可能重叠；按消息 ID 更新消息，按事件序号去重。
 
-网页可用 `EventSource` 订阅网站自己的同源 SSE 路由。它会在短暂断线时自动携带 `Last-Event-ID`；刷新后的新连接会从历史开始回放，因此显示层必须去重。需要从本地保存游标直接续传时，使用流式 `fetch` 设置该请求头。
+网页可用 `EventSource` 订阅网站自己的同源 SSE 路由。由于响应没有 `id:` 行，它不会记录业务游标；短暂断线自动重连或刷新后的新连接都会从历史开始回放，显示层必须按 JSON 的 `sequence` 去重。需要精准续传时，使用流式 `fetch`，手动把最后处理成功的序号放入 `Last-Event-ID` 请求头。
 
 ```javascript
 const events = new EventSource(`/api/agent/conversations/${conversationId}/events`);
@@ -327,37 +327,35 @@ const fail = (error) => {
 const types = ["message.accepted", "message.updated", "assistant.question", "agent.progress",
   "case.updated", "result.available", "archive.updated", "attachment.updated",
   "agent.failed", "conversation.interrupted", "conversation.completed"];
-for (const type of types) {
-  events.addEventListener(type, (message) => {
+events.onmessage = (message) => {
+  if (stopped) return;
+  if (pending >= 128) { fail(new Error("页面处理较慢，请重新连接并回放历史。")); return; }
+  pending += 1;
+  queue = queue.then(async () => {
     if (stopped) return;
-    if (pending >= 128) { fail(new Error("页面处理较慢，请重新连接并回放历史。")); return; }
-    pending += 1;
-    queue = queue.then(async () => {
+    const event = JSON.parse(message.data);
+    if (event.schema_version !== 1 || event.conversation_id !== conversationId ||
+        !types.includes(event.type) || !Number.isSafeInteger(event.sequence) || event.sequence < 1)
+      throw new Error("事件格式不符合约定。");
+    if (event.sequence <= lastSequence) return;
+    await renderEventAsText(event); // 网站组件：按 ID 更新，文本不得作为 HTML 执行。
+    if (event.type === "result.available") {
+      const response = await fetch(`/api/agent/conversations/${conversationId}/report`);
+      const result = await response.json();
+      if (!response.ok || !result.ok) throw new Error("报告暂未加载成功，请重试。");
       if (stopped) return;
-      const event = JSON.parse(message.data);
-      if (event.schema_version !== 1 || event.conversation_id !== conversationId ||
-          event.type !== type || !Number.isSafeInteger(event.sequence) || event.sequence < 1 ||
-          String(event.sequence) !== message.lastEventId) throw new Error("事件格式不符合约定。");
-      if (event.sequence <= lastSequence) return;
-      await renderEventAsText(event); // 网站组件：按 ID 更新，文本不得作为 HTML 执行。
-      if (type === "result.available") {
-        const response = await fetch(`/api/agent/conversations/${conversationId}/report`);
-        const result = await response.json();
-        if (!response.ok || !result.ok) throw new Error("报告暂未加载成功，请重试。");
-        if (stopped) return;
-        await renderVerifiedReport(result.data);
-      }
-      if (stopped) return;
-      lastSequence = event.sequence; // 所有业务处理成功后才能推进游标。
-      if (type === "conversation.completed") closeAgentEvents();
-    }).catch(fail).finally(() => { pending -= 1; });
-  });
-}
+      await renderVerifiedReport(result.data);
+    }
+    if (stopped) return;
+    lastSequence = event.sequence; // 所有业务处理成功后才能推进游标。
+    if (event.type === "conversation.completed") closeAgentEvents();
+  }).catch(fail).finally(() => { pending -= 1; });
+};
 ```
 
 上面的 `renderEventAsText`、`renderVerifiedReport`、`showEventRetry` 由网站组件实现；渲染须幂等，失败要抛错。组件销毁时调用 `closeAgentEvents()`，只断开订阅，不取消诊断。服务器和示例均限制待处理事件数量，慢连接不会无限积压。
 
-临时网络断线可由 `EventSource` 自动重连，但它自带的游标表示“已经收到”，不表示网站业务已处理。报告加载、解析或显示失败时，本例关闭连接并显示重试入口，不处理排队中的完成事件；点击重试需重新执行订阅初始化，从历史回放，页面按 ID 更新已有内容。不要复用已经提前推进的浏览器内部游标。需要持久续传时，用流式 `fetch` 携带最后处理成功的 `Last-Event-ID`。刷新恢复还应根据会话快照重新获取已经发布的报告，不能只恢复进度文字。
+临时网络断线可由 `EventSource` 自动重连，但这里不会自动携带业务 `Last-Event-ID`，重连会回放历史，本例按 `lastSequence` 跳过已经处理成功的事件。报告加载、解析或显示失败时，本例关闭连接并显示重试入口，不处理排队中的完成事件；点击重试需重新执行订阅初始化，从历史回放，页面按 ID 更新已有内容。需要持久精准续传时，用流式 `fetch` 携带最后处理成功的 `Last-Event-ID`；按空行拆帧并忽略以冒号开头的注释，不按读取到的网络块直接 `JSON.parse`。刷新恢复还应根据会话快照重新获取已经发布的报告，不能只恢复进度文字。
 
 ## 4. 正式报告与下载校验
 
@@ -413,6 +411,8 @@ node --test examples/website-agent/server.test.mjs
 测试覆盖未登录、无权会话、无权上传、无权下载、跨用户幂等命名空间、SSE 游标与心跳、报告字段、来源 Job/URL/hash 不匹配、ZIP 主动下载确认。实际部署还应检查网站反向代理没有缓冲 SSE，且只允许网站后端连接 xiaodao。
 
 ## 6. 服务配置与升级
+
+本次调整的是现有 `8.0.0` 预览版的 SSE 传输格式，持久会话与事件仍为 `schema_version=1`，V11 数据合同不变。已按旧版 `event:` 注册命名监听器的网站须改用 `onmessage`，从 JSON 读取 `type` 和 `sequence`，不再依赖 `lastEventId` 或服务端 `retry:`。更新部署时核对实际响应字节和对应源码版本，不能只看 `info.version=8.0.0`。此传输调整本身不要求重建已经使用的 V11 数据根。
 
 `INTAKE_CLAUDE_COMMAND` 配置独立问题整理角色；缺省沿用路由角色命令。该角色只整理用户消息和公开 requirements，不获得诊断工具、日志读取或发布结果权限。`SPECIALIZED_REVIEWER_ENABLED` 延续现有配置：关闭时通过服务端验证的 Candidate 可直接交付；开启时只在 Review PASS 后公开正式报告。
 

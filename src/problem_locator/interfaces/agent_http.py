@@ -146,14 +146,17 @@ async def _events(
     heartbeat_at = loop.time() + _HEARTBEAT_SECONDS
     batch = first
     try:
-        yield b"retry: 2000\n\n"
+        # Flush an initial comment even before any business event exists.
+        # This lets fetch/EventSource establish the stream before a message POST.
+        yield b": connected\n\n"
         while True:
             for event in batch.events:
-                payload = canonical_json_bytes(event.model_dump(mode="json"))
-                yield (
-                    f"id: {event.sequence}\nevent: {event.type}\ndata: ".encode("ascii")
-                    + payload + b"\n\n"
-                )
+                # The canonical serializer includes a file terminator. Remove
+                # only that LF so every SSE business frame has exactly one
+                # data line and one empty delimiter line. User newlines stay
+                # JSON-escaped; sequence/type remain in the unchanged payload.
+                payload = canonical_json_bytes(event.model_dump(mode="json")).removesuffix(b"\n")
+                yield b"data: " + payload + b"\n\n"
                 cursor = event.sequence
                 heartbeat_at = loop.time() + _HEARTBEAT_SECONDS
             if batch.stream_closed and len(batch.events) < _EVENT_BATCH_SIZE:
@@ -265,8 +268,12 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
             "model": AgentEvent,
             "content": {"text/event-stream": {"schema": {"type": "object"}}},
             "description": (
-                "SSE 帧的 data 是 AgentEvent JSON，id 等于 sequence；首次连接回放历史。"
-                "每 15 秒发送注释心跳。会话终态且归档已收口后关闭；断线不停止后台任务。"
+                "每条业务消息仅发送一行 data: AgentEvent JSON，并以空行结束；"
+                "不发送 event、id 或 retry 字段，前端使用 onmessage，按 JSON type 分派。"
+                "sequence 保留在 JSON 中；精确续传需显式传 Last-Event-ID，"
+                "原生 EventSource 自动重连会回放历史，前端须去重。"
+                "首次发送 connected 注释，每 15 秒发送注释心跳。"
+                "会话终态且归档已收口后关闭；断线不停止后台任务。"
             ),
         }},
         openapi_extra={"parameters": [{

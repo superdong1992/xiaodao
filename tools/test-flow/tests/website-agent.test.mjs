@@ -7,9 +7,9 @@ import { runWebsiteStep, parseSseFrame, validateWebsiteEvidence, websiteUserDesc
 const conversationId = "conversation-1", caseId = "case-1";
 const driver = { problem: { statement: "订单超时", expected_behavior: "正常响应", actual_behavior: "等待超时", scope: "一个订单" }, initial_user_fact_names: ["order_id"], initial_user_fact_values: ["ORDER-123"] };
 const event = (sequence, type, data = {}, withCase = false) => ({ schema_version: 1, sequence, conversation_id: conversationId, case_id: withCase ? caseId : null, job_id: null, type, created_at: "2026-09-07T00:00:00Z", data });
-const frame = (value) => `id: ${value.sequence}\nevent: ${value.type}\ndata: ${JSON.stringify(value)}\n\n`;
+const frame = (value) => `data: ${JSON.stringify(value)}\n\n`;
 const json = (data) => Response.json({ ok: true, data, error: null }, { headers: { "x-problem-locator-correlation-id": "test-correlation" } });
-const sse = (events) => new Response(": heartbeat\n\n" + events.map(frame).join(""), { headers: { "Content-Type": "text/event-stream" } });
+const sse = (events) => new Response(": connected\n\n: heartbeat\n\n" + events.map(frame).join(""), { headers: { "Content-Type": "text/event-stream" } });
 
 async function route() {
   const calls = []; let streams = 0;
@@ -49,10 +49,56 @@ test("website input does not invent domain facts or send server structured goals
   assert.doesNotMatch(text, /problem_spec|completion_criteria|safety_constraints/);
 });
 
+test("SSE parser accepts one data-only business line and ignores connection comments", () => {
+  const value = event(1, "agent.progress", { message: "正在核对证据\n请稍候" });
+  assert.deepEqual(parseSseFrame(`data: ${JSON.stringify(value)}`, conversationId, 0), value);
+  assert.equal(parseSseFrame(": connected", conversationId, 0), null);
+  assert.equal(parseSseFrame(": heartbeat", conversationId, 0), null);
+});
+
+test("SSE parser rejects named fields, retry fields, multiple data lines and unframed content", () => {
+  const value = event(1, "agent.progress", { message: "正在核对证据" });
+  const data = `data: ${JSON.stringify(value)}`;
+  for (const invalid of [
+    `id: 1\nevent: agent.progress\n${data}`,
+    `id: 1\n${data}`,
+    `event: agent.progress\n${data}`,
+    `retry: 2000\n${data}`,
+    `${data}\n${data}`,
+    `data: {\ndata: "sequence":1}`,
+    `${data}\n: heartbeat`,
+    "retry: 2000",
+    JSON.stringify(value),
+  ]) assert.throws(() => parseSseFrame(invalid, conversationId, 0), /FRAME_FORMAT/);
+});
+
+test("website stream handles UTF-8, escaped newlines and frame separators split across network chunks", async () => {
+  const expected = [event(1, "agent.progress", { message: "正在解析日志\n请稍候" }),
+    event(2, "attachment.updated", { status: "READY", name: "中文日志.zip" }, true)];
+  const wire = ": connected\n\n: heartbeat\n\n" + expected.map(frame).join("");
+  const bytes = new TextEncoder().encode(wire);
+  let offset = 0;
+  const body = new ReadableStream({ pull(controller) {
+    if (offset === bytes.length) controller.close();
+    else controller.enqueue(bytes.slice(offset, ++offset));
+  } });
+  const evidence = await runWebsiteStep({ phase: "upload", public_base_url: "http://localhost", conversation_id: conversationId, case_id: caseId, cursor: 0 }, async (url, options) => {
+    if (url.endsWith("/events")) {
+      assert.equal(options.headers["Last-Event-ID"], "0");
+      return new Response(body, { headers: { "Content-Type": "text/event-stream; charset=utf-8" } });
+    }
+    return json({ conversation_id: conversationId, case_id: caseId, status: "RUNNING" });
+  });
+  assert.deepEqual(evidence.events, expected);
+  assert.equal(evidence.records[0].raw_sse, wire);
+  assert.equal(validateWebsiteEvidence(evidence), true);
+});
+
 test("SSE parser rejects a gap, wrong conversation, internal fields and execution failures", () => {
   assert.equal(parseSseFrame(": heartbeat", conversationId, 0), null);
   assert.throws(() => parseSseFrame(frame(event(2, "message.accepted")), conversationId, 0), /SEQUENCE/);
   assert.throws(() => parseSseFrame(frame(event(1, "message.accepted")), "other", 0), /SEQUENCE/);
+  assert.throws(() => parseSseFrame(frame(event(1, null)), conversationId, 0), /SEQUENCE/);
   assert.throws(() => parseSseFrame(frame({ ...event(1, "message.accepted"), storage_path: "/private" }), conversationId, 0), /FIELDS/);
   assert.throws(() => parseSseFrame(frame(event(1, "agent.failed")), conversationId, 0), /AGENT_FAILED/);
   assert.throws(() => parseSseFrame(frame(event(1, "agent.progress", { message: "internal-only" })), conversationId, 0), /CHINESE/);

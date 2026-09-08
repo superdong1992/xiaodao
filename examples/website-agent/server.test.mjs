@@ -124,13 +124,15 @@ test("creation scopes idempotency to authenticated user and persists ownership",
   assert.deepEqual(stored, [["alice", conversation], ["alice", conversation]]);
 });
 
-test("SSE forwards Last-Event-ID and heartbeat with no buffering", async () => {
-  const text = ': heartbeat\n\nid: 2\nevent: agent.progress\ndata: {"sequence":2}\n\n';
+test("SSE transparently forwards data-only frames, Last-Event-ID and connection comments", async () => {
+  const text = ': connected\n\n: heartbeat\n\ndata: {"sequence":2,"type":"agent.progress","data":{"message":"正在核对证据\\n请稍候"}}\n\n';
   await withServer({ access, fetchImpl: async (_url, init) => {
     assert.equal(init.headers.get("Last-Event-ID"), "1");
     return new Response(text, { headers: { "Content-Type": "text/event-stream" } });
   }}, async (origin) => {
     const response = await fetch(origin + conversationPath + "/events", { headers: { "Last-Event-ID": "1" } });
+    assert.equal(response.headers.get("Content-Type"), "text/event-stream; charset=utf-8");
+    assert.equal(response.headers.get("Cache-Control"), "no-cache, no-transform");
     assert.equal(response.headers.get("X-Accel-Buffering"), "no");
     assert.equal(await response.text(), text);
   });

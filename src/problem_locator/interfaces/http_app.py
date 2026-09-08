@@ -624,7 +624,7 @@ _SUCCESS_RESPONSE_DESCRIPTIONS = {
     "create_agent_conversation": "会话已持久创建；相同 request_id 返回同一回执。",
     "send_agent_message": "消息及接收事件已原子持久化；后续整理与定位异步执行。",
     "get_agent_conversation": "返回会话历史、追问、附件状态和最新事件游标。",
-    "subscribe_agent_events": "SSE 帧 data 为 AgentEvent JSON，id 等于 sequence；按 Last-Event-ID 回放后持续订阅，每 15 秒发送注释心跳。断线不会停止任务。",
+    "subscribe_agent_events": "基础 SSE：每条业务帧只有一行 data: AgentEvent JSON 和一个空行，不发送 event/id/retry。前端用 onmessage 接收，按 JSON type 分派、sequence 去重；精准续传需显式设置 Last-Event-ID，原生 EventSource 自动重连会回放历史。首次发送 connected 注释，每 15 秒发送注释心跳；断线不停止任务。",
     "prepare_agent_attachment": "返回稳定的会话附件预约、上传地址和必需请求头。",
     "upload_agent_attachment": "原始字节的大小与 SHA-256 已验证，附件可供消息引用。",
     "get_liveness": "The process is live.",

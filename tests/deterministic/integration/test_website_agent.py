@@ -145,9 +145,13 @@ def test_raw_conversation_preupload_sse_and_final_report(website, review):
     assert service.get_conversation(conversation).status == "COMPLETED"
     response = client.get(prefix + "/events", headers={"Last-Event-ID": str(result.sequence)})
     assert response.status_code == 200
-    assert "event: archive.updated" in response.text and '"status":"READY"' in response.text
-    assert "event: conversation.completed" in response.text
-    assert "event: result.available" not in response.text
+    frames = response.content.split(b"\n\n")
+    assert frames[0] == b": connected" and frames[-1] == b""
+    assert all(frame.startswith(b"data: ") and b"\n" not in frame for frame in frames[1:-1])
+    streamed = [json.loads(frame[6:]) for frame in frames[1:-1]]
+    assert any(item["type"] == "archive.updated" and item["data"]["status"] == "READY" for item in streamed)
+    assert streamed[-1]["type"] == "conversation.completed"
+    assert all(item["sequence"] > result.sequence and item["type"] != "result.available" for item in streamed)
     assert len(engine.calls) == 3
 
 
@@ -204,7 +208,7 @@ def test_non_pass_review_publishes_only_inconclusive_report_and_audit(website, m
     assert len(reports) == 1 and reports[0].data["result_field"] == "unresolved_result"
     assert all(item["kind"] != "USER_RESULT_ARCHIVE" for event in events for item in event.data.get("artifacts", []))
     response = client.get(prefix + "/events")
-    assert response.status_code == 200 and "event: conversation.completed" in response.text
+    assert response.status_code == 200 and '"type":"conversation.completed"' in response.text
 
 
 def test_invalid_upload_can_retry_without_adopting_different_bytes(website):

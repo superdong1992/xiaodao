@@ -197,11 +197,64 @@ def test_sse_replays_bounded_batches_and_resumes_without_duplicate():
     assert response.headers["content-type"].startswith("text/event-stream")
     assert response.headers["x-accel-buffering"] == "no"
     assert "no-transform" in response.headers["cache-control"]
-    ids = [int(line[4:]) for line in response.text.splitlines() if line.startswith("id: ")]
-    assert ids == list(range(2, 203))
     frames = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+    assert [frame["sequence"] for frame in frames] == list(range(2, 203))
     assert all(frame["conversation_id"] == CONVERSATION for frame in frames)
     assert [call[1][2] for call in fake.calls] == [20] * 11
+
+
+def test_sse_business_frames_are_single_line_data_for_default_message_handlers():
+    response = run_request(FakeAgent([event(1), event(2)]), "GET", VIEW + "/events")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "text/event-stream; charset=utf-8"
+    assert "content-length" not in response.headers
+    assert response.content.startswith(b": connected\n\n")
+    frames = response.content.split(b"\n\n")
+    assert frames.pop() == b""
+    assert frames.pop(0) == b": connected"
+    assert len(frames) == 2
+    for sequence, frame in enumerate(frames, 1):
+        assert frame.startswith(b"data: ")
+        assert b"\n" not in frame and b"\r" not in frame
+        assert json.loads(frame.removeprefix(b"data: ")) == event(sequence).model_dump(mode="json")
+    assert not any(line.startswith((b"event:", b"id:", b"retry:")) for line in response.content.splitlines())
+
+
+def test_sse_establishes_empty_live_stream_before_waiting_for_events(monkeypatch):
+    monkeypatch.setattr(agent_http, "_EVENT_POLL_SECONDS", 3600)
+
+    async def scenario():
+        fake = FakeAgent()
+        fake.closed = False
+        disconnected = asyncio.Event()
+        sent = []
+        request_received = False
+
+        async def receive():
+            nonlocal request_received
+            if not request_received:
+                request_received = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await disconnected.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+            if message["type"] == "http.response.body" and message.get("body"):
+                disconnected.set()
+
+        scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.0"},
+                 "http_version": "1.1", "method": "GET", "scheme": "http",
+                 "path": VIEW + "/events", "raw_path": (VIEW + "/events").encode(),
+                 "root_path": "", "query_string": b"", "headers": [],
+                 "client": ("127.0.0.1", 12345), "server": ("127.0.0.1", 8000)}
+        await asyncio.wait_for(app_for(fake)(scope, receive, send), timeout=2)
+        assert sent[0]["type"] == "http.response.start" and sent[0]["status"] == 200
+        assert dict(sent[0]["headers"])[b"content-type"] == b"text/event-stream; charset=utf-8"
+        assert sent[1]["body"] == b": connected\n\n" and sent[1]["more_body"] is True
+        assert len(fake.calls) == 1
+
+    asyncio.run(scenario())
 
 
 def test_largest_valid_escaped_message_remains_replayable():
@@ -213,7 +266,26 @@ def test_largest_valid_escaped_message_remains_replayable():
     )
     response = run_request(FakeAgent([accepted]), "GET", VIEW + "/events")
     assert response.status_code == 200
-    assert "id: 1" in response.text
+    frames = [line for line in response.content.splitlines() if line.startswith(b"data: ")]
+    assert len(frames) == 1
+    assert json.loads(frames[0][6:]) == accepted.model_dump(mode="json")
+
+
+def test_sse_escapes_user_line_breaks_without_injecting_frames():
+    original_text = "中文🙂\r\ndata: fake\n\nevent: result.available\n\"quoted\""
+    accepted = AgentEvent(
+        sequence=1, conversation_id=CONVERSATION, type="message.accepted", created_at=WHEN,
+        data={"message_id": ATTACHMENT, "request_id": "line-breaks",
+              "text": original_text, "attachment_ids": [], "status": "QUEUED",
+              "created_at": WHEN, "notice": None},
+    )
+    response = run_request(FakeAgent([accepted]), "GET", VIEW + "/events")
+    assert response.status_code == 200
+    frames = response.content.split(b"\n\n")
+    assert len(frames) == 3 and frames[-1] == b""
+    assert frames[0] == b": connected"
+    assert b"\n" not in frames[1] and b"\r" not in frames[1]
+    assert json.loads(frames[1][6:])["data"]["text"] == original_text
 
 
 def test_sse_out_of_range_cursor_returns_json_before_headers():
@@ -243,7 +315,7 @@ def test_sse_heartbeat_and_live_archive_completion(monkeypatch):
     monkeypatch.setattr(agent_http, "_EVENT_POLL_SECONDS", 0.002)
     response = run_request(fake, "GET", VIEW + "/events")
     assert ": heartbeat" in response.text
-    assert "event: archive.updated" in response.text
+    assert '"type":"archive.updated"' in response.text
 
 
 def test_sse_disconnect_stops_reader_without_cancelling_work():
@@ -254,7 +326,7 @@ def test_sse_disconnect_stops_reader_without_cancelling_work():
         fake = FakeAgent()
         iterator = agent_http._events(Disconnected(), fake, CONVERSATION, 0,
             agent_http.AgentEventBatch(events=[], stream_closed=False))
-        assert await anext(iterator) == b"retry: 2000\n\n"
+        assert await anext(iterator) == b": connected\n\n"
         with pytest.raises(StopAsyncIteration):
             await anext(iterator)
         assert not fake.calls
@@ -271,7 +343,8 @@ def test_slow_sse_consumer_does_not_prefetch_more_durable_batches():
             agent_http.AgentEventBatch(events=fake.events[:20], stream_closed=False))
         await anext(iterator)
         first = await anext(iterator)
-        assert b"id: 1\n" in first
+        assert first.startswith(b"data: ")
+        assert json.loads(first[6:])["sequence"] == 1
         assert not fake.calls
         await iterator.aclose()
         assert not fake.calls

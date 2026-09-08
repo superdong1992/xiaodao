@@ -1,6 +1,6 @@
 # 已修复问题台账
 
-更新时间：2026-09-07
+更新时间：2026-09-08
 
 本文件记录已经在当前工作区验证、修复并由专项回归测试保护的问题。活跃待办仍只写入
 [`TODO.md`](TODO.md)；同一问题再次回归时更新原条目，不另建一个缺少历史关联的条目。
@@ -16,9 +16,13 @@
 - **发布边界**：网站后端必须实现登录、会话归属、订阅及下载权限，示例默认拒绝未接入的身份回调。Linux 是唯一 Server 平台；当前环境 Docker daemon 未启动，不能把零模型 Dev 或计划输出当作真实 Release 证明。
 - **网站指导补充（2026-09-07，8.0 预览版）**：当前 API 参考缺少部署后快速入口；原 EventSource 示例提前推进游标，且异步回调不串行，已用暂挂报告下载再送入完成事件的最小复现确认。补充版本/就绪检查、前后端职责、Linux 示例启动与联调验收；文档事件消费者改为有界串行处理，成功后推进游标，报告失败关闭并提示从历史重放，不让完成事件掩盖失败。此项不改变服务 API。
 - **网站指导专项回归**：`tools/test-flow/tests/website-agent-guide.test.mjs` 直接执行文档 SSE 示例，覆盖报告下载未完成时的游标与终态顺序、失败后不推进、重复事件去重和有界队列；同时核对快速指南入口、服务路径、版本、鉴权回调与源码合同。文档链接由 `docs-drift.test.mjs` 校验，逐字段 API 参考由 `rest-api-guide.test.mjs` 校验。
+- **基础 SSE 适配（2026-09-08，8.0 预览版 / `8b53bc5`）**：用户明确要求用于前端 AI 流式展示的单行 data 帧。修改前已用实际 HTTP 专项确认旧响应含 `retry:`、`id:`、`event:`，CrossJob 专项也确认旧解析器拒绝 data-only 帧。旧格式本身符合 SSE 标准，但命名事件不触发前端默认 `onmessage`，不符合本次接入要求。业务输出改为且仅为 `data: <单行 AgentEvent JSON>\n\n`；首次连接及保活使用注释，不新增业务事件或伪造模型 token。去掉序列化文件尾 LF，严格保留一个空行分隔符，用户换行在 JSON 内转义。持久 V11、AgentEvent v1、JSON 的 type/sequence、正式报告发布边界不变。
+- **基础 SSE 不可回归行为与专项**：无 event/id/retry 字段，无裸 JSON、伪造 `[DONE]` 或提前公开 Candidate；空历史立即建立流，断线不取消工作；显式 `Last-Event-ID` 精确回放，原生 EventSource 全量重放按 JSON sequence 去重，不再依赖浏览器 lastEventId。`test_agent_http.py::test_sse_business_frames_are_single_line_data_for_default_message_handlers`、`test_sse_establishes_empty_live_stream_before_waiting_for_events`、`test_sse_escapes_user_line_breaks_without_injecting_frames` 直接验证 HTTP 字节与首帧；`test_website_agent.py` 覆盖审核及归档后续事件；`website-agent.test.mjs` 验证 data-only 严格解析及逐字节 UTF-8 分片；网站后端与文档 VM 专项验证默认 message 消费、续传、转发和报告失败恢复。验证状态以本条后续基础 SSE verdict 元数据为准，不以旧 verdict 覆盖本次字节。
 - **最新 Test Flow verdict（8.0）**：Dev [run-20260907T071932Z-978e8711](.tmp/test-flow-evidence/run-20260907T071932Z-978e8711/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:94db9e4d48988e2c210d1d5fd4ae6e8d71c6907bef2adbdc1d273994982ea5d8`（787 files）；合同 576、单元 2,042、集成 61、SameJob 5 项通过，68 项平台跳过；Core 32 项、网站示例 12 项通过。此行是验证完成后的元数据回填，不属于所引用快照；未宣称真实 Release 通过。
 
 - **最新 Test Flow verdict（8.0 网站指导补充）**：Dev [run-20260907T085350Z-d3b1a48d](.tmp/test-flow-evidence/run-20260907T085350Z-d3b1a48d/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:33f493b793bf9526c0b01993303f29b2159d0342ab23d00b8b082b290507f3e4`（789 files）；verdict digest `d9f1b386df7f7ba2105db6a1dd2ad158cfd98496b0d0516a6de1b5468b04a0d6`。网站指导专项 20 项纳入 framework.node-tests 的 400 PASS / 30 项平台跳过；完整确定性合同 576、单元 2,042、集成 61、SameJob 5 项通过，68 项平台跳过，网站后端示例 12 项通过。零真实模型调用，未访问公司内网，不代表部署环境或真实 Release 已通过。此行是验证完成后的元数据回填，不属于所引用快照。
+
+- **最新 Test Flow verdict（基础 SSE 适配）**：Dev [run-20260908T014701Z-4c6fe7f0](.tmp/test-flow-evidence/run-20260908T014701Z-4c6fe7f0/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。基线 `74fe8df3d55f925465ad5b0602cb6245381f3f28`，源码快照 `git-visible-worktree-v1:70fce2c8d0e504ba369159f259c2cf48be32155fafafc3bbd529ef1dfd5d670a`（790 files）；verdict digest `5b1d5dd2ad10aa3775eda40637dfe7da468096fef5ca86e047829ab8936db3aa`。框架 409 PASS / 30 项平台跳过，完整确定性合同 576、单元 2,074、集成 61、SameJob 5 项通过，68 项平台跳过；Core 32、网站后端示例 12 项通过。零真实模型调用，未访问公司内网，不代表真实 Release 或部署环境通过。此行是验证完成后的元数据回填，不属于所引用快照。
 
 ## PL-FIX-056：活动状态更新复制全库并反复读取历史资源
 

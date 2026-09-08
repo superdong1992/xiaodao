@@ -15,13 +15,13 @@ export function websiteUserDescription(driver) {
 }
 
 export function parseSseFrame(frame, conversationId, after) {
-  const lines = frame.split(/\r?\n/);
-  if (!lines.some((line) => line.startsWith("data:"))) return null;
-  const one = (prefix) => { const found = lines.filter((line) => line.startsWith(prefix)); check(found.length === 1, "WEBSITE_SSE_FIELD_CARDINALITY"); return found[0].slice(prefix.length).trimStart(); };
-  const event = JSON.parse(one("data:"));
+  const lines = frame.replace(/\r?\n\r?\n$/, "").split(/\r?\n/);
+  if ((lines.length === 1 && lines[0] === "") || lines.every((line) => line.startsWith(":"))) return null;
+  check(lines.length === 1 && lines[0].startsWith("data: "), "WEBSITE_SSE_FRAME_FORMAT");
+  const event = JSON.parse(lines[0].slice("data: ".length));
   check(JSON.stringify(Object.keys(event).sort()) === JSON.stringify(EVENT_FIELDS), "WEBSITE_SSE_FIELDS");
   check(event.schema_version === 1 && event.conversation_id === conversationId && event.sequence === after + 1
-    && one("id:") === String(event.sequence) && one("event:") === event.type, "WEBSITE_SSE_SEQUENCE");
+    && typeof event.type === "string", "WEBSITE_SSE_SEQUENCE");
   check(event.type !== "agent.failed" && event.type !== "conversation.interrupted", "WEBSITE_AGENT_FAILED");
   if (event.type === "agent.progress") check(typeof event.data.message === "string" && /[\u3400-\u9fff]/u.test(event.data.message), "WEBSITE_PROGRESS_CHINESE");
   return event;

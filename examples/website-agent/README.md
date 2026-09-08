@@ -52,6 +52,12 @@ node examples/website-agent/server.ts
 
 `/report` 自动获取并校验 JSON 或 Generic Markdown；ZIP 只在用户主动确认后下载。所有产物均先落入唯一临时文件，验证 Content-Length、真实字节数和 SHA-256 后才转发，结束后清理。测试使用假上游，不调用真实模型。
 
+SSE 原样转发基础单行帧：每条业务消息是 `data: <完整 AgentEvent JSON>` 加空行，不包含 `id:`、`event:`、`retry:` 行。前端只需 `onmessage`，从 JSON 的 `type` 分发，从 `sequence` 去重。连接和心跳注释不会触发业务消息；结束使用 `conversation.completed`，没有 `[DONE]` 或 OpenAI `choices` / `delta` 包装。进度仍是已公开的阶段消息和追问，不转发模型内部推理或未审核报告。
+
+原生 `EventSource` 不会从 data-only 响应记录业务游标，自动重连会重放历史。需要精准续传时，前端用流式 `fetch` 手动设置最后处理成功的 `Last-Event-ID`，网站后端将此请求头转发给上游。事件应串行处理，报告下载、校验和展示成功后才推进游标；完整有界队列和失败重试示例见 [API 参考](../../docs/website-agent-api.md)。
+
+已接入早期 `8.0.0` 预览版的网站需要把命名事件监听改成 `onmessage`，不再读取 `lastEventId`。此次只调整传输格式，`schema_version=1` 和 V11 持久合同不变，不要求重建现有 V11 数据根。
+
 ## 4. 本地自检与环境联调分开
 
 从仓库根运行示例自检，不访问已部署服务，不调用模型：

@@ -65,7 +65,7 @@ Content-Type: application/json
 | 步骤 | 网站调用与展示 | 成功标志 |
 | --- | --- | --- |
 | 创建会话 | `POST /api/v1/agent/conversations`，保存用户归属 | 拿到 `conversation_id` |
-| 订阅进度 | `GET /api/v1/agent/conversations/{conversation_id}/events` | 可收到事件；空闲每 15 秒有注释心跳 |
+| 订阅进度 | `GET /api/v1/agent/conversations/{conversation_id}/events` | `text/event-stream`；每条业务消息为一行 `data: <JSON>` 加空行，`onmessage` 可直接接收；空闲每 15 秒有注释心跳 |
 | 发送原话 | `POST /api/v1/agent/conversations/{conversation_id}/messages` | 立即收到 `ACCEPTED` 回执；后续显示“正在整理问题” |
 | 回答追问 | 按原文展示 `assistant.question`，仍调用同一消息接口回答 | 用户事实不足就继续追问，不要求网站生成诊断字段 |
 | 补充日志 | 预约附件 → 按描述符 PUT 原始字节 → 发消息引用 `attachment_ids` | 上传为 `READY`；消息是否被采用另看 `APPLIED` / `notice` |
@@ -77,7 +77,9 @@ Content-Type: application/json
 
 “实时输出”是服务端发布的阶段消息和追问，**不是模型逐 token 输出或内部推理**。`result.available` 也不是报告全文。报告必须从正式产物获取，不从进度文案或旧 `methods_result` 拼接。
 
-刷新时先查询会话快照，恢复消息、追问、附件和报告状态，再回放事件并去重。`Last-Event-ID` 使用最后**处理成功**的序号；不要直接把快照的最大序号当作所有事件都已展示。处理事件要串行；报告加载失败时提供重试，不能被随后到达的完成事件掩盖。
+基础 SSE 只发送单行 `data:` 业务帧，不发送 `event:`、`id:` 或 `retry:` 行；`type` 和 `sequence` 保留在 JSON 内。连接注释 `: connected` 和心跳注释不会触发 `onmessage`。网站统一接收 `message`，再按 JSON 的 `type` 显示追问、进度或报告通知；不要按命名事件注册监听器，也不要等待 `[DONE]` 或按 OpenAI `choices` / `delta` 解析。完整前端示例见 [API 参考](website-agent-api.md)。
+
+刷新时先查询会话快照，恢复消息、追问、附件和报告状态，再回放事件并去重。响应不含 `id:`，原生 `EventSource` 自动重连时不会携带业务游标，会重新回放历史。需要精准续传时，用流式 `fetch` 手动设置 `Last-Event-ID`，使用最后**处理成功**的序号；不要直接把快照的最大序号当作所有事件都已展示。处理事件要串行；报告加载失败时提供重试，不能被随后到达的完成事件掩盖。
 
 `result.available` 不等于归档完成：JSON 已就绪但 ZIP 为 `PENDING` 时继续订阅。只在 `conversation.completed` 后结束正常订阅。断开 SSE 不会取消后台任务；首版不提供停止按钮。已经完成报告的新问题另建会话。
 
@@ -90,7 +92,7 @@ Content-Type: application/json
 | Case `UNRESOLVED` | 展示正式 `INCONCLUSIVE` JSON、证据缺口和限制；没有结果 ZIP |
 | 归档 `PENDING` / `FAILED` | 显示“日志包生成中”/“日志包生成失败”；已交付 JSON 仍有效 |
 | 会话 `FAILED` / `INTERRUPTED` | 展示安全错误或中断说明，由用户明确另建会话；不自动重跑模型 |
-| SSE 断线 | 显示连接状态，用最后成功游标续传；不能因为断线就新建诊断任务 |
+| SSE 断线 | 显示连接状态；`EventSource` 重连回放历史并去重，或用 `fetch` 携带最后成功游标续传；不能因为断线就新建诊断任务 |
 | HTTP `409` | 区分幂等冲突或会话已结束；不要换 ID 盲重发原诊断请求 |
 | 报告校验失败 | 不展示未校验内容，提示重新获取报告；保留已接收消息和会话 |
 
@@ -99,10 +101,12 @@ Content-Type: application/json
 - [ ] 从网站后端机器确认服务版本、就绪状态、Agent 创建和查询都正常。
 - [ ] 真实问题能完成追问、补充、日志上传和定位；最终显示具体报告。
 - [ ] 日志上传同时核对类型、字节数和 SHA-256；同一预约、消息重试不重复创建。
-- [ ] SSE 实时出现而非最后一次性显示；断线续传、刷新和重复事件不丢报告、不重复消息。
+- [ ] SSE 每条业务消息只有一行 `data:` 加空行，`onmessage` 能实时收到；断线重放、手动游标续传、刷新和重复事件不丢报告、不重复消息。
 - [ ] JSON 不等待 ZIP；ZIP 仅在确认后下载，下载前完成大小和 SHA-256 校验。
 - [ ] 未登录用户、其他用户不能查询会话、订阅、上传或下载；修改 UUID 不能越权。
 - [ ] 经测试负责人安排，在无其他受影响用户时做重启检查：历史保留，活动任务明确中断，不自动重跑；完成报告仍可读取，待归档任务按原机制恢复。
 - [ ] 留存部署身份、会话 ID、Case ID、事件序号、产物大小/哈希和正式 Test Flow verdict；手工联调与正式发布结论分开记录。
 
 通过这些检查后再开放小范围试用；“Linux 服务已启动”“OpenAPI 能打开”或“确定性测试通过”都不能单独代替部署环境的端到端验收。
+
+如果网站已经对接较早的 `8.0.0` 预览版，本次只调整 SSE 传输格式：改为统一 `onmessage` 并自行管理处理游标。事件 JSON 版本和 V11 持久合同不变，不需为这次调整重建 V11 数据根；核对实际帧格式和源码版本，不能仅凭相同版本号判断网站已适配。
