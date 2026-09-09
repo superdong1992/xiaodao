@@ -23,21 +23,78 @@ FIXTURE_ROOT = (
 )
 
 
-@pytest.mark.parametrize('access,tools', [('none', ''), ('read-only', 'Read')])
-def test_final_json_native_cli_has_only_the_required_file_tools(tmp_path, access, tools):
-    invocation = prepare_claude_command('claude --model model-name --tools Read,Write --output-format text',
-        parent_environment={}, os_name='posix')
-    result = apply_final_response_policy(invocation, file_access=access, workspace_root=tmp_path, phase='ROUTE')
-    assert result.argv[result.argv.index('--tools') + 1] == tools
-    assert result.argv[result.argv.index('--output-format') + 1] == 'stream-json'
-    assert result.argv[result.argv.index('--model') + 1] == 'model-name'
-    assert '-p' in result.argv and '--verbose' in result.argv
-    assert 'Write' not in ' '.join(result.argv)
-    assert result.environment['PROBLEM_LOCATOR_AGENT_FILE_ACCESS'] == access
+@pytest.mark.parametrize("access,tools", [("none", ""), ("read-only", "Read")])
+@pytest.mark.parametrize(
+    "executable", ["claude", "claude.exe", "claude.cmd", "codeagent", "codeagent.exe", "codeagent.cmd"]
+)
+@pytest.mark.parametrize("absolute_path", [False, True], ids=["bare", "absolute"])
+def test_final_json_native_cli_has_only_the_required_file_tools(
+    tmp_path: Path, access: str, tools: str, executable: str, absolute_path: bool
+) -> None:
+    command = (tmp_path / "Agent Bin" / executable).as_posix() if absolute_path else executable
+    invocation = prepare_claude_command(
+        f'"{command}" --model model-name --tools Read,Write --output-format text',
+        parent_environment={},
+        os_name="posix",
+    )
+    result = apply_final_response_policy(
+        invocation, file_access=access, workspace_root=tmp_path, phase="ROUTE"
+    )
+    assert result.argv[0] == command
+    assert result.argv[result.argv.index("--tools") + 1] == tools
+    assert result.argv[result.argv.index("--output-format") + 1] == "stream-json"
+    assert result.argv[result.argv.index("--permission-mode") + 1] == "dontAsk"
+    assert result.argv[result.argv.index("--model") + 1] == "model-name"
+    assert "-p" in result.argv and "--verbose" in result.argv
+    assert "Write" not in " ".join(result.argv)
+    if access == "read-only":
+        assert result.argv[result.argv.index("--allowedTools") + 1] == (
+            f"Read({tmp_path.as_posix()}/inputs/**)"
+        )
+    else:
+        assert "--allowedTools" not in result.argv
+    assert result.environment["PROBLEM_LOCATOR_AGENT_FILE_ACCESS"] == access
+    assert result.environment["PROBLEM_LOCATOR_AGENT_PHASE"] == "ROUTE"
 
 
-def test_custom_cli_receives_policy_without_unrecognized_arguments(tmp_path):
-    invocation = prepare_claude_command('python worker.py', parent_environment={}, os_name='posix')
+@pytest.mark.parametrize("access,tools", [("none", ""), ("read-only", "Read")])
+@pytest.mark.parametrize(
+    "owned_options",
+    [
+        "--tools Read Write --allowedTools Read Write --allowed-tools Bash "
+        "--output-format text --permission-mode bypassPermissions",
+        "--tools=Read,Write --allowedTools=Read,Write --allowed-tools=Bash "
+        "--output-format=text --permission-mode=bypassPermissions",
+    ],
+    ids=["separate-values", "equals-values"],
+)
+def test_codeagent_final_json_policy_replaces_conflicting_flags_and_preserves_operator_options(
+    tmp_path: Path, access: str, tools: str, owned_options: str
+) -> None:
+    invocation = prepare_claude_command(
+        "codeagent --model model-name --settings settings.json --max-turns 4 "
+        f"--print --verbose {owned_options}",
+        parent_environment={"ANTHROPIC_BASE_URL": "https://model.example.test"},
+        os_name="posix",
+    )
+    result = apply_final_response_policy(
+        invocation, file_access=access, workspace_root=tmp_path, phase="METHODS_SPECIALIST"
+    )
+    assert result.argv[:9] == invocation.argv[:9]
+    expected_policy = (
+        "--output-format", "stream-json", "--permission-mode", "dontAsk", "--tools", tools
+    )
+    if access == "read-only":
+        expected_policy += ("--allowedTools", f"Read({tmp_path.as_posix()}/inputs/**)")
+    assert result.argv[9:] == expected_policy
+    assert result.environment["ANTHROPIC_BASE_URL"] == "https://model.example.test"
+    assert result.environment["PROBLEM_LOCATOR_AGENT_FILE_ACCESS"] == access
+    assert result.environment["PROBLEM_LOCATOR_AGENT_PHASE"] == "METHODS_SPECIALIST"
+
+
+@pytest.mark.parametrize("command", ["python worker.py", "codeagent-wrapper --output-format text"])
+def test_custom_cli_receives_policy_without_unrecognized_arguments(tmp_path, command):
+    invocation = prepare_claude_command(command, parent_environment={}, os_name='posix')
     result = apply_final_response_policy(invocation, file_access='none', workspace_root=tmp_path, phase='ROUTE')
     assert result.argv == invocation.argv
     assert result.environment['PROBLEM_LOCATOR_AGENT_PHASE'] == 'ROUTE'

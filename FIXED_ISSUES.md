@@ -1,9 +1,20 @@
 # 已修复问题台账
 
-更新时间：2026-09-08
+更新时间：2026-09-09
 
 本文件记录已经在当前工作区验证、修复并由专项回归测试保护的问题。活跃待办仍只写入
 [`TODO.md`](TODO.md)；同一问题再次回归时更新原条目，不另建一个缺少历史关联的条目。
+
+## PL-FIX-059：非 Windows 环境不支持 no-follow chmod 时无法固化文件权限
+
+- **状态**：8.0 修复实现完成，验证状态以本条最终 Test Flow 元数据为准。
+- **症状与受影响版本**：当前 `8.0.0` / `b871d8f` 在非 Windows Python 的 `os.chmod(..., follow_symlinks=False)` 抛出 `NotImplementedError` 时直接失败，影响资源只读固化与 Methods 输入权限设置。修改前从当前源码导入函数，在 CPython 3.12.10 中用模块级 OS 代理模拟 `posix`、缺失能力和该原生异常，确认未进入兼容分支；此证据不代表已复现用户部署机器。
+- **根因**：兼容条件按 `os.name` 排除所有非 Windows 环境，没有结合当前解释器的能力声明。Windows 的 `lstat → chmod(path) → lstat` 只能事后发现目标替换，不能直接作为 Linux 的安全降级方式。
+- **不可回归行为**：先尝试原生 no-follow 调用；即使能力集合未列出 `chmod`，成功调用也不降级。只有 `NotImplementedError` 且未声明支持时才进入兼容逻辑；已声明支持时保留原异常，权限与 I/O 错误不得触发降级。POSIX 必须具备 `O_NOFOLLOW` 和 `fchmod`，只接受可读普通文件或目录，核对打开前后身份并对固定描述符修改权限；路径替换不得改变符号链接目标权限，异常时必须关闭描述符。Windows 保留既有重解析点、符号链接与身份检查。
+- **修复历史**：`db183b5` 首次引入 no-follow 调用；`151012d` 增加仅限 Windows 的兼容分支；`aca4b6f` 将调用用于 Methods 输入。2026-09-09 改为能力判断，并增加 POSIX `O_NOFOLLOW`、`fstat`、`fchmod` 和最终路径校验；`O_NONBLOCK` 避免目标被替换为 FIFO 时阻塞。
+- **专项回归测试**：`tests/deterministic/unit/storage/test_platform.py` 新增 `test_chmod_no_follow_*` 用例。`test_chmod_no_follow_falls_back_on_posix_without_follow_symlink_support` 直接覆盖原错误分支；能力声明、原生成功、其他异常、缺失描述符能力、链接/重解析点/特殊文件、打开时替换、操作后替换、描述符释放和 Windows 兼容均有确定性用例。`test_chmod_no_follow_posix_fallback_changes_real_file_and_directory_modes` 与 `test_chmod_no_follow_posix_fallback_never_changes_symlink_target_permissions` 使用真实 POSIX 文件系统验证权限与竞态，Windows 明确跳过这四个参数化用例。
+- **最新 Test Flow verdict（PL-FIX-059 Windows）**：`dev.default` [run-20260909T025854Z-660b78b8](.tmp/test-flow-evidence/run-20260909T025854Z-660b78b8/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:bc8bb6c1e994b3d8faeeb5e8127e789efd89fa7601b20930fe2d9b320c9e7c26`（790 files），verdict SHA-256 `f5072db5a6309c9ddaa473bcac672fe3986bd0dc4b7d074d736d651d858e77fd`。受影响与完整确定性测试通过，新增专项 20 PASS / 4 项 POSIX 跳过，零真实模型调用。本行是验证后的元数据回填，不属于所引用快照。
+- **最新 Test Flow verdict（PL-FIX-059 Linux）**：原生 Linux 卷、CPython 3.12.13 的 `dev.default` [run-20260909T031751Z-d16666cc](.tmp/chmod-linux-evidence/run-20260909T031751Z-d16666cc/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:c6caec5ebfeb96de0a422780d046294c55bf06f9a5fc4c92d0b3f8293db47d71`（790 files），verdict SHA-256 `6864d50c1cb75d0f310fb485a4d3db0ac96b45c1c41bfca149cfabac5eb9960e`；790 个文件内容哈希与 Windows 快照一致，文件模式差异导致快照摘要不同。受影响与完整确定性测试通过，新增专项 24 PASS / 0 skipped，零真实模型调用。首轮 `run-20260909T030237Z-282b81fc` 因容器 `/private/tmp` 只读失败；第二轮 `run-20260909T030729Z-e15d29b0` 的 24 个专项已通过，但子进程加载镜像旧源码导致两个集成用例失败，受影响阶段也超过时间门槛。两轮证据均保留；最终轮只对齐临时目录、源码所在文件系统与 editable 导入路径，源码摘要未变。本行是验证后的元数据回填，不属于所引用快照；这些 Dev 结论不代表真实 Release 或用户部署环境验收。
 
 ## PL-FIX-058：网站接入要求手工整理问题，缺少对话与实时进度
 
@@ -2501,6 +2512,16 @@
 - **新增专项回归测试**：`tests/deterministic/unit/runtime/test_final_response.py::test_specialist_index_reuses_all_shared_unicode_hits_without_copying_logs`、`test_specialist_empty_index_preserves_every_source_and_full_logs`、`test_specialist_index_rejects_mismatched_identity_and_invalid_hits`、`test_specialist_index_requires_skill_and_receipt_together`、`test_specialist_oversized_index_is_omitted_whole_without_dropping_inputs`、`test_specialist_index_includes_fixed_instructions_in_its_byte_limit`、`test_specialist_index_never_forces_inline_inputs_into_file_tools`、`test_specialist_large_inputs_keep_index_and_every_original_file_path`。
 - **入口与语义专项回归**：`tests/deterministic/unit/runtime/test_diagnosis_runtime.py::test_methods_v1_specialist_prompt_uses_this_jobs_frozen_marker_scan` 锁定本轮同一份输入/收据、单次 Specialist 调用及完整原文；`tests/deterministic/unit/runtime/test_p0_semantic_assets.py::test_specialist_assets_skip_mechanical_scan_only_with_complete_server_index`、`test_specialist_assets_preserve_full_reading_and_semantic_judgment_with_index` 和 `test_specialist_index_keeps_v1_response_schema_and_full_raw_line` 锁定完整索引的信任边界、无命中含义、缺省回退与原诊断合同。
 - **最新 Test Flow verdict（8.0 Specialist 索引，尚未验证通过）**：Dev [run-20260907T143410Z-1b5e8749](.tmp/test-flow-evidence/run-20260907T143410Z-1b5e8749/verdict.json) 为 `FAIL`：functional 为 `INCONCLUSIVE`，performance 为 `FAIL`，operation、verification 均为 `PASS`；源码快照 `git-visible-worktree-v1:be2b152dfb70967cae82bc8b92f1aefd4cf0081bb6267c8d24f49fc076538815`（790 files），工作树及物化快照验证均为 PASS，verdict digest `287bb6f6353a5e242485be10e674c707d6be3c536da16ef1d168b90761ea0073`。affected 的 535 项断言全部通过、24 项跳过，包含本轮全部索引与语义专项；阶段耗时 60.637 秒，超过既有 60 秒门槛，full 未运行。此前同快照 [run-20260907T142943Z-6a6f9f5f](.tmp/test-flow-evidence/run-20260907T142943Z-6a6f9f5f/verdict.json) 也因 61.710 秒超过同一门槛而 FAIL；在保留两次证据、源码、测试选择与门槛不变的前提下仅作过一次有明确假设的复测。本轮零真实模型调用，既不宣称完整 Dev 通过，也不宣称 thinking 或现场耗时下降。此行及 TODO 中的验证状态为运行后的元数据回填，不属于该快照；产品和测试字节未再修改。
+
+### 2026-09-09：8.0 补齐 codeagent 的最终响应与工具策略
+
+- **状态**：修复实现完成；验证状态以本段最终元数据为准。
+- **症状与受影响版本**：7.0 最终 JSON 迁移提交 `fdca5c3`（2026-09-06）至当前 `b871d8f` / 8.0.0。配置 `CLAUDE_COMMAND=codeagent` 或其绝对路径、`.exe`、`.cmd` 变体时，ROUTE 未强制使用 `stream-json`，合法答案也可能以 `OUTCOME_INVALID` 失败。当前源码最小复现确认：`claude` 会覆盖原有 `--output-format text --tools Read,Write`，四种 codeagent 调用均原样保留；同一份合法三字段答案作为文本传入遥测后 `final_result=None`，ROUTE 解析报 `OUTCOME_INVALID`，封装为成功的 stream-json result 事件后解析通过。该复现使用固定输入，未调用现场模型。
+- **根因与历史关联**：本条 7.0 迁移新增的 `apply_final_response_policy()` 只识别 claude 名称和 `node cli.js`，遗漏兼容 Claude CLI 的 codeagent。它因此进入自定义启动器分支，只接收环境变量，漏掉最终输出格式和阶段工具限制。
+- **修复历史**：2026-09-09 将 `codeagent`、`codeagent.exe`、`codeagent.cmd` 纳入原生 CLI 名称集合，沿用既有参数重写逻辑；路径形式按可执行文件名识别。
+- **不可回归行为**：codeagent 必须使用非交互的 `stream-json` 和 `dontAsk`；ROUTE 禁用文件工具，read-only 阶段只允许读取当前工作区的 `inputs/**`。冲突的输出与工具参数必须被覆盖，模型、配置和预算参数保留。未知自定义启动器仍只接收环境策略；非法 JSON、缺失或重复最终结果仍按原合同拒绝，不引入自动修复或放宽解析。
+- **专项回归测试**：`tests/deterministic/unit/runtime/test_claude_command.py::test_final_json_native_cli_has_only_the_required_file_tools` 覆盖六种 CLI 名称、裸命令与含空格绝对路径、两种文件权限；`test_codeagent_final_json_policy_replaces_conflicting_flags_and_preserves_operator_options` 覆盖冲突参数的空格与等号形式；`test_custom_cli_receives_policy_without_unrecognized_arguments` 覆盖未知启动器。三项共 30 组，其中新增 27 组。既有 `tests/deterministic/unit/runtime/test_final_response.py::test_route_uses_final_three_fields_and_server_pinned_identity`、`test_invalid_route_response_is_rejected_without_repair`、`test_stream_result_is_unique_successful_and_not_in_telemetry` 继续覆盖最终结果解析边界。
+- **最新 Test Flow verdict（8.0 codeagent 原生 CLI）**：Linux Dev [run-20260909T080141Z-5a3fafda](.tmp/codeagent-linux-evidence/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:1ba75761b3e6f5e9d028743e2a104a84a7cbeeadcdb8fad0611b4993412e5e43`（790 files），工作树、物化快照及交付文件内容核对均为 PASS；verdict digest `03f60bf35b0d5d6c0c255eda6a229722a28357cdd2fb641a8d0a7ca234dc15f4`。affected 942 passed / 1 skipped；完整确定性合同 576、单元 2,203、集成 66、SameJob 5 项通过，单元 1 项平台跳过，Core 32 项通过；30 组 CLI 策略专项全部通过，前一项 chmod 的 24 组专项也全部通过。零真实模型调用，不宣称现场 codeagent 或真实 Release 已验证。此行是验证完成后的元数据回填，不属于所引用快照；除此行外未修改交付字节。
 
 ## PL-FIX-054：专有定位终态只返回审计引用，缺少面向用户的具体报告
 

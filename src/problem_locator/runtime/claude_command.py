@@ -76,7 +76,11 @@ def apply_final_response_policy(invocation: ClaudeCommand, *, file_access: str |
     environment['PROBLEM_LOCATOR_AGENT_PHASE'] = phase
     argv = invocation.argv
     executable = Path(argv[0]).name.lower()
-    native = executable in {'claude', 'claude.exe', 'claude.cmd'}
+    # codeagent is a Claude-compatible CLI and needs the same output/tool policy.
+    native = executable in {
+        'claude', 'claude.exe', 'claude.cmd',
+        'codeagent', 'codeagent.exe', 'codeagent.cmd',
+    }
     native = native or (executable in {'node', 'node.exe'} and len(argv) > 1
         and Path(argv[1]).name == 'cli.js')
     if native:

@@ -277,37 +277,73 @@ def _sync_windows_directory(
 
 
 def chmod_no_follow(path: Path | str, mode: int) -> None:
-    """Apply permissions without accepting a final link or reparse-point swap."""
+    """Apply permissions without accepting a final link or reparse-point swap.
+
+    The POSIX descriptor fallback requires a readable regular file or directory.
+    """
 
     try:
         os.chmod(path, mode, follow_symlinks=False)
     except NotImplementedError:
-        if os.name != "nt":
+        if os.chmod in os.supports_follow_symlinks:
             raise
-        # CPython on Windows does not implement follow_symlinks=False for
-        # chmod.  The caller rejects reparse points immediately before this
-        # operation and verifies the same file identity immediately after it.
+        # Capability declarations can be conservative: keep a successful
+        # no-follow call even when chmod is absent from the capability set.
+        # POSIX must pin the inode rather than extend the Windows path-based
+        # fallback, which cannot prevent following a concurrently swapped link.
+        if os.name != "nt" and (
+            not hasattr(os, "fchmod") or not hasattr(os, "O_NOFOLLOW")
+        ):
+            raise
         target = Path(path)
         metadata = os.lstat(target)
         if stat.S_ISLNK(metadata.st_mode) or is_reparse_point(metadata):
             raise OSError("chmod target must not be a symbolic link")
-        os.chmod(target, mode)
-        final_metadata = os.lstat(target)
-        if (
-            stat.S_ISLNK(final_metadata.st_mode)
-            or is_reparse_point(final_metadata)
-            or (
-                final_metadata.st_dev,
-                final_metadata.st_ino,
-                stat.S_IFMT(final_metadata.st_mode),
-            )
-            != (
-                metadata.st_dev,
-                metadata.st_ino,
-                stat.S_IFMT(metadata.st_mode),
-            )
-        ):
-            raise OSError("chmod target changed while permissions were applied")
+        if os.name != "nt":
+            if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISDIR(metadata.st_mode)):
+                raise OSError("chmod target must be a regular file or directory")
+            flags = os.O_RDONLY | os.O_NOFOLLOW
+            flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+            descriptor = os.open(target, flags)
+            try:
+                opened = os.fstat(descriptor)
+                if is_reparse_point(opened) or (
+                    opened.st_dev,
+                    opened.st_ino,
+                    stat.S_IFMT(opened.st_mode),
+                ) != (
+                    metadata.st_dev,
+                    metadata.st_ino,
+                    stat.S_IFMT(metadata.st_mode),
+                ):
+                    raise OSError("chmod target changed while opening")
+                os.fchmod(descriptor, mode)
+                _verify_chmod_target(target, metadata)
+            finally:
+                os.close(descriptor)
+        else:
+            # CPython 3.12 on Windows has no fchmod/O_NOFOLLOW support.
+            os.chmod(target, mode)
+            _verify_chmod_target(target, metadata)
+
+
+def _verify_chmod_target(target: Path, metadata: os.stat_result) -> None:
+    final_metadata = os.lstat(target)
+    if (
+        stat.S_ISLNK(final_metadata.st_mode)
+        or is_reparse_point(final_metadata)
+        or (
+            final_metadata.st_dev,
+            final_metadata.st_ino,
+            stat.S_IFMT(final_metadata.st_mode),
+        )
+        != (
+            metadata.st_dev,
+            metadata.st_ino,
+            stat.S_IFMT(metadata.st_mode),
+        )
+    ):
+        raise OSError("chmod target changed while permissions were applied")
 
 
 class PlatformFileSync:
