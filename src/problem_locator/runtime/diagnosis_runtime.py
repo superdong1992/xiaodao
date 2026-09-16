@@ -735,6 +735,27 @@ def _binding_user_fact_name(binding: object) -> str | None:
     raise ValueError("Methods preflight binding shape is invalid")
 
 
+_MAX_ROLE_DESCRIPTION_BYTES = 256
+_MAX_ROLE_INPUT_PROMPT_BYTES = 512
+
+
+def _methods_role_input_prompt(prompt: str, description: str) -> str:
+    """Add bounded registered context without copying an unbounded description."""
+
+    prefix = prompt + "角色说明："
+    budget = min(_MAX_ROLE_DESCRIPTION_BYTES, _MAX_ROLE_INPUT_PROMPT_BYTES - len(prefix.encode("utf-8")))
+    if budget < 3:
+        raise ValueError("Methods role input prompt exceeds its fixed byte budget")
+    # At most budget + 1 characters need encoding to detect byte overflow.
+    # The registration text itself remains unchanged, including its identity.
+    raw = description[:budget + 1].encode("utf-8")
+    if len(raw) > budget:
+        description = raw[:budget - 3].decode("utf-8", errors="ignore") + "…"
+    else:
+        description = raw.decode("utf-8")
+    return prefix + description
+
+
 def _methods_user_input_projection(
     skill: ResolvedSpecializedSkillV1,
     supplied_names: set[str],
@@ -754,6 +775,8 @@ def _methods_user_input_projection(
     plan_names: set[str] = set()
     mandatory_names: set[str] = set()
     input_templates: dict[str, dict[str, Any]] = {}
+    role_contexts: dict[str, tuple[dict[str, Any], str]] = {}
+    module_contexts: dict[str, dict[str, Any]] = {}
     preprocessing = skill.registration.preprocessing
     plan = preprocessing.logparse_plan
     if preprocessing.requires_logparse:
@@ -789,10 +812,11 @@ def _methods_user_input_projection(
                     template = profile_by_name.get(f"{role['label']}_{field}")
                     if not isinstance(template, dict):
                         raise ValueError("built-in role requirement is unavailable")
-                    input_templates.setdefault(
-                        actual_name,
-                        {**deepcopy(template), "name": actual_name},
-                    )
+                    if actual_name not in input_templates:
+                        input_templates[actual_name] = {**deepcopy(template), "name": actual_name}
+                        role_contexts[actual_name] = role, field
+                elif field == "module":
+                    module_contexts.setdefault(actual_name, role)
             role_is_active = role["presence"] == "REQUIRED" or any(
                 name in supplied_names for _, name in role_bindings
             )
@@ -809,21 +833,35 @@ def _methods_user_input_projection(
     if not mandatory_names.issubset(declared):
         raise ValueError("Methods plan input is absent from required_user_inputs")
     for name in declared:
-        input_templates.setdefault(
-            name,
-            {
-                "name": name,
-                "prompt": f"Provide the required Methods input '{name}'.",
-                "constraints": {
-                    "value_type": "STRING",
-                    "min_utf8_bytes": 1,
-                    "max_utf8_bytes": 4096,
-                    "pattern": None,
-                    "allowed_values": [],
-                },
-                "supplement_policy": "MISSING_ONLY",
+        if name in input_templates:
+            continue
+        input_templates[name] = {
+            "name": name,
+            "prompt": f"Provide the required Methods input '{name}'.",
+            "constraints": {
+                "value_type": "STRING",
+                "min_utf8_bytes": 1,
+                "max_utf8_bytes": 4096,
+                "pattern": None,
+                "allowed_values": [],
             },
-        )
+            "supplement_policy": "MISSING_ONLY",
+        }
+        if name in module_contexts:
+            # Module bindings never override an existing time or role template,
+            # even when multiple bindings intentionally share one user fact.
+            role_contexts[name] = module_contexts[name], "module"
+
+    for name, (role, field) in role_contexts.items():
+        template = input_templates.get(name)
+        if template is None:
+            continue
+        prompt = template["prompt"]
+        if field == "module":
+            # Only an explicit USER_FACT module binding gets a module question;
+            # SKILL_FIXED modules and unrelated package inputs add no fields.
+            prompt = f"请提供 {role['label']} 角色的 module。"
+        template["prompt"] = _methods_role_input_prompt(prompt, role["description"])
 
     return MethodsUserInputProjection(
         active_required_names=tuple(

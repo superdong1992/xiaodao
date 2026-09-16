@@ -85,6 +85,19 @@
 - **专项回归测试**：`test_intake_adoption.py` 覆盖首条完整输入的 Reviewer 开关、真实 HTTP/报告/ZIP/SSE、部分参数和错误 action、旧草稿采用、冻结同值、并发新消息与受控失败；`test_intake_performance.py` 覆盖空闲轮询、历史容量、核心命令重放及索引；`test_intake.py` 和 `test_store.py` 覆盖全部来源/约束、事务门、并发覆盖范围、旧快照及单次调用。原转义专项 `test_model_output_escaping.py` 保留合法原值和非法 JSON 反例。
 - **最新 Test Flow verdict（8.1 参数采用）**：Linux `dev.default` [run-20260915T142733Z-be69a627](.tmp/pragmatic-dev-evidence-3/run-20260915T142733Z-be69a627/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:bd580c1f836358b1aca427885c6f0604fb7bbfcf60d81294630f352c16a72b3e`（821 files），verdict SHA-256 `2ec047106b8e2aad8b0254dc19131c25e704491607c0811d6c4338c2cd148fd9`。受影响范围由编排器交完整套件覆盖；Core 32、合同 576、单元 2601、集成 110、SameJob 5 项通过，单元 2 项非本平台用例跳过。全部专项纳入本轮，模型调用、token 和费用均为 0。本行是验证后的引用元数据，不属于所引用源码快照；不代表公司内网实测或真实模型 Release 通过。
 
+### 2026-09-16：首条描述与附件分开发送时补齐提取，多附件保留会话
+
+- **状态**：本轮修复的正式结论以本节最终 Test Flow 元数据为准，关联 PL-FIX-058 的首次参数采用修复。
+- **症状、受影响版本与确认**：8.1.0 / `2df9edb` 中，首条含参数描述已建案、尚未首次 Intake 时，紧接一条空文本附件消息会使提取调用为零，却将两条消息都登记为已覆盖，随后重复追问已有参数。另用两个 READY 日志包复现 `AGENT_NO_MATCHING_INPUT` 关闭会话；已有有效参数时只采用文字，之后重选单包仍被历史附件集合阻止。
+- **根因与修复历史**：跳过模型只看当前消息有无文字，没有检查本次处理范围内尚未提取的原文；附件数量校验聚合全部历史选择，且不可用附件仍触发空补充。2026-09-16 改为兼顾未覆盖原文和当前要求；待采用附件取最近一次明确选择，多包时提示选择或合包，保留有效文字与会话。提示与最新权威缺项合并保存，重选已有单包即可继续。
+- **不可回归行为**：首条原文与附件分开发送仍只执行一次必要提取；已整理文字后的纯附件消息不调用模型。新文字中的冻结事实更正继续要求新任务。多包不得任意择一、静默丢包或终结会话；文字补充不清除附件选择，已采用附件不被后续消息替换。并发新消息不被旧处理范围覆盖；刷新、SSE 与重复 Case 投影保留尚未解决的选择提示。
+- **性能与范围**：复用当前已加载的消息、附件和 Case 投影，不增加模型重试或额外 Case 查询；空闲轮询保持原有轻量查询路径。不解压日志补参，不改变公开 API/MCP schema 或 SSE v1。
+- **关闭提示收口**：复审确认同版本 `_close` 不清理 `current_questions`，失败或重启后仍可能显示等待中的附件追问。本轮在原关闭事务内清空当前问题和附件选择提示；历史问题事件、附件、失败记录保持可读，关闭后不会恢复提取。`tests/deterministic/unit/agent/test_store.py` 专项覆盖等待提示到失败/中断及刷新恢复。
+- **专项回归测试**：`tests/deterministic/integration/test_intake_attachment_selection.py` 覆盖真实 HTTP、Agent Store、调度器、原文采用、多包选择与报告交付，并断言纯附件零额外模型调用和 Case 查询次数；既有 `test_intake_adoption.py` 与 `test_intake_performance.py` 继续覆盖并发、冻结更正、一条与 199 条历史下的空闲轮询、命令重放和查询索引。
+- **首次验证与环境收口**：Dev `run-20260916T025246Z-925ace75` 的 affected 为 1,089 PASS / 1 skip、零功能失败，但耗时 119.236 秒超过该阶段 60 秒硬上限，权威结论为 FAIL，全量未启动。测试 scratch 与证据同在 Docker 虚拟磁盘卷。后续只将执行中的测试目录放入 tmpfs，退出前把全部证据复制到持久卷，再保存到工作区；保留原失败证据、相同基线、完整选集和门槛，不调整产品源码来规避该结果。合成环境耗时不外推为内网或持久磁盘性能。
+- **第二轮验证**：`run-20260916T030201Z-5a4ef546` 在 tmpfs 中仍为相同 1,089 PASS / 1 skip，affected 耗时 72.173 秒，权威结论仍为 FAIL。两轮都选中全部集成测试，文件比例仅 70/191，证实快速阶段的选集分类需要收口，见 PL-FIX-065；最终验证回到持久 Linux 卷，保持完整套件及现有门槛。
+- **最新 Test Flow verdict（8.1 输入时序与附件选择）**：Linux `dev.default` [run-20260916T031046Z-6644b384](.tmp/web-input-opt-evidence-3/run-20260916T031046Z-6644b384/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:377a16c7814973fa59584a56fc27845466ed8adb71d98319006b51b39639d15c`（824 files），verdict SHA-256 `20c868983c39802c10ee5c8a718e6afc2b559d7648f6b4bf7bcc210d51af6e5c`。Core 32、合同 576、单元 2635、集成 116、SameJob 5 项通过；单元 2 项平台用例跳过。本轮专项及模型/查询调用计数均通过，真实模型调用、token 和费用均为 0。本行是验证后的引用元数据，不属于所引用源码快照；不代表公司内网实测或真实模型 Release 通过。
+
 ## PL-FIX-056：活动状态更新复制全库并反复读取历史资源
 
 - **状态**：7.0 实现完成，是否验证通过以本条最终元数据为准。
@@ -2739,6 +2752,14 @@
 - **专项回归测试**：`test_intake.py`、`test_intake_tolerance.py` 直接覆盖上下文引用、逐项过滤、重复与冲突、时间规范化、跨轮等价时间重述及重验回执；`test_intake_adoption.py` 和 `test_website_agent.py` 覆盖原始消息到 Skill 参数采用及报告交付；`test_intake_performance.py` 继续验证空闲轮询零模型、零额外状态读写。
 - **最新 Test Flow verdict（8.1 输入宽容）**：Linux `dev.default` [run-20260915T142733Z-be69a627](.tmp/pragmatic-dev-evidence-3/run-20260915T142733Z-be69a627/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:bd580c1f836358b1aca427885c6f0604fb7bbfcf60d81294630f352c16a72b3e`（821 files），verdict SHA-256 `2ec047106b8e2aad8b0254dc19131c25e704491607c0811d6c4338c2cd148fd9`。受影响范围由编排器交完整套件覆盖；Core 32、合同 576、单元 2601、集成 110、SameJob 5 项通过，单元 2 项非本平台用例跳过。全部专项纳入本轮，模型调用、token 和费用均为 0。本行是验证后的引用元数据，不属于所引用源码快照；不代表公司内网实测或真实模型 Release 通过。
 
+### 2026-09-16：完整带时区时间兼容一个普通空格
+
+- **受影响版本与确认**：8.1.0 / Intake 1.3.0 的 `problem_time` 可采用 `2026-09-16T10:00:00+08:00`，但同一明确时刻仅将 `T` 换成空格即被过滤为 `INVALID_EXPLICIT_TIME`，用户需要重复提供时间。当前入口已用纯内存输入确认，属于 PL-FIX-062 时间格式支持范围的补齐。
+- **根因与修复历史**：时间表达式仅允许 `T`。Intake 1.3.1 复用原来的解析与来源复验路径，将分隔符扩展为 `T` 或一个 ASCII 空格；原始采用、规范化重放和冻结同值比较保持一致，不增加解析库、模型调用或额外扫描。
+- **不可回归行为**：须有完整日期、时分秒及 `Z` 或明确偏移；缺时区、`-00:00`、多个空格、Tab、全角或不换行空格仍拒绝，不舍弃亚毫秒精度。仅固定内建 `problem_time` 及其原有约束可转换，其他字段和标识符不改写；原始来源引用保持不变。
+- **专项回归测试**：`test_intake_tolerance.py::test_explicit_iso_time_is_normalized_without_changing_the_user_quote`、`test_incomplete_ambiguous_invalid_or_lossy_time_is_left_as_missing`、`test_space_time_replay_cannot_guess_from_invalid_or_ambiguous_quotes`、`test_space_time_normalization_does_not_expand_to_renamed_fields_or_identifiers`、`test_repeated_frozen_time_compares_instants_using_its_frozen_constraint`；`test_engine_parser_adopts_space_time_in_one_call_without_losing_source` 覆盖实际 Engine、解析器与校验器，假 backend 单次调用且无文件访问。
+- **最新 Test Flow verdict（8.1 时间格式）**：Linux `dev.default` [run-20260916T031046Z-6644b384](.tmp/web-input-opt-evidence-3/run-20260916T031046Z-6644b384/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:377a16c7814973fa59584a56fc27845466ed8adb71d98319006b51b39639d15c`（824 files），verdict SHA-256 `20c868983c39802c10ee5c8a718e6afc2b559d7648f6b4bf7bcc210d51af6e5c`。Core 32、合同 576、单元 2635、集成 116、SameJob 5 项通过；单元 2 项平台用例跳过。本轮专项及模型/查询调用计数均通过，真实模型调用、token 和费用均为 0。本行是验证后的引用元数据，不属于所引用源码快照；不代表公司内网实测或真实模型 Release 通过。
+
 ## PL-FIX-063：报告与归档重复解析，网站重复快照造成多余请求及误拒绝
 
 - **状态**：已实现，正式结论等待本节最终 Test Flow 元数据。
@@ -2749,3 +2770,21 @@
 - **最新 Test Flow verdict（8.1 报告性能）**：Linux `dev.default` [run-20260915T142733Z-be69a627](.tmp/pragmatic-dev-evidence-3/run-20260915T142733Z-be69a627/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:bd580c1f836358b1aca427885c6f0604fb7bbfcf60d81294630f352c16a72b3e`（821 files），verdict SHA-256 `2ec047106b8e2aad8b0254dc19131c25e704491607c0811d6c4338c2cd148fd9`。受影响范围由编排器交完整套件覆盖；Core 32、合同 576、单元 2601、集成 110、SameJob 5 项通过，单元 2 项非本平台用例跳过。全部专项纳入本轮，模型调用、token 和费用均为 0。本行是验证后的引用元数据，不属于所引用源码快照；不代表公司内网实测或真实模型 Release 通过。
 - **首次正式验证后的收口**：`run-20260915T141622Z-7a91517f` 的两项归档计数用例确认验证入口末尾再次调用完整 ZIP 构建，导致第二次拆行和摘要计算。改为复用已核验的报告/manifest 字节完成标准 ZIP 编码，保留逐项与最终字节比较，性能断言不放宽；新增非标准 ZIP 编码拒绝用例。同轮 12 项 advisory 网站旅程均通过，另一集成失败来自显式更正用例仍断言旧提示词，已对齐其固定输出；首轮证据完整保留，最终结论另取新源码 verdict。
 - **第二次正式验证后的收口**：`run-20260915T142244Z-38910c19` 中全部性能计数和 110 项集成旅程通过，唯一失败是归档 AST 边界清单仍绑定提取前的函数名。将原 `build_result_archive` 的两类允许操作原样移到 `_encode_result_archive`，不增加可用归档 API 或输入解包入口，保留精确匹配和禁止清单。
+
+## PL-FIX-064：Skill 已登记的角色含义没有传给网站参数提取
+
+- **状态**：本轮修复的正式结论以本节最终 Test Flow 元数据为准。
+- **症状、受影响版本与确认**：8.1.0 / `2df9edb` 的 RPC Skill registration 已区分调用进程与服务进程，但实际 Intake prompt 仅收到角色标签和通用字段提示，没有收到角色 `description`。当前投影与实际 prompt 已核对；这证明提取上下文缺失，不代表已测得真实模型误提取率。
+- **根因与修复历史**：内建角色模板只格式化 `label`，Methods 参数投影没有携带登记说明。2026-09-16 在 Methods 投影中为实际 USER_FACT 角色绑定补充已有说明，PendingRequirement 与 Intake 使用同一提示；字段名、约束、必填性和固定模块绑定保持不变。未登记含义的其他专有字段不猜测映射。
+- **不可回归行为与性能**：说明片段最多 256 UTF-8 字节，单条完整提示最多 512 字节，截断保留完整 Unicode 字符并显示省略号；先截取有界字符再编码，不复制无长度上限的完整说明。仅使用已加载 registration，不读日志或 Skill 文件，不增加模型调用、schema 字段或数据迁移；不改现有注册文件及其哈希。
+- **专项回归测试**：`tests/deterministic/unit/runtime/test_methods_intake_role_context.py` 覆盖实际注册绑定到 PendingRequirement/Intake prompt 的投影、别名字段、同名绑定、USER_FACT 与 SKILL_FIXED 模块、无元数据字段保持原状，以及长中文、emoji 和含历史问题的提示字节上限；`test_diagnosis_runtime.py` 的原 preflight 用例继续验证无模型、无工作目录及正式需求约束。同名绑定复审要求角色说明跟随既有模板，不能覆盖时间或其他字段的实际含义。
+- **最新 Test Flow verdict（8.1 Skill 角色说明）**：Linux `dev.default` [run-20260916T031046Z-6644b384](.tmp/web-input-opt-evidence-3/run-20260916T031046Z-6644b384/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:377a16c7814973fa59584a56fc27845466ed8adb71d98319006b51b39639d15c`（824 files），verdict SHA-256 `20c868983c39802c10ee5c8a718e6afc2b559d7648f6b4bf7bcc210d51af6e5c`。Core 32、合同 576、单元 2635、集成 116、SameJob 5 项通过；单元 2 项平台用例跳过。本轮专项及模型/查询调用计数均通过，真实模型调用、token 和费用均为 0。本行是验证后的引用元数据，不属于所引用源码快照；不代表公司内网实测或真实模型 Release 通过。
+
+## PL-FIX-065：完整集成测试被误归入快速 affected 阶段
+
+- **状态**：正式结论以本节最终 Test Flow 元数据为准。
+- **症状、受影响版本与确认**：8.1.0 / `2df9edb` 的 runtime 改动会选中整个 integration。选集仅占 70/191 个文件，却包含 1,090 个用例；磁盘卷和 tmpfs 两轮均为 1,089 PASS / 1 skip，但分别用时 119.236、72.173 秒，超过 affected 的 60 秒上限，阻断已安排的 full 阶段。
+- **根因与修复历史**：`planAffectedSelection` 只按文件比例达到 50% 判断宽范围，没有识别完整跨模块集成套件。2026-09-16 将整个 integration 目录也视为宽选集，沿原有转交机制处理；选择明细及计数保留。此改动减少默认 Dev 的重复执行，不删减 full 用例、不改变基线或性能策略。
+- **不可回归行为**：有 full 的计划将宽 affected 标为 `NOT_REQUIRED` 并继续执行完整套件；没有 full 的 `dev.quick` 必须以 `AFFECTED_SCOPE_REQUIRES_FULL` 结束，不能声称零测试 PASS。显式单个集成文件仍可运行 affected，原 50% 规则继续生效；affected 60 秒、full 300 秒上限不变。
+- **专项回归测试**：`tools/test-flow/tests/affected-selection.test.mjs` 用 70/191 文件复现包含整个 integration 的低比例选集，分别验证有/无 full 的 Gate 结果、单集成文件保持小范围及原比例边界；既有 `actions.test.mjs` 的窄范围与比例测试继续保留。该专项由正式 Test Flow 的框架自测执行。
+- **最新 Test Flow verdict（8.1 受影响选集）**：Linux `dev.default` [run-20260916T031046Z-6644b384](.tmp/web-input-opt-evidence-3/run-20260916T031046Z-6644b384/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:377a16c7814973fa59584a56fc27845466ed8adb71d98319006b51b39639d15c`（824 files），verdict SHA-256 `20c868983c39802c10ee5c8a718e6afc2b559d7648f6b4bf7bcc210d51af6e5c`。Core 32、合同 576、单元 2635、集成 116、SameJob 5 项通过；单元 2 项平台用例跳过。本轮专项及模型/查询调用计数均通过，真实模型调用、token 和费用均为 0。本行是验证后的引用元数据，不属于所引用源码快照；不代表公司内网实测或真实模型 Release 通过。

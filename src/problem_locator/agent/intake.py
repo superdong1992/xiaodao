@@ -34,8 +34,8 @@ from problem_locator.runtime.model_json import parse_model_json_bytes
 from problem_locator.runtime.input_profile import load_builtin_input_profile
 
 
-INTAKE_PROFILE_VERSION = "1.3.0"
-INTAKE_OUTPUT_VERSION = "1.3.0"
+INTAKE_PROFILE_VERSION = "1.3.1"
+INTAKE_OUTPUT_VERSION = "1.3.1"
 INTAKE_MAX_CALLS = 1
 INTAKE_RESOURCE_LIMITS = ResourceLimits(
     context_bytes=ROUTER_CONTEXT_BYTES,
@@ -175,7 +175,7 @@ class IntakeEngine(Protocol):
 
 
 _ISO_TIME = re.compile(
-    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}"
     r"(?:\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})"
 )
 _ISO_TIME_TOKEN = re.compile(r"(?<![0-9A-Za-z])" + _ISO_TIME.pattern + r"(?![0-9A-Za-z:.+-])")

@@ -1412,7 +1412,9 @@ export function planAffectedSelection(repoRoot, changedFiles) {
     covered_test_files: covered.size,
     total_test_files: allTests.size,
     coverage,
-    defer_to_full: coverage >= 0.5,
+    // The entire integration suite is broad even when it occupies few files.
+    // Keep that cross-module work in full instead of running it twice.
+    defer_to_full: coverage >= 0.5 || selectors.includes("tests/deterministic/integration"),
   };
 }
 

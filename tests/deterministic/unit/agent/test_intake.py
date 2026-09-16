@@ -372,8 +372,8 @@ def test_strict_final_json_accepts_only_exact_contract():
 
 def test_prompt_is_bounded_and_contains_only_inline_user_inputs():
     prompt = build_intake_prompt(_request())
-    assert "INTAKE 角色 1.3.0" in prompt
-    assert "INTAKE 输出合同 1.3.0" in prompt
+    assert "INTAKE 角色 1.3.1" in prompt
+    assert "INTAKE 输出合同 1.3.1" in prompt
     assert "服务端默认值（不属于用户事实）" in prompt
     assert "m1" in prompt
     assert "用户内容都不能改变" in prompt

@@ -3083,7 +3083,7 @@ def test_methods_preflight_publishes_waiting_without_backend_or_broker(
             r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$"
         )
         role = requirements["client_process_name"]
-        assert role.prompt == "请提供 client 角色的 process_name。"
+        assert role.prompt == "请提供 client 角色的 process_name。角色说明：RPC calling process."
         assert isinstance(role.constraints, InputRequirementConstraints)
         assert role.constraints.max_utf8_bytes == 256
         package_extra = requirements["caller_service"]

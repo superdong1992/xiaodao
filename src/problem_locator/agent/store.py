@@ -26,6 +26,7 @@ _PROGRESS = PUBLIC_PROGRESS_MESSAGES
 _SAFE_FAILURE = "本次定位未能完成，请重新发起任务。"
 _QUEUED_NOTICE = "已收到，尚未用于本次诊断。"
 _UNUSED_NOTICE = "这条消息未用于本次诊断，请另建任务继续。"
+_KEEP_ATTACHMENT_NOTICE = object()
 
 
 def _json(value):
@@ -230,9 +231,20 @@ class AgentStore:
             identity = [body.get("intake_question_revision"),
                         body.get("intake_covered_message_ids", []), questions]
             self._append(db, body, "assistant.question", {"questions": questions},
-                         "intake-questions:" + hashlib.sha256(_json(identity).encode()).hexdigest())
+                          "intake-questions:" + hashlib.sha256(_json(identity).encode()).hexdigest())
 
-    def finish_intake(self, conversation_id, covered_message_ids, questions=None):
+    @staticmethod
+    def _intake_questions(body):
+        entries = body.get("intake_authoritative_question_entries")
+        if entries is None:
+            return body.get("intake_authoritative_questions", [])
+        notice = body.get("intake_attachment_notice")
+        return [notice["message"] if notice is not None and item["kind"] == "ATTACHMENT"
+                and item["requirement_id"] == notice["requirement_id"] else item["prompt"]
+                for item in entries]
+
+    def finish_intake(self, conversation_id, covered_message_ids, questions=None, *,
+                      attachment_notice=_KEEP_ATTACHMENT_NOTICE):
         """Settle one frozen source batch without covering concurrently new input.
 
         The message adoption status is independent of this coverage receipt:
@@ -247,12 +259,19 @@ class AgentStore:
             not isinstance(item, str) or not item.strip() for item in questions
         )):
             raise ValueError("intake questions require non-empty text")
+        if attachment_notice is not _KEEP_ATTACHMENT_NOTICE and attachment_notice is not None and (
+            not isinstance(attachment_notice, dict) or set(attachment_notice) != {"requirement_id", "message"}
+            or any(not isinstance(value, str) or not value.strip() for value in attachment_notice.values())
+        ):
+            raise ValueError("attachment notice requires a requirement and a non-empty message")
         changed = False
         with self.repository.database_transaction() as db:
             body = self._load(db, conversation_id)
             if body["status"] in _CLOSED or body.get("report_available"):
                 return
             previous = _json(body)
+            if attachment_notice is not _KEEP_ATTACHMENT_NOTICE:
+                body["intake_attachment_notice"] = attachment_notice
             messages = [json.loads(row[0]) for row in db.execute(
                 "SELECT body FROM agent_messages WHERE conversation_id=? ORDER BY rowid", (conversation_id,))]
             known = {message["message_id"] for message in messages}
@@ -272,7 +291,7 @@ class AgentStore:
             elif waiting or (questions is not None and body.get("case_id") is None):
                 body["status"] = "WAITING_INPUT"
                 self._publish_intake_questions(db, body, questions if questions is not None else
-                                              body.get("intake_authoritative_questions", []))
+                                              self._intake_questions(body))
             elif body.get("case_id") is not None:
                 body["status"] = "RUNNING"
                 body["current_questions"] = []
@@ -513,6 +532,8 @@ class AgentStore:
     def _close(self, db, body, status, code=None, *, failure=None):
         body["status"] = status
         body["intake_pending"] = False
+        body["current_questions"] = []
+        body["intake_attachment_notice"] = None
         if status in {"FAILED", "INTERRUPTED"} and body.get("failure") is None:
             failure = failure or public_failure(code or ("AGENT_INTERRUPTED" if status == "INTERRUPTED" else None),
                 phase="RESTART" if status == "INTERRUPTED" else "AGENT")
@@ -558,9 +579,16 @@ class AgentStore:
         self._append(db, body, "case.updated", {"status": case.status.value, "case_revision": case.case_revision},
                      "case:" + str(case.case_revision))
         if case.status.value in {"WAITING_INPUT", "WAITING_ATTACHMENT"}:
-            questions = [requirement.prompt for requirement in case.diagnosis_state.pending_requirements
-                         if requirement.status.value == "OPEN"]
-            body["intake_authoritative_questions"] = questions
+            entries = [{"requirement_id": requirement.requirement_id, "kind": requirement.kind.value,
+                        "prompt": requirement.prompt} for requirement in case.diagnosis_state.pending_requirements
+                       if requirement.status.value == "OPEN"]
+            body["intake_authoritative_question_entries"] = entries
+            body["intake_authoritative_questions"] = [item["prompt"] for item in entries]
+            notice = body.get("intake_attachment_notice")
+            if notice is not None and not any(item["kind"] == "ATTACHMENT"
+                    and item["requirement_id"] == notice["requirement_id"] for item in entries):
+                body["intake_attachment_notice"] = None
+            questions = self._intake_questions(body)
             body["intake_question_revision"] = case.case_revision
             if body.get("intake_pending", False):
                 body["status"] = "INTAKE"
@@ -576,6 +604,7 @@ class AgentStore:
                 body["report_available"] = True
                 body["intake_pending"] = False
                 body["current_questions"] = []
+                body["intake_attachment_notice"] = None
                 result_field = ("generic_result_v2" if case.generic_result_v2 is not None else
                                 "generic_result" if case.generic_result is not None else
                                 "unresolved_result" if case.status.value == "UNRESOLVED" else "final_result")

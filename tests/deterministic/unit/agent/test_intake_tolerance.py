@@ -6,12 +6,13 @@ import json
 import pytest
 
 from problem_locator.agent.intake import (
-    IntakeError, IntakeInput, IntakeMessage, IntakeRequirement, build_initial_problem_spec, build_intake_prompt,
+    INTAKE_MAX_CALLS, ClaudeIntakeEngine, IntakeError, IntakeInput, IntakeMessage, IntakeRequirement,
+    build_initial_problem_spec, build_intake_prompt,
     intake_processing_receipt, parse_intake_response, validate_intake_decision,
 )
 from problem_locator.contracts import InputRequirementConstraints
 from problem_locator.runtime.input_profile import load_builtin_input_profile
-from tests.deterministic.unit.agent.test_intake import _decision, _request, _requirement, _value
+from tests.deterministic.unit.agent.test_intake import _Backend, _decision, _request, _requirement, _value
 
 
 def test_one_bad_proposal_does_not_discard_other_independent_values():
@@ -81,6 +82,9 @@ def _time_request(text, *, name="problem_time", constraints=None):
     ("2026-09-15T05:00:00.123-05:00", "2026-09-15T10:00:00.123Z"),
     ("2026-09-15T10:00:00.1Z", "2026-09-15T10:00:00.100Z"),
     ("2026-09-15T10:00:00.123000Z", "2026-09-15T10:00:00.123Z"),
+    ("2026-09-16 10:00:00+08:00", "2026-09-16T02:00:00.000Z"),
+    ("2026-09-16 02:00:00Z", "2026-09-16T02:00:00.000Z"),
+    ("2026-09-15 21:00:00.123000-05:00", "2026-09-16T02:00:00.123Z"),
 ])
 def test_explicit_iso_time_is_normalized_without_changing_the_user_quote(original, expected):
     request = _time_request("发生时间：" + original)
@@ -99,7 +103,11 @@ def test_explicit_iso_time_is_normalized_without_changing_the_user_quote(origina
 
 @pytest.mark.parametrize("original", ["2026-09-15", "2026-09-15 10:00:00", "10:00:00Z",
     "2026-09-15T10:00:00", "2026-09-15T10:00:00-00:00", "2026-09-15T10:00:00.1234Z",
-    "2026-99-99T99:99:99.000Z", "2026-09-15T10:00:00+24:00"])
+    "2026-99-99T99:99:99.000Z", "2026-09-15T10:00:00+24:00",
+    "2026-09-16  10:00:00+08:00", "2026-09-16\t10:00:00+08:00",
+    "2026-09-16\u00a010:00:00+08:00", "2026-09-16\u300010:00:00+08:00",
+    "2026-09-16 10:00:00-00:00", "2026-09-16 10:00:00.1234+08:00",
+    "2026-09-16 10:00:00+24:00"])
 def test_incomplete_ambiguous_invalid_or_lossy_time_is_left_as_missing(original):
     result = validate_intake_decision(_decision(problem_fields=[], user_facts=[_value("problem_time", original)]),
         _time_request(original))
@@ -117,8 +125,8 @@ def test_time_normalization_requires_the_exact_builtin_name_and_constraints(name
     assert result.action == "NEED_CLARIFICATION" and result.user_facts == []
 
 
-def test_normalized_model_value_requires_a_reproducible_complete_time_in_its_quote():
-    raw_time = "2026-09-15T18:00:00+08:00"
+@pytest.mark.parametrize("raw_time", ["2026-09-15T18:00:00+08:00", "2026-09-15 18:00:00+08:00"])
+def test_normalized_model_value_requires_a_reproducible_complete_time_in_its_quote(raw_time):
     request = _time_request(raw_time)
     exact = _value("problem_time", "2026-09-15T10:00:00.000Z", source_quote=raw_time)
     assert validate_intake_decision(_decision(problem_fields=[], user_facts=[exact]), request).user_facts == [exact]
@@ -130,6 +138,9 @@ def test_normalized_model_value_requires_a_reproducible_complete_time_in_its_quo
     ("2026-09-15T18:00:00+08:00", "NEED_CLARIFICATION"),
     ("2026-09-15T10:00:00Z", "NEED_CLARIFICATION"),
     ("2026-09-15T18:00:01+08:00", "NEW_CASE_REQUIRED"),
+    ("2026-09-15 18:00:00+08:00", "NEED_CLARIFICATION"),
+    ("2026-09-15 10:00:00Z", "NEED_CLARIFICATION"),
+    ("2026-09-15 18:00:01+08:00", "NEW_CASE_REQUIRED"),
 ])
 def test_repeated_frozen_time_compares_instants_using_its_frozen_constraint(original, action):
     request = _time_request(original)
@@ -153,6 +164,63 @@ def test_frozen_time_equivalence_is_not_inferred_from_a_name_or_custom_constrain
         "frozen_user_facts": {"problem_time": "2026-09-15T10:00:00.000Z"}})
     result = validate_intake_decision(_decision(problem_fields=[], user_facts=[_value("problem_time", original)]), frozen)
     assert result.action == "NEW_CASE_REQUIRED" and result.user_facts == []
+
+
+@pytest.mark.parametrize("quote", [
+    "2026-09-16  10:00:00+08:00",
+    "2026-09-16\t10:00:00+08:00",
+    "2026-09-16\u00a010:00:00+08:00",
+    "2026-09-16 10:00:00-00:00",
+    "2026-09-16 10:00:00+08:00 或 2026-09-16 11:00:00+08:00",
+])
+def test_space_time_replay_cannot_guess_from_invalid_or_ambiguous_quotes(quote):
+    request = _time_request(quote)
+    proposal = _value("problem_time", "2026-09-16T02:00:00.000Z", source_quote=quote)
+    result = validate_intake_decision(_decision(problem_fields=[], user_facts=[proposal]), request)
+    assert result.action == "NEED_CLARIFICATION" and result.user_facts == []
+    assert intake_processing_receipt(result)["items"] == [
+        {"field": "user_facts[0]", "reason": "INVALID_USER_SOURCE"}]
+
+
+def test_space_time_normalization_does_not_expand_to_renamed_fields_or_identifiers():
+    original = "2026-09-16 10:00:00+08:00"
+    renamed = _time_request(original, name="incident_time")
+    result = validate_intake_decision(_decision(problem_fields=[],
+        user_facts=[_value("incident_time", original)]), renamed)
+    assert result.action == "NEED_CLARIFICATION" and result.user_facts == []
+    assert intake_processing_receipt(result)["items"][0]["reason"] == "INPUT_CONSTRAINT_MISMATCH"
+    identifier = _time_request(original, name="device_model", constraints={
+        "value_type": "STRING", "min_utf8_bytes": 1, "max_utf8_bytes": 64,
+        "pattern": None, "allowed_values": [],
+    })
+    result = validate_intake_decision(_decision(problem_fields=[],
+        user_facts=[_value("device_model", original)]), identifier)
+    assert result.user_facts[0].value == original
+    assert intake_processing_receipt(result) is None
+
+
+@pytest.mark.parametrize("model_normalized", [False, True])
+def test_engine_parser_adopts_space_time_in_one_call_without_losing_source(tmp_path, model_normalized):
+    original = "2026-09-16 10:00:00.123+08:00"
+    expected = "2026-09-16T02:00:00.123Z"
+    text = "问题发生时间为 " + original + "。"
+    request = _time_request(text)
+    proposal = _value("problem_time", expected if model_normalized else original, source_quote=text)
+    backend = _Backend(_decision(problem_fields=[], user_facts=[proposal]).model_dump_json())
+    engine = ClaudeIntakeEngine("not-launched", workspace_root=tmp_path, backend=backend)
+    result = engine.intake(request)
+    assert len(backend.calls) == INTAKE_MAX_CALLS == 1
+    assert backend.calls[0]["file_access"] == "none"
+    assert backend.calls[0]["broker_environment"] is None
+    assert "一个 ASCII 空格" in backend.calls[0]["prompt"]
+    assert result.action == "SUBMIT_SUPPLEMENT"
+    assert result.user_facts[0].value == expected
+    assert result.user_facts[0].source_quote == text
+    assert result.user_facts[0].source_message_id == "m1"
+    receipt = intake_processing_receipt(result)
+    assert receipt["items"] == [{"field": "user_facts[0]", "reason": "UTC_TIME_NORMALIZED"}]
+    assert validate_intake_decision(result, request) == result
+    assert intake_processing_receipt(validate_intake_decision(result, request)) == receipt
 
 
 def test_excessive_json_nesting_stays_a_controlled_fatal_output_error():

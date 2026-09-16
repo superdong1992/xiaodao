@@ -136,11 +136,13 @@ def test_concurrent_retries_publish_one_message_and_monotonic_events(store):
         store.list_events(conversation, after=32)
 
 
-def _project_waiting_questions(store, conversation, questions, revision=1):
+def _project_waiting_questions(store, conversation, questions, revision=1, *, attachment_questions=()):
     case = SimpleNamespace(case_id=CASE_ID, active_job_id=None,
         status=CaseStatus.WAITING_INPUT, archive_status="NOT_REQUIRED", case_revision=revision,
         diagnosis_state=SimpleNamespace(pending_requirements=[SimpleNamespace(
-            status=SimpleNamespace(value="OPEN"), prompt=question) for question in questions]))
+            requirement_id="question-" + str(index),
+            kind=SimpleNamespace(value="ATTACHMENT" if question in attachment_questions else "INPUT"),
+            status=SimpleNamespace(value="OPEN"), prompt=question) for index, question in enumerate(questions)]))
     with store.repository.database_transaction() as db:
         store._project_case(db, store._load(db, conversation), SimpleNamespace(case=case))
 
@@ -203,6 +205,27 @@ def test_intake_finish_uses_latest_authoritative_remaining_questions(store):
     _project_waiting_questions(store, conversation, ["请上传日志。"], revision=2)
     assert [item.data["questions"] for item in store.list_events(conversation)
             if item.type == "assistant.question"] == questions
+
+
+@pytest.mark.parametrize("interrupted", [False, True], ids=["failed", "interrupted"])
+def test_terminal_conversation_clears_current_attachment_selection_question(store, interrupted):
+    conversation = _conversation(store)
+    message = store.submit_message(conversation, "first", "问题描述")
+    store.set_message_status(conversation, message.message_id, "APPLIED")
+    _project_waiting_questions(store, conversation, ["请上传日志。"], attachment_questions=["请上传日志。"])
+    notice = {"requirement_id": "question-0", "message": "请重新选择一个日志归档。"}
+    store.finish_intake(conversation, [message.message_id], attachment_notice=notice)
+    assert store.get_conversation(conversation).current_questions == [notice["message"]]
+    store.fail_conversation(conversation, interrupted=interrupted)
+    view = store.get_conversation(conversation)
+    assert view.status == ("INTERRUPTED" if interrupted else "FAILED")
+    assert view.current_questions == []
+    with store.repository.database_read() as database:
+        assert store._load(database, conversation)["intake_attachment_notice"] is None
+    events = store.list_events(conversation)
+    store.finish_intake(conversation, [message.message_id], attachment_notice=notice)
+    assert store.get_conversation(conversation).current_questions == []
+    assert store.list_events(conversation) == events
 
 
 def test_intake_coverage_and_question_publication_roll_back_together(store, monkeypatch):

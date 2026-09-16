@@ -48,8 +48,10 @@ records，不进入模型工作区；
 ./tools/test-flow/run.sh --track dev --goal dev.quick
 ```
 
-`dev.quick` 只在受影响范围可以安全缩小时运行对应测试。如果选择范围达到完整套件的一半，结果会以
+`dev.quick` 只在受影响范围可以安全缩小时运行对应测试。如果选择范围达到完整套件的一半，或包含整个
+`tests/deterministic/integration` 目录，结果会以
 `AFFECTED_SCOPE_REQUIRES_FULL` 收口，不会把 0 个测试记成 PASS；此时必须运行 `dev.default`。
+`dev.default` 将这类宽范围交给已有的 full 阶段，完整执行原套件；单个集成测试文件仍可走 affected。
 这条 quick → default 升级是预期控制流，不受同身份失败重试策略阻止，也不要求填写新的失败假设。
 `dev.quick` 是不完整的开发反馈，不得用于 Release、修复台账或源码快照验证。
 

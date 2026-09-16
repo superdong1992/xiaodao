@@ -75,6 +75,8 @@ Content-Type: application/json
 
 输入只需 `request_id`、`text`、`attachment_ids`；每个新逻辑请求生成新 ID，网络重试保持 ID 和内容不变。完整可复制的请求/响应、文件哈希和请求头见 [API 参考](website-agent-api.md)。附件仅支持现有压缩日志格式，不是截图、PDF 或任意文件上传接口。
 
+首次提交建议先上传一个日志包，再把问题文字和该包的 `attachment_ids` 一起发送。先发文字、后发附件也受支持，后台会先采用尚未提取的文字参数。当前一次诊断使用一份日志归档；选了多个包时按提示合包，或用新消息只引用所需的一个附件。上传到 `READY` 后仍须发消息引用，上传本身不触发采用。参数提取不读取日志正文，请把已知的问题时间、进程和槽位等信息写入文字；完整时间应包含明确时区，如 `2026-09-16 10:00:00+08:00`。
+
 “实时输出”是服务端发布的阶段消息和追问，**不是模型逐 token 输出或内部推理**。`result.available` 也不是报告全文。报告必须从正式产物获取，不从进度文案或旧 `methods_result` 拼接。
 
 基础 SSE 只发送单行 `data:` 业务帧，不发送 `event:`、`id:` 或 `retry:` 行；`type` 和 `sequence` 保留在 JSON 内。连接注释 `: connected` 和心跳注释不会触发 `onmessage`。网站统一接收 `message`，再按 JSON 的 `type` 显示追问、进度或报告通知；不要按命名事件注册监听器，也不要等待 `[DONE]` 或按 OpenAI `choices` / `delta` 解析。完整前端示例见 [API 参考](website-agent-api.md)。

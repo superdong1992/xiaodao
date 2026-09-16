@@ -243,10 +243,10 @@ class AgentConversationService:
             if case_view.status.value not in {"WAITING_INPUT", "WAITING_ATTACHMENT"}:
                 return False
         pending = [item for item in view.messages if item.status in {"QUEUED", "PROCESSING"}]
+        covered = set(intake_state["covered_message_ids"])
         if not pending:
             # APPLIED means the original message created the Case, not that
             # its Skill-specific facts were extracted. Read it once after ROUTE.
-            covered = set(intake_state["covered_message_ids"])
             pending = [item for item in view.messages
                 if item.status == "APPLIED" and item.message_id not in covered]
             if not pending or case_view is None:
@@ -254,9 +254,16 @@ class AgentConversationService:
                 return False
         message = pending[0]
         prefix = []
+        selected_attachment_ids = []
+        uncovered_text = False
         for item in view.messages:
             if item.status != "UNUSED":
                 prefix.append(item)
+                uncovered_text = uncovered_text or (item.message_id not in covered and bool(item.text.strip()))
+                if item.attachment_ids:
+                    # A later explicit selection replaces an unadopted choice;
+                    # older uploads are retained but never silently combined.
+                    selected_attachment_ids = item.attachment_ids
             if item.message_id == message.message_id:
                 break
         if message.status != "APPLIED":
@@ -280,7 +287,9 @@ class AgentConversationService:
             ), message_id=message.message_id)
             return True
         self._phase = "INTAKE"
-        request = self._intake_input(view, prefix, draft, case_view)
+        attachments, attachment_ids, attachment_notice = self._attachment_selection(
+            view, case_view, selected_attachment_ids)
+        request = self._intake_input(view, prefix, draft, case_view, attachments)
         operation_id = conversation_id + ":intake:" + message.message_id
         prior = self.store.get_dispatch(conversation_id, operation_id)
         if prior is not None:
@@ -300,10 +309,12 @@ class AgentConversationService:
             self.store.record_dispatch(conversation_id, operation_id,
                 {"operation": "INTAKE", "input": request.model_dump(mode="json")})
             self.store.append_progress(conversation_id, "INTAKE", dedupe_key="intake:" + message.message_id)
-            if not message.text.strip() or (message.status == "APPLIED"
-                    and not any(item.kind == "INPUT" for item in request.requirements)):
+            open_inputs = any(item.kind == "INPUT" for item in request.requirements)
+            if (not message.text.strip() and not (uncovered_text and open_inputs)) or (
+                    message.status == "APPLIED" and not open_inputs):
                 # Attachment-only work needs no language model. Actual attachment
-                # count/type/adoption are still checked by the service and Case.
+                # work may still cover an earlier, as-yet unextracted description.
+                # New nonempty messages retain frozen-fact correction checks.
                 decision = IntakeDecision(action="SUBMIT_SUPPLEMENT" if request.attachments else "NEED_CLARIFICATION",
                     message="已核对补充要求。",
                     problem_fields=[], user_facts=[])
@@ -330,26 +341,22 @@ class AgentConversationService:
                  "user_facts": [item.model_dump(mode="json") for item in decision.user_facts]}
         self.store.set_draft(conversation_id, draft)
         inputs = {item.name: item.value for item in decision.user_facts}
-        attachment_ids = self._available_attachments(view, case_view, prefix)
         if inputs or attachment_ids:
             self._supplement(conversation_id, case_view, inputs, attachment_ids, "message-" + message.message_id,
                 message_id=message.message_id)
-        elif decision.action == "SUBMIT_SUPPLEMENT":
+        elif decision.action == "SUBMIT_SUPPLEMENT" and attachment_notice is None:
             raise AgentStoreError("AGENT_NO_MATCHING_INPUT", "本次内容不符合当前补充要求。", 409)
         elif message.status != "APPLIED":
             self.store.set_message_status(conversation_id, message.message_id, "APPLIED")
-        self.store.finish_intake(conversation_id, [item.message_id for item in prefix])
+        self.store.finish_intake(conversation_id, [item.message_id for item in prefix],
+            attachment_notice=attachment_notice)
         return True
 
-    def _intake_input(self, view, messages, draft, case_view):
+    def _intake_input(self, view, messages, draft, case_view, attachments):
         sources = [IntakeMessage(message_id=item.message_id, role="USER", text=item.text) for item in messages]
         if view.current_questions:
             sources.insert(len(sources) - 1, IntakeMessage(message_id="question-" + messages[-1].message_id,
                 role="ASSISTANT", text="\n".join(view.current_questions)))
-        references = {key for item in messages for key in item.attachment_ids}
-        attachments = [IntakeAttachment(attachment_id=item.attachment_id, file_name=item.name,
-            media_type=item.content_type, size_bytes=item.size, sha256=item.sha256)
-            for item in view.attachments if item.attachment_id in references and item.status in {"READY", "IMPORTED"}]
         requirements, frozen_requirements, spec, frozen_facts = [], [], None, {}
         if case_view is not None:
             spec = ProblemSpecInput.model_validate(case_view.problem_spec.model_dump(exclude={"revision"}))
@@ -371,22 +378,32 @@ class AgentConversationService:
             frozen_problem_spec=spec, frozen_user_facts=frozen_facts,
             frozen_input_requirements=frozen_requirements)
 
-    def _available_attachments(self, view, case_view, messages):
+    def _attachment_selection(self, view, case_view, selected_ids):
         requirements = [item for item in case_view.pending_requirements
             if item.status.value == "OPEN" and item.kind.value == "ATTACHMENT"
             and item.supplement_policy.value == "MISSING_ONLY"]
         if len(requirements) != 1:
-            return []
+            return [], [], None
+        requirement = requirements[0]
         constraints = requirements[0].constraints
-        selected = {key for item in messages if item.status != "UNUSED" for key in item.attachment_ids}
+        selected = set(selected_ids)
         used = {key for item in case_view.pending_requirements if item.kind.value == "ATTACHMENT"
             and item.status.value == "FULFILLED" for key in item.fulfilled_by_refs}
-        attachments = [item.attachment_id for item in view.attachments if item.attachment_id in selected
-            and item.status in {"READY", "IMPORTED"} and item.case_attachment_id not in used
-            and item.content_type in constraints.allowed_content_types]
-        if not constraints.min_count <= len(attachments) <= constraints.max_count:
-            return []
-        return attachments
+        records = [item for item in view.attachments if item.attachment_id in selected
+            and item.status in {"READY", "IMPORTED"} and item.case_attachment_id not in used]
+        attachments = [IntakeAttachment(attachment_id=item.attachment_id, file_name=item.name,
+            media_type=item.content_type, size_bytes=item.size, sha256=item.sha256) for item in records]
+        notice = None
+        if len(records) > constraints.max_count:
+            notice = ("当前仅支持一份日志归档，请合并后上传，或重新选择一个附件。"
+                if constraints.max_count == 1 else "所选日志附件数量超出当前要求，请重新选择附件。")
+        elif any(item.content_type not in constraints.allowed_content_types for item in records):
+            notice = "所选附件格式不符合要求，请重新上传支持的日志归档。"
+        elif records and len(records) < constraints.min_count:
+            notice = "日志附件数量不足，请按要求补充后重新选择附件。"
+        if notice is not None:
+            return attachments, [], {"requirement_id": requirement.requirement_id, "message": notice}
+        return attachments, [item.attachment_id for item in records], None
 
     def _supplement(self, conversation_id, case_view, inputs, attachment_ids, label, *, message_id=None):
         self._phase = "IMPORT_ATTACHMENT"
