@@ -9,12 +9,22 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from problem_locator.contracts.limits import JOB_STDOUT_STDERR_BYTES
 from problem_locator.contracts.ports import AppendOnlyByteSink
 
 
 _DEFAULT_LINE_LIMIT_BYTES = 1024 * 1024
 _SAFE_TOOL_NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
-_STREAM_TYPES = frozenset({"system", "assistant", "user", "result"})
+_STREAM_TYPES = frozenset({"system", "assistant", "user", "result", "stream_event", "content_block_start"})
+
+
+def _unique_event_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("stream-json contains a duplicate object key")
+        value[key] = item
+    return value
 
 
 def _nonnegative_number(value: object) -> float | None:
@@ -36,16 +46,20 @@ def _utf8_size(value: object) -> int:
     return len(value.encode("utf-8")) if isinstance(value, str) else 0
 
 
-def _message_blocks(value: object) -> tuple[Mapping[str, Any], ...]:
+def _message_blocks(value: object, *, allow_text: bool = False) -> tuple[Mapping[str, Any], ...] | None:
     if not isinstance(value, dict):
-        return ()
+        return None
     message = value.get("message")
     if not isinstance(message, dict):
-        return ()
+        return None
     content = message.get("content")
-    if not isinstance(content, list):
+    if allow_text and isinstance(content, str):
         return ()
-    return tuple(item for item in content if isinstance(item, dict))
+    if not isinstance(content, list) or any(
+        not isinstance(item, dict) or not isinstance(item.get("type"), str) for item in content
+    ):
+        return None
+    return tuple(content)
 
 
 def _union_duration(intervals: list[tuple[float, float]]) -> float:
@@ -70,20 +84,24 @@ class AgentStreamTelemetry:
         *,
         monotonic: Callable[[], float] = time.monotonic,
         line_limit_bytes: int = _DEFAULT_LINE_LIMIT_BYTES,
+        output_limit_bytes: int = JOB_STDOUT_STDERR_BYTES,
     ) -> None:
         if line_limit_bytes <= 0:
             raise ValueError("line_limit_bytes must be positive")
+        if output_limit_bytes <= 0:
+            raise ValueError("output_limit_bytes must be positive")
         self._monotonic = monotonic
         self._origin = monotonic()
         self._line_limit = line_limit_bytes
+        self._output_limit = output_limit_bytes
         self._buffer = bytearray()
-        self._discarding_line = False
         self._lock = threading.Lock()
         self._recognized = 0
         self._parsed_lines = 0
         self._output_bytes = 0
         self._malformed = False
         self._line_limited = False
+        self._output_limited = False
         self._internal_failure = False
         self._terminal_result = False
         self._final_result: str | None = None
@@ -99,6 +117,8 @@ class AgentStreamTelemetry:
             "text": {"count": 0, "utf8_bytes": 0, "first": None, "last": None},
         }
         self._pending_tools: dict[str, tuple[str, float]] = {}
+        self._seen_tool_names: dict[str, str] = {}
+        self._partial_tool_indices: set[int] = set()
         self._tool_counts: dict[str, int] = {}
         self._tool_intervals: dict[str, list[tuple[float, float]]] = {}
         self._tool_max_ms: dict[str, float] = {}
@@ -126,56 +146,56 @@ class AgentStreamTelemetry:
         with self._lock:
             self._internal_failure = True
             self._buffer.clear()
-            self._discarding_line = True
 
     def write(self, chunk: bytes) -> None:
         if not isinstance(chunk, bytes) or not chunk:
             raise ValueError("write requires non-empty bytes")
         with self._lock:
-            if self._internal_failure:
-                return
             self._output_bytes += len(chunk)
+            if self._output_bytes > self._output_limit:
+                self._output_limited = True
+                self._buffer.clear()
+                self._final_result = None
+            if self._internal_failure or self._output_limited:
+                return
             try:
                 self._consume(chunk)
             except BaseException:
                 self._internal_failure = True
                 self._buffer.clear()
-                self._discarding_line = True
 
     def _consume(self, chunk: bytes) -> None:
-        for value in chunk:
-            if self._discarding_line:
-                if value == 0x0A:
-                    self._discarding_line = False
-                continue
-            if value == 0x0A:
-                line = bytes(self._buffer)
-                self._buffer.clear()
-                self._process_line(line)
-                continue
-            self._buffer.append(value)
-            if len(self._buffer) > self._line_limit:
-                self._line_limited = True
-                self._buffer.clear()
-                self._discarding_line = True
+        # The sampling threshold must never discard a terminal result or hide
+        # a tool call. Complete frames are bounded by the phase's output budget.
+        fragments = chunk.split(b"\n")
+        for fragment in fragments[:-1]:
+            self._buffer.extend(fragment)
+            line = bytes(self._buffer)
+            self._buffer.clear()
+            self._process_line(line, terminated=True)
+        self._buffer.extend(fragments[-1])
 
     def finish(self) -> None:
         with self._lock:
-            if self._internal_failure or self._discarding_line:
+            if self._internal_failure or self._output_limited:
                 return
             if self._buffer:
                 line = bytes(self._buffer)
                 self._buffer.clear()
                 self._process_line(line)
 
-    def _process_line(self, raw: bytes) -> None:
+    def _process_line(self, raw: bytes, *, terminated: bool = False) -> None:
+        if terminated and raw.endswith(b"\r"):
+            raw = raw[:-1]
+        sampled = len(raw) <= self._line_limit
+        self._line_limited |= not sampled
         if not raw or raw.endswith(b"\r"):
             self._malformed = True
             return
         self._parsed_lines += 1
         try:
-            payload = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            payload = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_event_object)
+        except (UnicodeDecodeError, ValueError):
             self._malformed = True
             return
         if not isinstance(payload, dict) or payload.get("type") not in _STREAM_TYPES:
@@ -190,16 +210,75 @@ class AgentStreamTelemetry:
                 else self._system_observed_ms
             )
         elif event_type == "assistant":
-            self._observe_assistant(payload, observed_ms)
+            self._observe_assistant(payload, observed_ms, observe_blocks=sampled)
         elif event_type == "user":
             self._observe_user(payload, observed_ms)
         elif event_type == "result":
             self._observe_result(payload, observed_ms)
+        elif event_type == "stream_event":
+            self._observe_partial(payload.get("event"), observed_ms)
+        elif event_type == "content_block_start":
+            self._observe_partial(payload, observed_ms)
 
-    def _observe_assistant(self, payload: Mapping[str, Any], observed_ms: float) -> None:
-        for block in _message_blocks(payload):
+    def _observe_partial(self, event: object, observed_ms: float) -> None:
+        if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+            self._malformed = True
+            return
+        event_type = event["type"]
+        if event_type in {"message_start", "message_stop"}:
+            self._partial_tool_indices.clear()
+        elif event_type == "content_block_start":
+            block = event.get("content_block")
+            if not isinstance(block, dict) or not isinstance(block.get("type"), str):
+                self._malformed = True
+                return
+            index = event.get("index")
+            if type(index) is int:
+                self._partial_tool_indices.discard(index)
+            if block["type"] == "tool_use":
+                self._observe_tool_use(block, observed_ms)
+                if type(index) is int and index >= 0:
+                    self._partial_tool_indices.add(index)
+        elif event_type == "content_block_stop":
+            index = event.get("index")
+            if type(index) is int:
+                self._partial_tool_indices.discard(index)
+        elif event_type == "content_block_delta":
+            delta = event.get("delta")
+            if isinstance(delta, dict) and delta.get("type") == "input_json_delta":
+                index = event.get("index")
+                if type(index) is not int or index not in self._partial_tool_indices:
+                    # Tool arguments without a preceding tool identity cannot
+                    # establish which tool the phase actually used.
+                    self._malformed = True
+        # Text/thinking deltas and ordinary metadata carry no tool invocation.
+
+    def _observe_tool_use(self, block: Mapping[str, Any], observed_ms: float) -> None:
+        tool_id, raw_name = block.get("id"), block.get("name")
+        if not isinstance(tool_id, str) or not tool_id or not isinstance(raw_name, str) or not _SAFE_TOOL_NAME.fullmatch(raw_name):
+            self._malformed = True
+            return
+        prior_name = self._seen_tool_names.get(tool_id)
+        if prior_name is not None:
+            if prior_name != raw_name:
+                self._malformed = True
+            return
+        self._seen_tool_names[tool_id] = raw_name
+        self._tool_counts[raw_name] = self._tool_counts.get(raw_name, 0) + 1
+        self._pending_tools[tool_id] = (raw_name, observed_ms)
+
+    def _observe_assistant(
+        self, payload: Mapping[str, Any], observed_ms: float, *, observe_blocks: bool = True,
+    ) -> None:
+        blocks = _message_blocks(payload)
+        if blocks is None:
+            self._malformed = True
+            return
+        for block in blocks:
             block_type = block.get("type")
             if block_type in self._blocks:
+                if not observe_blocks:
+                    continue
                 state = self._blocks[block_type]
                 state["count"] = int(state["count"]) + 1
                 state["utf8_bytes"] = int(state["utf8_bytes"]) + _utf8_size(
@@ -209,19 +288,25 @@ class AgentStreamTelemetry:
                 state["last"] = observed_ms
                 continue
             if block_type != "tool_use":
+                if block_type == "tool_result":
+                    self._malformed = True
                 continue
-            raw_name = block.get("name")
-            name = raw_name if isinstance(raw_name, str) and _SAFE_TOOL_NAME.fullmatch(raw_name) else "OTHER"
-            self._tool_counts[name] = self._tool_counts.get(name, 0) + 1
-            tool_id = block.get("id")
-            if isinstance(tool_id, str) and tool_id:
-                self._pending_tools[tool_id] = (name, observed_ms)
+            self._observe_tool_use(block, observed_ms)
 
     def _observe_user(self, payload: Mapping[str, Any], observed_ms: float) -> None:
-        for block in _message_blocks(payload):
+        blocks = _message_blocks(payload, allow_text=True)
+        if blocks is None:
+            self._malformed = True
+            return
+        for block in blocks:
             if block.get("type") != "tool_result":
+                if block.get("type") == "tool_use":
+                    self._malformed = True
                 continue
             tool_id = block.get("tool_use_id")
+            if not isinstance(tool_id, str) or not tool_id or tool_id not in self._seen_tool_names:
+                self._malformed = True
+                continue
             pending = self._pending_tools.pop(tool_id, None) if isinstance(tool_id, str) else None
             if pending is None:
                 continue
@@ -259,15 +344,22 @@ class AgentStreamTelemetry:
                     self._usage_counts[safe_name] = count
 
     @property
+    def output_limit_exceeded(self) -> bool:
+        with self._lock:
+            return self._output_limited
+
+    @property
     def final_result(self) -> str | None:
         """The single successful CLI result; never included in diagnostic events."""
         self.finish()
         with self._lock:
-            return self._final_result if not self._internal_failure else None
+            return self._final_result if not (self._internal_failure or self._output_limited) else None
 
     def permits_file_access(self, policy: str) -> bool:
         self.finish()
         with self._lock:
+            if self._internal_failure or self._output_limited or self._malformed:
+                return False
             allowed = set() if policy == 'none' else {'Read'}
             return set(self._tool_counts).issubset(allowed)
 
@@ -281,7 +373,9 @@ class AgentStreamTelemetry:
     ) -> dict[str, Any]:
         self.finish()
         with self._lock:
-            if self._internal_failure:
+            if self._output_limited:
+                status, reason = "UNAVAILABLE", "STREAM_JSON_OUTPUT_LIMIT"
+            elif self._internal_failure:
                 status, reason = "UNAVAILABLE", "TELEMETRY_INTERNAL_FAILURE"
             elif (
                 self._recognized == 0

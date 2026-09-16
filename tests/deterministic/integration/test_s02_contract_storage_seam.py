@@ -32,7 +32,7 @@ def test_real_case_repository_round_trips_the_v11_export(tmp_path) -> None:
 
     assert report.valid is True
     assert report.generation == snapshot.generation == 1
-    assert snapshot.contract_revision == "v11-contract-r1"
+    assert snapshot.contract_revision == "v11-contract-r2"
     assert repository.export_snapshot() == canonical_json_bytes(snapshot)
     assert not repository.layout.state.exists()
     repository.close()

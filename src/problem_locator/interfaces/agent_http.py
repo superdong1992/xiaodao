@@ -97,9 +97,9 @@ class _SseResponse(StreamingResponse):
     media_type = "text/event-stream"
 
 
-def _failure(code: str, message: str, status: int, *, retryable: bool = False) -> JSONResponse:
+def _failure(code: str, message: str, status: int, *, retryable: bool = False, details=None) -> JSONResponse:
     value = AgentErrorEnvelope(error=AgentHttpError(
-        code=code, message=message, retryable=retryable,
+        code=code, message=message, retryable=retryable, details=details or [],
     ))
     return JSONResponse(value.model_dump(mode="json"), status_code=status)
 
@@ -211,7 +211,7 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
             result = result_model.model_validate(model_json(result))
             return JSONResponse(success_envelope(result))
         except AgentStoreError as exc:
-            return _failure(exc.code, exc.message, exc.status_code)
+            return _failure(exc.code, exc.message, exc.status_code, details=exc.details, retryable=exc.retryable)
         except ApplicationPortError as exc:
             return JSONResponse(error_envelope(exc.error), status_code=http_status_for(exc.error))
         except Exception:
@@ -296,7 +296,7 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
                 after_sequence=cursor, limit=_EVENT_BATCH_SIZE,
             ), conversation_id, cursor)
         except AgentStoreError as exc:
-            return _failure(exc.code, exc.message, exc.status_code)
+            return _failure(exc.code, exc.message, exc.status_code, details=exc.details, retryable=exc.retryable)
         except ApplicationPortError as exc:
             return JSONResponse(error_envelope(exc.error), status_code=http_status_for(exc.error))
         except Exception:
@@ -384,7 +384,7 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
             result = AgentAttachment.model_validate(model_json(result))
             return JSONResponse(success_envelope(result))
         except AgentStoreError as exc:
-            return _failure(exc.code, exc.message, exc.status_code)
+            return _failure(exc.code, exc.message, exc.status_code, details=exc.details, retryable=exc.retryable)
         except ApplicationPortError as exc:
             return JSONResponse(error_envelope(exc.error), status_code=http_status_for(exc.error))
         except Exception:

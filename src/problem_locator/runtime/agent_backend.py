@@ -213,7 +213,11 @@ class AgentBackend:
         file_access: str | None = None,
     ) -> BackendExecution:
         backend_invocation_id = _next_backend_invocation_id()
-        telemetry = AgentStreamTelemetry(monotonic=self._monotonic)
+        telemetry = AgentStreamTelemetry(
+            monotonic=self._monotonic,
+            output_limit_bytes=(test_limits.stdout_stderr_bytes if test_limits is not None
+                else resource_limits.stdout_stderr_bytes),
+        )
         stdout_sink = _OwnedSink(log_sinks.stdout)
         stderr_sink = (
             stdout_sink
@@ -648,6 +652,12 @@ class AgentBackend:
 
         if primary_failure is not None:
             raise RuntimeExecutionError(primary_failure)
+        if telemetry.output_limit_exceeded:
+            raise runtime_failure(
+                stage=ExecutionStage.BACKEND_EXECUTE,
+                code=ErrorCode.BACKEND_OUTPUT_LIMIT,
+                message="Agent 输出超过当前阶段的字节上限。",
+            )
         workspace_bytes = measure_workspace(allow_transient_changes=False)
         if workspace_bytes > limits.workspace_bytes:
             raise runtime_failure(

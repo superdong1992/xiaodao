@@ -47,6 +47,7 @@ def test_public_console_entries_are_pre_registered() -> None:
     scripts = metadata["scripts"]
     assert scripts == {
         "problem-locator-logparse": "problem_locator.integrations.logparse.cli:main",
+        "problem-locator-data-upgrade": "problem_locator.entrypoints.data_upgrade:main",
         "problem-locator-seal-outcome-draft": (
             "problem_locator.runtime.outcome_finalizer:main"
         ),

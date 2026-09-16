@@ -211,6 +211,7 @@ def test_key_method_error_code_sets_are_exact_where_the_v1_spec_is_closed() -> N
     exact = {
         "ApplicationQueryPort.get_case": frozenset(
             {
+                ErrorCode.DISPATCH_REJECTED,
                 ErrorCode.VALIDATION_ERROR,
                 ErrorCode.CASE_NOT_FOUND,
                 ErrorCode.JOB_NOT_FOUND,

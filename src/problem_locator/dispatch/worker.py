@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Callable
+import time
 
 from problem_locator.contracts import (
     ApplicationPortError,
@@ -44,6 +46,17 @@ _FAILURE_REPORT_RETRY_CODES = frozenset(
 
 class SchedulerInvariantError(RuntimeError):
     """A successful Port receipt violated its frozen shape or binding."""
+
+
+class DeliverySubmissionExpired(RuntimeError):
+    """The bounded submission window ended; persistence is still unconfirmed."""
+
+    def __init__(self, job_id: str, case_id: str, phase: str, error: ApplicationPortError,
+                 secondary_error_code: ErrorCode | None = None):
+        super().__init__("result submission window expired")
+        self.job_id, self.case_id, self.phase = job_id, case_id, phase
+        self.error_code = error.error.code
+        self.secondary_error_code = secondary_error_code
 
 
 class _TypedRuntimeWorker:
@@ -96,7 +109,14 @@ class JobWorker:
         epoch_context: RuntimeEpochContext,
         shutdown_signal: SchedulerShutdownSignal | None = None,
         submission_backoff: SubmissionBackoff | None = None,
+        *,
+        submission_window_seconds: float = 30.0,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
+        if submission_window_seconds <= 0:
+            raise ValueError("submission window must be positive")
+        self._submission_window_seconds = submission_window_seconds
+        self._monotonic = monotonic
         self._job_control = job_control
         self._epoch_context = epoch_context
         self._shutdown_signal = (
@@ -246,7 +266,12 @@ class JobWorker:
         receipt: RuntimeExecutionReceipt,
     ) -> OutcomeReceipt | None:
         failed_attempt = 0
+        deadline = self._monotonic() + self._submission_window_seconds
+        last_error: ApplicationPortError | None = None
         while not self._shutdown_signal.is_requested():
+            if last_error is not None and self._monotonic() >= deadline:
+                raise DeliverySubmissionExpired(receipt.job_outcome.job_id,
+                    receipt.job_outcome.case_id, "RESULT_DELIVERY", last_error) from None
             try:
                 return self._job_control.submit_outcome(
                     receipt.job_outcome,
@@ -258,7 +283,11 @@ class JobWorker:
                     not in JOB_OUTCOME_SUBMISSION_RETRY_ERROR_CODES
                 ):
                     raise
-                if not self._wait_before_retry(failed_attempt):
+                last_error = exc
+                if self._monotonic() >= deadline:
+                    raise DeliverySubmissionExpired(receipt.job_outcome.job_id,
+                        receipt.job_outcome.case_id, "RESULT_DELIVERY", exc) from None
+                if not self._wait_before_retry(failed_attempt, deadline):
                     return None
                 failed_attempt += 1
         return None
@@ -270,7 +299,12 @@ class JobWorker:
         infrastructure_error: RuntimeInfrastructureError,
     ) -> FailureReceipt | None:
         failed_attempt = 0
+        deadline = self._monotonic() + self._submission_window_seconds
+        last_error: ApplicationPortError | None = None
         while not self._shutdown_signal.is_requested():
+            if last_error is not None and self._monotonic() >= deadline:
+                raise DeliverySubmissionExpired(job.job_id, job.case_id, "FAILURE_REPORT", last_error,
+                    infrastructure_error.execution_failure.code) from None
             try:
                 return self._job_control.report_execution_infrastructure_failure(
                     job.job_id,
@@ -281,17 +315,23 @@ class JobWorker:
             except ApplicationPortError as exc:
                 if exc.error.code not in _FAILURE_REPORT_RETRY_CODES:
                     raise
-                if not self._wait_before_retry(failed_attempt):
+                last_error = exc
+                if self._monotonic() >= deadline:
+                    raise DeliverySubmissionExpired(job.job_id, job.case_id, "FAILURE_REPORT", exc,
+                        infrastructure_error.execution_failure.code) from None
+                if not self._wait_before_retry(failed_attempt, deadline):
                     return None
                 failed_attempt += 1
         return None
 
-    def _wait_before_retry(self, failed_attempt: int) -> bool:
+    def _wait_before_retry(self, failed_attempt: int, deadline: float | None = None) -> bool:
         if self._shutdown_signal.is_requested():
             return False
-        waited = self._submission_backoff.wait(
-            submission_backoff_delay(failed_attempt)
-        )
+        delay = submission_backoff_delay(failed_attempt)
+        if deadline is not None:
+            delay = min(delay, max(0.0, deadline - self._monotonic()))
+        # This bounds retries, not a synchronous Port call already in progress.
+        waited = self._submission_backoff.wait(delay)
         return waited and not self._shutdown_signal.is_requested()
 
     @staticmethod

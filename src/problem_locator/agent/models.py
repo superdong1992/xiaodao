@@ -27,6 +27,15 @@ class AgentModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True)
 
 
+class AgentPublicFailure(AgentModel):
+    """Safe failure/operational diagnostics; never permission to rerun a model."""
+
+    code: NonEmptyText
+    message: NonEmptyText
+    details: list[dict[str, str | int | bool | None]] = Field(default_factory=list)
+    retryable: Literal[False] = False
+
+
 class CreateConversationRequest(AgentModel):
     request_id: NonEmptyText
 
@@ -102,6 +111,7 @@ class ConversationView(AgentModel):
     case_status: str | None = None
     archive_status: Literal["NOT_REQUIRED", "PENDING", "READY", "FAILED"] = "NOT_REQUIRED"
     current_questions: list[str] = Field(default_factory=list)
+    failure: AgentPublicFailure | None = None
     messages: list[AgentMessage] = Field(default_factory=list)
     attachments: list[AgentAttachment] = Field(default_factory=list)
     last_event_id: int = 0
@@ -284,9 +294,10 @@ class AgentEvent(AgentModel):
 
 
 class AgentStoreError(Exception):
-    def __init__(self, code: str, message: str, status_code: int = 400):
+    def __init__(self, code: str, message: str, status_code: int = 400, *, details=None, retryable=False):
         super().__init__(message)
         self.code, self.message, self.status_code = code, message, status_code
+        self.details, self.retryable = details or [], retryable
 
 
 AgentError = AgentStoreError

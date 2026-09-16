@@ -1,4 +1,4 @@
-# Problem Locator 8.0 预览版
+# Problem Locator 8.1 预览版
 
 ## 内部网站 Agent 接入
 
@@ -12,9 +12,9 @@
 
 | 合同或资产 | 当前版本 |
 | --- | --- |
-| Problem Locator package | `8.0.0` |
+| Problem Locator package | `8.1.0` |
 | State / Job / Outcome schema | `11` |
-| S00 contract revision | `v11-contract-r1` |
+| S00 contract revision | `v11-contract-r2` |
 | Agent conversation / event / INTAKE | `1` / `1` / `1.0.0` |
 | Methods package | `SKILL.md` + `methods.json@1` + `references/*.md` |
 | Product registration | `registration-template.json@1` |
@@ -24,7 +24,7 @@
 | Specialist / Reviewer profile | `8.0.0` / `7.0.0` |
 | Router / Diagnose / Review tool bundle | `3.0.0` / `4.0.0` / `3.0.0` |
 
-State、Job 和权威 Outcome 已切换到 V11。升级必须使用全新 `DATA_ROOT`；服务首次启动会写入 `data-format.json` 和 `completed.sqlite3`。V1–V10 旧目录原样保留，不迁移、不删除、不兼容读取；历史报告使用旧版本只读查看或事先导出。活动 Case 只保存在内存，服务退出后不自动恢复；Agent 会话历史独立持久化，重启后未完成会话标记中断，必须由用户明确新建任务。已交付的报告、资源索引和待归档任务继续恢复。
+State、Job 和权威 Outcome 使用 V11。8.0 的 `v11-contract-r1` 数据可按[离线升级说明](docs/data-upgrade-v11-r2.md)复制并校验后升级到 r2，保留历史会话和报告；不自动改写源目录。新安装使用空 `DATA_ROOT`，首次启动会写入 `data-format.json` 和 `completed.sqlite3`。V1–V10 旧目录原样保留，不迁移、不删除、不兼容读取。活动 Case 只保存在内存，服务退出后不自动恢复；Agent 会话历史独立持久化，重启后未完成会话标记中断，需另建任务。已交付的报告、资源索引和待归档任务继续恢复。
 
 本仓库将故障定位能力分为四层：
 
@@ -53,6 +53,12 @@ requirement 或权威 Outcome。
 独立 Job、Workspace 和上下文中复核；`REVIEWING` 阶段不公开产物，只有 PASS 后才公开。非 PASS
 进入 `UNRESOLVED`，只公开 `INCONCLUSIVE` JSON 和审计包。详细语义见下文“Methods V1、可选审核与报告”。
 
+8.1 当前默认使用 `METHODS_EVIDENCE_VALIDATION=advisory`：Methods 诊断暂不因引用文字、行号、marker、身份词或方法标识不一致而清空模型发现。报告明确标注这些内容是未经证据一致性复核的模型判断，交付 `PARTIAL`；没有可识别发现时交付 `INCONCLUSIVE`。`root_cause=null`，无依据的完成条件保持 `UNKNOWN`，不增加模型调用。实际引用只来自本次冻结日志，文件归属、路径、权限、字节数和 SHA-256 检查继续生效。设置 `strict` 可恢复原证据校验及 Reviewer 关闭时的逐项筛选。详情见 [诊断交付策略](docs/diagnosis-advisory.md)。
+
+模型 JSON 输出接受开头 BOM、完整代码围栏和 CRLF；这些兼容仅位于模型输出入口，七个 MCP 工具的输入合同不变。网站快照新增安全 `failure`，可定位失败阶段并关联服务端日志。调度或持久化异常会停止接收新任务；结果提交最多在现有 30 秒窗口内再次尝试，窗口不会强行中断单次阻塞 I/O，也不会重跑模型。
+
+ROUTE 另允许对 `reason` 中遗漏的双引号转义执行一次本地恢复：必须唯一确定字段边界，保持 `skill_id`、`confidence` 和已有转义不变，并重新通过完整校验。原始响应、采用结果和恢复记录分别归档。其他模型阶段和公开输入不自动修复 JSON 语法；边界与排查方式见[模型输出兼容说明](docs/model-output-compatibility.md)。
+
 ### 发布验收
 
 仓库测试统一从 [`tools/test-flow/README.md`](tools/test-flow/README.md) 进入；终态结构见 [`design/test-flow-architecture.md`](design/test-flow-architecture.md)。Dev 默认只跑受影响确定性测试和完整确定性套件，不调用真实模型；SameJob 已纳入确定性 Journey。Release 在 planning 时冻结 Git 可见工作树的不可变源码快照，不要求预先提交；它还要求当前平台的 built-in Client→Linux adapter、完整确定性/平台证明，以及从 GENESIS 和全新空 `DATA_ROOT` 开始的一条 no-mock CrossJob 旅程。
@@ -67,7 +73,7 @@ Release 或物理局域网部署验收。
 
 Problem Locator 是一个单实例故障诊断服务。它接收结构化问题，收集事实与附件，执行固定版本的路由和诊断任务；Reviewer 默认关闭。专有定位以服务端验证后的 `diagnosis-result.json` 为用户报告，并按需提供含原始目标日志的 `result.zip`。Generic V2 终态继续发布 Markdown 结果。
 
-Problem Locator 8.0 的活动 Case、Job 和核心命令幂等记录保存在内存中，每个 Case 有独立锁和 revision。会话、消息、派发记录和公共事件存入 SQLite，继续使用 SQLite WAL + FULL 同步。终态结果与报告可用事件使用同一事务，归档状态与归档事件也使用同一事务；提交后才通知客户端。阶段事件不会增加 Case revision。历史 Case 按需读取，不在每次写操作中复制全库或重新读取历史附件。
+Problem Locator 8.1 的活动 Case、Job 和核心命令幂等记录保存在内存中，每个 Case 有独立锁和 revision。会话、消息、派发记录和公共事件存入 SQLite，继续使用 SQLite WAL + FULL 同步。终态结果与报告可用事件使用同一事务，归档状态与归档事件也使用同一事务；提交后才通知客户端。阶段事件不会增加 Case revision。历史 Case 按需读取，不在每次写操作中复制全库或重新读取历史附件。
 
 ## 环境要求与安装
 
@@ -107,6 +113,7 @@ uv lock --check
 | `DFX_LOG_LEVEL` | 否 | `INFO` | 结构化诊断日志级别：`DEBUG`、`INFO`、`WARNING`、`ERROR` 或 `CRITICAL` |
 | `DFX_LOG_DIR` | 否 | 无 | 服务端可观测日志目录的绝对路径；配置后生成 `debug.jsonl`、`journey.jsonl` 和按 Case 渲染的人类可读日志 |
 | `SPECIALIZED_REVIEWER_ENABLED` | 否 | `false` | 只接受小写 `true` 或 `false`；开启后，新完成的 Specialist Candidate 才进入独立审核 |
+| `METHODS_EVIDENCE_VALIDATION` | 否 | `advisory` | `advisory` 保留未经证据一致性复核的模型判断；`strict` 恢复原核验。启动时固定，Reviewer 继承对应诊断的策略 |
 | `ROUTE_WORKERS` | 否 | `1` | 独立 ROUTE 队列的 worker 数 |
 | `DIAGNOSE_WORKERS` | 否 | `2` | DIAGNOSE/REVIEW 队列的 worker 数 |
 | `LOGPARSE_CONCURRENCY` | 否 | `1` | 同时执行的 Logparse 子进程数 |
@@ -412,7 +419,7 @@ INTERRUPTED 不伪造用户报告。`methods_result` 不属于当前客户端结
 
 ## 隔离重放指定 Job
 
-`replay-job` 是普通本地 CLI，不引入管理员角色、管理 API、认证或权限模型。它只接受当前 State V11 / `v11-contract-r1` 的已持久化 State/Job/Outcome 闭包，并在新的隔离安装中按当前固定资产执行指定阶段。活动任务不会在停服后保留，不能用这个命令恢复：
+`replay-job` 是普通本地 CLI，不引入管理员角色、管理 API、认证或权限模型。它只接受当前 State V11 / `v11-contract-r2` 的已持久化 State/Job/Outcome 闭包，并在新的隔离安装中按当前固定资产执行指定阶段。数据目录升级不转换以前导出的 replay 文件。活动任务不会在停服后保留，不能用这个命令恢复：
 
 - `diagnose-only`：源 Job 必须是 DIAGNOSE；执行服务端终结，但不向隔离 State 提交诊断 Outcome。
 - `review-only`：源 Job 必须是 REVIEW；执行服务端终结，但不向隔离 State 提交 Review Outcome。

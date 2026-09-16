@@ -52,6 +52,7 @@ from problem_locator.contracts import (
     RequirementStatus,
     ResourceStore,
     ReviewCausalAssertion,
+    ReviewPolicy,
     ReviewSubjectV2,
     RouteDecision,
     RouteKind,
@@ -160,7 +161,9 @@ from .methods_records_v2 import (
     read_method_rejected_attempt_v2,
     read_method_state_v2,
 )
-from .methods_outcome import map_verified_methods_draft
+from .methods_outcome import map_verified_methods_draft, method_evidence_rule_ids
+from .methods_advisory import accept_method_diagnosis_advisory, parse_advisory_diagnosis
+from .methods_selection import diagnosis_mapping, select_method_diagnosis
 from .proposal_stager import discard_staged, stage_validated_output
 from .resolved_logparse import (
     ResolvedLogparsePlanNotReady,
@@ -917,8 +920,11 @@ def _method_grounding_audit_from_bytes(data: bytes) -> MethodGroundingAuditV1:
         "checked_source_count",
         "skill_load",
     }
-    if not isinstance(value, dict) or set(value) != fields:
+    if not isinstance(value, dict) or set(value) not in (fields, fields | {"validation_mode"}):
         raise ValueError("Methods grounding audit fields are invalid")
+    validation_mode = value.get("validation_mode", "strict")
+    if validation_mode not in {"advisory", "strict"}:
+        raise ValueError("Methods evidence validation mode is invalid")
     load = value["skill_load"]
     if not isinstance(load, dict) or set(load) != {
         "package_tree_sha256",
@@ -980,6 +986,7 @@ def _method_grounding_audit_from_bytes(data: bytes) -> MethodGroundingAuditV1:
         evidence_count=value["evidence_count"],
         checked_source_count=value["checked_source_count"],
         skill_load=skill_load,
+        validation_mode=validation_mode,
     )
 
 
@@ -1004,6 +1011,7 @@ class DiagnosisRuntime:
         backend_test_limits: BackendExecutionLimits | None = None,
         generic_locator_executor: GenericLocatorExecutor | None = None,
         specialized_reviewer_enabled: bool = False,
+        methods_evidence_validation: str = "advisory",
         public_progress: Callable[[str, str, str], None] | None = None,
     ) -> None:
         self._state_repository = state_repository
@@ -1021,6 +1029,9 @@ class DiagnosisRuntime:
         self._clock = clock
         self._id_generator = id_generator
         self._specialized_reviewer_enabled = specialized_reviewer_enabled
+        if methods_evidence_validation not in {"advisory", "strict"}:
+            raise ValueError("METHODS_EVIDENCE_VALIDATION 必须是 advisory 或 strict")
+        self._methods_evidence_validation = methods_evidence_validation
         self._public_progress = public_progress
         self._publisher = OutcomePublisher(execution_records, clock, id_generator)
         self._generic_locator_executor = generic_locator_executor or GenericLocatorExecutor(
@@ -1345,8 +1356,17 @@ class DiagnosisRuntime:
                     workspace,
                     materials,
                 )
+                specialist_context = context.body
+                if self._methods_evidence_validation == "advisory":
+                    specialist_context += (
+                        "\nServer evidence policy: advisory. Return your best supported diagnosis in the "
+                        "existing JSON structure. Missing quotation metadata is a limitation, not a reason "
+                        "to discard a useful finding. Do not invent source IDs, lines or identity tokens; "
+                        "leave unavailable citation metadata empty and explain uncertainty. The server "
+                        "will label these findings as model judgments without evidence consistency review.\n"
+                    )
                 methods_prompt, inputs_inlined, complete_input_bytes = specialist_prompt(
-                    context.body, workspace.root, methods_preprocessing.frozen.target_logs,
+                    specialist_context, workspace.root, methods_preprocessing.frozen.target_logs,
                     skill_load=methods_skill_load,
                     skill=methods_skill,
                 )
@@ -1378,11 +1398,17 @@ class DiagnosisRuntime:
             )
             backend_prompt = context.body
             if job.job_type is JobType.REVIEW:
+                advisory_review = (prior_methods_diagnosis is not None
+                    and prior_methods_diagnosis.audit.validation_mode == "advisory")
                 backend_prompt += (
                     "\n\n<<<METHODS_REVIEW_BOUNDARY>>>\n"
                     "Independently review inputs/method-diagnosis.json against the fixed "
-                    "Candidate, Evidence, and inputs/method-grounding-audit.json. Preserve "
-                    "each exact (method_id, identity_tokens) pair. Write only "
+                    "Candidate, Evidence, and inputs/method-grounding-audit.json. "
+                    + ("Evidence policy is advisory: judge the whole result semantically. Missing or "
+                       "inexact quotation metadata, markers or identity tokens alone are not grounds "
+                       "for rejection. These are unverified model judgments, not server-grounded facts. "
+                       if advisory_review else "Preserve each exact (method_id, identity_tokens) pair. ")
+                    + "Write only "
                     "output/method-review.draft.json. Logparse is unavailable.\n"
                     "<<<END METHODS_REVIEW_BOUNDARY>>>\n"
                 )
@@ -1394,37 +1420,91 @@ class DiagnosisRuntime:
             )
         if broker_audit_bytes is not None:
             self._publish_audit_bytes(job, "broker_audit.json", broker_audit_bytes)
+        if job.job_type is JobType.DIAGNOSE and isinstance(final_response, str):
+            self._publish_audit_bytes(job, "method-diagnosis.raw.txt", final_response.encode("utf-8"))
         self._announce(job, "VERIFYING")
         validating = record_stage_started(ExecutionStage.OUTCOME_VALIDATE)
         try:
             if job.job_type is JobType.ROUTE:
                 validated_draft = parse_route_response(final_response, job)
             elif job.job_type is JobType.DIAGNOSE:
-                validated_draft = parse_specialist_response(final_response, secrets=secrets)
+                validated_draft = parse_specialist_response(final_response, secrets=secrets,
+                    preserve_evidence_items=(job.review_policy is ReviewPolicy.NONE
+                        or self._methods_evidence_validation == "advisory"))
             else:
                 validated_draft = read_agent_output(
                     workspace, job, workspace.manifest, secrets=secrets,
                     broker_audit_bytes=broker_audit_bytes,
+                    methods_evidence_validation_mode=(prior_methods_diagnosis.audit.validation_mode
+                        if prior_methods_diagnosis is not None else "strict"),
                 )
         except RejectedAgentOutputError as exc:
             self._archive_rejected_agent_output(job, exc)
             raise
+        if isinstance(validated_draft, ValidatedAgentDraft) and validated_draft.route_recovery is not None:
+            recovery = validated_draft.route_recovery
+            diagnostic_id = self._id_generator.new("diagnostic")
+            recovery_receipt = {
+                **recovery.to_receipt(), "diagnostic_id": diagnostic_id,
+                "case_id": job.case_id, "job_id": job.job_id, "phase": "ROUTE",
+            }
+            self._publish_audit_bytes(job, "route-response.raw.txt", recovery.raw_bytes)
+            self._publish_audit_bytes(job, "route-response.effective.txt", recovery.effective_bytes)
+            self._publish_audit_bytes(job, "route-json-recovery.json", canonical_json_bytes(recovery_receipt))
+            log_event("runtime.route.reason_quotes_recovered", case_id=job.case_id,
+                job_id=job.job_id, diagnostic_id=diagnostic_id,
+                inserted_escape_count=len(recovery.inserted_escape_offsets),
+                raw_response_sha256=bytes_sha256(recovery.raw_bytes),
+                effective_response_sha256=bytes_sha256(recovery.effective_bytes))
         diagnosis_audit = self._diagnosis_audit_for_review(job, aggregate)
         verification = None
         if isinstance(validated_draft, ValidatedMethodDiagnosisDraft):
             if methods_preprocessing is None or methods_skill_load is None:
                 raise _unexpected_failure()
+            self._publish_audit_bytes(job, "method-diagnosis.draft.json", validated_draft.canonical_bytes)
             try:
                 skill = self._resolved_methods_skill(assets)
                 for resource in methods_preprocessing.validated.proposal_resources:
                     resource.verify_unchanged()
-                verified_diagnosis = verify_method_diagnosis(
+                verification_inputs = dict(
                     skill=skill,
                     draft=validated_draft.draft,
                     target_logs=methods_preprocessing.frozen.target_logs,
                     logparse_receipt_sha256=methods_preprocessing.frozen.receipt_sha256,
                     skill_load=methods_skill_load,
                 )
+                if self._methods_evidence_validation == "advisory":
+                    verified_diagnosis = accept_method_diagnosis_advisory(**verification_inputs,
+                        missing_targets=tuple(target.label for target in
+                            methods_preprocessing.validated.authoritative_targets.unresolved))
+                elif job.review_policy is ReviewPolicy.NONE:
+                    verified_diagnosis = select_method_diagnosis(**verification_inputs,
+                        missing_targets=tuple(target.label for target in
+                            methods_preprocessing.validated.authoritative_targets.unresolved))
+                else:
+                    verified_diagnosis = verify_method_diagnosis(**verification_inputs)
+                if verified_diagnosis.advisory is not None:
+                    diagnostic_id = self._id_generator.new("diagnostic")
+                    advisory = {**verified_diagnosis.advisory, "diagnostic_id": diagnostic_id,
+                        "raw_response_sha256": bytes_sha256(validated_draft.raw_bytes)}
+                    self._publish_audit_bytes(job, "method-diagnosis.effective.json",
+                        canonical_json_bytes(diagnosis_mapping(verified_diagnosis.draft)))
+                    self._publish_audit_bytes(job, "method-evidence-advisory.json", canonical_json_bytes(advisory))
+                    log_event("runtime.methods.evidence_advisory", case_id=job.case_id,
+                        job_id=job.job_id, diagnostic_id=diagnostic_id,
+                        retained_count=len(verified_diagnosis.draft.evidence),
+                        evidence_validation_mode="advisory")
+                if verified_diagnosis.selection is not None:
+                    diagnostic_id = self._id_generator.new("diagnostic")
+                    selection = {**verified_diagnosis.selection, "diagnostic_id": diagnostic_id,
+                                 "raw_response_sha256": bytes_sha256(validated_draft.raw_bytes)}
+                    self._publish_audit_bytes(job, "method-diagnosis.effective.json",
+                        canonical_json_bytes(diagnosis_mapping(verified_diagnosis.draft)))
+                    self._publish_audit_bytes(job, "method-evidence-selection.json", canonical_json_bytes(selection))
+                    log_event("runtime.methods.evidence_selected", case_id=job.case_id,
+                        job_id=job.job_id, diagnostic_id=diagnostic_id,
+                        retained_count=len(selection["retained"]), rejected_count=len(selection["rejected"]),
+                        status=selection["status"])
                 mapped = map_verified_methods_draft(
                     job=job,
                     manifest=workspace.manifest,
@@ -1437,6 +1517,11 @@ class DiagnosisRuntime:
             except (TypeError, ValueError) as exc:
                 reason_code = _method_validation_reason_code(exc)
                 diagnostic_id = self._id_generator.new("diagnostic")
+                self._publish_audit_bytes(job, "method-validation-failure.json", canonical_json_bytes({
+                    "schema_version": 1, "diagnostic_id": diagnostic_id,
+                    "phase": "GROUNDING", "reason_code": reason_code.value,
+                    "source_draft_sha256": bytes_sha256(validated_draft.canonical_bytes),
+                }))
                 raise RuntimeExecutionError(
                     ExecutionFailure(
                         stage=ExecutionStage.OUTCOME_VALIDATE,
@@ -1452,11 +1537,6 @@ class DiagnosisRuntime:
                 ) from None
             self._publish_audit_bytes(
                 job,
-                "method-diagnosis.draft.json",
-                validated_draft.canonical_bytes,
-            )
-            self._publish_audit_bytes(
-                job,
                 "method-grounding-audit.json",
                 canonical_json_bytes(asdict(verified_diagnosis.audit)),
             )
@@ -1467,6 +1547,8 @@ class DiagnosisRuntime:
             authoritative_targets = mapped.authoritative_targets
             target_logs = mapped.target_logs
         elif isinstance(validated_draft, ValidatedMethodReviewDraft):
+            if validated_draft.raw_bytes is not None:
+                self._publish_audit_bytes(job, "method-review.raw.txt", validated_draft.raw_bytes)
             if prior_methods_diagnosis is None or diagnosis_audit is None:
                 raise _unexpected_failure()
             try:
@@ -3662,9 +3744,28 @@ class DiagnosisRuntime:
         )
         if diagnosis_bytes is None or audit_bytes is None or receipt_bytes is None:
             raise ValueError("prior Methods diagnosis audit material is unavailable")
-        diagnosis_value = parse_canonical_json_bytes(diagnosis_bytes)
-        diagnosis = MethodDiagnosisDraftV1.from_mapping(diagnosis_value)
         audit = _method_grounding_audit_from_bytes(audit_bytes)
+        if audit.validation_mode == "advisory":
+            original_digest = bytes_sha256(diagnosis_bytes)
+            authority_audit = matches[0].decision_audit
+            advisory_bytes = self._execution_records.read_audit_bytes(
+                source_job_id, "method-evidence-advisory.json")
+            if (authority_audit is None or authority_audit.source_draft_sha256 != original_digest
+                    or advisory_bytes is None):
+                raise ValueError("prior Methods source draft identity is invalid")
+            advisory_receipt = parse_canonical_json_bytes(advisory_bytes)
+            diagnosis_bytes = self._execution_records.read_audit_bytes(
+                source_job_id, "method-diagnosis.effective.json")
+            if diagnosis_bytes is None:
+                raise ValueError("prior effective Methods diagnosis is unavailable")
+            if (not isinstance(advisory_receipt, dict)
+                    or advisory_receipt.get("validation_mode") != "advisory"
+                    or advisory_receipt.get("source_draft_sha256") != original_digest
+                    or advisory_receipt.get("effective_draft_sha256") != bytes_sha256(diagnosis_bytes)):
+                raise ValueError("prior effective Methods diagnosis identity is invalid")
+        diagnosis_value = parse_canonical_json_bytes(diagnosis_bytes)
+        diagnosis = (parse_advisory_diagnosis(diagnosis_value) if audit.validation_mode == "advisory"
+            else MethodDiagnosisDraftV1.from_mapping(diagnosis_value))
         if (
             audit.registration_id != skill.registration_id
             or audit.registration_sha256 != skill.registration_sha256
@@ -3706,21 +3807,17 @@ class DiagnosisRuntime:
         rule_ids: list[str] = []
         assertions: list[ReviewCausalAssertion] = []
         mechanical: list[MechanicalFact] = []
-        for ordinal, evidence in enumerate(diagnosis.draft.evidence, start=1):
-            identity_hash = canonical_json_sha256(
-                {
-                    "schema_version": 1,
-                    "method_id": evidence.method_id,
-                    "identity_tokens": sorted(evidence.identity_tokens),
-                }
-            )[:16]
-            rule_id = f"methods:{evidence.method_id}:{identity_hash}"
+        advisory = diagnosis.audit.validation_mode == "advisory"
+        for ordinal, (evidence, rule_id) in enumerate(zip(
+            diagnosis.draft.evidence, method_evidence_rule_ids(diagnosis), strict=True), start=1):
             rule_ids.append(rule_id)
             assertions.append(
                 ReviewCausalAssertion(
                     rule_id=rule_id,
                     statement=(
-                        f"Independently review grounded method {evidence.method_id} "
+                        f"Review model finding {evidence.method_id} against the frozen inputs. "
+                        "Evidence consistency has not been verified."
+                        if advisory else f"Independently review grounded method {evidence.method_id} "
                         "for the exact frozen evidence identity."
                     ),
                 )
@@ -3729,7 +3826,7 @@ class DiagnosisRuntime:
                 MechanicalFact(
                     fact_id=f"methods-grounding-{ordinal}",
                     name="methods_grounding",
-                    value="SERVER_GROUNDED",
+                    value="MODEL_CLAIM_UNVERIFIED" if advisory else "SERVER_GROUNDED",
                     source_rule_id=rule_id,
                     evidence_refs=list(required_evidence),
                 )

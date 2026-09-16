@@ -188,7 +188,7 @@ def _pre_evaluation_runtime(
     workspace_root = tmp_path / "runtime-data"
     if failure_point == "workspace":
         workspace_root.write_text("not a directory", encoding="utf-8")
-    runtime = DiagnosisRuntime(
+    runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=_StateView(aggregate),
         resource_store=resources,
         asset_catalog=catalog,

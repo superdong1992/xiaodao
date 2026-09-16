@@ -388,7 +388,7 @@ class _Stack:
             shlex.join((sys.executable, os.fspath(FAKE_AGENT))),
             parent_environment=environment,
         )
-        self.runtime = DiagnosisRuntime(
+        self.runtime = DiagnosisRuntime(methods_evidence_validation="strict",
             state_repository=self.repository,
             resource_store=self.resources,
             asset_catalog=self.catalog,

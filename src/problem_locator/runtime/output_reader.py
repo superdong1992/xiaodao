@@ -12,7 +12,7 @@ import io
 import logging
 import os
 import stat
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -61,8 +61,6 @@ from problem_locator.contracts.serialization import (
 )
 from problem_locator.diagnostics import log_event
 from problem_locator.integrations.agent_json import (
-    AgentJsonSurface,
-    normalize_agent_json_file,
     parse_agent_json_bytes,
     read_agent_json_file,
 )
@@ -78,6 +76,8 @@ from .methods_evaluation_v2 import (
     evaluate_method_role_v2,
 )
 from .methods_grounding import MethodDiagnosisDraftV1, MethodReviewV1
+from .model_json import parse_model_json_bytes
+from .route_json import RouteQuoteRecovery
 from .outcome_finalizer import (
     DRAFT_FINALIZATION_MARKER_NAME,
     SealedAgentOutcomeDraftMarker,
@@ -415,6 +415,7 @@ class ValidatedAgentDraft:
     proposal_resources: tuple[ValidatedProposalResource, ...]
     authoritative_targets: AuthoritativeTargetSet | None
     target_logs: tuple[CapturedTargetLog, ...]
+    route_recovery: RouteQuoteRecovery | None = None
 
 
 class ValidatedOutputKind(StrEnum):
@@ -433,8 +434,9 @@ class ValidatedMethodDiagnosisDraft:
         default=ValidatedOutputKind.METHOD_DIAGNOSIS_DRAFT,
         init=False,
     )
-    draft: MethodDiagnosisDraftV1
+    draft: MethodDiagnosisDraftV1 | Mapping[str, Any]
     canonical_bytes: bytes
+    raw_bytes: bytes | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -447,6 +449,7 @@ class ValidatedMethodReviewDraft:
     )
     draft: MethodReviewV1
     canonical_bytes: bytes
+    raw_bytes: bytes | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2109,9 +2112,10 @@ def _read_method_agent_output(
             max_bytes=job.resource_limits.workspace_bytes,
         )
         assert raw_draft_bytes is not None
-        document = parse_agent_json_bytes(raw_draft_bytes)
+        document = parse_model_json_bytes(raw_draft_bytes)
         parsed = parser(document.value)
         canonical_bytes = document.canonical_bytes
+        _scan_bytes(raw_draft_bytes, patterns)
         _scan_bytes(canonical_bytes, patterns)
         _assert_snapshot_paths(initial)
         final_metadata = _lstat(workspace_root / relative_path)
@@ -2119,51 +2123,8 @@ def _read_method_agent_output(
             failure_category = "method_draft_stability"
             diagnostic_reason = "Methods draft changed during validation"
             raise _InvalidOutput
-        if raw_draft_bytes != canonical_bytes:
-            failure_category = "method_draft_normalization"
-            try:
-                normalized = normalize_agent_json_file(
-                    workspace_root / relative_path,
-                    surface=(
-                        AgentJsonSurface.METHOD_DIAGNOSIS_DRAFT
-                        if kind is ValidatedOutputKind.METHOD_DIAGNOSIS_DRAFT
-                        else AgentJsonSurface.METHOD_REVIEW_DRAFT
-                    ),
-                    max_bytes=job.resource_limits.workspace_bytes,
-                    validate=parser,
-                )
-            except (InvalidJsonBytesError, OSError, TypeError, ValueError) as exc:
-                diagnostic_reason = str(exc)
-                raise _InvalidOutput from exc
-            if normalized.canonical_bytes != canonical_bytes:
-                failure_category = "method_draft_stability"
-                diagnostic_reason = "Methods draft changed during normalization"
-                raise _InvalidOutput
-            normalized_snapshot = _snapshot_source(
-                workspace_root,
-                relative_path,
-                root_identity=root_identity,
-                boundary=output_boundary,
-            )
-            _, _, normalized_bytes, _ = _read_frozen_relative_file(
-                workspace_root,
-                relative_path,
-                capture=True,
-                root_identity=root_identity,
-                boundary=output_boundary,
-                max_bytes=job.resource_limits.workspace_bytes,
-            )
-            if normalized_bytes != canonical_bytes:
-                failure_category = "method_draft_stability"
-                diagnostic_reason = "Methods draft normalization bytes changed"
-                raise _InvalidOutput
-            _assert_snapshot_paths(normalized_snapshot)
-            final_metadata = _lstat(workspace_root / relative_path)
-            if _fingerprint(final_metadata) != normalized_snapshot.leaf_fingerprint:
-                failure_category = "method_draft_stability"
-                diagnostic_reason = "Methods draft changed after normalization"
-                raise _InvalidOutput
-            final_outcome_bytes = len(canonical_bytes)
+        # Normalize only the returned document. The frozen model file and raw
+        # bytes remain available as the exact audit source, including wrappers.
     except _MissingOutcome:
         missing = True
         final_outcome_state = "missing"
@@ -2220,12 +2181,14 @@ def _read_method_agent_output(
         return ValidatedMethodDiagnosisDraft(
             draft=parsed,
             canonical_bytes=canonical_bytes,
+            raw_bytes=raw_draft_bytes,
         )
     assert kind is ValidatedOutputKind.METHOD_REVIEW_DRAFT
     assert isinstance(parsed, MethodReviewV1)
     return ValidatedMethodReviewDraft(
         draft=parsed,
         canonical_bytes=canonical_bytes,
+        raw_bytes=raw_draft_bytes,
     )
 
 
@@ -2236,6 +2199,7 @@ def read_agent_output(
     *,
     secrets: Iterable[bytes | str] = (),
     broker_audit_bytes: bytes | None = None,
+    methods_evidence_validation_mode: str = "strict",
 ) -> ValidatedAgentDraftOutput:
     """Read the one output protocol selected by the immutable Job.
 
@@ -2248,6 +2212,9 @@ def read_agent_output(
     method_protocol = _method_output_protocol(job)
     if method_protocol is not None:
         relative_path, parser, kind = method_protocol
+        if job.job_type is JobType.REVIEW and methods_evidence_validation_mode == "advisory":
+            from .methods_advisory import parse_advisory_review
+            parser = parse_advisory_review
         return _read_method_agent_output(
             workspace,
             job,

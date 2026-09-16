@@ -90,7 +90,7 @@ def test_valid_empty_v11_state_fixture_is_accepted() -> None:
     _schema_validator(STATE_SCHEMA_PATH).validate(payload)
     state = StateFile.model_validate(payload)
     assert state.schema_version == SCHEMA_VERSION == 11
-    assert state.contract_revision == CONTRACT_REVISION == "v11-contract-r1"
+    assert state.contract_revision == CONTRACT_REVISION == "v11-contract-r2"
     assert state.generation == 1
     assert state.runtime_epochs == []
     assert state.recovery_processing_records == {}

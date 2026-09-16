@@ -9,12 +9,15 @@ from problem_locator.contracts import (
     PrepareAttachment, SubmitSupplement,
 )
 from problem_locator.contracts.models import ProblemSpecInput
+from problem_locator.diagnostics import log_event
 
 from .intake import (
     ClaudeIntakeEngine, IntakeAttachment, IntakeDecision, IntakeInput, IntakeMessage,
     IntakeRequirement, IntakeValue, build_initial_problem_spec, validate_intake_decision,
+    intake_processing_receipt,
 )
-from .models import AgentStoreError
+from .models import AgentPublicFailure, AgentStoreError
+from .failures import exception_code, exception_details
 from .uploads import ConversationUploads
 
 _CLOSED = {"COMPLETED", "FAILED", "INTERRUPTED"}
@@ -47,6 +50,7 @@ class AgentConversationService:
         self._processing, self._lifecycle = threading.Lock(), threading.Lock()
         self._thread = None
         self._failure = None
+        self._phase = "AGENT"
         store.on_change = lambda _conversation_id: self._wake.set()
 
     def start(self, runtime_epoch=None):
@@ -70,6 +74,9 @@ class AgentConversationService:
     def _available(self):
         if self._stop.is_set() or self._failure is not None:
             raise AgentStoreError("AGENT_UNAVAILABLE", "会话服务暂时不可用，请稍后重试。", 503)
+        operational = getattr(self.application, "operational_state", None)
+        if operational is not None:
+            operational.require_accepting()
 
     def create_conversation(self, request_id):
         self._available()
@@ -80,11 +87,41 @@ class AgentConversationService:
         return self.store.submit_message(conversation_id, request_id, text or "", attachment_ids or [])
 
     def get_conversation(self, conversation_id):
-        return self.store.get_conversation(conversation_id)
+        view = self.store.get_conversation(conversation_id)
+        operational = getattr(self.application, "operational_state", None)
+        if operational is not None and view.case_id is None and view.status not in _CLOSED and any(
+            message.status in {"QUEUED", "PROCESSING"} for message in view.messages
+        ) and not operational.accepting and operational.latest_error is not None:
+            # This accepted message has no Case whose delivery can be queried.
+            # Reveal the pause, never identifiers from the task that stopped us.
+            raise AgentStoreError("DISPATCH_REJECTED", "服务异常，已接收的任务暂时无法继续。", 503,
+                details=[{"field": "phase", "actual": "DISPATCH_PAUSED"},
+                    {"field": "persistence", "actual": "UNKNOWN"}], retryable=True)
+        if operational is not None and view.case_id is not None:
+            error = operational.error_for_case(view.case_id, None, view.archive_status)
+            if error is None:
+                return view
+            try:
+                case = self.application.get_case(view.case_id).case_view
+            except ApplicationPortError as query_error:
+                if query_error.error.code.value == "CASE_NOT_FOUND" and (view.status in _CLOSED or
+                    operational.error_for_case(view.case_id, None, view.archive_status) is None):
+                    return view
+                raise
+            error = operational.error_for_case(view.case_id, case.status, case.archive_status)
+            if error is not None:
+                if any(item.field == "phase" and item.actual == "ARCHIVE_STATUS_COMMIT" for item in error.details):
+                    # The report is authoritative; only this process's archive
+                    # delivery is unknown. Do not persist or emit a terminal event.
+                    return view.model_copy(update={"failure": AgentPublicFailure(code=error.code.value,
+                        message="报告已生成，但归档状态暂时无法确认。",
+                        details=[item.model_dump(mode="json") for item in error.details], retryable=False)})
+                raise ApplicationPortError(error)
+        return view
 
     def list_events(self, conversation_id, after_sequence=0, limit=100):
         events = self.store.list_events(conversation_id, after=after_sequence, limit=limit)
-        view = self.store.get_conversation(conversation_id)
+        view = self.get_conversation(conversation_id)
         delivered = events[-1].sequence if events else after_sequence
         return {"events": events, "stream_closed": view.status in _CLOSED and delivered >= view.last_event_id}
 
@@ -109,7 +146,8 @@ class AgentConversationService:
                 self._wake.wait(0.5)
 
     def run_once(self, conversation_id=None):
-        if self._stop.is_set() or not self._processing.acquire(blocking=False):
+        operational = getattr(self.application, "operational_state", None)
+        if self._stop.is_set() or (operational is not None and not operational.accepting) or not self._processing.acquire(blocking=False):
             return False
         progressed = False
         try:
@@ -118,11 +156,17 @@ class AgentConversationService:
                 if self._stop.is_set():
                     break
                 try:
+                    self._phase = "AGENT"
                     progressed = self._advance(selected) or progressed
                 except Exception as error:
+                    if operational is not None and not operational.accepting:
+                        # The operational latch reports uncertain delivery over HTTP.
+                        # Do not invent a durable failure or replay a queued command.
+                        break
                     if not self._stop.is_set():
                         # Public failures never contain raw model, filesystem or tool output.
-                        self.store.fail_conversation(selected, getattr(error, "code", "AGENT_EXECUTION_FAILED"))
+                        self.store.fail_conversation(selected, exception_code(error), phase=self._phase,
+                            source_details=exception_details(error))
                     progressed = True
             return progressed
         finally:
@@ -130,12 +174,16 @@ class AgentConversationService:
 
     def _execute_command(self, conversation_id, label, command, *, message_id=None):
         """Freeze the full command before dispatch, including its initial revision."""
+        previous_phase = self._phase
+        self._phase = {CreateCase: "CREATE_CASE", PrepareAttachment: "PREPARE_ATTACHMENT",
+            SubmitSupplement: "SUBMIT_SUPPLEMENT"}[type(command)]
         dispatch_id = conversation_id + ":" + label
         existing = self.store.get_dispatch(conversation_id, dispatch_id)
         if existing is not None:
             if existing["epoch"] != self.store.runtime_epoch and existing["status"] != "COMPLETED":
                 raise AgentStoreError("AGENT_DISPATCH_INTERRUPTED", "任务已经中断，请新建任务。", 409)
             if existing["status"] == "COMPLETED":
+                self._phase = previous_phase
                 return ApplicationResponse.model_validate(existing["result"])
             payload = existing["payload"]
             command = _COMMANDS[payload["operation"]].model_validate(payload["command"])
@@ -154,6 +202,7 @@ class AgentConversationService:
             self.store.finish_adoption(conversation_id, message_id, accepted=True)
         if not response.dispatch_pending:
             self.store.complete_dispatch(dispatch_id, response.model_dump(mode="json"))
+        self._phase = previous_phase
         return response
 
     def _retry_pending_commands(self, conversation_id):
@@ -162,33 +211,47 @@ class AgentConversationService:
             if payload["operation"] not in _COMMANDS:
                 continue
             command = _COMMANDS[payload["operation"]].model_validate(payload["command"])
+            self._phase = {CreateCase: "CREATE_CASE", PrepareAttachment: "PREPARE_ATTACHMENT",
+                SubmitSupplement: "SUBMIT_SUPPLEMENT"}[type(command)]
             # Replaying a received command can only redispatch its existing Job.
             response = self.application.execute(command)
             if not response.dispatch_pending:
                 self.store.complete_dispatch(pending["dispatch_id"], response.model_dump(mode="json"))
 
     def _advance(self, conversation_id):
+        self._phase = "CASE_QUERY"
+        intake_state = self.store.get_intake_state(conversation_id)
+        if not intake_state["pending"] and not intake_state["pending_commands"]:
+            return False
+        if not intake_state["ready"] and not intake_state["pending_commands"]:
+            return False
+        if intake_state["pending_commands"]:
+            self._retry_pending_commands(conversation_id)
         view = self.store.get_conversation(conversation_id)
         if view.status in _CLOSED or view.case_status in _CASE_DONE:
             return False
-        self._retry_pending_commands(conversation_id)
-        view = self.store.get_conversation(conversation_id)
         case_view = None
         if view.case_id is not None:
+            self._phase = "CASE_QUERY"
             try:
                 case_view = self.application.get_case(view.case_id).case_view
             except ApplicationPortError as error:
                 if error.error.code.value == "CASE_NOT_FOUND":
-                    self.store.fail_conversation(conversation_id, interrupted=True)
+                    self.store.fail_conversation(conversation_id, "CASE_NOT_FOUND", interrupted=True, phase="CASE_QUERY")
                     return True
                 raise
             if case_view.status.value not in {"WAITING_INPUT", "WAITING_ATTACHMENT"}:
                 return False
-        pending = self.store.pending_messages(conversation_id)
+        pending = [item for item in view.messages if item.status in {"QUEUED", "PROCESSING"}]
         if not pending:
-            if case_view is not None:
-                return self._submit_attachments(conversation_id, view, case_view)
-            return False
+            # APPLIED means the original message created the Case, not that
+            # its Skill-specific facts were extracted. Read it once after ROUTE.
+            covered = set(intake_state["covered_message_ids"])
+            pending = [item for item in view.messages
+                if item.status == "APPLIED" and item.message_id not in covered]
+            if not pending or case_view is None:
+                self.store.finish_intake(conversation_id, [])
+                return False
         message = pending[0]
         prefix = []
         for item in view.messages:
@@ -196,12 +259,14 @@ class AgentConversationService:
                 prefix.append(item)
             if item.message_id == message.message_id:
                 break
-        self.store.set_message_status(conversation_id, message.message_id, "PROCESSING")
+        if message.status != "APPLIED":
+            self.store.set_message_status(conversation_id, message.message_id, "PROCESSING")
         draft = self.store.get_draft(conversation_id)
         if case_view is None:
+            self._phase = "CREATE_CASE"
             if not message.text.strip():
                 self.store.set_message_status(conversation_id, message.message_id, "APPLIED")
-                self.store.update_intake(conversation_id, draft, ["请描述需要定位的问题。"])
+                self.store.finish_intake(conversation_id, [message.message_id], ["请描述需要定位的问题。"])
                 return True
             # Creation is deterministic. Retain the full original message and
             # let the Case produce requirements before extracting any facts.
@@ -214,19 +279,33 @@ class AgentConversationService:
                 initial_user_facts=[], wait_seconds=0,
             ), message_id=message.message_id)
             return True
+        self._phase = "INTAKE"
         request = self._intake_input(view, prefix, draft, case_view)
         operation_id = conversation_id + ":intake:" + message.message_id
         prior = self.store.get_dispatch(conversation_id, operation_id)
         if prior is not None:
             if prior["status"] != "COMPLETED":
                 raise AgentStoreError("AGENT_INTAKE_UNCERTAIN", "问题整理已中断，请新建任务。", 409)
-            decision = validate_intake_decision(IntakeDecision.model_validate(prior["result"]), request)
+            # A completed model call belongs to its frozen input, even if a
+            # successfully committed supplement has since closed requirements.
+            frozen_request = IntakeInput.model_validate(prior["payload"]["input"])
+            decision = validate_intake_decision(IntakeDecision.model_validate(prior["result"]), frozen_request)
+            if decision.action == "SUBMIT_SUPPLEMENT":
+                # A formerly nonempty submission may now be fully adopted,
+                # including attachment-only results with no user_facts. Derive
+                # any remaining work from the current authoritative requirements.
+                decision = decision.model_copy(update={"action": "NEED_CLARIFICATION"})
+            decision = validate_intake_decision(decision, request)
         else:
             self.store.record_dispatch(conversation_id, operation_id,
                 {"operation": "INTAKE", "input": request.model_dump(mode="json")})
             self.store.append_progress(conversation_id, "INTAKE", dedupe_key="intake:" + message.message_id)
-            if not message.text.strip() and case_view is not None and request.attachments:
-                decision = IntakeDecision(action="SUBMIT_SUPPLEMENT", message="已收到日志附件。",
+            if not message.text.strip() or (message.status == "APPLIED"
+                    and not any(item.kind == "INPUT" for item in request.requirements)):
+                # Attachment-only work needs no language model. Actual attachment
+                # count/type/adoption are still checked by the service and Case.
+                decision = IntakeDecision(action="SUBMIT_SUPPLEMENT" if request.attachments else "NEED_CLARIFICATION",
+                    message="已核对补充要求。",
                     problem_fields=[], user_facts=[])
             elif isinstance(self.intake_engine, ClaudeIntakeEngine):
                 decision = self.intake_engine.intake(request, cancellation=_IntakeShutdown(self._stop))
@@ -234,38 +313,44 @@ class AgentConversationService:
                 decision = self.intake_engine.intake(request)
             decision = validate_intake_decision(decision, request)
             self.store.complete_dispatch(operation_id, decision.model_dump(mode="json"))
+            receipt = intake_processing_receipt(decision)
+            if receipt is not None:
+                log_event("agent.intake.inputs_processed", conversation_id=conversation_id,
+                    case_id=view.case_id, operation_id=operation_id, **receipt)
         if self._stop.is_set():
             return False
         if decision.action == "NEW_CASE_REQUIRED":
-            self.store.set_message_status(conversation_id, message.message_id, "UNUSED", decision.message)
-            self.store.update_intake(conversation_id, draft, [decision.message])
+            if message.status != "APPLIED":
+                self.store.set_message_status(conversation_id, message.message_id, "UNUSED", decision.message)
+            self.store.finish_intake(conversation_id, [item.message_id for item in prefix], [decision.message])
             return True
-        known = {item["name"]: item for item in draft.get("user_facts", [])}
-        known.update({item.name: item.model_dump(mode="json") for item in decision.user_facts})
+        # The validated decision already merges source-backed drafts with new
+        # facts and removes identical facts adopted by the authoritative Case.
         draft = {"problem_fields": [item.model_dump(mode="json") for item in decision.draft],
-                 "user_facts": list(known.values())}
+                 "user_facts": [item.model_dump(mode="json") for item in decision.user_facts]}
         self.store.set_draft(conversation_id, draft)
-        if decision.action == "NEED_CLARIFICATION":
-            self.store.set_message_status(conversation_id, message.message_id, "APPLIED")
-            questions = [item.prompt for item in case_view.pending_requirements if item.status.value == "OPEN"]
-            self.store.update_intake(conversation_id, draft, questions)
-            return True
         inputs = {item.name: item.value for item in decision.user_facts}
         attachment_ids = self._available_attachments(view, case_view, prefix)
-        self._supplement(conversation_id, case_view, inputs, attachment_ids, "message-" + message.message_id,
-            message_id=message.message_id)
+        if inputs or attachment_ids:
+            self._supplement(conversation_id, case_view, inputs, attachment_ids, "message-" + message.message_id,
+                message_id=message.message_id)
+        elif decision.action == "SUBMIT_SUPPLEMENT":
+            raise AgentStoreError("AGENT_NO_MATCHING_INPUT", "本次内容不符合当前补充要求。", 409)
+        elif message.status != "APPLIED":
+            self.store.set_message_status(conversation_id, message.message_id, "APPLIED")
+        self.store.finish_intake(conversation_id, [item.message_id for item in prefix])
         return True
 
     def _intake_input(self, view, messages, draft, case_view):
         sources = [IntakeMessage(message_id=item.message_id, role="USER", text=item.text) for item in messages]
         if view.current_questions:
-            sources.append(IntakeMessage(message_id="question-" + messages[-1].message_id,
+            sources.insert(len(sources) - 1, IntakeMessage(message_id="question-" + messages[-1].message_id,
                 role="ASSISTANT", text="\n".join(view.current_questions)))
         references = {key for item in messages for key in item.attachment_ids}
         attachments = [IntakeAttachment(attachment_id=item.attachment_id, file_name=item.name,
             media_type=item.content_type, size_bytes=item.size, sha256=item.sha256)
             for item in view.attachments if item.attachment_id in references and item.status in {"READY", "IMPORTED"}]
-        requirements, spec, frozen_facts = [], None, {}
+        requirements, frozen_requirements, spec, frozen_facts = [], [], None, {}
         if case_view is not None:
             spec = ProblemSpecInput.model_validate(case_view.problem_spec.model_dump(exclude={"revision"}))
             frozen_facts = {item.provenance.input_name: item.statement for item in case_view.user_facts
@@ -275,10 +360,16 @@ class AgentConversationService:
                 constraints=item.constraints if item.kind.value == "INPUT" else None)
                 for item in case_view.pending_requirements if item.status.value == "OPEN"
                 and item.supplement_policy.value == "MISSING_ONLY"]
+            frozen_requirements = [IntakeRequirement(requirement_id=item.requirement_id, name=item.name,
+                description=item.prompt, kind="INPUT", constraints=item.constraints)
+                for item in case_view.pending_requirements if item.status.value == "FULFILLED"
+                and item.kind.value == "INPUT" and item.supplement_policy.value == "MISSING_ONLY"]
         return IntakeInput(conversation_id=view.conversation_id, messages=sources,
             draft=[IntakeValue.model_validate(item) for item in draft.get("problem_fields", [])],
+            draft_user_facts=[IntakeValue.model_validate(item) for item in draft.get("user_facts", [])],
             requirements=requirements, attachments=attachments,
-            frozen_problem_spec=spec, frozen_user_facts=frozen_facts)
+            frozen_problem_spec=spec, frozen_user_facts=frozen_facts,
+            frozen_input_requirements=frozen_requirements)
 
     def _available_attachments(self, view, case_view, messages):
         requirements = [item for item in case_view.pending_requirements
@@ -297,21 +388,14 @@ class AgentConversationService:
             return []
         return attachments
 
-    def _submit_attachments(self, conversation_id, view, case_view):
-        applied = [item for item in view.messages if item.status == "APPLIED"]
-        attachments = self._available_attachments(view, case_view, applied)
-        if not attachments:
-            return False
-        requirement = next(item for item in case_view.pending_requirements
-            if item.status.value == "OPEN" and item.kind.value == "ATTACHMENT")
-        self._supplement(conversation_id, case_view, {}, attachments, "attachment-" + requirement.requirement_id)
-        return True
-
     def _supplement(self, conversation_id, case_view, inputs, attachment_ids, label, *, message_id=None):
+        self._phase = "IMPORT_ATTACHMENT"
         targets = [self.uploads.import_into_case(conversation_id, case_view.case_id, item, self._execute_command)
             for item in attachment_ids]
         if not inputs and not targets:
+            self._phase = "SUBMIT_SUPPLEMENT"
             raise AgentStoreError("AGENT_NO_MATCHING_INPUT", "本次内容不符合当前补充要求。", 409)
+        self._phase = "CASE_QUERY"
         latest = self.application.get_case(case_view.case_id).case_view
         self._execute_command(conversation_id, label, SubmitSupplement(
             idempotency_key="agent-supplement-" + conversation_id + "-" + label,

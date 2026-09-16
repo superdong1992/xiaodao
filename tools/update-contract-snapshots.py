@@ -93,12 +93,44 @@ def refresh_fixture_manifests() -> None:
         _write(manifest_path, canonical_json_bytes(manifest))
 
 
+def advance_fixture_revision(previous: str) -> None:
+    """Advance fixture contract headers without rewriting historical prose."""
+    prefix = f"v{SCHEMA_VERSION}-contract-r"
+    if (not previous.startswith(prefix) or not previous[len(prefix):].isdigit()
+            or int(previous[len(prefix):]) >= int(CONTRACT_REVISION[len(prefix):])):
+        raise ValueError("源 fixture 必须是当前 schema 的较早合同修订。")
+
+    def advance(value):
+        if isinstance(value, list):
+            return [advance(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        result = {key: advance(item) for key, item in value.items()}
+        if result.get("contract_revision") == previous:
+            result["contract_revision"] = CONTRACT_REVISION
+        return result
+
+    for path in sorted((ROOT / "tests" / "fixtures").rglob("*.json")):
+        if path.name == "fixture-manifest.json":
+            continue
+        try:
+            original = json.loads(path.read_bytes())
+        except (ValueError, UnicodeError):
+            continue
+        updated = advance(original)
+        if updated != original:
+            _write(path, canonical_json_bytes(updated))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixtures", action="store_true")
     parser.add_argument("--web", action="store_true", help="同时刷新完整 REST OpenAPI 快照（不启动服务）。")
     parser.add_argument("--advance-fixtures-from", type=int)
+    parser.add_argument("--advance-fixture-revision-from")
     args = parser.parse_args()
+    if args.advance_fixtures_from is not None and args.advance_fixture_revision_from is not None:
+        parser.error("schema 升级与合同修订升级不能同时执行。")
     schemas = ROOT / "schemas" / "v2"
     for name, content in schema_bundle_bytes().items():
         _write(schemas / name, content)
@@ -113,7 +145,9 @@ def main() -> None:
         _write(schemas / "web-api.openapi.snapshot.json", canonical_json_bytes(app.openapi()))
     if args.advance_fixtures_from is not None:
         advance_fixtures(args.advance_fixtures_from)
-    if args.fixtures or args.advance_fixtures_from is not None:
+    if args.advance_fixture_revision_from is not None:
+        advance_fixture_revision(args.advance_fixture_revision_from)
+    if args.fixtures or args.advance_fixtures_from is not None or args.advance_fixture_revision_from is not None:
         refresh_fixture_manifests()
 
 

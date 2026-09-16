@@ -198,6 +198,7 @@ def finalize_server_outcome(
         and authoritative_targets is not None
         and bool(authoritative_targets.unresolved)
         and draft.result_type is not OutcomeResultType.INCONCLUSIVE
+        and not verification.permits_missing_targets(job, payload)
     )
     if verification_requires_inconclusive or targets_require_inconclusive:
         assert isinstance(payload, (DiagnosisOutcome, ReviewAssessment))

@@ -40,6 +40,53 @@ class ResultArchiveLog:
     evidence_bindings: tuple[EvidenceBinding, ...] = ()
 
 
+class _ArchiveLogCache:
+    """Reuse only immutable bytes inside one archive preparation/validation."""
+
+    def __init__(self, target_logs: tuple[ResultArchiveLog, ...]) -> None:
+        self.by_name = {item.target.archive_name: item for item in target_logs}
+        self.digests: dict[int, str] = {}
+        self.ranges: dict[tuple[int, int, int], tuple[str, str]] = {}
+
+    def digest(self, item: ResultArchiveLog) -> str:
+        key = id(item)
+        digest = self.digests.get(key)
+        if digest is None:
+            digest = hashlib.sha256(item.content).hexdigest()
+            self.digests[key] = digest
+        return digest
+
+    def prepare_ranges(self, requested: Iterable[tuple[str, int, int]]) -> None:
+        by_name: dict[str, dict[tuple[int, int], None]] = {}
+        for name, start, end in requested:
+            by_name.setdefault(name, {})[(start, end)] = None
+        for name, spans in by_name.items():
+            self._cache_source_ranges(self.by_name[name], spans)
+
+    def _cache_source_ranges(
+        self, item: ResultArchiveLog, spans: Iterable[tuple[int, int]],
+    ) -> None:
+        # Finish all requested ranges while just this source is split; retaining
+        # every log's copied lines would amplify the Job's raw-byte budget.
+        physical = item.content.splitlines(keepends=True)
+        for start, end in spans:
+            if start < 1 or end < start or end > len(physical):
+                raise ValueError("a result citation line range exceeds its target log")
+            raw = b"".join(physical[start - 1:end])
+            # A complete-range citation and the manifest describe identical
+            # bytes, so their hash can share the same actual-byte computation.
+            digest = (self.digest(item) if start == 1 and end == len(physical)
+                      else hashlib.sha256(raw).hexdigest())
+            try:
+                excerpt = raw.rstrip(b"\r\n").decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ValueError("a cited target log range is not UTF-8") from exc
+            self.ranges[(id(item), start, end)] = digest, excerpt
+
+    def cited_range(self, name: str, start: int, end: int) -> tuple[str, str]:
+        return self.ranges[(id(self.by_name[name]), start, end)]
+
+
 def _zip_info(name: str) -> zipfile.ZipInfo:
     info = zipfile.ZipInfo(name, _ZIP_TIMESTAMP)
     info.compress_type = zipfile.ZIP_DEFLATED
@@ -96,14 +143,14 @@ def _numbered(items: Iterable[str], *, empty: str = "无。") -> list[str]:
     return [f"{index}. {value}" for index, value in enumerate(values, start=1)]
 
 
-def _target_log_rows(target_logs: tuple[ResultArchiveLog, ...]) -> list[str]:
+def _target_log_rows(target_logs: tuple[ResultArchiveLog, ...], log_cache: _ArchiveLogCache) -> list[str]:
     if not target_logs:
         return ["无（本次诊断未使用目标日志）。"]
     rows: list[str] = []
     for item in target_logs:
         target = item.target
         assert target.archive_name is not None
-        digest = hashlib.sha256(item.content).hexdigest()
+        digest = log_cache.digest(item)
         cpu = "" if target.cpu_id is None else f"，CPU={target.cpu_id}"
         pid = "" if target.pid is None else f"，PID={target.pid}"
         caveats = "" if not target.caveats else f"，说明={'；'.join(target.caveats)}"
@@ -124,6 +171,7 @@ def _target_log_rows(target_logs: tuple[ResultArchiveLog, ...]) -> list[str]:
 def _validate_citation_log_bindings(
     report: UserResultPayloadV3,
     target_logs: tuple[ResultArchiveLog, ...],
+    log_cache: _ArchiveLogCache,
 ) -> None:
     logs_by_name = {item.target.archive_name: item.content for item in target_logs}
     citations: list[object] = []
@@ -145,6 +193,7 @@ def _validate_citation_log_bindings(
         for citation in rule.citations
     )
     citations.extend(report.time_relevance.citations)
+    requested: list[tuple[str, int, int]] = []
     for citation in citations:
         name = citation.archive_name
         digest = citation.raw_bytes_sha256
@@ -157,18 +206,16 @@ def _validate_citation_log_bindings(
             raise ValueError("a result citation names a non-authoritative target log")
         if citation.line_start is None or citation.line_end is None:
             raise ValueError("a target-log citation requires one bounded line range")
-        physical = content.splitlines(keepends=True)
-        if citation.line_end > len(physical):
-            raise ValueError("a result citation line range exceeds its target log")
-        raw_range = b"".join(
-            physical[citation.line_start - 1 : citation.line_end]
-        )
-        if digest != hashlib.sha256(raw_range).hexdigest():
+        requested.append((name, citation.line_start, citation.line_end))
+    log_cache.prepare_ranges(requested)
+    for citation in citations:
+        name = citation.archive_name
+        if name is None:
+            continue
+        assert citation.line_start is not None and citation.line_end is not None
+        actual_digest, expected_excerpt = log_cache.cited_range(name, citation.line_start, citation.line_end)
+        if citation.raw_bytes_sha256 != actual_digest:
             raise ValueError("a result citation raw hash differs from cited line bytes")
-        try:
-            expected_excerpt = raw_range.rstrip(b"\r\n").decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ValueError("a cited target log range is not UTF-8") from exc
         if citation.excerpt != expected_excerpt:
             raise ValueError("a result citation excerpt is not verbatim target log text")
 
@@ -179,12 +226,19 @@ def render_result_text(
     target_logs: tuple[ResultArchiveLog, ...],
 ) -> str:
     """Render the fixed nine-section Chinese ``result.txt`` contract."""
+    return _render_result_text(report, target_logs=target_logs, log_cache=_ArchiveLogCache(target_logs))
+
+
+def _render_result_text(
+    report: UserResultPayloadV3, *, target_logs: tuple[ResultArchiveLog, ...],
+    log_cache: _ArchiveLogCache,
+) -> str:
 
     if not isinstance(report, UserResultPayloadV3):
         raise TypeError("report must be a UserResultPayloadV3")
     if report.status not in {"COMPLETED", "PARTIAL"}:
         raise ValueError("only a completed or partial user result may produce result.zip")
-    _validate_citation_log_bindings(report, target_logs)
+    _validate_citation_log_bindings(report, target_logs, log_cache)
 
     supporting = "；".join(
         _binding_text(binding) for binding in report.supporting_evidence_bindings
@@ -196,9 +250,11 @@ def render_result_text(
             f"{_text(finding.statement)}（置信度={finding.confidence:.3f}；"
             f"证据={citations or '无'}）"
         )
+    semantic_rules = {rule.rule_id for rule in report.verification_rules if rule.status == "SEMANTIC_ONLY"}
     factor_lines = [
         *(
-            f"已确认[{_text(item.factor_id)}][{_enum_text(item.role)}] "
+            f"{'模型判断' if semantic_rules.intersection(item.required_rule_ids) else '已确认'}"
+            f"[{_text(item.factor_id)}][{_enum_text(item.role)}] "
             f"{_text(item.statement)}"
             for item in report.causal_factors
         ),
@@ -308,7 +364,7 @@ def render_result_text(
         *_numbered((_text(item) for item in report.safety_notes)),
         "",
         "9. 目标日志清单",
-        *_target_log_rows(target_logs),
+        *_target_log_rows(target_logs, log_cache),
     ]
     result = "\n".join(lines) + "\n"
     if len(result.encode("utf-8")) > _MAX_RESULT_TEXT_BYTES:
@@ -324,7 +380,8 @@ def _validated_logs(
     names: set[str] = {"result.txt", "archive-manifest.json"}
     paths: set[str] = set()
     source: tuple[str, str, str] | None = None
-    for expected_ordinal, item in enumerate(target_logs, start=1):
+    previous_ordinal = 0
+    for item in target_logs:
         if not isinstance(item, ResultArchiveLog) or not isinstance(item.content, bytes):
             raise TypeError("each target log must bind authoritative metadata to bytes")
         if not isinstance(item.evidence_bindings, tuple) or any(
@@ -348,7 +405,8 @@ def _validated_logs(
         if (
             not isinstance(target, AuthoritativeTargetLog)
             or not target.deliverable
-            or target.ordinal != expected_ordinal
+            or type(target.ordinal) is not int
+            or target.ordinal <= previous_ordinal
             or target.log_path is None
             or target.archive_name is None
             or target.archive_name != semantic_archive_name(target)
@@ -365,6 +423,10 @@ def _validated_logs(
             or not target.archive_name.endswith(".log")
         ):
             raise ValueError("target logs do not exactly follow deliverable plan order")
+        # Missing targets keep their original ordinal in the authoritative
+        # inventory. Completeness is checked by the runtime before this seam;
+        # archives preserve the strictly ordered deliverable subset.
+        previous_ordinal = target.ordinal
         name_key = target.archive_name.casefold()
         path = target.workspace_relative_path
         assert path is not None
@@ -389,6 +451,7 @@ def _archive_manifest(
     problem_time: str | None,
     result_bytes: bytes,
     target_logs: tuple[ResultArchiveLog, ...],
+    log_cache: _ArchiveLogCache,
 ) -> bytes:
     logs = []
     for item in target_logs:
@@ -413,7 +476,7 @@ def _archive_manifest(
                     for binding in item.evidence_bindings
                 ],
                 "size": len(item.content),
-                "sha256": hashlib.sha256(item.content).hexdigest(),
+                "sha256": log_cache.digest(item),
             }
         )
     return canonical_json_bytes(
@@ -437,9 +500,10 @@ def prepare_result_archive(report: UserResultPayloadV3, *, problem_time: str | N
     logs = _validated_logs(target_logs)
     if logs and not problem_time:
         raise ValueError("Logparse-backed result.zip requires problem_time")
-    result_text = render_result_text(report, target_logs=logs)
+    log_cache = _ArchiveLogCache(logs)
+    result_text = _render_result_text(report, target_logs=logs, log_cache=log_cache)
     manifest = _archive_manifest(report, problem_time=problem_time,
-        result_bytes=result_text.encode("utf-8"), target_logs=logs)
+        result_bytes=result_text.encode("utf-8"), target_logs=logs, log_cache=log_cache)
     rows = json.loads(manifest)["target_logs"]
     return ArchivePlan(result_text=result_text, manifest_json=manifest.decode("utf-8"), logs=[
         ArchiveSourceFile(source_kind=item.target.source_kind, source_ref=item.target.source_ref,
@@ -487,13 +551,23 @@ def build_result_archive(
     logs = _validated_logs(target_logs)
     if logs and not problem_time:
         raise ValueError("Logparse-backed result.zip requires problem_time")
-    result_bytes = render_result_text(report, target_logs=logs).encode("utf-8")
+    log_cache = _ArchiveLogCache(logs)
+    result_bytes = _render_result_text(report, target_logs=logs, log_cache=log_cache).encode("utf-8")
     manifest_bytes = _archive_manifest(
         report,
         problem_time=problem_time,
         result_bytes=result_bytes,
         target_logs=logs,
+        log_cache=log_cache,
     )
+    return _encode_result_archive(result_bytes, manifest_bytes, logs)
+
+
+def _encode_result_archive(
+    result_bytes: bytes, manifest_bytes: bytes, logs: tuple[ResultArchiveLog, ...],
+) -> bytes:
+    """Encode already verified payloads without repeating report preparation."""
+
     stream = io.BytesIO()
     with zipfile.ZipFile(
         stream,
@@ -523,12 +597,16 @@ def validate_result_archive_bytes(
     if not isinstance(archive_bytes, bytes):
         raise TypeError("archive_bytes must be bytes")
     logs = _validated_logs(target_logs)
-    expected_result = render_result_text(report, target_logs=logs).encode("utf-8")
+    if logs and not problem_time:
+        raise ValueError("Logparse-backed result.zip requires problem_time")
+    log_cache = _ArchiveLogCache(logs)
+    expected_result = _render_result_text(report, target_logs=logs, log_cache=log_cache).encode("utf-8")
     expected_manifest = _archive_manifest(
         report,
         problem_time=problem_time,
         result_bytes=expected_result,
         target_logs=logs,
+        log_cache=log_cache,
     )
     expected_names = [
         "result.txt",
@@ -569,11 +647,7 @@ def validate_result_archive_bytes(
                     raise ValueError("result archive metadata or entry bytes are invalid")
     except (zipfile.BadZipFile, zipfile.LargeZipFile, RuntimeError) as exc:
         raise ValueError("result archive is not a valid canonical ZIP") from exc
-    expected_archive = build_result_archive(
-        report,
-        problem_time=problem_time,
-        target_logs=logs,
-    )
+    expected_archive = _encode_result_archive(expected_result, expected_manifest, logs)
     if archive_bytes != expected_archive:
         raise ValueError("result archive bytes are not the canonical v2 encoding")
     return expected_result.decode("utf-8")

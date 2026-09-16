@@ -49,6 +49,7 @@ def _settings(
     route_command: str | None = None,
     diagnose_command: str | None = None,
     intake_command: str | None = None,
+    evidence_validation: str = "advisory",
 ) -> Settings:
     environ = {
         "DATA_ROOT": str(data_root),
@@ -59,6 +60,7 @@ def _settings(
         "LOGPARSE_CONFIG_PATH": str(FAKE_LOGPARSE_CONFIG),
         "LOGPARSE_PYTHON": sys.executable,
         "CLAUDE_COMMAND": "claude",
+        "METHODS_EVIDENCE_VALIDATION": evidence_validation,
         "SPECIALIZED_REVIEWER_ENABLED": (
             "true" if reviewer_enabled else "false"
         ),
@@ -187,6 +189,7 @@ def test_unique_object_graph_recovery_export_and_shutdown_lock_order(
         assert graph.runtime._logparse_broker_factory is graph.logparse_broker_factory
         assert graph.runtime._asset_resolver._catalog is graph.asset_catalog
         assert graph.runtime._specialized_reviewer_enabled is False
+        assert graph.runtime._methods_evidence_validation == "advisory"
 
         before = graph.state_admin.readiness()
         assert [check.name for check in before.checks] == [
@@ -229,15 +232,18 @@ def test_unique_object_graph_recovery_export_and_shutdown_lock_order(
     replacement.release()
 
 
+@pytest.mark.parametrize("mode", ["advisory", "strict"])
 def test_production_composition_injects_enabled_specialized_reviewer(
     tmp_path: Path,
+    mode: str,
 ) -> None:
     graph = build_service(
-        _settings(tmp_path / "data", reviewer_enabled=True)
+        _settings(tmp_path / "data", reviewer_enabled=True, evidence_validation=mode)
     )
     try:
         assert graph.settings.specialized_reviewer_enabled is True
         assert graph.runtime._specialized_reviewer_enabled is True
+        assert graph.runtime._methods_evidence_validation == mode
         diagnose = next(
             ref
             for ref in graph.asset_catalog.route_bindings().available_skill_refs

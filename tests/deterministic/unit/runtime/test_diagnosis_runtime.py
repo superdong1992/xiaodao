@@ -881,7 +881,7 @@ def _runtime_fixture(
     actual_resource_store = (
         _UnusedResourceStore() if resource_store is None else resource_store
     )
-    runtime = DiagnosisRuntime(
+    runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=state,
         resource_store=actual_resource_store,
         asset_catalog=catalog,
@@ -904,7 +904,7 @@ def _generic_runtime_fixture(
     job = _running_generic_job(catalog)
     state = _StateView(_generic_aggregate(job))
     records = InMemoryExecutionRecordStore()
-    runtime = DiagnosisRuntime(
+    runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=state,
         resource_store=_UnusedResourceStore(),
         asset_catalog=catalog,
@@ -954,7 +954,7 @@ def test_extra_user_fact_keeps_registered_route_candidate_for_semantic_router(
     state = _StateView(_route_aggregate(job))
     records = InMemoryExecutionRecordStore()
     backend = _RuntimeBackend(canonical_json_bytes(_route_agent_no_capability(job)))
-    runtime = DiagnosisRuntime(
+    runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=state,
         resource_store=_UnusedResourceStore(),
         asset_catalog=catalog,
@@ -1003,7 +1003,7 @@ def test_empty_production_catalog_publishes_no_capability_without_router(
     job = Job.model_validate(payload)
     state = _StateView(_route_aggregate(job))
     records = InMemoryExecutionRecordStore()
-    runtime = DiagnosisRuntime(
+    runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=state,
         resource_store=_UnusedResourceStore(),
         asset_catalog=catalog,
@@ -1087,9 +1087,15 @@ def test_generic_runtime_passes_only_exact_multiline_unicode_and_reads_result_fi
 
 
 @pytest.mark.parametrize("status", ["RESOLVED", "UNRESOLVED"])
+@pytest.mark.parametrize("header_prefix,header_ending", [
+    (b"", b"\n"), (b"", b"\r\n"),
+    (b"\xef\xbb\xbf", b"\n"), (b"\xef\xbb\xbf", b"\r\n"),
+])
 def test_generic_runtime_preserves_complete_v2_markdown_bytes_and_digest(
     tmp_path: Path,
     status: str,
+    header_prefix: bytes,
+    header_ending: bytes,
 ) -> None:
     report = (
         "# 定位结论\r\n\r\n"
@@ -1101,7 +1107,7 @@ def test_generic_runtime_preserves_complete_v2_markdown_bytes_and_digest(
     report_bytes = report.encode("utf-8")
     backend = _GenericRuntimeBackend(
         None,
-        v2_result_bytes=_generic_v2_result_bytes(report, status=status),
+        v2_result_bytes=header_prefix + _generic_v2_result_bytes(report, status=status).replace(b"\n", header_ending, 1),
     )
     runtime, job, state, records = _generic_runtime_fixture(tmp_path, backend)
 
@@ -1149,26 +1155,22 @@ def test_generic_runtime_accepts_exact_v2_markdown_body_byte_limit(
     "v2_result_bytes",
     [
         b"",
-        b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\r\n# report\n",
         b"<<<GENERIC_DIAGNOSIS_RESULT_V2:UNKNOWN>>>\n# report\n",
         b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>",
         b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n",
         b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n \t\n",
         b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n\xff",
-        b"\xef\xbb\xbf<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n# report\n",
         b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n\xef\xbb\xbf# report\n",
         b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n"
         + b"x" * (MAX_GENERIC_REPORT_BYTES + 1),
     ],
     ids=[
         "empty-file",
-        "crlf-status-line",
         "unknown-status",
         "missing-status-lf",
         "empty-body",
         "whitespace-body",
         "invalid-body-utf8",
-        "file-utf8-bom",
         "body-utf8-bom",
         "oversize-body",
     ],
@@ -1342,7 +1344,7 @@ def test_public_asset_fake_typed_resolve_failure_preserves_details_as_outcome(
     catalog.inject_failure("resolve", typed_failure)
     state = _StateView(_route_aggregate(job))
     records = InMemoryExecutionRecordStore()
-    runtime = DiagnosisRuntime(
+    runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=state,
         resource_store=_UnusedResourceStore(),
         asset_catalog=catalog,
@@ -1525,7 +1527,7 @@ def test_missing_job_fixed_resource_id_is_not_replaced_from_latest_state(
     )
     state = _StateView(aggregate)
     records = InMemoryExecutionRecordStore()
-    runtime = DiagnosisRuntime(
+    runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=state,
         resource_store=_UnusedResourceStore(),
         asset_catalog=catalog,
@@ -1614,7 +1616,7 @@ def test_ambiguous_success_keeps_staged_refs_for_durable_outbox_replay(
     )
     records = _AfterWriteExecutionRecordStore(after_write_failures=2)
     resources = InMemoryResourceStore()
-    runtime = DiagnosisRuntime(
+    runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=_StateView(_route_aggregate(job)),
         resource_store=resources,
         asset_catalog=catalog,
@@ -1666,7 +1668,7 @@ def test_explicit_prepublish_validation_failure_discards_staged_resource(
     )
     records = InMemoryExecutionRecordStore()
     resources = InMemoryResourceStore()
-    runtime = DiagnosisRuntime(
+    runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=_StateView(_route_aggregate(job)),
         resource_store=resources,
         asset_catalog=catalog,
@@ -2842,7 +2844,7 @@ def _public_fake_claiming_runtime(
         return None
 
     factory.preprocessing_executor = execute_preprocessing
-    runtime = DiagnosisRuntime(
+    runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=_StateView(aggregate),
         resource_store=resources,
         asset_catalog=catalog,
@@ -3029,7 +3031,7 @@ def test_methods_preflight_publishes_waiting_without_backend_or_broker(
     aggregate = CaseAggregate.model_validate(aggregate_payload)
     records = InMemoryExecutionRecordStore()
     workspace_root = tmp_path / f"missing-{missing_binding}-data"
-    runtime = DiagnosisRuntime(
+    runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=_StateView(aggregate),
         resource_store=resources,
         asset_catalog=catalog,
@@ -3113,7 +3115,7 @@ def test_ready_logparse_job_rejects_untyped_compiler_omission(
         "problem_locator.runtime.diagnosis_runtime.compile_resolved_logparse_plan",
         lambda *args: None,
     )
-    runtime = DiagnosisRuntime(
+    runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=_StateView(aggregate),
         resource_store=resources,
         asset_catalog=catalog,
@@ -3162,7 +3164,7 @@ def test_default_product_survives_compiler_and_workspace_manifest(
         return None
 
     factory.preprocessing_executor = execute_preprocessing
-    runtime = DiagnosisRuntime(
+    runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=_StateView(aggregate),
         resource_store=resources,
         asset_catalog=catalog,
@@ -3218,7 +3220,7 @@ def _agent_json_claiming_runtime(
         noncanonical_draft=not malformed_draft,
         malformed_draft=malformed_draft,
     )
-    runtime = DiagnosisRuntime(
+    runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=_StateView(aggregate),
         resource_store=resources,
         asset_catalog=catalog,
@@ -3746,7 +3748,7 @@ def test_logparse_broker_asset_failure_preserves_the_typed_v1_error(
     catalog = _logparse_catalog(tmp_path, factory)
     job, aggregate, resources = _claimed_logparse_job_state_and_resources(catalog)
     records = InMemoryExecutionRecordStore()
-    runtime = DiagnosisRuntime(
+    runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=_StateView(aggregate),
         resource_store=resources,
         asset_catalog=catalog,

@@ -224,12 +224,21 @@ class MethodGroundingAuditV1:
     evidence_count: int
     checked_source_count: int
     skill_load: SkillLoadReceiptV1
+    # Historical audit files omit this field and retain strict semantics.
+    validation_mode: str = "strict"
+
+    def __post_init__(self) -> None:
+        if self.validation_mode not in {"strict", "advisory"}:
+            raise ValueError("Methods evidence validation mode is invalid")
 
 
 @dataclass(frozen=True, slots=True)
 class VerifiedMethodDiagnosisV1:
     draft: MethodDiagnosisDraftV1
     audit: MethodGroundingAuditV1
+    # Present only on the server-owned, Reviewer-off selection path.
+    selection: Mapping[str, Any] | None = None
+    advisory: Mapping[str, Any] | None = None
 
 
 def marker_occurs(marker: str, line: str) -> bool:
@@ -292,6 +301,51 @@ def scan_method_markers(
     )
 
 
+def verify_method_evidence(
+    item: MethodEvidenceV1,
+    *,
+    skill: ResolvedSpecializedSkillV1,
+    confirmed_methods: Sequence[str],
+    by_source: Mapping[str, FrozenTargetLogV1],
+    source_lines: dict[str, tuple[str, ...]],
+) -> None:
+    """Verify one complete finding without borrowing another finding's sources."""
+    method = skill.methods.method_by_id.get(item.method_id)
+    if method is None:
+        raise ValueError("evidence names an unknown method")
+    if item.method_id not in confirmed_methods:
+        raise ValueError("evidence may only support a confirmed method")
+    seen_sources: set[tuple[str, int]] = set()
+    cited_lines: list[str] = []
+    for source in item.sources:
+        target = by_source.get(source.source_id)
+        if target is None:
+            raise ValueError("evidence source_id is not a frozen target log")
+        source_key = (source.source_id, source.line_number)
+        if source_key in seen_sources:
+            raise ValueError("evidence sources must not duplicate a target line")
+        seen_sources.add(source_key)
+        lines = source_lines.get(source.source_id)
+        if lines is None:
+            lines = target.lines
+            source_lines[source.source_id] = lines
+        if source.line_number > len(lines):
+            raise ValueError("evidence source line_number exceeds the frozen log")
+        actual_line = lines[source.line_number - 1]
+        if source.line != actual_line:
+            raise ValueError("evidence source line differs from the frozen log")
+        if source.marker not in method.evidence_markers:
+            raise MethodsValidationError(
+                MethodsValidationReasonCode.EVIDENCE_MARKER_NOT_INDEXED,
+                "evidence marker is not indexed by its method",
+            )
+        if not marker_occurs(source.marker, actual_line):
+            raise ValueError("evidence marker is absent from the cited line")
+        cited_lines.append(actual_line)
+    if any(not any(token in line for line in cited_lines) for token in item.identity_tokens):
+        raise ValueError("identity_tokens must occur in the same evidence sources")
+
+
 def verify_method_diagnosis(
     *,
     skill: ResolvedSpecializedSkillV1,
@@ -344,45 +398,15 @@ def verify_method_diagnosis(
     evidence_identities: set[tuple[str, tuple[str, ...]]] = set()
     source_lines: dict[str, tuple[str, ...]] = {}
     for item in diagnosis.evidence:
-        method = methods.get(item.method_id)
-        if method is None:
-            raise ValueError("evidence names an unknown method")
-        if item.method_id not in diagnosis.confirmed_methods:
-            raise ValueError("evidence may only support a confirmed method")
+        verify_method_evidence(
+            item, skill=skill, confirmed_methods=diagnosis.confirmed_methods,
+            by_source=by_source, source_lines=source_lines,
+        )
         evidence_method_ids.add(item.method_id)
         identity = (item.method_id, tuple(sorted(item.identity_tokens)))
         if identity in evidence_identities:
             raise ValueError("method evidence identities must be unique")
         evidence_identities.add(identity)
-        seen_sources: set[tuple[str, int]] = set()
-        cited_lines: list[str] = []
-        for source in item.sources:
-            target = by_source.get(source.source_id)
-            if target is None:
-                raise ValueError("evidence source_id is not a frozen target log")
-            source_key = (source.source_id, source.line_number)
-            if source_key in seen_sources:
-                raise ValueError("evidence sources must not duplicate a target line")
-            seen_sources.add(source_key)
-            lines = source_lines.get(source.source_id)
-            if lines is None:
-                lines = target.lines
-                source_lines[source.source_id] = lines
-            if source.line_number > len(lines):
-                raise ValueError("evidence source line_number exceeds the frozen log")
-            actual_line = lines[source.line_number - 1]
-            if source.line != actual_line:
-                raise ValueError("evidence source line differs from the frozen log")
-            if source.marker not in method.evidence_markers:
-                raise MethodsValidationError(
-                    MethodsValidationReasonCode.EVIDENCE_MARKER_NOT_INDEXED,
-                    "evidence marker is not indexed by its method",
-                )
-            if not marker_occurs(source.marker, actual_line):
-                raise ValueError("evidence marker is absent from the cited line")
-            cited_lines.append(actual_line)
-        if any(not any(token in line for line in cited_lines) for token in item.identity_tokens):
-            raise ValueError("identity_tokens must occur in the same evidence sources")
     if evidence_method_ids != set(diagnosis.confirmed_methods):
         raise MethodsValidationError(
             MethodsValidationReasonCode.CONFIRMED_EVIDENCE_MISSING,
@@ -464,6 +488,12 @@ def verify_method_review(
 
     if not isinstance(diagnosis, VerifiedMethodDiagnosisV1):
         raise TypeError("diagnosis must be a verified method diagnosis")
+    if diagnosis.audit.validation_mode == "advisory":
+        from .methods_advisory import parse_advisory_review
+
+        # The whole-result verdict remains the reviewer's decision. Identity
+        # spelling and coverage are explanatory metadata in advisory mode.
+        return review if isinstance(review, MethodReviewV1) else parse_advisory_review(review)
     parsed = review if isinstance(review, MethodReviewV1) else MethodReviewV1.from_mapping(review)
     expected = {
         (item.method_id, tuple(sorted(item.identity_tokens)))

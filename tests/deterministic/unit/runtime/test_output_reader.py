@@ -28,6 +28,7 @@ from problem_locator.runtime.failures import RuntimeExecutionError
 from problem_locator.runtime.output_reader import (
     RejectedAgentOutputError,
     ValidatedMethodDiagnosisDraft,
+    ValidatedMethodReviewDraft,
     read_agent_output,
 )
 from problem_locator.runtime.outcome_finalizer import (
@@ -123,6 +124,42 @@ def _write_file_proposal(root: Path, relative_path: str, content: bytes) -> Path
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content)
     return path
+
+
+@pytest.mark.parametrize("role", ["diagnosis", "review"])
+@pytest.mark.parametrize("prefix,suffix", [
+    (b"\xef\xbb\xbf", b""),
+    (b"```json\n", b"\n```"),
+    (b"\xef\xbb\xbf```\r\n", b"\r\n```"),
+])
+def test_methods_model_file_normalization_preserves_exact_raw_audit_bytes(tmp_path, role, prefix, suffix):
+    job, manifest, value = _diagnosis_inputs()
+    result_type = ValidatedMethodDiagnosisDraft
+    if role == "review":
+        job = Job.model_validate(_fixture_payload("job-review.json"))
+        manifest = WorkspaceInputManifest.model_validate(_fixture_payload("workspace-input-manifest-review.json"))
+        value = {"schema_version": 1, "verdict": "PASS", "findings": [], "limitations": []}
+        result_type = ValidatedMethodReviewDraft
+    raw = prefix + json.dumps(value, ensure_ascii=False, indent=2).encode('utf-8') + suffix
+    path = _write_file_proposal(tmp_path, f"output/method-{role}.draft.json", raw)
+    result = read_agent_output(tmp_path, job, manifest)
+    assert isinstance(result, result_type)
+    assert result.raw_bytes == raw
+    assert result.canonical_bytes == canonical_json_bytes(value)
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("raw", [
+    b'```json\n{"schema_version":1,"schema_version":1}\n```',
+    b'```json\n{}\n```\nextra explanation',
+])
+def test_rejected_model_file_preserves_original_bytes_without_schema_repair(tmp_path, raw):
+    job, manifest, _ = _diagnosis_inputs()
+    path = _write_method_diagnosis(tmp_path, raw)
+    with pytest.raises(RejectedAgentOutputError) as caught:
+        read_agent_output(tmp_path, job, manifest)
+    assert caught.value.raw_outcome_bytes == raw
+    assert path.read_bytes() == raw
 
 
 def _diagnostic_draft(

@@ -201,7 +201,10 @@ class StorageLayout:
             or temporary.exists()
             or temporary.is_symlink()
         ):
-            raise UnsupportedDataFormatError("数据目录格式不受支持，请配置空 DATA_ROOT。")
+            raise UnsupportedDataFormatError(
+                "数据目录格式不受支持。请保留原目录；v11-contract-r1 数据需先用 "
+                "problem-locator-data-upgrade 显式复制升级。"
+            )
 
     def validate_v2_data_format(self) -> None:
         """Read-only validation for an already initialized Result V2 root."""

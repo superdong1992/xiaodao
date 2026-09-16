@@ -74,9 +74,18 @@ _BINARY_FLAG = getattr(os, "O_BINARY", 0)
 _AUDIT_FILENAMES = frozenset(
     {
         "context.txt",
+        "route-response.raw.txt",
+        "route-response.effective.txt",
+        "route-json-recovery.json",
         "agent_job_outcome.draft.json",
         "method-diagnosis.draft.json",
+        "method-diagnosis.raw.txt",
+        "method-diagnosis.effective.json",
+        "method-evidence-selection.json",
+        "method-evidence-advisory.json",
+        "method-validation-failure.json",
         "method-review.draft.json",
+        "method-review.raw.txt",
         "agent_job_outcome.json",
         "decision_audit.json",
         "decision_evidence.jsonl",

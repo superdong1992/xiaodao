@@ -1,6 +1,6 @@
 # 网站 Agent 接入：部署后的第一轮联调
 
-面向网站前后端开发和 Linux 测试环境运维，适用于 xiaodao `8.0.0` / V11。目标是跑通一次“用户原话 → 创建任务 → 按要求补充 → 日志 → 实时进度 → 具体定位报告”。本文不代表你的测试服务已通过验收。
+面向网站前后端开发和 Linux 测试环境运维，适用于 xiaodao `8.1.0` / V11 / `v11-contract-r2`。目标是跑通一次“用户原话 → 创建任务 → 按要求补充 → 日志 → 实时进度 → 具体定位报告”。本文不代表你的测试服务已通过验收。
 
 网站保留原有问答，新建一个 Agent 入口。调用关系是：**浏览器 → 网站后端 → xiaodao**。网站不用安装 MCP 客户端，也不用把用户原话加工成 `problem_spec`。
 
@@ -9,14 +9,14 @@
 | 交接项 | 需要提供什么 |
 | --- | --- |
 | 测试服务地址 | 网站后端可访问的完整地址、端口和路径前缀；不要把内部地址直接暴露给浏览器 |
-| 部署版本 | 应为 `8.0.0`，同时记录部署的 commit 或源码快照；不能仅凭进程启动判断版本 |
+| 部署版本 | 应为 `8.1.0` / `v11-contract-r2`，同时记录部署的 commit 或源码快照；不能仅凭进程启动判断版本 |
 | 接口合同 | 在线 `GET /openapi.json`；可视化入口 `GET /docs`；仓库 [OpenAPI 快照](../schemas/v2/web-api.openapi.snapshot.json) |
 | 完整说明 | [Agent API 参考](website-agent-api.md)：请求响应、附件、SSE、字段、错误与报告校验 |
 | 网站后端示例 | [TypeScript 示例和启动说明](../examples/website-agent/README.md)：登录/归属回调、上传、SSE、报告下载 |
 | 联调样本 | 经批准可用于测试的真实问题和配套压缩日志；时间、环境等信息按任务要求补充，预期行为不作为建案前置条件，不要用虚构事实补齐追问 |
 | 网络和运行约束 | 允许访问的后端来源、反向代理配置、上传限制、模型调用预算、测试负责人 |
 
-在线合同以**实际部署的服务**为准。如果在线版本、路由与本仓库不同，先对齐部署，不要让网站适配旧版本。示例的 `XIAODAO_BASE_URL` 与服务端 `PUBLIC_BASE_URL` 应保持相同的地址和路径前缀，否则下载地址校验会拒绝请求。
+在线合同以**实际部署的服务**为准。如果在线版本、路由与本仓库不同，先对齐部署，不要让网站适配旧版本。示例仅使用配置的 `XIAODAO_BASE_URL` 和已核验的 Case/产物 ID 构造下载路径，响应 URL 不参与寻址；它可以与服务端 `PUBLIC_BASE_URL` 不同，内部地址的路径前缀会保留。
 
 ## 2. 先做不调用模型的连通检查
 
@@ -33,7 +33,7 @@ curl --fail-with-body "$XIAODAO_BASE_URL/openapi.json"
 
 1. `/live`：HTTP 200，`{"ok":true,"data":{"status":"live"},"error":null}`。
 2. `/ready`：HTTP 200，`ok=true`、`data.ready=true`。失败时先由运维处理返回的错误码。它检查服务就绪条件，**不证明模型或诊断全链路已经可用**。
-3. `/openapi.json`：直接返回 OpenAPI 文档，不套 `ok/data` 信封；`info.version` 为 `8.0.0`，`paths` 中有 `/api/v1/agent/conversations` 及消息、事件、附件路由。
+3. `/openapi.json`：直接返回 OpenAPI 文档，不套 `ok/data` 信封；`info.version` 为 `8.1.0`，`paths` 中有 `/api/v1/agent/conversations` 及消息、事件、附件路由。
 
 Swagger 页面位于服务的 `/docs`。如果内网资源加载受限或代理加了路径前缀，页面可能打不开；当前页面从根路径 `/openapi.json` 加载合同，可先直接读取 OpenAPI。不要因此误判业务 API 不可用，也不要为了打开文档放开公网访问。
 
@@ -46,7 +46,7 @@ Content-Type: application/json
 {"request_id":"website-smoke-20260907-001"}
 ```
 
-保存响应的 `data.conversation_id`，调用 `GET /api/v1/agent/conversations/{conversation_id}`；应能读回同一会话。重试沿用同一 `request_id`，下一次独立测试换新 ID。`503 / AGENT_UNAVAILABLE` 表示 Agent 服务未就绪，不能靠前端重试解决。不要删除已有 `DATA_ROOT` 来排查；8.0 需要新空 V11 数据根，历史数据必须保留。
+保存响应的 `data.conversation_id`，调用 `GET /api/v1/agent/conversations/{conversation_id}`；应能读回同一会话。重试沿用同一 `request_id`，下一次独立测试换新 ID。`503 / AGENT_UNAVAILABLE` 表示 Agent 服务未就绪，不能靠前端重试解决。不要删除已有 `DATA_ROOT` 来排查；新部署使用空目录，已有 `8.0.0` / `v11-contract-r1` 数据按[副本升级说明](data-upgrade-v11-r2.md)显式升级，保留原目录和历史报告。
 
 ## 3. 网站前后端分别做什么
 
@@ -81,6 +81,8 @@ Content-Type: application/json
 
 刷新时先查询会话快照，恢复消息、追问、附件和报告状态，再回放事件并去重。响应不含 `id:`，原生 `EventSource` 自动重连时不会携带业务游标，会重新回放历史。需要精准续传时，用流式 `fetch` 手动设置 `Last-Event-ID`，使用最后**处理成功**的序号；不要直接把快照的最大序号当作所有事件都已展示。处理事件要串行；报告加载失败时提供重试，不能被随后到达的完成事件掩盖。
 
+收到 `agent.failed` 或 `conversation.interrupted` 时，先读取会话快照并展示 `failure`，再推进游标。它提供安全错误码、实际阶段和稳定的 `diagnostic_id`；刷新页面也读取同一信息。若 details 中是 `ARCHIVE_STATUS_COMMIT / persistence=UNKNOWN`，提示“报告已生成，但归档状态暂时无法确认”，继续获取正式 JSON，不把它当成任务失败或伪造完成事件。
+
 `result.available` 不等于归档完成：JSON 已就绪但 ZIP 为 `PENDING` 时继续订阅。只在 `conversation.completed` 后结束正常订阅。断开 SSE 不会取消后台任务；首版不提供停止按钮。已经完成报告的新问题另建会话。
 
 ## 5. 网站界面至少覆盖这些情况
@@ -91,7 +93,8 @@ Content-Type: application/json
 | 消息 `QUEUED` / `UNUSED` | 显示服务端 `notice`，不冒称消息已经用于诊断 |
 | Case `UNRESOLVED` | 展示正式 `INCONCLUSIVE` JSON、证据缺口和限制；没有结果 ZIP |
 | 归档 `PENDING` / `FAILED` | 显示“日志包生成中”/“日志包生成失败”；已交付 JSON 仍有效 |
-| 会话 `FAILED` / `INTERRUPTED` | 展示安全错误或中断说明，由用户明确另建会话；不自动重跑模型 |
+| 会话 `FAILED` / `INTERRUPTED` | 从快照 `failure` 展示安全错误码、阶段和诊断关联 ID，由用户明确另建会话；不自动重跑模型 |
+| 归档交付 `persistence=UNKNOWN` | 保留 `RUNNING / PENDING` 和已发布 JSON，显示归档状态暂时无法确认；临时提示不写入历史 |
 | SSE 断线 | 显示连接状态；`EventSource` 重连回放历史并去重，或用 `fetch` 携带最后成功游标续传；不能因为断线就新建诊断任务 |
 | HTTP `409` | 区分幂等冲突或会话已结束；不要换 ID 盲重发原诊断请求 |
 | 报告校验失败 | 不展示未校验内容，提示重新获取报告；保留已接收消息和会话 |
@@ -103,10 +106,12 @@ Content-Type: application/json
 - [ ] 日志上传同时核对类型、字节数和 SHA-256；同一预约、消息重试不重复创建。
 - [ ] SSE 每条业务消息只有一行 `data:` 加空行，`onmessage` 能实时收到；断线重放、手动游标续传、刷新和重复事件不丢报告、不重复消息。
 - [ ] JSON 不等待 ZIP；ZIP 仅在确认后下载，下载前完成大小和 SHA-256 校验。
+- [ ] 下载响应缺少 `Content-Length` / `X-Content-SHA256` 仍核对真实字节数和 SHA-256；提供这些头时必须匹配。
+- [ ] 失败事件和刷新均读取快照 `failure`；报告已生成但归档 UNKNOWN 时，首次读取 JSON 仍可成功。
 - [ ] 未登录用户、其他用户不能查询会话、订阅、上传或下载；修改 UUID 不能越权。
 - [ ] 经测试负责人安排，在无其他受影响用户时做重启检查：历史保留，活动任务明确中断，不自动重跑；完成报告仍可读取，待归档任务按原机制恢复。
 - [ ] 留存部署身份、会话 ID、Case ID、事件序号、产物大小/哈希和正式 Test Flow verdict；手工联调与正式发布结论分开记录。
 
 通过这些检查后再开放小范围试用；“Linux 服务已启动”“OpenAPI 能打开”或“确定性测试通过”都不能单独代替部署环境的端到端验收。
 
-如果网站已经对接较早的 `8.0.0` 预览版，本次只调整 SSE 传输格式：改为统一 `onmessage` 并自行管理处理游标。事件 JSON 版本和 V11 持久合同不变，不需为这次调整重建 V11 数据根；核对实际帧格式和源码版本，不能仅凭相同版本号判断网站已适配。
+历史上较早的 `8.0.0` 预览版曾调整 SSE 传输格式：统一使用 `onmessage` 并自行管理处理游标，那次调整本身没有改变 V11 数据合同。本次 `8.1.0` 则使用 `v11-contract-r2`，SSE 仍为 v1，但旧 r1 数据必须显式副本升级；不能把早期 SSE 的兼容说明理解成此次无需升级。

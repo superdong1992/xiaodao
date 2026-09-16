@@ -47,7 +47,7 @@ CONTROLLED_ARCHIVE_ALLOWLIST = {
     ): frozenset({"call:zipfile.ZipInfo"}),
     (
         "src/problem_locator/integrations/result_archive.py",
-        "build_result_archive",
+        "_encode_result_archive",
     ): frozenset(
         {
             "call:zipfile.ZipFile",

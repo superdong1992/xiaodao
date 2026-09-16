@@ -4,7 +4,7 @@
 
 ## 1. 启动前准备
 
-使用 Node.js 24+，无需 npm 依赖。先确认网站后端可以访问 xiaodao 的 `/live`、`/ready` 和 `/openapi.json`，线上版本为 `8.0.0`。再接入网站的认证和归属存储。
+使用 Node.js 24+，无需 npm 依赖。先确认网站后端可以访问 xiaodao 的 `/live`、`/ready` 和 `/openapi.json`，线上版本为 `8.1.0` / `v11-contract-r2`。再接入网站的认证和归属存储。
 
 `WEBSITE_AUTH_MODULE` 指向网站自己的 `.mjs` 模块，模块须具名导出 `access` 对象，对应 [server.ts](server.ts) 中的 `Access` 类型。以下五个回调都需要实现：
 
@@ -42,7 +42,7 @@ node examples/website-agent/server.ts
 
 ## 3. 网站调用哪些路径
 
-这里的 `/api/agent` 是**网站同源路径**；xiaodao 上游使用 `/api/v1/agent`。服务端 `PUBLIC_BASE_URL` 与本例 `XIAODAO_BASE_URL` 的协议、地址、路径前缀须一致，示例会严格核对下载描述符地址；上传地址会改写为网站同源路径。
+这里的 `/api/agent` 是**网站同源路径**；xiaodao 上游使用 `/api/v1/agent`。本例只向配置的 `XIAODAO_BASE_URL` 发请求；下载路径由已经核验的 Case 和产物 ID 构造，上游返回的 `download_url` 不参与寻址。因此网站内部地址可以与服务端 `PUBLIC_BASE_URL` 不同。上传地址会改写为网站同源路径。
 
 收到非空问题原话后，服务端按 MCP 客户端的固定中性模板创建 Case，初始事实为空。网站不应先要求用户填写预期行为、范围或日志；创建前不调用 INTAKE。建案后只按原文展示 OPEN requirements 的追问，并用消息接口提交回答。没有 OPEN requirements 时不额外追问。
 
@@ -52,13 +52,17 @@ node examples/website-agent/server.ts
 - 结果 ZIP：用户确认包含原始目标日志后，给相应下载路径添加 `?download=archive&acknowledge_raw_logs=true`。
 - 审计包：只按用户请求下载，给相应下载路径添加 `?download=audit`。
 
-`/report` 自动获取并校验 JSON 或 Generic Markdown；ZIP 只在用户主动确认后下载。所有产物均先落入唯一临时文件，验证 Content-Length、真实字节数和 SHA-256 后才转发，结束后清理。测试使用假上游，不调用真实模型。
+`/report` 自动获取并校验 JSON 或 Generic Markdown；ZIP 只在用户主动确认后下载。所有产物均先落入唯一临时文件，真实字节数和 SHA-256 必须与权威产物描述一致，校验后才转发，结束后清理。响应可省略 `Content-Length` 和 `X-Content-SHA256`；提供时必须匹配。下载不接受重定向。测试使用假上游，不调用真实模型。
 
 SSE 原样转发基础单行帧：每条业务消息是 `data: <完整 AgentEvent JSON>` 加空行，不包含 `id:`、`event:`、`retry:` 行。前端只需 `onmessage`，从 JSON 的 `type` 分发，从 `sequence` 去重。连接和心跳注释不会触发业务消息；结束使用 `conversation.completed`，没有 `[DONE]` 或 OpenAI `choices` / `delta` 包装。进度仍是已公开的阶段消息和追问，不转发模型内部推理或未审核报告。
 
 原生 `EventSource` 不会从 data-only 响应记录业务游标，自动重连会重放历史。需要精准续传时，前端用流式 `fetch` 手动设置最后处理成功的 `Last-Event-ID`，网站后端将此请求头转发给上游。事件应串行处理，报告下载、校验和展示成功后才推进游标；完整有界队列和失败重试示例见 [API 参考](../../docs/website-agent-api.md)。
 
-已接入早期 `8.0.0` 预览版的网站需要把命名事件监听改成 `onmessage`，不再读取 `lastEventId`。此次只调整传输格式，`schema_version=1` 和 V11 持久合同不变，不要求重建现有 V11 数据根。
+收到 `agent.failed` 或 `conversation.interrupted` 后，重新读取会话快照并展示 `failure`。其中 `code` 是安全错误码；`details` 提供实际失败阶段和稳定的诊断关联 ID，供服务端查证。页面刷新也从快照恢复错误，不从 SSE 的固定错误文案猜测原因。终态任务不会因为重新查询或上传重试而重新调用模型。
+
+`failure.details` 若含 `persistence=UNKNOWN`，表示当前进程尚不能确认交付状态。归档状态写入失败时，快照仍保留 `RUNNING / PENDING`，页面提示“报告已生成，但归档状态暂时无法确认”，已发布的 JSON 仍可读取和展示。这条临时提示不写入会话历史，不代表诊断失败，也不生成完成事件。
+
+已接入早期 `8.0.0` 预览版的网站需要把命名事件监听改成 `onmessage`，不再读取 `lastEventId`。历史上的那次传输调整没有改变 V11 数据合同。本次 `8.1.0` 使用 `v11-contract-r2`，SSE 仍为 `schema_version=1`，但已有 r1 数据必须按[副本升级说明](../../docs/data-upgrade-v11-r2.md)显式升级；原数据和历史报告保留，不能直接修改旧目录的合同标记。
 
 ## 4. 本地自检与环境联调分开
 

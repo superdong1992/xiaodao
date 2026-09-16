@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from problem_locator.agent.models import AgentEvent, AgentStoreError, SendMessageRequest, EVENT_PAYLOAD_MODELS
 from problem_locator.agent.store import AgentStore
-from problem_locator.contracts import CaseStatus, GenericResult, IdempotencyRecord
+from problem_locator.contracts import ApplicationErrorDetail, CaseStatus, ExecutionFailure, GenericResult, IdempotencyRecord
 from tests.deterministic.unit.storage.test_state_repository import (
     CASE_ID, JOB_ID, _empty_mutation, _finish, _open, _populate,
 )
@@ -134,6 +134,195 @@ def test_concurrent_retries_publish_one_message_and_monotonic_events(store):
         store.list_events(conversation, limit=501)
     with pytest.raises(AgentStoreError):
         store.list_events(conversation, after=32)
+
+
+def _project_waiting_questions(store, conversation, questions, revision=1):
+    case = SimpleNamespace(case_id=CASE_ID, active_job_id=None,
+        status=CaseStatus.WAITING_INPUT, archive_status="NOT_REQUIRED", case_revision=revision,
+        diagnosis_state=SimpleNamespace(pending_requirements=[SimpleNamespace(
+            status=SimpleNamespace(value="OPEN"), prompt=question) for question in questions]))
+    with store.repository.database_transaction() as db:
+        store._project_case(db, store._load(db, conversation), SimpleNamespace(case=case))
+
+
+def _stored_conversation_body(store, conversation):
+    with store.repository.database_read() as db:
+        return db.execute("SELECT body FROM agent_conversations WHERE conversation_id=?", (conversation,)).fetchone()[0]
+
+
+def test_first_applied_message_holds_questions_until_intake_finishes_once(store):
+    conversation = _conversation(store)
+    receipt = store.submit_message(conversation, "first", "设备型号已经提供：X1")
+    store.set_message_status(conversation, receipt.message_id, "PROCESSING")
+    store.set_message_status(conversation, receipt.message_id, "APPLIED")
+    _project_waiting_questions(store, conversation, ["请提供设备型号。"])
+    view = store.get_conversation(conversation)
+    assert view.status == "INTAKE" and view.case_status == "WAITING_INPUT"
+    assert view.current_questions == []
+    assert not any(item.type == "assistant.question" for item in store.list_events(conversation))
+    assert store.get_intake_state(conversation) == {
+        "pending": True, "covered_message_ids": [], "pending_commands": False, "ready": True}
+    store.finish_intake(conversation, [receipt.message_id])
+    view = store.get_conversation(conversation)
+    assert view.status == "WAITING_INPUT" and view.current_questions == ["请提供设备型号。"]
+    assert view.messages[0].status == "APPLIED"
+    assert store.get_intake_state(conversation)["covered_message_ids"] == [receipt.message_id]
+    previous = _stored_conversation_body(store, conversation)
+    events = store.list_events(conversation)
+    store.finish_intake(conversation, [receipt.message_id])
+    assert _stored_conversation_body(store, conversation) == previous
+    assert store.list_events(conversation) == events
+    assert not any(key.startswith("intake_") for key in view.model_dump())
+
+
+def test_intake_finish_cannot_cover_a_concurrently_received_message(store):
+    conversation = _conversation(store)
+    first = store.submit_message(conversation, "first", "型号 X1")
+    _project_waiting_questions(store, conversation, ["请提供版本。"])
+    second = store.submit_message(conversation, "second", "版本 V2")
+    store.finish_intake(conversation, [first.message_id])
+    assert store.get_intake_state(conversation) == {
+        "pending": True, "covered_message_ids": [first.message_id], "pending_commands": False, "ready": True}
+    assert store.get_conversation(conversation).current_questions == []
+    assert not any(item.type == "assistant.question" for item in store.list_events(conversation))
+    store.finish_intake(conversation, [second.message_id, first.message_id])
+    assert store.get_intake_state(conversation)["covered_message_ids"] == [first.message_id, second.message_id]
+    assert not store.get_intake_state(conversation)["pending"]
+    assert store.get_conversation(conversation).current_questions == ["请提供版本。"]
+
+
+def test_intake_finish_uses_latest_authoritative_remaining_questions(store):
+    conversation = _conversation(store)
+    first = store.submit_message(conversation, "first", "型号 X1，版本 V2")
+    _project_waiting_questions(store, conversation, ["请提供型号。", "请提供版本。", "请上传日志。"])
+    _project_waiting_questions(store, conversation, ["请上传日志。"], revision=2)
+    assert not any(item.type == "assistant.question" for item in store.list_events(conversation))
+    store.finish_intake(conversation, [first.message_id])
+    questions = [item.data["questions"] for item in store.list_events(conversation) if item.type == "assistant.question"]
+    assert questions == [["请上传日志。"]]
+    _project_waiting_questions(store, conversation, ["请上传日志。"], revision=2)
+    assert [item.data["questions"] for item in store.list_events(conversation)
+            if item.type == "assistant.question"] == questions
+
+
+def test_intake_coverage_and_question_publication_roll_back_together(store, monkeypatch):
+    conversation = _conversation(store)
+    first = store.submit_message(conversation, "first", "型号 X1")
+    _project_waiting_questions(store, conversation, ["请上传日志。"])
+    previous = _stored_conversation_body(store, conversation)
+    events = store.list_events(conversation)
+    append = store._append
+
+    def fail_question(db, body, event_type, data, dedupe_key):
+        result = append(db, body, event_type, data, dedupe_key)
+        if event_type == "assistant.question":
+            raise sqlite3.OperationalError("injected intake publication failure")
+        return result
+
+    monkeypatch.setattr(store, "_append", fail_question)
+    with pytest.raises(sqlite3.OperationalError):
+        store.finish_intake(conversation, [first.message_id])
+    assert _stored_conversation_body(store, conversation) == previous
+    assert store.list_events(conversation) == events
+    assert store.get_intake_state(conversation)["pending"]
+
+
+@pytest.mark.parametrize("terminal", ["closed", "report"])
+def test_late_intake_finish_cannot_overwrite_closed_or_report_ready_conversation(store, terminal):
+    conversation = _conversation(store)
+    first = store.submit_message(conversation, "first", "型号 X1")
+    store.record_dispatch(conversation, "pending", {"operation": "CreateCase"})
+    if terminal == "closed":
+        store.fail_conversation(conversation)
+    else:
+        with store.repository.database_transaction() as db:
+            body = store._load(db, conversation)
+            body.update(status="RUNNING", report_available=True)
+            store._save(db, body)
+    previous = _stored_conversation_body(store, conversation)
+    events = store.list_events(conversation)
+    assert store.get_intake_state(conversation) == {
+        "pending": False, "covered_message_ids": [], "pending_commands": False, "ready": False}
+    store.finish_intake(conversation, [first.message_id], questions=["不得覆盖终态。"])
+    assert _stored_conversation_body(store, conversation) == previous
+    assert store.list_events(conversation) == events
+
+
+def test_intake_state_read_is_private_read_only_and_safe_for_legacy_body(store):
+    conversation = _conversation(store)
+    with store.repository.database_transaction() as db:
+        body = store._load(db, conversation)
+        body.pop("intake_pending")
+        body.pop("intake_covered_message_ids")
+        store._save(db, body)
+    previous = _stored_conversation_body(store, conversation)
+    assert store.get_intake_state(conversation) == {
+        "pending": False, "covered_message_ids": [], "pending_commands": False, "ready": True}
+    assert _stored_conversation_body(store, conversation) == previous
+    assert store.list_events(conversation) == []
+
+
+def test_finished_intake_preserves_pending_command_discovery_with_index(store):
+    conversation = _conversation(store)
+    message = store.submit_message(conversation, "first", "型号 X1")
+    store.record_dispatch(conversation, "pending", {"operation": "SubmitSupplement"})
+    store.finish_intake(conversation, [message.message_id])
+    assert store.get_intake_state(conversation) == {
+        "pending": False, "covered_message_ids": [message.message_id], "pending_commands": True, "ready": True}
+    with store.repository.database_read() as db:
+        indexes = {row[1] for row in db.execute("PRAGMA index_list('agent_dispatches')")}
+        assert "agent_dispatches_conversation_status" in indexes
+    store.complete_dispatch("pending", {})
+    assert not store.get_intake_state(conversation)["pending_commands"]
+
+
+def test_update_intake_keeps_gate_until_explicit_finish_and_custom_question(store):
+    conversation = _conversation(store)
+    first = store.submit_message(conversation, "first", "型号 X1")
+    store.update_intake(conversation, {}, ["请描述需要定位的问题。"])
+    assert store.get_intake_state(conversation)["pending"]
+    assert store.get_conversation(conversation).current_questions == []
+    store.finish_intake(conversation, [first.message_id], questions=["请描述需要定位的问题。"])
+    assert store.get_conversation(conversation).current_questions == ["请描述需要定位的问题。"]
+    assert not store.get_intake_state(conversation)["pending"]
+
+
+def test_intake_coverage_rejects_foreign_messages_without_clearing_gate(store):
+    conversation, other = _conversation(store), _conversation(store, "other")
+    store.submit_message(conversation, "first", "型号 X1")
+    foreign = store.submit_message(other, "other-first", "型号 Y2")
+    previous = _stored_conversation_body(store, conversation)
+    with pytest.raises(AgentStoreError, match="不属于本会话"):
+        store.finish_intake(conversation, [foreign.message_id])
+    assert _stored_conversation_body(store, conversation) == previous
+
+
+def test_intake_ready_skips_running_cases_but_keeps_unknown_bound_case_queryable(store):
+    conversation = _conversation(store)
+    store.submit_message(conversation, "first", "型号 X1")
+    store.bind_case(conversation, CASE_ID)
+    assert store.get_intake_state(conversation)["ready"]
+    _populate(store.repository)
+    assert store.get_intake_state(conversation)["pending"]
+    assert not store.get_intake_state(conversation)["ready"]
+    _project_waiting_questions(store, conversation, ["请上传日志。"], revision=2)
+    assert store.get_intake_state(conversation)["ready"]
+
+
+def test_new_message_preserves_legacy_authoritative_questions_before_hiding_them(store):
+    conversation = _conversation(store)
+    _project_waiting_questions(store, conversation, ["请上传日志。"])
+    with store.repository.database_transaction() as db:
+        body = store._load(db, conversation)
+        body.pop("intake_authoritative_questions")
+        body.pop("intake_question_revision")
+        body.pop("intake_pending")
+        body.pop("intake_covered_message_ids")
+        store._save(db, body)
+    first = store.submit_message(conversation, "first", "暂时没有日志。")
+    assert store.get_conversation(conversation).current_questions == []
+    store.finish_intake(conversation, [first.message_id])
+    assert store.get_conversation(conversation).current_questions == ["请上传日志。"]
 
 
 def test_message_bytes_and_attachment_ownership_are_validated(store):
@@ -332,6 +521,32 @@ def test_safe_failure_never_exposes_internal_failure_and_marks_queued_unused(sto
     assert "secret-token" not in str([event.model_dump() for event in store.list_events(conversation)])
 
 
+def test_terminal_failure_snapshot_and_events_commit_atomically(store, monkeypatch):
+    conversation = _conversation(store)
+    store.submit_message(conversation, "one", "问题描述")
+    before = store.get_conversation(conversation)
+    events_before = store.list_events(conversation)
+    append = store._append
+
+    def fail_after_event(db, body, event_type, data, dedupe_key):
+        result = append(db, body, event_type, data, dedupe_key)
+        if event_type == "conversation.completed":
+            raise sqlite3.OperationalError("injected transaction failure")
+        return result
+
+    monkeypatch.setattr(store, "_append", fail_after_event)
+    with pytest.raises(sqlite3.OperationalError):
+        store.fail_conversation(conversation, "INTAKE_OUTPUT_INVALID", phase="INTAKE")
+    assert store.get_conversation(conversation) == before
+    assert store.list_events(conversation) == events_before
+    monkeypatch.setattr(store, "_append", append)
+    store.fail_conversation(conversation, "INTAKE_OUTPUT_INVALID", phase="INTAKE")
+    failure = store.get_conversation(conversation).failure
+    assert failure is not None and failure.retryable is False
+    store.fail_conversation(conversation, "secret-token", phase="private/path")
+    assert store.get_conversation(conversation).failure == failure
+
+
 def test_restart_interrupts_started_conversations_once_and_preserves_empty_drafts(store):
     started, empty = _conversation(store), _conversation(store, "empty")
     store.submit_message(started, "message", "任务输入")
@@ -372,6 +587,29 @@ def test_restart_keeps_durably_completed_case_failure_and_never_reopens_dispatch
         assert not any(event.type == "conversation.interrupted" for event in before)
     finally:
         reopened.close()
+
+
+def test_case_failure_projects_typed_evidence_location_without_rejected_values(store):
+    conversation = _conversation(store)
+    store.bind_case(conversation, CASE_ID)
+    aggregate = _populate(store.repository)
+    diagnostic = "50000000-0000-4000-8000-000000000001"
+    execution_failure = ExecutionFailure(stage="OUTCOME_VALIDATE", code="OUTCOME_INVALID", message="SECRET raw evidence",
+        retryable=False, diagnostic_id=diagnostic, reason_code="METHOD_VALIDATION_FAILED", details=[ApplicationErrorDetail(field="findings[1].evidence_refs[2]",
+            actual="SECRET rejected log", expected="SECRET expected log", resource_type=None, resource_id=None,
+            resource_ref=None, limit=None, observed=None)])
+    case = aggregate.case.model_copy(update={"status": CaseStatus.FAILED, "active_job_id": None, "case_revision": 2,
+        "failure": SimpleNamespace(source_outcome_id="failure-outcome", diagnostic_id=diagnostic, reason_code=execution_failure.reason_code,
+            code=execution_failure.code)})
+    failed = aggregate.model_copy(update={"case": case, "outcomes": {"failure-outcome": SimpleNamespace(error=execution_failure)}})
+    with store.repository.database_transaction() as db:
+        store._project_case(db, store._load(db, conversation), failed)
+    snapshot = store.get_conversation(conversation)
+    assert snapshot.status == "FAILED"
+    assert snapshot.failure.details == [{"field": "phase", "actual": "OUTCOME_VALIDATE"},
+        {"field": "diagnostic_id", "actual": diagnostic}, {"field": "reason_code", "actual": "METHOD_VALIDATION_FAILED"},
+        {"field": "location", "actual": "findings[1].evidence_refs[2]"}]
+    assert "SECRET" not in snapshot.model_dump_json()
 
 
 def test_notification_failure_cannot_reject_a_committed_message(store):

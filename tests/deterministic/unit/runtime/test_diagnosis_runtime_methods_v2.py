@@ -457,7 +457,7 @@ def _runtime(
         return None
 
     factory.preprocessing_executor = execute_preprocessing
-    runtime = DiagnosisRuntime(
+    runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=_StateView(aggregate),
         resource_store=resources,
         asset_catalog=catalog,
@@ -689,7 +689,7 @@ def _review_runtime(
     )
     events.clear()
     backend = _EvidenceV2ReviewerBackend(responses, events)
-    runtime = DiagnosisRuntime(
+    runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=_StateView(aggregate),
         resource_store=_UnusedResourceStore(),  # type: ignore[arg-type]
         asset_catalog=catalog,
@@ -1689,7 +1689,7 @@ def test_specialist_replacement_resumes_old_repair_without_rescan(
     )
     factory = FakeLogparseBrokerFactory()
     backend = _EvidenceV2SpecialistBackend(factory, replacement, ("VALID",))
-    runtime = DiagnosisRuntime(
+    runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=repository,
         resource_store=resources,  # type: ignore[arg-type]
         asset_catalog=catalog,
@@ -1763,7 +1763,7 @@ def test_specialist_replacement_resource_drift_keeps_old_evaluation_lineage(
     )
     factory = FakeLogparseBrokerFactory()
     backend = _EvidenceV2SpecialistBackend(factory, replacement, ("VALID",))
-    runtime = DiagnosisRuntime(
+    runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=repository,
         resource_store=resources,  # type: ignore[arg-type]
         asset_catalog=catalog,
@@ -1873,7 +1873,7 @@ def test_specialist_replacement_lineage_resumes_from_immediate_predecessor(
     )
     factory = FakeLogparseBrokerFactory()
     backend = _EvidenceV2SpecialistBackend(factory, second_replacement, ("VALID",))
-    runtime = DiagnosisRuntime(
+    runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=second_repository,
         resource_store=resources,  # type: ignore[arg-type]
         asset_catalog=catalog,
@@ -1982,7 +1982,7 @@ def test_reviewer_replacement_inherits_old_rejection_and_interrupted_state(
     )
     events: list[str] = []
     backend = _EvidenceV2ReviewerBackend(("VALID_CONFIRMED",), events)
-    runtime = DiagnosisRuntime(
+    runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=repository,
         resource_store=resources,  # type: ignore[arg-type]
         asset_catalog=catalog,

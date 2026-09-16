@@ -97,8 +97,10 @@ def _raw_range(
     *,
     line_start: int,
     line_end: int,
+    physical: list[bytes] | None = None,
 ) -> tuple[bytes, str]:
-    physical = captured.content.splitlines(keepends=True)
+    if physical is None:
+        physical = captured.content.splitlines(keepends=True)
     if line_start < 1 or line_end < line_start or line_end > len(physical):
         raise ValueError("DecisionAudit line range escapes the authoritative target log")
     raw = b"".join(physical[line_start - 1 : line_end])
@@ -109,6 +111,39 @@ def _raw_range(
     if not excerpt.strip():
         raise ValueError("DecisionAudit raw log citation is empty")
     return raw, excerpt
+
+
+class _CapturedLogIndex:
+    """Keep cited ranges, releasing each source's temporary physical lines."""
+
+    def __init__(self, captured_logs: tuple[CapturedTargetLog, ...]) -> None:
+        self.by_path: dict[str | None, list[CapturedTargetLog]] = {}
+        for item in captured_logs:
+            self.by_path.setdefault(item.target.log_path, []).append(item)
+        self.ranges: dict[tuple[int, int, int], tuple[str, str]] = {}
+
+    def prepare_ranges(self, requested: Iterable[tuple[str, int, int]]) -> None:
+        by_path: dict[str, dict[tuple[int, int], None]] = {}
+        for path, start, end in requested:
+            by_path.setdefault(path, {})[(start, end)] = None
+        for path, spans in by_path.items():
+            matches = self.by_path.get(path, [])
+            if len(matches) == 1:
+                self._cache_source_ranges(matches[0], spans)
+
+    def _cache_source_ranges(
+        self, captured: CapturedTargetLog, spans: Iterable[tuple[int, int]],
+    ) -> None:
+        # Keep the full split in this source-local frame. Returning before the
+        # next source is split bounds copied-line memory to one log at a time.
+        physical = captured.content.splitlines(keepends=True)
+        for start, end in spans:
+            raw, excerpt = _raw_range(captured, line_start=start, line_end=end, physical=physical)
+            self.ranges[(id(captured), start, end)] = (bytes_sha256(raw), excerpt)
+
+    def cited_range(self, captured: CapturedTargetLog, start: int, end: int) -> tuple[str, str]:
+        # Identity keys avoid hashing entire byte strings for cache lookup.
+        return self.ranges[(id(captured), start, end)]
 
 
 def _generic_citation(binding: EvidenceBinding) -> UserResultCitationV2:
@@ -126,21 +161,18 @@ def _rule_citations(
     evaluation: object,
     captured_logs: tuple[CapturedTargetLog, ...],
     decision_evidence: dict[tuple[str, str, int, str], str],
+    log_index: _CapturedLogIndex,
 ) -> list[UserResultCitationV2]:
     citations: list[UserResultCitationV2] = []
     represented: set[tuple[str, str]] = set()
     for line_range in evaluation.line_ranges:
-        matches = [
-            item for item in captured_logs if item.target.log_path == line_range.path
-        ]
+        matches = log_index.by_path.get(line_range.path, [])
         if len(matches) == 1:
             captured = matches[0]
-            raw, excerpt = _raw_range(
-                captured,
-                line_start=line_range.line_start,
-                line_end=line_range.line_end,
+            actual_digest, excerpt = log_index.cited_range(
+                captured, line_range.line_start, line_range.line_end,
             )
-            if bytes_sha256(raw) != line_range.raw_bytes_sha256:
+            if actual_digest != line_range.raw_bytes_sha256:
                 raise ValueError("DecisionAudit raw-line hash differs from target log bytes")
             target_binding_keys = {
                 _binding_key(binding) for binding in captured.evidence_bindings
@@ -222,6 +254,7 @@ def _verification_rules(
     verification: VerificationResult,
     captured_logs: tuple[CapturedTargetLog, ...],
 ) -> list[UserResultVerificationRuleV2]:
+    log_index = _CapturedLogIndex(captured_logs)
     decision_evidence: dict[tuple[str, str, int, str], str] = {}
     for raw_record in verification.decision_evidence_bytes.splitlines(keepends=True):
         value = parse_canonical_json_bytes(raw_record)
@@ -256,6 +289,11 @@ def _verification_rules(
         if existing is not None and existing != value["raw_line"]:
             raise ValueError("server decision-evidence records conflict")
         decision_evidence[key] = value["raw_line"]
+    log_index.prepare_ranges(
+        (item.path, item.line_start, item.line_end)
+        for rule in verification.audit.rules
+        for item in rule.server_evaluation.line_ranges
+    )
     result: list[UserResultVerificationRuleV2] = []
     for rule in verification.audit.rules:
         evaluation = rule.server_evaluation
@@ -274,6 +312,7 @@ def _verification_rules(
                     evaluation,
                     captured_logs,
                     decision_evidence,
+                    log_index,
                 ),
                 observed_times=list(evaluation.observed_times),
                 event_observations=list(evaluation.event_observations),
@@ -321,15 +360,23 @@ def _findings(
         for binding in verification.audit.required_evidence_bindings
     }
     result: list[UserResultFindingV2] = []
-    for finding in payload.findings:
+    if verification.finding_rule_ids and len(verification.finding_rule_ids) != len(payload.findings):
+        raise ValueError("finding rule identities differ from the verified findings")
+    for index, finding in enumerate(payload.findings):
         if not finding.evidence_bindings or any(
             _binding_key(binding) not in verified
             for binding in finding.evidence_bindings
         ):
             raise ValueError("a public Finding is not backed by verified Evidence")
         citations: list[UserResultCitationV2] = []
+        finding_rules = rules
+        if verification.finding_rule_ids:
+            selected_ids = verification.finding_rule_ids[index]
+            finding_rules = [rule for rule in rules if rule.rule_id in selected_ids]
+            if len(finding_rules) != len(selected_ids):
+                raise ValueError("a finding's verified rules are unavailable")
         for binding in finding.evidence_bindings:
-            citations.extend(_finding_citations(binding, rules))
+            citations.extend(_finding_citations(binding, finding_rules))
         result.append(
             UserResultFindingV2(
                 statement=finding.statement,
@@ -501,6 +548,8 @@ def _gaps(
     completed: bool,
 ) -> list[str]:
     values: list[str] = []
+    if verification.evidence_validation_mode == "advisory":
+        values.append("本次未执行证据一致性复核，以下发现为模型判断，仍需结合实际日志确认。")
     if authoritative_targets is not None:
         values.extend(
             f"目标日志 {target.label} 的匹配状态为 {target.match_status}，无法形成完整日志交付。"
@@ -552,6 +601,7 @@ def _result_factors(
     *,
     candidate_result: bool,
     rules: list[UserResultVerificationRuleV2],
+    exact_rule_sources: bool = False,
 ) -> tuple[list[UserResultFactorV3], list[UserResultFactorV3], list[UserResultFactorV3]]:
     if not candidate_result or not isinstance(payload, DiagnosisOutcome):
         return [], [], []
@@ -562,8 +612,10 @@ def _result_factors(
         result: list[UserResultFactorV3] = []
         for factor in values:
             citations: list[UserResultCitationV2] = []
+            factor_rules = ([rule for rule in rules if rule.rule_id in factor.required_rule_ids]
+                            if exact_rule_sources else rules)
             for binding in factor.evidence_bindings:
-                citations.extend(_finding_citations(binding, rules))
+                citations.extend(_finding_citations(binding, factor_rules))
             result.append(
                 UserResultFactorV3(
                     factor_id=factor.factor_id,
@@ -654,8 +706,12 @@ def build_server_result_bundle(
         if not verification.positive_gate_passed:
             raise ValueError("a candidate public result requires the selected path gate")
         if authoritative_targets is not None:
-            authoritative_targets.require_deliverable()
-            if tuple(item.target for item in captured_logs) != authoritative_targets.targets:
+            required_targets = (
+                tuple(target for target in authoritative_targets.targets if target.deliverable)
+                if verification.permits_missing_targets(job, payload)
+                else authoritative_targets.require_deliverable()
+            )
+            if tuple(item.target for item in captured_logs) != required_targets:
                 raise ValueError("the public archive does not cover every resolved target")
         elif captured_logs:
             raise ValueError("target logs require a server-authoritative target set")
@@ -678,6 +734,7 @@ def build_server_result_bundle(
         payload,
         candidate_result=candidate_result,
         rules=rules,
+        exact_rule_sources=bool(verification.finding_rule_ids),
     )
     report = UserResultPayloadV3(
         schema_version=3,
@@ -759,7 +816,9 @@ def build_server_result_bundle(
         metadata=UserResultMetadataV3(
             schema_version=3,
             format_id="problem-locator-diagnosis-v3",
-            description="服务端验证后生成的诊断结果 v3。",
+            description=("服务端整理生成的诊断结果 v3。"
+                         if verification.evidence_validation_mode == "advisory"
+                         else "服务端验证后生成的诊断结果 v3。"),
         ),
     )
     files = [ServerGeneratedResultFile(draft=result_draft, content=report_bytes)]

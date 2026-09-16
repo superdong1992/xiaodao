@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 
 from problem_locator.contracts import StateFile
 from problem_locator.application.projection import project_artifact_summaries
+from problem_locator.diagnostics import log_event
+from .failures import interrupted_execution_failure, public_failure
 from .models import (AgentAttachment, AgentEvent, AgentMessage, AgentStoreError,
                      AttachmentRecord, CreateConversationRequest, ConversationReceipt, ConversationView,
                      MessageReceipt, SendMessageRequest, PUBLIC_PROGRESS_MESSAGES)
@@ -62,6 +64,8 @@ class AgentStore:
                     dispatch_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
                     epoch TEXT NOT NULL, status TEXT NOT NULL,
                     payload TEXT NOT NULL, result TEXT);
+                CREATE INDEX IF NOT EXISTS agent_dispatches_conversation_status
+                    ON agent_dispatches(conversation_id,status,epoch);
                 CREATE TABLE IF NOT EXISTS agent_message_adoptions (
                     message_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
                     dispatch_id TEXT NOT NULL);
@@ -131,7 +135,8 @@ class AgentStore:
             conversation_id, now = self._id("conversation"), self._now()
             body = dict(conversation_id=conversation_id, status="INTAKE", case_id=None, job_id=None,
                         case_status=None, archive_status="NOT_REQUIRED", current_questions=[],
-                        last_event_id=0, created_at=now, updated_at=now, draft={}, report_available=False)
+                        last_event_id=0, created_at=now, updated_at=now, draft={}, report_available=False,
+                        intake_pending=False, intake_covered_message_ids=[])
             db.execute("INSERT INTO agent_conversations VALUES (?,?,?,?,?,NULL,NULL)",
                        (conversation_id, request_id, self.runtime_epoch, "INTAKE", _json(body)))
         return ConversationReceipt(conversation_id=conversation_id, request_id=request_id)
@@ -164,6 +169,14 @@ class AgentStore:
                 request_id=request_id, event_id=event.sequence)
             db.execute("INSERT INTO agent_messages VALUES (?,?,?,?,?,?)",
                        (message.message_id, conversation_id, request_id, fingerprint, _json(message), _json(receipt)))
+            if body.get("case_status") in {"WAITING_INPUT", "WAITING_ATTACHMENT"}:
+                # Older snapshots have public questions but no private gate
+                # projection. Preserve that authoritative snapshot before hiding it.
+                body.setdefault("intake_authoritative_questions", list(body.get("current_questions", [])))
+            body["intake_pending"] = True
+            body["current_questions"] = []
+            if body.get("case_status") in {None, "WAITING_INPUT", "WAITING_ATTACHMENT"}:
+                body["status"] = "INTAKE"
             self._save(db, body)
         self._notify(conversation_id)
         return receipt
@@ -193,6 +206,82 @@ class AgentStore:
         with self.repository.database_read() as db:
             return self._load(db, conversation_id).get("draft", {})
 
+    def get_intake_state(self, conversation_id):
+        """Read the private work latch without loading history or changing state."""
+        with self.repository.database_read() as db:
+            body = self._load(db, conversation_id)
+            closed = body["status"] in _CLOSED or body.get("report_available", False)
+            commands = False if closed else db.execute(
+                "SELECT 1 FROM agent_dispatches WHERE conversation_id=? AND status='PENDING' AND epoch=? LIMIT 1",
+                (conversation_id, self.runtime_epoch),
+            ).fetchone() is not None
+            return {"pending": False if closed else body.get("intake_pending", False),
+                    "covered_message_ids": list(body.get("intake_covered_message_ids", [])),
+                    "pending_commands": commands,
+                    "ready": not closed and (body.get("case_id") is None or
+                        body.get("case_status") in {None, "WAITING_INPUT", "WAITING_ATTACHMENT"})}
+
+    def _publish_intake_questions(self, db, body, questions):
+        questions = list(questions)
+        if body.get("current_questions") == questions:
+            return
+        body["current_questions"] = questions
+        if questions:
+            identity = [body.get("intake_question_revision"),
+                        body.get("intake_covered_message_ids", []), questions]
+            self._append(db, body, "assistant.question", {"questions": questions},
+                         "intake-questions:" + hashlib.sha256(_json(identity).encode()).hexdigest())
+
+    def finish_intake(self, conversation_id, covered_message_ids, questions=None):
+        """Settle one frozen source batch without covering concurrently new input.
+
+        The message adoption status is independent of this coverage receipt:
+        an already APPLIED create message can be extracted once without reversal.
+        Case questions come from the latest transactionally saved projection.
+        """
+        if not isinstance(covered_message_ids, (list, tuple)) or any(
+            not isinstance(item, str) or not item for item in covered_message_ids
+        ):
+            raise ValueError("intake coverage requires message identifiers")
+        if questions is not None and (not isinstance(questions, (list, tuple)) or any(
+            not isinstance(item, str) or not item.strip() for item in questions
+        )):
+            raise ValueError("intake questions require non-empty text")
+        changed = False
+        with self.repository.database_transaction() as db:
+            body = self._load(db, conversation_id)
+            if body["status"] in _CLOSED or body.get("report_available"):
+                return
+            previous = _json(body)
+            messages = [json.loads(row[0]) for row in db.execute(
+                "SELECT body FROM agent_messages WHERE conversation_id=? ORDER BY rowid", (conversation_id,))]
+            known = {message["message_id"] for message in messages}
+            covered = set(body.get("intake_covered_message_ids", [])) | set(covered_message_ids)
+            if not covered <= known:
+                raise AgentStoreError("AGENT_MESSAGE_NOT_FOUND", "整理记录引用了不属于本会话的消息。", 404)
+            body["intake_covered_message_ids"] = [message["message_id"] for message in messages
+                                                   if message["message_id"] in covered]
+            pending = any(message["status"] != "UNUSED" and message["message_id"] not in covered
+                          for message in messages)
+            body["intake_pending"] = pending
+            waiting = body.get("case_status") in {"WAITING_INPUT", "WAITING_ATTACHMENT"}
+            if pending:
+                body["current_questions"] = []
+                if waiting or body.get("case_id") is None:
+                    body["status"] = "INTAKE"
+            elif waiting or (questions is not None and body.get("case_id") is None):
+                body["status"] = "WAITING_INPUT"
+                self._publish_intake_questions(db, body, questions if questions is not None else
+                                              body.get("intake_authoritative_questions", []))
+            elif body.get("case_id") is not None:
+                body["status"] = "RUNNING"
+                body["current_questions"] = []
+            if _json(body) != previous:
+                self._save(db, body)
+                changed = True
+        if changed:
+            self._notify(conversation_id)
+
     def set_draft(self, conversation_id, draft):
         with self.repository.database_transaction() as db:
             body = self._load(db, conversation_id)
@@ -206,8 +295,10 @@ class AgentStore:
             self._ensure_open(body)
             if status not in {"INTAKE", "WAITING_INPUT", "RUNNING"}:
                 raise ValueError("invalid intake status")
-            body.update(draft=draft, current_questions=list(questions), status=status)
-            if questions:
+            pending = body.get("intake_pending", False)
+            body.update(draft=draft, current_questions=[] if pending else list(questions),
+                        status="INTAKE" if pending and status == "WAITING_INPUT" else status)
+            if questions and not pending:
                 self._append(db, body, "assistant.question", {"questions": list(questions)},
                              "questions:" + hashlib.sha256(_json([draft, questions]).encode()).hexdigest())
             self._save(db, body)
@@ -408,18 +499,27 @@ class AgentStore:
         self._notify(conversation_id)
         return event
 
-    def fail_conversation(self, conversation_id, code="AGENT_EXECUTION_FAILED", *, interrupted=False):
+    def fail_conversation(self, conversation_id, code="AGENT_EXECUTION_FAILED", *, interrupted=False, phase="AGENT", source_details=()):
         # Internal exception text is deliberately not an argument.
         with self.repository.database_transaction() as db:
             body = self._load(db, conversation_id)
             if body["status"] in _CLOSED or body.get("report_available"):
                 return
-            self._close(db, body, "INTERRUPTED" if interrupted else "FAILED", code)
+            self._close(db, body, "INTERRUPTED" if interrupted else "FAILED", code,
+                failure=public_failure(code, phase=phase, source_details=source_details))
             self._save(db, body)
         self._notify(conversation_id)
 
-    def _close(self, db, body, status, code=None):
+    def _close(self, db, body, status, code=None, *, failure=None):
         body["status"] = status
+        body["intake_pending"] = False
+        if status in {"FAILED", "INTERRUPTED"} and body.get("failure") is None:
+            failure = failure or public_failure(code or ("AGENT_INTERRUPTED" if status == "INTERRUPTED" else None),
+                phase="RESTART" if status == "INTERRUPTED" else "AGENT")
+            body["failure"] = failure.model_dump(mode="json")
+            log_event("agent.failure_projected", conversation_id=body["conversation_id"],
+                case_id=body.get("case_id"), job_id=body.get("job_id"),
+                code=failure.code, **{item["field"]: item["actual"] for item in failure.details})
         self._mark_unused(db, body)
         if status == "INTERRUPTED":
             self._append(db, body, "conversation.interrupted", {"code": "AGENT_INTERRUPTED", "message": "服务已重启，本次任务已中断，请重新发起。"}, "interrupted")
@@ -458,16 +558,23 @@ class AgentStore:
         self._append(db, body, "case.updated", {"status": case.status.value, "case_revision": case.case_revision},
                      "case:" + str(case.case_revision))
         if case.status.value in {"WAITING_INPUT", "WAITING_ATTACHMENT"}:
-            body["status"] = "WAITING_INPUT"
-            body["current_questions"] = [requirement.prompt for requirement in case.diagnosis_state.pending_requirements if requirement.status.value == "OPEN"]
-            if body["current_questions"]:
-                self._append(db, body, "assistant.question", {"questions": body["current_questions"]}, "case-questions:" + str(case.case_revision))
+            questions = [requirement.prompt for requirement in case.diagnosis_state.pending_requirements
+                         if requirement.status.value == "OPEN"]
+            body["intake_authoritative_questions"] = questions
+            body["intake_question_revision"] = case.case_revision
+            if body.get("intake_pending", False):
+                body["status"] = "INTAKE"
+                body["current_questions"] = []
+            else:
+                body["status"] = "WAITING_INPUT"
+                self._publish_intake_questions(db, body, questions)
         elif case.status.value in _RESULT:
             summaries = project_artifact_summaries(case, aggregate.artifacts.values(), include_internal=False)
             reports = [item for item in summaries if item.kind.value in {"USER_RESULT", "GENERIC_REPORT"}]
             generic = case.generic_result_v2 or case.generic_result
             if reports or generic is not None:
                 body["report_available"] = True
+                body["intake_pending"] = False
                 body["current_questions"] = []
                 result_field = ("generic_result_v2" if case.generic_result_v2 is not None else
                                 "generic_result" if case.generic_result is not None else
@@ -484,7 +591,27 @@ class AgentStore:
             else:
                 body["status"] = "RUNNING"
         elif case.status.value in {"FAILED", "CANCELLED", "INTERRUPTED"}:
-            self._close(db, body, "INTERRUPTED" if case.status.value == "INTERRUPTED" else "FAILED")
+            case_failure = case.failure
+            outcome = aggregate.outcomes.get(case_failure.source_outcome_id) if case_failure is not None else None
+            execution_failure = outcome.error if outcome is not None else None
+            if execution_failure is None and case_failure is not None:
+                records = [record for record in aggregate.execution_failure_records.values()
+                    if record.job_id == case_failure.source_job_id and record.failure.code == case_failure.code
+                    and (case_failure.diagnostic_id is None or record.failure.diagnostic_id == case_failure.diagnostic_id)]
+                if records:
+                    execution_failure = max(records, key=lambda item: (item.recorded_at, item.failure_id)).failure
+            if case_failure is None and case.status.value == "INTERRUPTED":
+                execution_failure = interrupted_execution_failure(aggregate)
+            failure = public_failure(
+                case_failure.code if case_failure is not None else
+                    execution_failure.code if execution_failure is not None else "AGENT_INTERRUPTED",
+                phase=execution_failure.stage if execution_failure is not None else "AGENT",
+                diagnostic_id=case_failure.diagnostic_id if case_failure is not None else
+                    execution_failure.diagnostic_id if execution_failure is not None else None,
+                reason_code=case_failure.reason_code if case_failure is not None else
+                    execution_failure.reason_code if execution_failure is not None else None,
+                source_details=execution_failure.details if execution_failure is not None else ())
+            self._close(db, body, "INTERRUPTED" if case.status.value == "INTERRUPTED" else "FAILED", failure=failure)
         else:
             body["status"] = "RUNNING"
             body["current_questions"] = []

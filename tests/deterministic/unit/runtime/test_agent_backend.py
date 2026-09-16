@@ -249,6 +249,7 @@ def _execute(
     limits: BackendExecutionLimits | None = None,
     sinks: ExecutionLogSinks | None = None,
     broker_environment: dict[str, str] | None = None,
+    file_access: str | None = None,
 ):
     actual_sinks = sinks or _sinks()[0]
     return backend.execute(
@@ -259,6 +260,7 @@ def _execute(
         resource_limits=default_resource_limits("DIAGNOSE"),
         broker_environment=broker_environment,
         test_limits=limits or _limits(),
+        file_access=file_access,
     )
 
 
@@ -765,6 +767,35 @@ def test_stdout_stderr_combined_limit_overflow_terminates(tmp_path: Path) -> Non
             limits=_limits(output=64),
         )
     _assert_failure(caught, ErrorCode.BACKEND_OUTPUT_LIMIT)
+
+
+@pytest.mark.parametrize("returncode,limit,error", [
+    (0, 2 * 1024 * 1024, None),
+    (17, 2 * 1024 * 1024, ErrorCode.BACKEND_EXIT_FAILED),
+    (0, 1024 * 1024, ErrorCode.BACKEND_OUTPUT_LIMIT),
+])
+def test_large_terminal_obeys_process_exit_and_stage_output_budget(tmp_path, returncode, limit, error):
+    answer_size = 1024 * 1024 + 1
+    script = tmp_path / "stream_agent.py"
+    script.write_text(
+        "import json, sys\n"
+        "sys.stdin.buffer.read()\n"
+        f"event = {{'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'x' * {answer_size}}}\n"
+        "sys.stdout.buffer.write(json.dumps(event).encode('utf-8') + b'\\r\\n')\n"
+        "sys.stdout.buffer.flush()\n"
+        f"raise SystemExit({returncode})\n",
+        encoding="utf-8",
+    )
+    backend = AgentBackend(f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}", parent_environment={})
+    root = _workspace(tmp_path)
+    if error is not None:
+        with pytest.raises(RuntimeExecutionError) as caught:
+            _execute(backend, root, limits=_limits(output=limit, wall_time=5), file_access="none")
+        _assert_failure(caught, error)
+    else:
+        result = _execute(backend, root, limits=_limits(output=limit, wall_time=5), file_access="none")
+        assert result.final_result == "x" * answer_size
+        assert result.stdout_stderr_bytes <= limit
 
 
 def test_workspace_limit_and_root_shape_bypass_are_rejected(tmp_path: Path) -> None:

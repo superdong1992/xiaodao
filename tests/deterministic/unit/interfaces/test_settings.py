@@ -89,6 +89,19 @@ def test_all_fixed_configuration_defaults_are_exact(tmp_path: Path) -> None:
     assert settings.dfx_log_level == "INFO"
     assert settings.dfx_log_dir is None
     assert settings.specialized_reviewer_enabled is False
+    assert settings.methods_evidence_validation == "advisory"
+
+
+@pytest.mark.parametrize("mode", ["advisory", "strict"])
+def test_methods_evidence_validation_can_restore_strict_checks(tmp_path, mode):
+    settings = Settings.load(environ={**environment(tmp_path), "METHODS_EVIDENCE_VALIDATION": mode})
+    assert settings.methods_evidence_validation == mode
+
+
+@pytest.mark.parametrize("mode", ["", "off", "STRICT", "false"])
+def test_methods_evidence_validation_rejects_unknown_modes(tmp_path, mode):
+    with pytest.raises(SettingsError, match="METHODS_EVIDENCE_VALIDATION"):
+        Settings.load(environ={**environment(tmp_path), "METHODS_EVIDENCE_VALIDATION": mode})
 
 
 def test_role_agent_commands_override_the_legacy_fallback_independently(

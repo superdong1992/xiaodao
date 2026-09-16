@@ -73,7 +73,9 @@ def test_release_metadata_keeps_the_offline_database_boundary() -> None:
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     required_release_boundaries = (
-        "State、Job 和权威 Outcome 已切换到 V11",
+        "State、Job 和权威 Outcome 使用 V11",
+        "v11-contract-r2",
+        "docs/data-upgrade-v11-r2.md",
         "不重放活动任务或未确认的 Outcome",
         "SQLite WAL + FULL",
         "旧数据目录原样保留",

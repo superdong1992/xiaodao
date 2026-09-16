@@ -916,17 +916,6 @@ class CandidateConclusion(ContractModel):
                 raise ValueError(
                     "a PARTIAL Candidate requires a confirmed or excluded factor"
                 )
-            if not any(
-                item.status
-                in {
-                    CompletionCriterionStatus.SATISFIED,
-                    CompletionCriterionStatus.PARTIALLY_SATISFIED,
-                }
-                for item in self.completion_criteria_mapping
-            ):
-                raise ValueError(
-                    "a PARTIAL Candidate requires evidence-backed criterion progress"
-                )
             if all(
                 item.status is CompletionCriterionStatus.SATISFIED
                 for item in self.completion_criteria_mapping
@@ -2679,17 +2668,6 @@ class CandidateConclusionDraft(ContractModel):
                 raise ValueError(
                     "a PARTIAL Candidate draft requires a confirmed or excluded factor"
                 )
-            if not any(
-                entry.status
-                in {
-                    CompletionCriterionStatus.SATISFIED,
-                    CompletionCriterionStatus.PARTIALLY_SATISFIED,
-                }
-                for entry in self.completion_criteria_mapping
-            ):
-                raise ValueError(
-                    "a PARTIAL Candidate draft requires evidence-backed criterion progress"
-                )
             if all(
                 entry.status is CompletionCriterionStatus.SATISFIED
                 for entry in self.completion_criteria_mapping
@@ -3027,17 +3005,6 @@ class UserResultPayloadV3(ContractModel):
             if not (self.causal_factors or self.excluded_factors):
                 raise ValueError(
                     "PARTIAL USER_RESULT requires a confirmed or excluded factor"
-                )
-            if not any(
-                entry.status
-                in {
-                    CompletionCriterionStatus.SATISFIED,
-                    CompletionCriterionStatus.PARTIALLY_SATISFIED,
-                }
-                for entry in self.completion_criteria_mapping
-            ):
-                raise ValueError(
-                    "PARTIAL USER_RESULT requires evidence-backed criterion progress"
                 )
             if all(
                 entry.status is CompletionCriterionStatus.SATISFIED

@@ -8,8 +8,9 @@ from problem_locator.contracts import (
     AgentJobOutcomeDraftV2, ErrorCode, ExecutionStage, Job, RouteDecision,
     RouteKind, OutcomeResultType, canonical_json_bytes,
 )
-from problem_locator.integrations.agent_json import parse_agent_json_bytes
 from .failures import runtime_failure
+from .model_json import parse_model_json_bytes
+from .route_json import parse_route_json_bytes
 from .methods_grounding import (
     MethodDiagnosisDraftV1, SkillLoadReceiptV1,
 )
@@ -120,12 +121,20 @@ def _document(text: str | None, secrets=()):
         token = secret.encode("utf-8") if isinstance(secret, str) else secret
         if token and token in raw:
             raise ValueError("CLI result contains a private capability")
-    return parse_agent_json_bytes(raw)
+    document = parse_model_json_bytes(raw)
+    for secret in secrets:
+        token = secret.encode("utf-8") if isinstance(secret, str) else secret
+        if token and token in document.canonical_bytes:
+            raise ValueError("CLI result contains a private capability")
+    return document
 
 
 def parse_route_response(text: str | None, job: Job) -> ValidatedAgentDraft:
     try:
-        value = _document(text).value
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("CLI final result is missing")
+        parsed = parse_route_json_bytes(text.encode("utf-8"))
+        value = parsed.document.value
         if not isinstance(value, dict) or set(value) != {"skill_id", "reason", "confidence"}:
             raise ValueError("ROUTE response must contain exactly three fields")
         skill_id = value["skill_id"]
@@ -148,17 +157,23 @@ def parse_route_response(text: str | None, job: Job) -> ValidatedAgentDraft:
             proposed_artifact_drafts=[], rule_claims=[], error=None,
         )
         return ValidatedAgentDraft(draft=draft, canonical_bytes=canonical_json_bytes(draft),
-            proposal_resources=(), authoritative_targets=None, target_logs=())
+            proposal_resources=(), authoritative_targets=None, target_logs=(),
+            route_recovery=parsed.recovery)
     except (TypeError, ValueError):
         raise runtime_failure(stage=ExecutionStage.OUTCOME_VALIDATE, code=ErrorCode.OUTCOME_INVALID,
             message="ROUTE 最终响应无效，必须返回目录中的 skill_id、reason 和 confidence。") from None
 
 
-def parse_specialist_response(text: str | None, *, secrets=()) -> ValidatedMethodDiagnosisDraft:
+def parse_specialist_response(
+    text: str | None, *, secrets=(), preserve_evidence_items: bool = False,
+) -> ValidatedMethodDiagnosisDraft:
     try:
         document = _document(text, secrets)
-        draft = MethodDiagnosisDraftV1.from_mapping(document.value)
-        return ValidatedMethodDiagnosisDraft(draft=draft, canonical_bytes=document.canonical_bytes)
+        if not isinstance(document.value, dict):
+            raise ValueError("Specialist response must be a JSON object")
+        draft = document.value if preserve_evidence_items else MethodDiagnosisDraftV1.from_mapping(document.value)
+        return ValidatedMethodDiagnosisDraft(draft=draft, canonical_bytes=document.canonical_bytes,
+            raw_bytes=text.encode("utf-8"))
     except (TypeError, ValueError):
         raise runtime_failure(stage=ExecutionStage.OUTCOME_VALIDATE, code=ErrorCode.OUTCOME_INVALID,
             message="Specialist 最终响应不是有效的诊断 JSON。") from None

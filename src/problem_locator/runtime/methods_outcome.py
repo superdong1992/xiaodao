@@ -9,7 +9,7 @@ protocol has been validated and grounded.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Protocol
 
 from problem_locator.contracts import (
@@ -38,6 +38,7 @@ from problem_locator.contracts import (
     LogparseEvidenceLocator,
     OutcomeResultType,
     ReviewAssessment,
+    ReviewPolicy,
     ReviewVerdict,
     RuleClaimResult,
     ServerRuleEvaluation,
@@ -53,6 +54,7 @@ from problem_locator.contracts.enums import MethodsValidationReasonCode
 from .authoritative_targets import AuthoritativeTargetSet
 from .methods_grounding import (
     MethodReviewV1,
+    MethodEvidenceV1,
     MethodsValidationError,
     VerifiedMethodDiagnosisV1,
     marker_occurs,
@@ -134,6 +136,21 @@ def _method_rule_id(method_id: str, identity_tokens: tuple[str, ...]) -> str:
     return f"methods:{method_id}:{digest}"
 
 
+def _evidence_rule_id(item: MethodEvidenceV1, *, advisory: bool) -> str:
+    if not advisory:
+        return _method_rule_id(item.method_id, item.identity_tokens)
+    # Tokens remain model metadata. Distinct judgments with the same tokens
+    # must not collide or acquire invented identity tokens.
+    digest = canonical_json_sha256(asdict(item))[:24]
+    return f"methods:advisory:{digest}"
+
+
+def method_evidence_rule_ids(diagnosis: VerifiedMethodDiagnosisV1) -> list[str]:
+    """Keep runtime review subjects and both outcome projections in agreement."""
+    return [_evidence_rule_id(item, advisory=diagnosis.audit.validation_mode == "advisory")
+            for item in diagnosis.draft.evidence]
+
+
 def _candidate_rule_id(method_id: str) -> str:
     return f"methods:candidate:{method_id}"
 
@@ -152,8 +169,18 @@ def _factor_id(method_id: str) -> str:
     return f"{value[:53]}_{suffix}"
 
 
-def _physical_line(content: bytes, line_number: int) -> tuple[bytes, str]:
-    lines = content.splitlines(keepends=True)
+def _advisory_factor_id(method_id: str) -> str:
+    # Unknown model method IDs are text metadata; distinct punctuation or
+    # Unicode must not collapse into a duplicate contract factor identifier.
+    suffix = hashlib.sha256(method_id.encode("utf-8")).hexdigest()[:16]
+    return f"{_factor_id(method_id)[:47]}_{suffix}"
+
+
+def _physical_line(
+    content: bytes, line_number: int, *, lines: list[bytes] | None = None,
+) -> tuple[bytes, str]:
+    if lines is None:
+        lines = content.splitlines(keepends=True)
     if line_number < 1 or line_number > len(lines):
         raise ValueError("grounded Methods citation escapes its target log")
     raw = lines[line_number - 1]
@@ -164,6 +191,36 @@ def _physical_line(content: bytes, line_number: int) -> tuple[bytes, str]:
     if not text.strip():
         raise ValueError("grounded Methods citation is empty")
     return raw, text
+
+
+class _RequestedPhysicalLines:
+    """Split each referenced log once and retain only requested line values."""
+
+    def __init__(self, evidence: tuple[MethodEvidenceV1, ...]) -> None:
+        self._requested: dict[str, set[int]] = {}
+        for item in evidence:
+            for source in item.sources:
+                self._requested.setdefault(source.source_id, set()).add(source.line_number)
+        self._selected: dict[str, dict[int, tuple[bytes, str] | str]] = {}
+
+    def get(self, source_id: str, content: bytes, line_number: int) -> tuple[bytes, str]:
+        selected = self._selected.get(source_id)
+        if selected is None:
+            selected = {}
+            physical = content.splitlines(keepends=True)
+            for requested in self._requested[source_id]:
+                try:
+                    selected[requested] = _physical_line(content, requested, lines=physical)
+                except ValueError as exc:
+                    # Store the message, not the exception/traceback: retaining
+                    # a traceback would also retain the full physical list.
+                    selected[requested] = str(exc)
+            del physical
+            self._selected[source_id] = selected
+        value = selected[line_number]
+        if isinstance(value, str):
+            raise ValueError(value)
+        return value
 
 
 def _target_binding(target: CapturedTargetLog) -> EvidenceBinding:
@@ -267,6 +324,10 @@ def _diagnosis_projection(
         or job.skill_ref.content_hash != verified.audit.combined_sha256
     ):
         raise ValueError("grounded Methods identity differs from the pinned Job Skill")
+    selected = verified.selection is not None
+    advisory = verified.audit.validation_mode == "advisory"
+    if selected and job.review_policy is not ReviewPolicy.NONE:
+        raise ValueError("evidence selection requires the frozen no-review policy")
 
     validated = preprocessing.validated
     target_logs = validated.target_logs
@@ -296,19 +357,36 @@ def _diagnosis_projection(
     evidence_bindings_by_method: dict[str, list[EvidenceBinding]] = {}
     decision_evidence: list[bytes] = []
     seen_records: set[tuple[str, str, int]] = set()
+    physical_lines = _RequestedPhysicalLines(verified.draft.evidence)
+    finding_bindings: list[list[EvidenceBinding]] = []
+    omitted_locations = False
     for evidence in verified.draft.evidence:
-        rule_id = _method_rule_id(evidence.method_id, evidence.identity_tokens)
+        rule_id = _evidence_rule_id(evidence, advisory=advisory)
         evidence_rule_ids.setdefault(evidence.method_id, []).append(rule_id)
         citations: list[AgentEvidenceCitation] = []
         evaluation_bindings: list[EvidenceBinding] = []
         line_ranges: list[VerifiedLogLineRange] = []
+        seen_locations: set[tuple[str, int]] = set()
         for source in evidence.sources:
             captured = by_source.get(source.source_id)
             if captured is None or captured.target.log_path is None:
+                if advisory:
+                    omitted_locations = True
+                    continue
                 raise ValueError("grounded Methods source is not an authoritative target")
+            location = (source.source_id, source.line_number)
+            if location in seen_locations:
+                continue
+            seen_locations.add(location)
             binding = bindings_by_source[source.source_id]
-            raw_line, text = _physical_line(captured.content, source.line_number)
-            if text != source.line or not marker_occurs(source.marker, text):
+            try:
+                raw_line, text = physical_lines.get(source.source_id, captured.content, source.line_number)
+            except ValueError:
+                if not advisory:
+                    raise
+                omitted_locations = True
+                continue
+            if not advisory and (text != source.line or not marker_occurs(source.marker, text)):
                 raise MethodsValidationError(
                     MethodsValidationReasonCode.EVIDENCE_SOURCE_CHANGED,
                     "grounded Methods source changed before Outcome mapping",
@@ -347,6 +425,12 @@ def _diagnosis_projection(
                     )
                 )
         evaluation_bindings = _unique_bindings(evaluation_bindings)
+        if advisory and not evaluation_bindings:
+            # These bindings identify the actual logs supplied to the model;
+            # no line range is claimed when a model location is unavailable.
+            evaluation_bindings = list(all_bindings)
+            omitted_locations = True
+        finding_bindings.append(evaluation_bindings)
         method_bindings = evidence_bindings_by_method.setdefault(
             evidence.method_id, []
         )
@@ -357,6 +441,8 @@ def _diagnosis_projection(
             fact_refs=[],
             citations=citations,
             explanation=(
+                "模型判断；未复核引文、行号、身份或方法标记是否支持该判断。"
+                if advisory else
                 f"Grounded Methods evidence for {evidence.method_id}; "
                 f"identity_tokens={list(evidence.identity_tokens)!r}."
             ),
@@ -368,8 +454,8 @@ def _diagnosis_projection(
                 agent_claim=claim,
                 server_evaluation=ServerRuleEvaluation(
                     rule_id=rule_id,
-                    rule_kind=_EVIDENCE_RULE_KIND,
-                    status=ServerRuleStatus.VERIFIED_PASS,
+                    rule_kind=_SEMANTIC_RULE_KIND if advisory else _EVIDENCE_RULE_KIND,
+                    status=ServerRuleStatus.SEMANTIC_ONLY if advisory else ServerRuleStatus.VERIFIED_PASS,
                     fact_refs=[],
                     evidence_bindings=evaluation_bindings,
                     anchor_id=None,
@@ -416,6 +502,18 @@ def _diagnosis_projection(
             )
         )
 
+    if selected and verified.selection["gap_messages"]:
+        rule_id = "methods:evidence-selection"
+        claim = AgentRuleClaim(rule_id=rule_id, claimed_result=RuleClaimResult.UNKNOWN,
+            fact_refs=[], citations=[], explanation="部分发现未通过核验，具体缺口已单独记录。")
+        rule_claims.append(claim)
+        audit_rules.append(DecisionRuleAudit(rule_id=rule_id, agent_claim=claim,
+            server_evaluation=ServerRuleEvaluation(rule_id=rule_id,
+                rule_kind=_SUFFICIENCY_RULE_KIND, status=ServerRuleStatus.UNVERIFIABLE,
+                fact_refs=[], evidence_bindings=[], anchor_id=None, derived_anchor_time=None,
+                observed_times=[], event_observations=[], derived_values=[], line_ranges=[],
+                issues=list(verified.selection["gap_messages"]))))
+
     has_confirmed = bool(verified.draft.confirmed_methods)
     if not audit_rules:
         rule_id = "methods:evidence-sufficiency"
@@ -449,7 +547,8 @@ def _diagnosis_projection(
         )
 
     complete = (
-        verified.draft.status == "CONFIRMED"
+        not advisory
+        and verified.draft.status == "CONFIRMED"
         and has_confirmed
         and not verified.draft.candidate_methods
     )
@@ -470,9 +569,11 @@ def _diagnosis_projection(
         }
         causal_factors = [
             CausalFactorDraft(
-                factor_id=_factor_id(method_id),
+                factor_id=_advisory_factor_id(method_id) if advisory else _factor_id(method_id),
                 role=CausalFactorRole.CAUSE,
                 statement=(
+                    f"模型判断（未做证据复核）{method_id}：{summaries_by_method[method_id]}"
+                    if advisory else
                     f"已确认定位方法 {method_id}：{summaries_by_method[method_id]}"
                 ),
                 evidence_bindings=evidence_bindings_by_method[method_id],
@@ -482,7 +583,7 @@ def _diagnosis_projection(
         ]
         candidate_factors = [
             CausalFactorDraft(
-                factor_id=_factor_id(method_id),
+                factor_id=_advisory_factor_id(method_id) if advisory else _factor_id(method_id),
                 role=CausalFactorRole.CONTRIBUTOR,
                 statement=f"待确认定位方法：{method_id}。",
                 evidence_bindings=list(all_bindings),
@@ -498,17 +599,14 @@ def _diagnosis_projection(
                 status=(
                     CompletionCriterionStatus.SATISFIED
                     if complete
-                    else (
-                        CompletionCriterionStatus.PARTIALLY_SATISFIED
-                        if index == 0
-                        else CompletionCriterionStatus.UNKNOWN
-                    )
+                    else CompletionCriterionStatus.UNKNOWN
                 ),
-                evidence_bindings=(list(all_bindings) if complete or index == 0 else []),
+                evidence_bindings=(list(all_bindings) if complete else []),
                 explanation=(
                     "Every confirmed method is grounded in immutable target-log lines."
                     if complete
-                    else "Grounded method evidence exists, but the Methods result remains partial."
+                    else ("已保留模型判断，尚未复核证据，也未确认该完成条件已满足。" if advisory
+                          else "已保留通过核验的发现，但现有证据尚不能证明该完成条件已满足。")
                 ),
             )
             for index, criterion in enumerate(criteria)
@@ -530,10 +628,10 @@ def _diagnosis_projection(
     findings = [
         Finding(
             statement=item.summary,
-            evidence_bindings=evidence_bindings_by_method[item.method_id],
-            confidence=1.0,
+            evidence_bindings=bindings,
+            confidence=0.5 if advisory else 1.0,
         )
-        for item in verified.draft.evidence
+        for item, bindings in zip(verified.draft.evidence, finding_bindings, strict=True)
     ]
     result_type = (
         OutcomeResultType.COMPLETED if candidate is not None else OutcomeResultType.INCONCLUSIVE
@@ -545,11 +643,18 @@ def _diagnosis_projection(
         requested_attachments=[],
         candidate_conclusion_draft=candidate,
         recommended_next_step=(
+            "请结合实际日志核对报告中的模型判断；实施变更前检查安全说明，处理后按完成条件复验。"
+            if advisory and candidate is not None else
             "请根据已确认的定位方法处理对应异常；实施变更前先核对安全说明，修复后按完成条件复验。"
             if candidate is not None
             else "请补充覆盖证据缺口的目标日志，再创建新的定位任务。"
         ),
-        limitations=list(verified.draft.limitations),
+        limitations=list(dict.fromkeys([*verified.draft.limitations,
+            *(["无法定位的模型引用已省略；无行号的日志关联只表示该日志属于本次模型输入，不表示结论已获证实。"]
+              if omitted_locations else []),
+            *(["模型未提供可校准的置信度；报告中的 0.5 仅为占位值，不表示经过统计验证的概率。"]
+              if advisory and candidate is not None else []),
+        ])),
         safety_notes=list(verified.draft.safety_notes),
     )
     draft = AgentJobOutcomeDraftV2(
@@ -609,6 +714,10 @@ def _diagnosis_projection(
             audit=audit,
             positive_gate_passed=candidate is not None,
             decision_evidence_bytes=evidence_bytes,
+            partial_evidence_selected=selected and resolution is DiagnosisResolutionStatus.PARTIAL,
+            finding_rule_ids=tuple((_evidence_rule_id(item, advisory=advisory),)
+                                   for item in verified.draft.evidence) if selected or advisory else (),
+            evidence_validation_mode=verified.audit.validation_mode,
         ),
         proposal_resources=proposal_resources,
         authoritative_targets=validated.authoritative_targets,
@@ -644,10 +753,8 @@ def _review_projection(
         != manifest.review_subject.required_rule_ids
     ):
         raise ValueError("Methods review is not bound to its diagnosis audit")
-    evidence_rules = [
-        _method_rule_id(item.method_id, item.identity_tokens)
-        for item in diagnosis.draft.evidence
-    ]
+    advisory = diagnosis.audit.validation_mode == "advisory"
+    evidence_rules = method_evidence_rule_ids(diagnosis)
     candidate_rules = [
         _candidate_rule_id(method_id)
         for method_id in diagnosis.draft.candidate_methods
@@ -667,14 +774,24 @@ def _review_projection(
     rule_claims: list[AgentRuleClaim] = []
     audit_rules: list[DecisionRuleAudit] = []
     for evidence, rule_id in zip(diagnosis.draft.evidence, evidence_rules, strict=True):
-        finding = finding_by_identity[
-            (evidence.method_id, tuple(sorted(evidence.identity_tokens)))
-        ]
+        identity = (evidence.method_id, tuple(sorted(evidence.identity_tokens)))
+        finding = finding_by_identity.get(identity)
+        if finding is None and not advisory:
+            raise ValueError("review finding is absent from the grounded diagnosis")
+        finding_verdict = review.verdict if advisory else finding.verdict
+        finding_reason = finding.reason if finding is not None else (
+            "该发现未提供单独匹配的审核条目，采用 Reviewer 对整份结果的判断；未做证据一致性复核。"
+        )
+        if advisory and finding is not None:
+            finding_reason = (
+                f"整份结果审核为 {review.verdict}；条目意见为 {finding.verdict}：{finding.reason}"
+                " 未做证据一致性复核。"
+            )
         claimed = {
             "PASS": RuleClaimResult.PASS,
             "NEED_MORE_EVIDENCE": RuleClaimResult.UNKNOWN,
             "REJECT": RuleClaimResult.FAIL,
-        }[finding.verdict]
+        }[finding_verdict]
         bindings = [
             EvidenceBinding(existing_evidence_id=ref, evidence_proposal_key=None)
             for ref in facts_by_rule.get(rule_id, [])
@@ -684,7 +801,7 @@ def _review_projection(
             claimed_result=claimed,
             fact_refs=[],
             citations=[],
-            explanation=finding.reason,
+            explanation=finding_reason,
         )
         rule_claims.append(claim)
         audit_rules.append(
@@ -750,6 +867,8 @@ def _review_projection(
 
     verdict = ReviewVerdict(review.verdict)
     reasons = [item.reason for item in review.findings if item.verdict != "PASS"]
+    if advisory and verdict is not ReviewVerdict.PASS and not reasons:
+        reasons = ["Reviewer 对整份结果的判断为 " + review.verdict + "。"]
     assessment = ReviewAssessment(
         candidate_conclusion_id=job.review_target.candidate_conclusion_id,
         candidate_revision=job.review_target.candidate_revision,
@@ -765,6 +884,10 @@ def _review_projection(
         stale_references=[],
         requested_requirement_ids=[],
         recommendation=(
+            "接受 Reviewer 对整份模型结果的审核判断；该结果仍未做证据一致性复核。"
+            if advisory and verdict is ReviewVerdict.PASS else
+            "请按 Reviewer 的整份结果审核意见补充或核对资料；该结果仍未做证据一致性复核。"
+            if advisory else
             "Accept the independently reviewed Methods Candidate."
             if verdict is ReviewVerdict.PASS
             else "Do not accept the Candidate without resolving the review findings."
@@ -812,6 +935,7 @@ def _review_projection(
             audit=audit,
             positive_gate_passed=True,
             decision_evidence_bytes=b"",
+            evidence_validation_mode=diagnosis.audit.validation_mode,
         ),
         proposal_resources=(),
         authoritative_targets=None,
@@ -861,4 +985,5 @@ __all__ = [
     "MappedMethodsDraft",
     "MethodsPreprocessingExecutionLike",
     "map_verified_methods_draft",
+    "method_evidence_rule_ids",
 ]

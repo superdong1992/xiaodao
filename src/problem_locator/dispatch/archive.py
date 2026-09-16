@@ -8,16 +8,18 @@ import uuid
 from pathlib import PurePosixPath
 
 from problem_locator.application.mutations import build_state_mutation
-from problem_locator.contracts import Artifact, ArtifactKind, ResourceKind, ResourceType, UserResultArchiveMetadataV3
+from problem_locator.contracts import ApplicationPortError, Artifact, ArtifactKind, ErrorCode, ResourceKind, ResourceType, UserResultArchiveMetadataV3
 from problem_locator.contracts.models import ArchivePlan
 from problem_locator.diagnostics import log_event
 from problem_locator.integrations.result_archive import write_result_archive_file
 from problem_locator.journey import record_journey_event
+from problem_locator.operational import OperationalState
 from problem_locator.storage.paths import ensure_no_symlink_ancestors
 
 
 class ArchiveService:
-    def __init__(self, repository, resource_store, publication_guard, notifier, clock, *, workers=1):
+    def __init__(self, repository, resource_store, publication_guard, notifier, clock, *, workers=1,
+                 operational_state: OperationalState | None = None):
         if not isinstance(workers, int) or isinstance(workers, bool) or workers < 1:
             raise ValueError("archive workers must be positive")
         self._repository = repository
@@ -25,6 +27,7 @@ class ArchiveService:
         self._guard = publication_guard
         self._notifier = notifier
         self._clock = clock
+        self.operational_state = operational_state or OperationalState(clock.now)
         self._workers = workers
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
@@ -110,7 +113,15 @@ class ArchiveService:
             self._repository.requeue_archive_task(case_id)
         except Exception as error:
             if not published:
-                self._set_status(case_id, "FAILED")
+                try:
+                    self._set_status(case_id, "FAILED")
+                except Exception as status_error:
+                    self.operational_state.record(case_id=case_id, job_id=payload["source_job_id"],
+                        phase="ARCHIVE_STATUS_COMMIT",
+                        error_code=error.error.code if isinstance(error, ApplicationPortError) else ErrorCode.RESOURCE_PUBLISH_FAILED,
+                        secondary_error_code=status_error.error.code if isinstance(status_error, ApplicationPortError) else ErrorCode.STATE_WRITE_FAILED)
+                    log_event("case.archive.status_unknown", level=logging.ERROR, case_id=case_id,
+                        job_id=payload["source_job_id"], error=status_error)
             log_event("case.archive.failed", level=logging.ERROR, case_id=case_id, error=error)
             record_journey_event("case.archive.failed", case_id=case_id, duration_ms=(time.perf_counter() - started) * 1000)
         finally:

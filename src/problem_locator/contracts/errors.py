@@ -246,6 +246,7 @@ PORT_ERROR_CODES: Mapping[str, frozenset[ErrorCode]] = MappingProxyType(
     {
         "ApplicationCommandPort.execute": frozenset(
             {
+                ErrorCode.DISPATCH_REJECTED,
                 ErrorCode.VALIDATION_ERROR,
                 ErrorCode.CASE_NOT_FOUND,
                 ErrorCode.ATTACHMENT_NOT_FOUND,
@@ -275,6 +276,7 @@ PORT_ERROR_CODES: Mapping[str, frozenset[ErrorCode]] = MappingProxyType(
                 ErrorCode.CASE_NOT_FOUND,
                 ErrorCode.JOB_NOT_FOUND,
                 ErrorCode.JOB_CASE_MISMATCH,
+                ErrorCode.DISPATCH_REJECTED,
                 ErrorCode.STATE_CORRUPT,
                 ErrorCode.STATE_SCHEMA_UNSUPPORTED,
             }

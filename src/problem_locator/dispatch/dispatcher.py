@@ -6,25 +6,30 @@ import threading
 import time
 from collections.abc import Callable
 
-from problem_locator.contracts import CancelReceipt, CancellationReason, DispatchReceipt, JobType
+from problem_locator.contracts import CancelReceipt, CancellationReason, DispatchReceipt, ErrorCode, JobStatus, JobType
 from problem_locator.diagnostics import log_event
 from problem_locator.journey import record_journey_event
+from problem_locator.operational import OperationalState
 from .cancellation import CancellationController
 from .worker import JobWorker
 
 FatalWorkerHandler = Callable[[str, Exception], None]
+JobIdentity = tuple[str, JobType] | tuple[str, JobType, JobStatus]
 
 
 class InProcessDispatcher:
     def __init__(self, worker: JobWorker, *,
-                 job_identity: Callable[[str], tuple[str, JobType]] | None = None,
+                 job_identity: Callable[[str], JobIdentity] | None = None,
                  route_workers: int = 1, diagnose_workers: int = 2,
                  on_fatal_worker_error: FatalWorkerHandler | None = None,
+                 operational_state: OperationalState | None = None,
                  thread_name: str = "problem-locator-job-worker") -> None:
         if any(isinstance(n, bool) or not isinstance(n, int) or n < 1 for n in (route_workers, diagnose_workers)):
             raise ValueError("worker counts must be positive integers")
         self._worker = worker
+        self._operational = operational_state or OperationalState()
         self._job_identity = job_identity or (lambda key: (key, JobType.DIAGNOSE))
+        self._has_persisted_identity = job_identity is not None
         self._counts = {"ROUTE": route_workers, "DIAGNOSE": diagnose_workers}
         self._on_fatal_worker_error = on_fatal_worker_error
         self._thread_name = thread_name
@@ -58,6 +63,16 @@ class InProcessDispatcher:
         with self._condition:
             return tuple(self._queued)
 
+    @property
+    def queued_job_identities(self) -> tuple[tuple[str, str], ...]:
+        with self._condition:
+            return tuple((job_id, item[0]) for job_id, item in self._queued.items())
+
+    def running_case_id(self, job_id: str) -> str | None:
+        with self._condition:
+            item = self._running.get(job_id)
+            return None if item is None else item[0]
+
     def start(self) -> None:
         with self._condition:
             if self._threads:
@@ -70,12 +85,31 @@ class InProcessDispatcher:
                     thread.start()
 
     def submit(self, job_id: str) -> DispatchReceipt:
-        case_id, job_type = self._job_identity(job_id)
+        with self._condition:
+            if job_id in self._queued or job_id in self._running:
+                return DispatchReceipt(job_id=job_id, accepted=False, duplicate=True)
+            if not self._operational.accepting and not self._has_persisted_identity:
+                return DispatchReceipt(job_id=job_id, accepted=False, duplicate=False)
+        try:
+            identity = self._job_identity(job_id)
+        except Exception:
+            if not self._operational.accepting:
+                # Do not invent a Case identity when storage cannot confirm it.
+                return DispatchReceipt(job_id=job_id, accepted=False, duplicate=False)
+            raise
+        case_id, job_type = identity[:2]
+        status = identity[2] if len(identity) == 3 else None
         lane = "ROUTE" if job_type is JobType.ROUTE else "DIAGNOSE"
         with self._condition:
             if job_id in self._queued or job_id in self._running:
                 return DispatchReceipt(job_id=job_id, accepted=False, duplicate=True)
-            if not self._accepting:
+            if not self._accepting or not self._operational.accepting:
+                if self._has_persisted_identity and status in {None, JobStatus.PENDING}:
+                    # An in-flight command/Outcome may commit a new Job after
+                    # fatal pause took its queue snapshot. Preserve its receipt
+                    # and durable state while making this missed queue signal visible.
+                    self._operational.record(case_id=case_id, job_id=job_id,
+                        phase="DISPATCH_PAUSED", error_code=ErrorCode.DISPATCH_REJECTED)
                 return DispatchReceipt(job_id=job_id, accepted=False, duplicate=False)
             self._queues[lane].append(job_id)
             self._queued[job_id] = (case_id, lane, time.perf_counter())
@@ -116,6 +150,7 @@ class InProcessDispatcher:
             raise ValueError("timeout_seconds must be non-negative")
         deadline = time.monotonic() + timeout_seconds
         self._worker.request_shutdown()
+        self._operational.stop_accepting()
         with self._condition:
             self._accepting = self._claiming_enabled = False
             self._stop_requested = True
@@ -155,6 +190,7 @@ class InProcessDispatcher:
             try:
                 self._worker.execute_one(job_id, cancellation)
             except Exception as error:
+                self._operational.stop_accepting()
                 self.pause_claiming()
                 with self._condition:
                     self._finishing.add(job_id)

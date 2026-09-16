@@ -49,7 +49,7 @@ _GENERIC_V2_STATUS_HEADERS = {
 }
 MAX_GENERIC_RESULT_V2_BYTES = MAX_GENERIC_REPORT_BYTES + max(
     len(header) for header in _GENERIC_V2_STATUS_HEADERS
-)
+) + 4  # One leading UTF-8 BOM and one extra CR in the protocol header.
 _UTF8_BOM = b"\xef\xbb\xbf"
 GENERIC_RESULT_PATTERN = re.compile(
     r"\A<<<GENERIC_DIAGNOSIS_RESULT_V1>>>\r?\n"
@@ -187,13 +187,16 @@ def _parse_v1_result(raw: bytes, *, skill_name: str) -> GenericDiagnosisOutcome:
 
 def _parse_v2_result(raw: bytes, *, skill_name: str) -> GenericDiagnosisOutcomeV2:
     if raw.startswith(_UTF8_BOM):
-        raise _invalid_result() from None
+        raw = raw[len(_UTF8_BOM):]
     status: GenericResultStatus | None = None
     body = b""
     for header, candidate_status in _GENERIC_V2_STATUS_HEADERS.items():
-        if raw.startswith(header):
+        lf_header = header
+        crlf_header = header[:-1] + b"\r\n"
+        matched_header = next((prefix for prefix in (lf_header, crlf_header) if raw.startswith(prefix)), None)
+        if matched_header is not None:
             status = candidate_status
-            body = raw[len(header) :]
+            body = raw[len(matched_header) :]
             break
     if (
         status is None

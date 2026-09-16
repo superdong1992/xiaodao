@@ -359,7 +359,8 @@ def test_specialized_diagnosis_normalizes_pretty_methods_draft(
     assert isinstance(result, ValidatedMethodDiagnosisDraft)
     assert pretty != canonical
     assert result.canonical_bytes == canonical
-    assert draft_path.read_bytes() == canonical
+    assert draft_path.read_bytes() == pretty
+    assert result.raw_bytes == pretty
     assert result.draft.status == "INSUFFICIENT"
 
 
@@ -393,7 +394,8 @@ def test_review_normalizes_pretty_methods_draft_without_sealer(tmp_path: Path) -
     assert isinstance(result, ValidatedMethodReviewDraft)
     assert pretty != canonical
     assert result.canonical_bytes == canonical
-    assert draft_path.read_bytes() == canonical
+    assert draft_path.read_bytes() == pretty
+    assert result.raw_bytes == pretty
     assert result.draft.findings[0].identity_tokens == ("request_id=42",)
     assert not (tmp_path / "runtime/tool-state/outcome-draft.finalized.json").exists()
 

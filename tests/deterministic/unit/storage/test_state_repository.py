@@ -80,7 +80,7 @@ def test_empty_directory_initializes_generation_one_canonical_state(repository):
     snapshot = repository.read_snapshot()
     assert isinstance(repository, StateRepository)
     assert snapshot.schema_version == SCHEMA_VERSION == 11
-    assert snapshot.contract_revision == CONTRACT_REVISION == "v11-contract-r1"
+    assert snapshot.contract_revision == CONTRACT_REVISION == "v11-contract-r2"
     assert snapshot.generation == 1 and snapshot.cases == {}
     assert repository.export_snapshot() == canonical_json_bytes(snapshot)
     assert repository.layout.data_format_marker.read_bytes() == DATA_FORMAT_MARKER_BYTES

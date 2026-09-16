@@ -71,6 +71,7 @@ from problem_locator.contracts import (
     validate_coordinator_plan_result,
 )
 from problem_locator.journey import record_journey_event
+from problem_locator.operational import OperationalState
 
 from .formalization import apply_diagnosis_state_delta, build_job
 from .errors import raise_port_error as _raise_shared_port_error
@@ -228,6 +229,7 @@ class ExternalCommandHandler:
         stable_target_detector: Callable[[Case, Mapping[str, str]], bool]
         | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        operational_state: OperationalState | None = None,
     ) -> None:
         self._repository = repository
         self._coordinator = coordinator
@@ -244,8 +246,11 @@ class ExternalCommandHandler:
             stable_target_detector or _default_stable_target_detector
         )
         self._monotonic = monotonic
+        self._operational = operational_state
 
     def execute(self, command: ExternalNonUploadCommand) -> ApplicationResponse:
+        if self._operational is not None and isinstance(command, (CreateCase, SubmitSupplement, ResumeCase)):
+            self._operational.require_accepting()
         try:
             if isinstance(command, CreateCase):
                 return self._create_case(command)

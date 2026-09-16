@@ -73,7 +73,8 @@ class CaseStateRepository:
             self._layout.initialize_v2_data_root(self._file_sync)
         except UnsupportedDataFormatError as exc:
             raise _port_error(ErrorCode.STATE_SCHEMA_UNSUPPORTED,
-                '数据目录格式不受支持，请为新版本配置空 DATA_ROOT。') from exc
+                '数据目录格式不受支持。请保留原目录；v11-contract-r1 数据需先用 '
+                'problem-locator-data-upgrade 显式复制升级。') from exc
         try:
             self._db = sqlite3.connect(self._layout.data_root / 'completed.sqlite3',
                                       check_same_thread=False, isolation_level=None, timeout=30)

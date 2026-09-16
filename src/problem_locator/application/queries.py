@@ -26,6 +26,7 @@ from problem_locator.contracts.ports import (
     StateChangeNotifier,
     StateRepository,
 )
+from problem_locator.operational import OperationalState
 
 from .errors import raise_port_error
 from .projection import (
@@ -59,11 +60,33 @@ class ApplicationQueryService:
         notifier: StateChangeNotifier,
         *,
         monotonic: Callable[[], float] = time.monotonic,
+        operational_state: OperationalState | None = None,
     ) -> None:
         self._repository = repository
         self._resource_store = resource_store
         self._notifier = notifier
         self._monotonic = monotonic
+        self._operational = operational_state
+
+    def _checked_snapshot(self, case_id: str) -> StateFile:
+        try:
+            snapshot = self._repository.read_snapshot(case_id)
+        except ApplicationPortError:
+            error = None if self._operational is None else self._operational.error_for_case(case_id, None,
+                include_archive_faults=False)
+            if error is not None:
+                raise ApplicationPortError(error) from None
+            raise
+        aggregate = snapshot.cases.get(case_id)
+        if aggregate is not None and self._operational is not None:
+            for job in aggregate.jobs.values():
+                if job.status in {JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.INTERRUPTED}:
+                    self._operational.confirm_finished_job(job.job_id)
+            error = self._operational.error_for_case(case_id, aggregate.case.status.value,
+                aggregate.case.archive_status, include_archive_faults=False)
+            if error is not None:
+                raise ApplicationPortError(error)
+        return snapshot
 
     def get_case(
         self,
@@ -89,7 +112,7 @@ class ApplicationQueryService:
         wait_for_job_id = query.wait_for_job_id
         wait_seconds = query.wait_seconds
 
-        snapshot = self._repository.read_snapshot(case_id)
+        snapshot = self._checked_snapshot(case_id)
         aggregate = snapshot.cases.get(case_id)
         if aggregate is None:
             raise_port_error(ErrorCode.CASE_NOT_FOUND, "The Case does not exist.")
@@ -128,7 +151,7 @@ class ApplicationQueryService:
                     # fails, refresh authoritative state before deciding whether
                     # the finite wait completed or timed out.
                     changed = False
-                snapshot = self._repository.read_snapshot(case_id)
+                snapshot = self._checked_snapshot(case_id)
                 if not changed and not _wait_is_complete(
                     snapshot, case_id, target_job_id
                 ):

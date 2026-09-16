@@ -172,7 +172,7 @@ def test_runtime_submission_reviewer_and_public_projection_are_one_v2_journey(
         return None
 
     broker_factory.preprocessing_executor = execute_preprocessing
-    specialist_runtime = DiagnosisRuntime(
+    specialist_runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=repository,
         resource_store=resources,
         asset_catalog=catalog,
@@ -234,7 +234,7 @@ def test_runtime_submission_reviewer_and_public_projection_are_one_v2_journey(
         ("VALID_CONFIRMED",),
         review_events,
     )
-    reviewer_runtime = DiagnosisRuntime(
+    reviewer_runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=repository,
         resource_store=resources,
         asset_catalog=catalog,

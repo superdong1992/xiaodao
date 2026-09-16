@@ -750,7 +750,7 @@ def test_real_runtime_state_fault_fails_scheduler_and_next_start_drops_active_wo
         catalog,  # type: ignore[arg-type]
     )
     backend = _NeverBackend()
-    runtime = DiagnosisRuntime(
+    runtime = DiagnosisRuntime(methods_evidence_validation="strict",
         state_repository=first_repository,
         resource_store=first_resources,
         asset_catalog=catalog,

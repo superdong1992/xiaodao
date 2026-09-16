@@ -92,6 +92,7 @@ def test_r3_exact_port_error_closure_is_not_overwide() -> None:
 
     expected = {
         "ApplicationCommandPort.execute": {
+            ErrorCode.DISPATCH_REJECTED,
             ErrorCode.VALIDATION_ERROR,
             ErrorCode.CASE_NOT_FOUND,
             ErrorCode.ATTACHMENT_NOT_FOUND,
@@ -114,6 +115,7 @@ def test_r3_exact_port_error_closure_is_not_overwide() -> None:
             *state_failures,
         },
         "ApplicationQueryPort.get_case": {
+            ErrorCode.DISPATCH_REJECTED,
             ErrorCode.VALIDATION_ERROR,
             ErrorCode.CASE_NOT_FOUND,
             ErrorCode.JOB_NOT_FOUND,

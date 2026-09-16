@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdtemp, readFile, rm, rmdir } from "node:fs/promises";
+import { mkdtemp, rm, rmdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Readable, Transform } from "node:stream";
@@ -30,9 +30,15 @@ export const denyAccess: Access = {
 
 export class HttpError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  code: string;
+  details: Json[];
+  retryable: boolean;
+  constructor(status: number, message: string, code = "WEBSITE_AGENT_ERROR", details: Json[] = [], retryable = false) {
     super(message);
     this.status = status;
+    this.code = code;
+    this.details = details;
+    this.retryable = retryable;
   }
 }
 
@@ -45,12 +51,74 @@ const MAX_REPORT_BYTES = 16 * 1024 * 1024;
 const KINDS = new Set(["USER_RESULT", "USER_RESULT_ARCHIVE", "AUDIT_BUNDLE", "GENERIC_REPORT"]);
 const ZIP_NOTICE = "该文件包含原始目标日志，可能含有业务信息。请确认后下载。";
 const AUDIT_NOTICE = "该文件是本次定位的审计包，请按内部数据管理要求保存。";
+const PUBLIC_CODES = new Set([
+  "VALIDATION_ERROR", "CASE_NOT_FOUND", "JOB_NOT_FOUND", "JOB_CASE_MISMATCH", "ATTACHMENT_NOT_FOUND",
+  "ARTIFACT_NOT_FOUND", "RESOURCE_NOT_FOUND", "INVALID_CASE_STATE", "ACTIVE_JOB_EXISTS", "NEW_CASE_REQUIRED",
+  "REVISION_CONFLICT", "IDEMPOTENCY_CONFLICT", "RESOURCE_CASE_MISMATCH", "ATTACHMENT_NOT_READY", "UPLOAD_INCOMPLETE",
+  "RESOURCE_HASH_MISMATCH", "RESOURCE_SIZE_MISMATCH", "RESOURCE_LIMIT_EXCEEDED", "PATH_VIOLATION", "CONTEXT_LIMIT",
+  "ASSET_VERSION_UNAVAILABLE", "OUTCOME_MISSING", "OUTCOME_INVALID", "BACKEND_START_FAILED", "BACKEND_CANCELLED",
+  "BACKEND_TIMEOUT", "BACKEND_OUTPUT_LIMIT", "BACKEND_EXIT_FAILED", "WORKSPACE_LIMIT", "WORKSPACE_PREPARE_FAILED",
+  "RESOURCE_STAGE_FAILED", "EXECUTION_RECORD_FAILED", "LOGPARSE_FAILED", "LOGPARSE_OUTPUT_INVALID", "DISPATCH_REJECTED",
+  "CLAIM_REJECTED", "INSTANCE_LOCKED", "STATE_CORRUPT", "STATE_SCHEMA_UNSUPPORTED", "STATE_WRITE_FAILED",
+  "RESOURCE_PUBLISH_FAILED", "CONFIG_INVALID", "NO_CAPABILITY", "AGENT_EXECUTION_FAILED", "AGENT_INTERRUPTED",
+  "AGENT_DISPATCH_INTERRUPTED", "AGENT_INTAKE_UNCERTAIN", "AGENT_NO_MATCHING_INPUT", "AGENT_UNAVAILABLE",
+  "INTAKE_OUTPUT_INVALID", "INTAKE_INPUT_INVALID", "INTAKE_CONTEXT_LIMIT", "INTAKE_EXECUTION_FAILED",
+  "INTAKE_ASSET_UNAVAILABLE", "AGENT_CONVERSATION_NOT_FOUND", "AGENT_CONVERSATION_CLOSED", "AGENT_IDEMPOTENCY_CONFLICT",
+  "AGENT_ATTACHMENT_NOT_READY", "AGENT_MESSAGE_LIMIT", "AGENT_INVALID_CURSOR", "AGENT_ATTACHMENT_LIMIT",
+  "AGENT_ATTACHMENT_NOT_FOUND", "AGENT_ATTACHMENT_STATE_CONFLICT", "UPLOAD_IN_PROGRESS", "CONVERSATION_CLOSED",
+  "ATTACHMENT_CONVERSATION_MISMATCH", "RESOURCE_INVALID",
+]);
+const PUBLIC_PHASES = new Set(["AGENT", "CREATE_CASE", "INTAKE", "CASE_QUERY", "PREPARE_ATTACHMENT", "IMPORT_ATTACHMENT",
+  "SUBMIT_SUPPLEMENT", "RESTART", "ASSET_RESOLUTION", "CONTEXT_BUILD", "WORKSPACE_PREPARE", "BACKEND_START",
+  "BACKEND_EXECUTE", "TOOL_EXECUTE", "OUTCOME_VALIDATE", "RESOURCE_STAGE", "EXECUTION_RECORD", "ADMISSION",
+  "CLAIM_COMMIT", "OUTCOME_COMMIT", "FAILURE_COMMIT", "ARCHIVE_STATUS_COMMIT", "DISPATCH", "WORKER_EXECUTION",
+  "CLAIM_DELIVERY", "RESULT_DELIVERY", "FAILURE_RECORD", "DISPATCH_PAUSED"]);
+const DIAGNOSTIC_ID = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|diag-[A-Za-z0-9_-]{1,128})$/;
+const FAILURE_LOCATION = /^(?:inputs|input_names|input_values|initial_user_fact_names|initial_user_fact_values|problem_spec|attachment_ids|attachments|declared_size|declared_sha256|content_type|expected_case_revision|idempotency_key|methods_result|verification_result|findings|evidence|evidence_refs|matched_rules|rules)(?:(?:\.[a-z][a-z0-9_]{0,63})|(?:\[[0-9]{1,5}\])){0,8}$/;
 
 type Json = Record<string, any>;
 type Artifact = {
   artifact_id: string; kind: string; name: string; content_type: string;
   size: number; sha256: string; download_url: string;
 };
+
+function safeError(value: Json, terminal = false) {
+  const code = typeof value?.code === "string" && PUBLIC_CODES.has(value.code) ? value.code : "WEBSITE_AGENT_ERROR";
+  const details: Json[] = [];
+  for (const item of Array.isArray(value?.details) ? value.details.slice(0, 32) : []) {
+    if (item?.field === "phase" && PUBLIC_PHASES.has(item.actual)) details.push({ field: "phase", actual: item.actual });
+    else if (item?.field === "diagnostic_id" && typeof item.actual === "string" && DIAGNOSTIC_ID.test(item.actual))
+      details.push({ field: "diagnostic_id", actual: item.actual });
+    else if (item?.field === "reason_code" && typeof item.actual === "string" && /^[A-Z][A-Z0-9_]{0,127}$/.test(item.actual))
+      details.push({ field: "reason_code", actual: item.actual });
+    else if (item?.field === "location" && typeof item.actual === "string" && item.actual.length <= 160 && FAILURE_LOCATION.test(item.actual))
+      details.push({ field: "location", actual: item.actual });
+    else if (item?.field === "persistence" && item.actual === "UNKNOWN") details.push({ field: "persistence", actual: "UNKNOWN" });
+    else if (["case_id", "job_id", "runtime_epoch"].includes(item?.field) && typeof item.actual === "string" && UUID.test(item.actual))
+      details.push({ field: item.field, actual: item.actual });
+    else if (["cause_code", "secondary_error_code"].includes(item?.field) && PUBLIC_CODES.has(item.actual))
+      details.push({ field: item.field, actual: item.actual });
+    else if (item?.field === "occurred_at" && typeof item.actual === "string" &&
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(item.actual))
+      details.push({ field: item.field, actual: item.actual });
+  }
+  const messages: Record<string, string> = {
+    AGENT_CONVERSATION_CLOSED: "本次任务已经结束，请另建任务。",
+    AGENT_IDEMPOTENCY_CONFLICT: "同一 request_id 的内容不能更改。",
+    AGENT_ATTACHMENT_NOT_READY: "附件未上传完成或不属于本会话。",
+    INTAKE_OUTPUT_INVALID: "补充信息整理失败，请核对输入后新建任务。",
+    INTAKE_CONTEXT_LIMIT: "会话内容过长，请新建任务并精简输入。",
+    AGENT_INTERRUPTED: "本次任务已中断，请重新发起。",
+    DISPATCH_REJECTED: "定位服务暂时无法接收任务，请稍后重试。",
+    STATE_WRITE_FAILED: "定位状态暂时无法确认，请稍后查询。",
+  };
+  const archiveUnknown = details.some((item) => item.field === "phase" && item.actual === "ARCHIVE_STATUS_COMMIT");
+  const dispatchPaused = details.some((item) => item.field === "phase" && item.actual === "DISPATCH_PAUSED");
+  return { code, message: archiveUnknown ? "报告已生成，但归档状态暂时无法确认。" :
+    dispatchPaused ? "服务异常，已接收的任务暂时无法继续。" :
+    messages[code] ?? (terminal ? "本次定位未能完成，请重新发起任务。" : "定位服务未能完成请求，请核对错误信息。"),
+    details, retryable: !terminal && value?.retryable === true };
+}
 
 function json(response: ServerResponse, status: number, value: unknown) {
   const body = Buffer.from(JSON.stringify(value));
@@ -145,8 +213,9 @@ export function createAgentBackend(options: {
     const envelope = await boundedResponseJson(response);
     if (!response.ok || envelope.ok !== true || envelope.error !== null) {
       // 只返回受控公共错误，不转发 HTML、模型输出或堆栈。
-      throw new HttpError([400, 404, 409, 413, 422, 503].includes(response.status) ? response.status : 502,
-        typeof envelope.error?.message === "string" ? envelope.error.message : "定位服务暂时无法完成请求。");
+      const error = safeError(envelope.error);
+      throw new HttpError([400, 404, 409, 413, 422, 500, 503, 504].includes(response.status) ? response.status : 502,
+        error.message, error.code, error.details, error.retryable);
     }
     return envelope.data;
   };
@@ -155,24 +224,28 @@ export function createAgentBackend(options: {
     const conversation = await api(`/api/v1/agent/conversations/${conversationId}`);
     if (!conversation.case_id || !UUID.test(conversation.case_id)) throw new HttpError(409, "定位任务尚未生成报告。");
     const caseId = conversation.case_id as string;
-    const [state, listed] = await Promise.all([
-      api(`/api/v1/cases/${caseId}`), api(`/api/v1/cases/${caseId}/artifacts`),
-    ]);
+    const state = await api(`/api/v1/cases/${caseId}`);
     const view = state.case_view;
-    if (view?.case_id !== caseId || !Array.isArray(view.artifacts) || !Array.isArray(listed.artifacts)) {
+    if (view?.case_id !== caseId || !Array.isArray(view.artifacts)) {
       throw new HttpError(502, "产物信息与会话不一致。");
     }
     const sourceJob = view.final_result?.proposed_by_job_id ?? view.unresolved_result?.source_job_id ??
       view.generic_result_v2?.source_job_id ?? view.generic_result?.source_job_id;
     const result: Artifact[] = [];
     const seen = new Set();
-    for (const artifact of listed.artifacts as Artifact[]) {
+    // CaseView already projects the authoritative downloadable artifacts. One
+    // snapshot keeps the result and its archive list at the same revision.
+    for (const artifact of view.artifacts as Json[]) {
+      if (!artifact || typeof artifact !== "object" || Array.isArray(artifact)) {
+        throw new HttpError(502, "产物信息与会话不一致。");
+      }
       if (!KINDS.has(artifact.kind)) continue;
-      const summary = view.artifacts.find((item: Json) => item.artifact_id === artifact.artifact_id);
-      if (!UUID.test(artifact.artifact_id) || seen.has(artifact.artifact_id) || !summary?.downloadable ||
-          !sourceJob || summary.created_by_job_id !== sourceJob ||
+      if (typeof artifact.artifact_id !== "string" || !UUID.test(artifact.artifact_id) || seen.has(artifact.artifact_id) ||
+          artifact.downloadable !== true || artifact.resource_kind !== "FILE" ||
+          typeof sourceJob !== "string" || !UUID.test(sourceJob) || artifact.created_by_job_id !== sourceJob ||
           !Number.isSafeInteger(artifact.size) || artifact.size < 0 || artifact.size > MAX_DOWNLOAD_BYTES ||
-          !SHA.test(artifact.sha256) || ["kind", "name", "content_type", "size", "sha256"].some((key) => summary[key] !== (artifact as any)[key])) {
+          typeof artifact.sha256 !== "string" || !SHA.test(artifact.sha256) ||
+          typeof artifact.name !== "string" || !artifact.name.trim()) {
         throw new HttpError(502, "产物身份或校验信息不一致。");
       }
       const expectedType = { USER_RESULT: "application/json", USER_RESULT_ARCHIVE: "application/zip", AUDIT_BUNDLE: "application/zip", GENERIC_REPORT: "text/markdown" }[artifact.kind];
@@ -186,23 +259,52 @@ export function createAgentBackend(options: {
       }
       const expectedUrl = upstreamUrl(`/api/v1/artifacts/${artifact.artifact_id}/content`);
       expectedUrl.searchParams.set("case_id", caseId);
-      if (artifact.download_url !== expectedUrl.href) throw new HttpError(502, "产物下载地址不符合接入配置。");
       seen.add(artifact.artifact_id);
-      result.push(artifact);
+      // 上游公布的 URL 没有寻址权；下载始终使用配置的内部地址和已核验的 ID。
+      result.push({ artifact_id: artifact.artifact_id, kind: artifact.kind, name: artifact.name,
+        content_type: artifact.content_type, size: artifact.size, sha256: artifact.sha256,
+        download_url: expectedUrl.href });
     }
     return { view, artifacts: result };
   }
 
-  async function verifiedDownload(artifact: Artifact, use: (path: string) => Promise<void>) {
+  async function downloadResponse(artifact: Artifact): Promise<Response> {
     const response = await fetchImpl(artifact.download_url, { redirect: "manual" });
+    const contentLength = response.headers.get("content-length");
+    const contentHash = response.headers.get("x-content-sha256");
     if (response.status !== 200 || !response.body ||
-        response.headers.get("content-length") !== String(artifact.size) ||
-        response.headers.get("x-content-sha256") !== artifact.sha256 ||
+        (contentLength !== null && contentLength !== String(artifact.size)) ||
+        (contentHash !== null && contentHash !== artifact.sha256) ||
         response.headers.get("content-type")?.split(";")[0] !== artifact.content_type ||
         ![null, "identity"].includes(response.headers.get("content-encoding"))) {
       await response.body?.cancel();
       throw new HttpError(502, "下载响应与产物信息不一致。");
     }
+    return response;
+  }
+
+  async function verifiedReport(artifact: Artifact): Promise<Buffer> {
+    if (artifact.size > MAX_REPORT_BYTES) throw new HttpError(502, "报告超出接入限制。");
+    const response = await downloadResponse(artifact);
+    // The exact size was bounded and checked before allocation. Never publish
+    // partially received bytes or parse model text before actual-byte hashing.
+    const content = Buffer.alloc(artifact.size);
+    const hash = createHash("sha256");
+    let size = 0;
+    for await (const chunk of Readable.fromWeb(response.body as any)) {
+      if (chunk.length > artifact.size - size) throw new HttpError(502, "下载内容大小不匹配。");
+      content.set(chunk, size);
+      hash.update(chunk);
+      size += chunk.length;
+    }
+    if (size !== artifact.size || hash.digest("hex") !== artifact.sha256) {
+      throw new HttpError(502, "下载内容的大小或 SHA-256 校验失败。");
+    }
+    return content;
+  }
+
+  async function verifiedDownload(artifact: Artifact, use: (path: string) => Promise<void>) {
+    const response = await downloadResponse(artifact);
     const directory = await mkdtemp(join(tmpdir(), "xiaodao-website-"));
     const file = join(directory, "payload");
     try {
@@ -283,7 +385,13 @@ export function createAgentBackend(options: {
         // 仅关闭本次上游订阅，不调用取消或删除定位任务的接口。
         response.once("close", () => controller.abort());
         const upstream = await upstreamFetch(`/api/v1/agent/conversations/${conversationId}/events`, { headers, signal: controller.signal });
-        if (!upstream.ok || !upstream.body || !upstream.headers.get("content-type")?.startsWith("text/event-stream")) {
+        if (!upstream.ok) {
+          const envelope = await boundedResponseJson(upstream);
+          const error = safeError(envelope.error);
+          throw new HttpError([400, 404, 409, 413, 422, 500, 503, 504].includes(upstream.status) ? upstream.status : 502,
+            error.message, error.code, error.details, error.retryable);
+        }
+        if (!upstream.body || !upstream.headers.get("content-type")?.startsWith("text/event-stream")) {
           await upstream.body?.cancel();
           throw new HttpError(502, "暂时无法订阅会话事件。");
         }
@@ -313,19 +421,16 @@ export function createAgentBackend(options: {
           }
           if (reports.length !== 1) throw new HttpError(409, "报告尚未就绪，或产物列表不完整。");
           const report = reports[0];
-          if (report.size > MAX_REPORT_BYTES) throw new HttpError(502, "报告超出接入限制。");
-          await verifiedDownload(report, async (path) => {
-            const text = await readFile(path, "utf8");
-            if (report.kind === "GENERIC_REPORT") {
-              json(response, 200, { ok: true, data: { format: "markdown", markdown: text }, error: null });
-            } else {
-              let payload: Json;
-              try { payload = JSON.parse(text); } catch { throw new HttpError(502, "报告 JSON 无效。"); }
-              const expected = { RESOLVED: "COMPLETED", PARTIALLY_RESOLVED: "PARTIAL", UNRESOLVED: "INCONCLUSIVE" }[current.view.status as string];
-              if (!expected || payload.status !== expected) throw new HttpError(502, "报告状态与任务不一致。");
-              json(response, 200, { ok: true, data: { format: "problem-locator-diagnosis-v3", report: payload, sections: reportSections(payload) }, error: null });
-            }
-          });
+          const text = (await verifiedReport(report)).toString("utf8");
+          if (report.kind === "GENERIC_REPORT") {
+            json(response, 200, { ok: true, data: { format: "markdown", markdown: text }, error: null });
+          } else {
+            let payload: Json;
+            try { payload = JSON.parse(text); } catch { throw new HttpError(502, "报告 JSON 无效。"); }
+            const expected = { RESOLVED: "COMPLETED", PARTIALLY_RESOLVED: "PARTIAL", UNRESOLVED: "INCONCLUSIVE" }[current.view.status as string];
+            if (!expected || payload.status !== expected) throw new HttpError(502, "报告状态与任务不一致。");
+            json(response, 200, { ok: true, data: { format: "problem-locator-diagnosis-v3", report: payload, sections: reportSections(payload) }, error: null });
+          }
           return;
         }
         const artifact = current.artifacts.find((item) => item.artifact_id === artifactId);
@@ -342,12 +447,19 @@ export function createAgentBackend(options: {
             throw new HttpError(409, expected === "archive" ? ZIP_NOTICE : "请先确认需要下载审计包。");
           }
         } else if (url.search) throw new HttpError(400, "此报告不接受下载参数。");
-        await verifiedDownload(artifact, async (path) => {
-          response.writeHead(200, { "Content-Type": artifact.content_type, "Content-Length": artifact.size,
+        const downloadHeaders = { "Content-Type": artifact.content_type, "Content-Length": artifact.size,
             "X-Content-SHA256": artifact.sha256, "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store",
-            "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(artifact.name)}` });
-          await pipeline(createReadStream(path), response);
-        });
+            "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(artifact.name)}` };
+        if (["USER_RESULT", "GENERIC_REPORT"].includes(artifact.kind) && artifact.size <= MAX_REPORT_BYTES) {
+          const content = await verifiedReport(artifact);
+          response.writeHead(200, downloadHeaders);
+          response.end(content);
+        } else {
+          await verifiedDownload(artifact, async (path) => {
+            response.writeHead(200, downloadHeaders);
+            await pipeline(createReadStream(path), response);
+          });
+        }
         return;
       }
       const allowed = (!action && method === "GET") || (["messages", "attachments"].includes(action) && method === "POST" && !artifactId);
@@ -357,6 +469,7 @@ export function createAgentBackend(options: {
       const result = await api(`/api/v1/agent/conversations/${conversationId}${suffix}`, body ? {
         method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
       } : undefined);
+      if (!action && result.failure) result.failure = safeError(result.failure, true);
       if (action === "attachments") {
         const attachmentId = result.attachment?.attachment_id;
         if (!UUID.test(attachmentId)) throw new HttpError(502, "定位服务返回的附件标识无效。");
@@ -367,7 +480,8 @@ export function createAgentBackend(options: {
     } catch (error) {
       if (response.headersSent || response.destroyed) { response.destroy(); return; }
       const publicError = error instanceof HttpError ? error : new HttpError(502, "网站暂时无法连接定位服务。");
-      json(response, publicError.status, { ok: false, data: null, error: { code: "WEBSITE_AGENT_ERROR", message: publicError.message } });
+      json(response, publicError.status, { ok: false, data: null, error: { code: publicError.code, message: publicError.message,
+        details: publicError.details, retryable: publicError.retryable } });
     }
   });
 }

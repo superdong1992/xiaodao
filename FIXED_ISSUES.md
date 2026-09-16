@@ -1,9 +1,31 @@
 # 已修复问题台账
 
-更新时间：2026-09-09
+更新时间：2026-09-15
 
 本文件记录已经在当前工作区验证、修复并由专项回归测试保护的问题。活跃待办仍只写入
 [`TODO.md`](TODO.md)；同一问题再次回归时更新原条目，不另建一个缺少历史关联的条目。
+
+## PL-FIX-060：调度暂停后继续接单，结果提交失败使任务状态长期不明
+
+- **状态**：8.1 实现完成，是否通过正式验证以本条最终 Test Flow 元数据为准。
+- **症状与受影响版本**：`03fb1cd` / 8.0.0 的调度器发生致命暂停后，应用和 Agent 消息入口仍可能持久接收新任务；结果或基础设施失败的提交持续异常时，Worker 无限等待。ZIP 生成失败且失败状态也写入失败时，公开状态一直停在 PENDING。修改前已核对这些实际调用路径，并用固定时钟、失败提交和真实归档任务复现。
+- **根因**：接收状态只在调度器内部，应用入口未共享；既有提交重试没有总时限；数据库不可用时没有区别于持久终态的进程内异常状态。
+- **不可回归行为**：致命暂停后，新创建、补充、恢复和 Agent 消息在持久接收前返回 503；已经接收的请求保留原收据。结果与失败提交各自最多使用 30 秒重试窗口，超时不再提交或重跑模型；单次同步 I/O 返回后释放 Worker。无法确认交付时，查询返回带 Case、Job、阶段和原错误关联的受控异常，readiness 失败，不伪造 Case 终态或 SSE。权威状态确认提交成功时以成功为准。归档双重失败只标记归档状态暂时未知，JSON 报告继续可读。
+- **修复历史**：2026-09-15 引入应用、调度和 Agent 共用的进程接收状态；为既有提交重试加总窗口；区分结果交付与归档状态异常，并在查询时核对权威 Job 状态。活动诊断不跨重启续办，队列容量与同步 I/O 硬超时未改。
+- **专项回归测试**：`tests/deterministic/unit/dispatch/test_operational_delivery.py` 覆盖持续失败、超过窗口后返回的成功提交、Worker 释放和已接收排队任务；`tests/deterministic/unit/application/test_operational_admission.py` 覆盖接收前拒绝、未知状态不写回和权威成功；`tests/deterministic/unit/dispatch/test_postcommit_admission.py` 直接验证在途创建和成功 Outcome 于暂停后产生的新 Job 仍有明确故障，旧 Job 的成功不会清除新 Job 故障；`tests/deterministic/integration/test_archive_status_fault.py` 复现归档双重失败并读取原报告；`tests/deterministic/integration/test_website_agent.py` 覆盖消息入口、尚未建案的已接收消息及会话错误投影。
+
+- **最新 Test Flow verdict（8.1 调度交付）**：Linux `dev.default` [run-20260915T142733Z-be69a627](.tmp/pragmatic-dev-evidence-3/run-20260915T142733Z-be69a627/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:bd580c1f836358b1aca427885c6f0604fb7bbfcf60d81294630f352c16a72b3e`（821 files），verdict SHA-256 `2ec047106b8e2aad8b0254dc19131c25e704491607c0811d6c4338c2cd148fd9`。受影响范围由编排器交完整套件覆盖；Core 32、合同 576、单元 2601、集成 110、SameJob 5 项通过，单元 2 项非本平台用例跳过。全部专项纳入本轮，模型调用、token 和费用均为 0。本行是验证后的引用元数据，不属于所引用源码快照；不代表公司内网实测或真实模型 Release 通过。
+
+## PL-FIX-061：V11 合同修订升级缺少保留历史数据的显式入口
+
+- **状态**：8.1 实现完成，是否通过正式验证以本条最终 Test Flow 元数据为准。
+- **症状与受影响版本**：8.0.0 / `v11-contract-r1` 的目录标记和已完成任务快照绑定 r1；当前源码检查确认，更换合同修订后旧目录会被拒绝，原提示要求配置空目录，无法保留历史会话和报告。
+- **根因**：此前只有新目录初始化和拒绝旧合同，没有同一 State schema 内的离线副本升级入口。
+- **不可回归行为**：Linux 命令显式选择 `--plan-only` 或 `--execute`，持有源实例现有锁，源与目标不重叠。plan-only 不打开源 SQLite；execute 将主库、WAL、SHM 复制到独立暂存目录后校验。只修改目录标记、完成任务快照顶层合同修订和核验后的附件固定路径；保留会话、事件序号、幂等和不可变资源字节。校验数据库、快照、引用和全部文件哈希后原子发布目标与凭据，失败副本不可作为正式数据目录，源目录始终保留。无自动升级、全局版本替换、旧导出文件转换或活动诊断续办。
+- **修复历史**：2026-09-15 增加 `problem-locator-data-upgrade`，目标版本为 8.1.0 / `v11-contract-r2`，State 11、报告 3；更新合同清单、生成 schema、OpenAPI 和升级指南。校验过程不构造服务 Repository 或执行恢复。
+- **专项回归测试**：`tests/deterministic/unit/interfaces/test_data_upgrade.py` 使用实际持久状态与会话历史验证副本升级、WAL、一致性、真实报告/READY ZIP 字节、源目录不变和失败副本不能启动；覆盖空会话、缺失内存 Case 的关闭历史、关单遗留派发/附件和归档引用篡改。旧格式拒绝及合同版本由 `test_state_repository.py`、`test_schema_snapshots.py`、`test_release_version.py` 继续覆盖，`tests/deterministic/contracts/test_project_freeze.py` 冻结新命令的注册入口。
+
+- **最新 Test Flow verdict（8.1 离线升级）**：Linux `dev.default` [run-20260915T142733Z-be69a627](.tmp/pragmatic-dev-evidence-3/run-20260915T142733Z-be69a627/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:bd580c1f836358b1aca427885c6f0604fb7bbfcf60d81294630f352c16a72b3e`（821 files），verdict SHA-256 `2ec047106b8e2aad8b0254dc19131c25e704491607c0811d6c4338c2cd148fd9`。受影响范围由编排器交完整套件覆盖；Core 32、合同 576、单元 2601、集成 110、SameJob 5 项通过，单元 2 项非本平台用例跳过。全部专项纳入本轮，模型调用、token 和费用均为 0。本行是验证后的引用元数据，不属于所引用源码快照；不代表公司内网实测或真实模型 Release 通过。
 
 ## PL-FIX-059：非 Windows 环境不支持 no-follow chmod 时无法固化文件权限
 
@@ -34,6 +56,34 @@
 - **最新 Test Flow verdict（8.0 网站指导补充）**：Dev [run-20260907T085350Z-d3b1a48d](.tmp/test-flow-evidence/run-20260907T085350Z-d3b1a48d/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:33f493b793bf9526c0b01993303f29b2159d0342ab23d00b8b082b290507f3e4`（789 files）；verdict digest `d9f1b386df7f7ba2105db6a1dd2ad158cfd98496b0d0516a6de1b5468b04a0d6`。网站指导专项 20 项纳入 framework.node-tests 的 400 PASS / 30 项平台跳过；完整确定性合同 576、单元 2,042、集成 61、SameJob 5 项通过，68 项平台跳过，网站后端示例 12 项通过。零真实模型调用，未访问公司内网，不代表部署环境或真实 Release 已通过。此行是验证完成后的元数据回填，不属于所引用快照。
 
 - **最新 Test Flow verdict（基础 SSE 适配）**：Dev [run-20260908T014701Z-4c6fe7f0](.tmp/test-flow-evidence/run-20260908T014701Z-4c6fe7f0/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。基线 `74fe8df3d55f925465ad5b0602cb6245381f3f28`，源码快照 `git-visible-worktree-v1:70fce2c8d0e504ba369159f259c2cf48be32155fafafc3bbd529ef1dfd5d670a`（790 files）；verdict digest `5b1d5dd2ad10aa3775eda40637dfe7da468096fef5ca86e047829ab8936db3aa`。框架 409 PASS / 30 项平台跳过，完整确定性合同 576、单元 2,074、集成 61、SameJob 5 项通过，68 项平台跳过；Core 32、网站后端示例 12 项通过。零真实模型调用，未访问公司内网，不代表真实 Release 或部署环境通过。此行是验证完成后的元数据回填，不属于所引用快照。
+
+### 2026-09-15：8.1 保留失败原因，并按可信配置下载报告
+
+- **受影响版本与确认结果**：`03fb1cd` / 8.0.0 的会话快照没有失败字段，网站将上游错误折叠为通用错误；报告下载依赖响应中的地址与必需响应头，内外域名不同或缺失可选头会拒绝合法报告。修改前已检查实际 HTTP、存储和网站下载路径，并补固定响应回归。
+- **根因与本次修复**：会话关闭事务增加可选 `failure`，固定中文映射保留 code、实际阶段、受控字段位置和稳定 diagnostic_id，丢弃原始异常、内部路径和输入值。SSE v1 形状不变，失败事件后读取快照，刷新也能恢复原因；关闭历史在无进程异常时不强制查询已丢失的内存 Case。网站按配置前缀、已授权 Case 和已核验产物 ID 构造下载路径，响应 download_url 不参与寻址。
+- **不可回归行为**：终态错误 retryable=false；历史缺失 failure 时返回 null；受控错误不能泄露原始异常或模型内容。域名可以不同，Content-Length 与 x-content-sha256 缺失时按实际字节验证，存在时必须匹配；归属、来源 Job、类型、编码、重定向及实际长度/哈希检查仍严格。JSON 就绪即展示，ZIP 失败不撤回报告，SSE 断线不取消诊断。
+- **专项回归测试**：`tests/deterministic/integration/test_website_agent.py`、`tests/deterministic/unit/agent/test_store.py`、`examples/website-agent/server.test.mjs`、`tools/test-flow/tests/website-agent-guide.test.mjs`，覆盖错误同事务留存、刷新/重放、重启历史、错误字段脱敏、内外域名、恶意地址、缺失响应头、错误哈希和归属。
+- **验证范围**：本轮仅使用本地合成输入与确定性模型替身；正式结论以本节最终 Dev verdict 元数据为准，不代表公司内网或真实模型 Release 通过。
+
+#### 2026-09-15：补齐基础设施中断的具体失败投影
+
+- **症状、版本与复现**：当前 8.1 工作区的 ROUTE 恢复审计写入失败时，状态机按既有合同将 Case 和 Job 置为 `INTERRUPTED`，但会话快照只得到 `AGENT_INTERRUPTED`。正式 Dev `run-20260915T111552Z-a4eabc66` 的三条审计写入故障用例先暴露了测试预期 `FAILED` 与实际状态不符；随后核对状态机、持久 Outcome 和投影代码，确认 `INTERRUPTED` 不设置 `case.failure`，而原投影依赖该字段，遗漏已保存的执行错误。
+- **根因与再次修复**：原失败投影只完整覆盖 `FAILED`。现在仅在没有 CaseFailure 的中断状态下，从唯一未被后续 Job 替换的中断 Job 查找唯一权威失败：采用的 Outcome 必须有 `APPLIED` 处理记录且产生时间与 Job 完成时间一致；基础设施失败记录必须匹配 Job、runtime epoch 和完成时间。无记录或关联有歧义时保持通用中断，不从旧任务或迟到结果猜原因。
+- **不可回归行为**：保留真实 `INTERRUPTED` 状态，公开快照保存具体 code、stage、受控位置和 diagnostic_id，终态 retryable=false。SSE v1 类型与帧不变，刷新快照仍可读到相同失败。旧失败、被替换 Job、非 APPLIED 结果、时间或 epoch 不匹配的记录不得冒充当前原因；不公开原始异常或模型文本。
+- **专项回归测试**：`tests/deterministic/unit/agent/test_interrupted_failure.py` 覆盖权威记录选择、旧任务、迟到记录与歧义，验证持久快照和脱敏；`tests/deterministic/integration/test_route_quote_delivery.py::test_route_recovery_cannot_succeed_without_durable_audit` 覆盖三种真实审计写入故障、HTTP 刷新和 SSE 重放。首轮失败证据保留于 `.tmp/route-quotes-dev-evidence-1/run-20260915T111552Z-a4eabc66/verdict.json`，不作为通过结论。
+- **最新 Test Flow verdict（8.1 中断原因）**：Linux `dev.default` [run-20260915T142733Z-be69a627](.tmp/pragmatic-dev-evidence-3/run-20260915T142733Z-be69a627/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:bd580c1f836358b1aca427885c6f0604fb7bbfcf60d81294630f352c16a72b3e`（821 files），verdict SHA-256 `2ec047106b8e2aad8b0254dc19131c25e704491607c0811d6c4338c2cd148fd9`。受影响范围由编排器交完整套件覆盖；Core 32、合同 576、单元 2601、集成 110、SameJob 5 项通过，单元 2 项非本平台用例跳过。全部专项纳入本轮，模型调用、token 和费用均为 0。本行是验证后的引用元数据，不属于所引用源码快照；不代表公司内网实测或真实模型 Release 通过。
+
+- **最新 Test Flow verdict（8.1 网站交付）**：Linux `dev.default` [run-20260915T142733Z-be69a627](.tmp/pragmatic-dev-evidence-3/run-20260915T142733Z-be69a627/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:bd580c1f836358b1aca427885c6f0604fb7bbfcf60d81294630f352c16a72b3e`（821 files），verdict SHA-256 `2ec047106b8e2aad8b0254dc19131c25e704491607c0811d6c4338c2cd148fd9`。受影响范围由编排器交完整套件覆盖；Core 32、合同 576、单元 2601、集成 110、SameJob 5 项通过，单元 2 项非本平台用例跳过。全部专项纳入本轮，模型调用、token 和费用均为 0。本行是验证后的引用元数据，不属于所引用源码快照；不代表公司内网实测或真实模型 Release 通过。
+
+### 2026-09-15：先采用已有 Skill 参数，再追问剩余信息
+
+- **状态**：8.1 实现完成，正式验证以本节最终 Test Flow 元数据为准。
+- **症状、受影响版本与复现**：当前 8.1.0 工作区及 8.0.0 的网站 Case-first 流程中，首条消息一次提供八项 RPC 参数，实际 HTTP 与调度器合成复现仍得到八项 OPEN 输入、零 Intake 调用、零已采用事实。另一合成场景中，NEED_CLARIFICATION 已提取七项，下一轮补第八项时只提交第八项，前七项继续被追问。原始消息没有在 HTTP 或 telemetry 中丢失。
+- **根因与本次修复**：首条消息建案后即为 APPLIED，旧 Worker 只处理新消息；草稿 user_facts 没有回传或合并提交；Case WAIT 投影过早发布全部问题。现在在具体要求就绪后对已有来源执行一次有持久记录的 Intake，统一校验并部分提交事实；相关草稿回传并重验，冻结同值去重、异值仍要求新任务。提问门与接收及 Case 投影同事务更新，采用结果后才发布剩余要求，并发新消息保持待处理。
+- **不可回归行为**：建案前零 Intake；首条和新消息每条最多触发一次模型，已覆盖来源不因轮询、刷新、Case revision 或命令重放重复提取；APPLIED 不回退。模型 action 不得阻止有效参数提交。当前 Case 采用状态优先于本地草稿；已完成 Intake 先按冻结输入重验，再按当前要求判断剩余工作，已采用的纯附件和参数都可直接收口，不能被误判为新空提交。不修改原始问题，不增加模型修复或诊断重试，不放开时间和标识符的任意改写。公开 MCP/API 与 SSE v1 不增加字段。单项无效的处理已由下述同日修复改为保留其余有效参数。
+- **性能约束**：空闲/尚在执行的 Case 轮询跳过完整会话和 Case 查询，未完成命令使用 conversation/status/epoch 索引。专项对一条与199条历史分别执行100次 Worker 轮询，要求模型、命令、历史和 Case 查询为零且不写状态；另以2000条派发历史检查查询计划。观测耗时只作为确定性环境证据，不作真实模型性能承诺；首条无参数时可能比旧流程增加一次必要提取。
+- **专项回归测试**：`test_intake_adoption.py` 覆盖首条完整输入的 Reviewer 开关、真实 HTTP/报告/ZIP/SSE、部分参数和错误 action、旧草稿采用、冻结同值、并发新消息与受控失败；`test_intake_performance.py` 覆盖空闲轮询、历史容量、核心命令重放及索引；`test_intake.py` 和 `test_store.py` 覆盖全部来源/约束、事务门、并发覆盖范围、旧快照及单次调用。原转义专项 `test_model_output_escaping.py` 保留合法原值和非法 JSON 反例。
+- **最新 Test Flow verdict（8.1 参数采用）**：Linux `dev.default` [run-20260915T142733Z-be69a627](.tmp/pragmatic-dev-evidence-3/run-20260915T142733Z-be69a627/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:bd580c1f836358b1aca427885c6f0604fb7bbfcf60d81294630f352c16a72b3e`（821 files），verdict SHA-256 `2ec047106b8e2aad8b0254dc19131c25e704491607c0811d6c4338c2cd148fd9`。受影响范围由编排器交完整套件覆盖；Core 32、合同 576、单元 2601、集成 110、SameJob 5 项通过，单元 2 项非本平台用例跳过。全部专项纳入本轮，模型调用、token 和费用均为 0。本行是验证后的引用元数据，不属于所引用源码快照；不代表公司内网实测或真实模型 Release 通过。
 
 ## PL-FIX-056：活动状态更新复制全库并反复读取历史资源
 
@@ -1880,6 +1930,25 @@
   `git-visible-worktree-v1:b3f3ff6e28d9e1cccee712d8f617d470501aa97a53d662b49222b5a6d7d85968`
   （718 files）。本 verdict 元数据行本身不宣称被其引用的快照覆盖。
 
+### 2026-09-15：8.1 在模型入口兼容无歧义格式，并解除遥测采样对结果的限制
+
+- **受影响版本与确认结果**：`03fb1cd` / 8.0.0 的实际模型结果入口仍拒绝 CRLF、一个开头 BOM 和包住全部内容的单个代码围栏；遥测单行阈值会丢弃大结果。修改前已经用这些固定字节复现，属于同类格式误拒绝在最终响应入口的延续。
+- **本次修复与不可回归行为**：流式协议接受 LF/CRLF；业务终态和工具审计读取所属阶段总预算内的完整数据，不受进度采样行长影响，真正超限明确失败。仅模型 JSON 入口接受一个 BOM 和一个完整围栏，在内存规范化并分别保留原始字节与采用结果；公共 Agent/MCP JSON 不放宽。重复键、非有限数、非法 JSON、多个终态、异常退出、读取漂移仍拒绝。Generic 只规范协议头，正文长度、原字节和哈希保持一致。此节取代早期 5.0 记录中“模型 BOM 必须拒绝”和“回写原草稿”的行为；历史测试结论不改写。
+- **专项回归测试**：`tests/deterministic/unit/runtime/test_model_json.py`、`test_final_response.py`、`test_agent_telemetry.py`、`test_agent_backend.py`、`test_output_reader.py`、`test_generic_locator.py`；既有 `test_methods_output_pipeline.py`、`test_diagnosis_runtime.py` 覆盖真实运行时入口。`tests/deterministic/unit/agent/test_intake.py` 从实际 Intake Engine 的 backend.final_result 验证相同兼容规则和单次调用，公共 JSON 严格性有直接反例。
+- **验证范围**：没有新增模型调用或修复轮次，最新正式验证以本节最终 Dev verdict 元数据为准。
+
+- **最新 Test Flow verdict（8.1 模型格式）**：Linux `dev.default` [run-20260915T142733Z-be69a627](.tmp/pragmatic-dev-evidence-3/run-20260915T142733Z-be69a627/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:bd580c1f836358b1aca427885c6f0604fb7bbfcf60d81294630f352c16a72b3e`（821 files），verdict SHA-256 `2ec047106b8e2aad8b0254dc19131c25e704491607c0811d6c4338c2cd148fd9`。受影响范围由编排器交完整套件覆盖；Core 32、合同 576、单元 2601、集成 110、SameJob 5 项通过，单元 2 项非本平台用例跳过。全部专项纳入本轮，模型调用、token 和费用均为 0。本行是验证后的引用元数据，不属于所引用源码快照；不代表公司内网实测或真实模型 Release 通过。
+
+### 2026-09-15：8.1 为 ROUTE.reason 增加受限的双引号恢复
+
+- **症状、受影响版本与确认结果**：当前 `03fb1cd` 基础上的 8.1.0 工作区中，外层 stream-json 事件合法、内层 `reason` 含未转义双引号时，实际 `AgentStreamTelemetry → parse_route_response` 路径返回 `OUTCOME_INVALID`，路由无法继续。修改前已用固定字节直接复现，并确认 telemetry 完整保留内层文本；没有证据表明它损坏了合法转义，也不把本条当作公司内网故障根因已经确认。
+- **根因与历史关联**：原解析器有意严格拒绝所有 JSON 语法错误。本次按用户明确授权，为本条模型输出兼容增加一个窄例外；它不是原有合法 JSON 兼容的回归。只有 `ROUTE.reason` 可执行一次本地恢复，Intake、Specialist、Reviewer、公开 Agent JSON 和七个 MCP 输入保持严格。
+- **修复历史**：2026-09-15 新增独立 ROUTE 解析入口。先严格解析，仅语法错误才搜索 `reason` 的可能结束位置；恢复只在字符串内部插入必要的反斜杠，保留全部原始字节、已有转义、BOM 和完整围栏。恢复候选必须唯一、完整且恰有三个字段，不借冻结 Skill 目录选取候选；若需要吞入形似其他字段的片段则拒绝。恢复后继续执行原来的目录、类型、数值和文本长度校验。
+- **不可回归行为**：`skill_id`、`confidence` 不补写、不改值；缺失字段、重复字段、非有限数、非法转义、截断、多终态和异常退出不得被恢复掩盖。恢复搜索上限为原文 64 KiB、128 个未转义引号，正常有效 JSON 不受这两个新搜索上限影响。合法嵌套字符串经过脱敏、流分片、日志、telemetry 和业务解析后保持原值；Generic 正文保留原始字节与哈希。原文、实际采用文本、规则、插入位置、长度、哈希及 `diagnostic_id` 分别持久化，关联只含元数据的诊断日志；审计写入失败不得报告恢复成功。不增加模型调用或任务续办。
+- **专项回归测试**：`tests/deterministic/unit/runtime/test_route_json.py` 直接覆盖恢复、唯一性、字段吞并、重复键、非法转义、UTF-8 偏移与有界搜索；`test_final_response.py` 覆盖真实冻结路由业务校验；`test_model_output_escaping.py` 覆盖完整流式 sink 链、Intake 用户事实、Specialist 证据、Reviewer 文件和 Generic 正文，防止恢复扩散到其他入口。`tests/deterministic/integration/test_route_quote_delivery.py` 使用网站 HTTP、调度器、真实运行时与持久存储，分别验证 Reviewer 开关下的报告/归档/SSE 交付、单次模型执行、恢复审计及三种审计文件写入失败。多终态与非零退出继续由既有 `test_agent_telemetry.py`、`test_agent_backend.py` 专项覆盖。
+- **验证范围**：只验证本地合成场景，不宣称公司内网验收或真实模型 Release 通过。使用方式与限制见 `docs/model-output-compatibility.md`。
+- **最新 Test Flow verdict（8.1 路由引号恢复）**：Linux `dev.default` [run-20260915T142733Z-be69a627](.tmp/pragmatic-dev-evidence-3/run-20260915T142733Z-be69a627/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:bd580c1f836358b1aca427885c6f0604fb7bbfcf60d81294630f352c16a72b3e`（821 files），verdict SHA-256 `2ec047106b8e2aad8b0254dc19131c25e704491607c0811d6c4338c2cd148fd9`。受影响范围由编排器交完整套件覆盖；Core 32、合同 576、单元 2601、集成 110、SameJob 5 项通过，单元 2 项非本平台用例跳过。全部专项纳入本轮，模型调用、token 和费用均为 0。本行是验证后的引用元数据，不属于所引用源码快照；不代表公司内网实测或真实模型 Release 通过。
+
 ## PL-FIX-043：Methods marker 大小写语义在多阶段校验中不一致
 
 - **状态**：已按 Evidence V2 单次扫描合同再次修复；是否验证通过以本条“最新 Test Flow verdict”为准。
@@ -2523,6 +2592,14 @@
 - **专项回归测试**：`tests/deterministic/unit/runtime/test_claude_command.py::test_final_json_native_cli_has_only_the_required_file_tools` 覆盖六种 CLI 名称、裸命令与含空格绝对路径、两种文件权限；`test_codeagent_final_json_policy_replaces_conflicting_flags_and_preserves_operator_options` 覆盖冲突参数的空格与等号形式；`test_custom_cli_receives_policy_without_unrecognized_arguments` 覆盖未知启动器。三项共 30 组，其中新增 27 组。既有 `tests/deterministic/unit/runtime/test_final_response.py::test_route_uses_final_three_fields_and_server_pinned_identity`、`test_invalid_route_response_is_rejected_without_repair`、`test_stream_result_is_unique_successful_and_not_in_telemetry` 继续覆盖最终结果解析边界。
 - **最新 Test Flow verdict（8.0 codeagent 原生 CLI）**：Linux Dev [run-20260909T080141Z-5a3fafda](.tmp/codeagent-linux-evidence/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:1ba75761b3e6f5e9d028743e2a104a84a7cbeeadcdb8fad0611b4993412e5e43`（790 files），工作树、物化快照及交付文件内容核对均为 PASS；verdict digest `03f60bf35b0d5d6c0c255eda6a229722a28357cdd2fb641a8d0a7ca234dc15f4`。affected 942 passed / 1 skipped；完整确定性合同 576、单元 2,203、集成 66、SameJob 5 项通过，单元 1 项平台跳过，Core 32 项通过；30 组 CLI 策略专项全部通过，前一项 chmod 的 24 组专项也全部通过。零真实模型调用，不宣称现场 codeagent 或真实 Release 已验证。此行是验证完成后的元数据回填，不属于所引用快照；除此行外未修改交付字节。
 
+### 2026-09-15：8.1 补齐部分流式工具事件的权限审计
+
+- **受影响版本与确认结果**：`03fb1cd` / 8.0.0 的遥测忽略 `stream_event`，也把异常 assistant content 当作空消息。固定字节复现确认，流中携带 Write 后返回成功 result，`permits_file_access("none")` 仍为 true。这是原有审计缺口，不是本轮格式兼容新增的回归。
+- **根因与本次修复**：工具审计此前只识别完整 assistant 消息；现在同时处理 partial `content_block_start`，按工具 ID 与名称去重，拒绝冲突身份、不可识别工具和无开始事件的工具参数。普通文本 delta、进度与 metadata 继续接受。
+- **不可回归行为与专项**：大行和部分流不能隐藏 Write；合法 Read 与 partial+完整消息去重仍通过；异常内容不得伪装为干净审计。`tests/deterministic/unit/runtime/test_agent_telemetry.py` 的固定流反例与 `test_agent_backend.py` 实际进程输出用例覆盖这一边界，模型调用次数不变。最新正式验证以本节最终 Dev verdict 元数据为准。
+
+- **最新 Test Flow verdict（8.1 流式审计）**：Linux `dev.default` [run-20260915T142733Z-be69a627](.tmp/pragmatic-dev-evidence-3/run-20260915T142733Z-be69a627/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:bd580c1f836358b1aca427885c6f0604fb7bbfcf60d81294630f352c16a72b3e`（821 files），verdict SHA-256 `2ec047106b8e2aad8b0254dc19131c25e704491607c0811d6c4338c2cd148fd9`。受影响范围由编排器交完整套件覆盖；Core 32、合同 576、单元 2601、集成 110、SameJob 5 项通过，单元 2 项非本平台用例跳过。全部专项纳入本轮，模型调用、token 和费用均为 0。本行是验证后的引用元数据，不属于所引用源码快照；不代表公司内网实测或真实模型 Release 通过。
+
 ## PL-FIX-054：专有定位终态只返回审计引用，缺少面向用户的具体报告
 
 - **状态**：修复完成；验证结论以本条“最新 Test Flow verdict”为准。
@@ -2600,9 +2677,28 @@
 - **专项回归测试**：`tests/deterministic/integration/test_async_archive.py`；`tests/deterministic/integration/test_terminal_crash.py`；`tests/deterministic/journey/test_rpc_timeout.py`；`tests/deterministic/unit/integrations/test_result_archive.py`。
 - **最新 Test Flow verdict（7.0）**：Dev [run-20260905T152251Z-bc60e01f](.tmp/test-flow-evidence/run-20260905T152251Z-bc60e01f/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:14a770d4c99596e650442ee7c0c8f44750625bb5ef593581ff2c47094ceb5136`（764 files）；完整 deterministic 2,535 passed / 68 skipped，Core 31 passed。此行是验证完成后的元数据回填，不属于所引用快照。
 
+### 2026-09-15：8.1 按完整发现保留可核验证据，贯通 PARTIAL 报告与归档
+
+- **受影响版本与确认结果**：`03fb1cd` / 8.0.0 的任一 finding 引用失败会使整份草稿失败；缺失目标会在 finalizer 清空有效发现，归档又要求日志序号连续。同一文件中的不同发现还会互相引用对方行号。修改前已核对逐项 grounding、finalizer 和报告路径；缺失首目标与同文件双发现都已直接复现。
+- **根因与本次修复**：整稿核验和下游完整性条件未区分共享身份异常与单项证据缺口。新增以 `method_id + identity_tokens` 为单位的选择器，每项引用全部核验，失败移除整项；完全重复合并，身份冲突整组移除。按 Job 冻结 Reviewer 策略启用；开启 Reviewer 时保持整稿审核。
+- **不可回归行为**：全有效保留完整结果；至少一项有效且有缺口交付 PARTIAL / PARTIALLY_RESOLVED；结构有效但没有可验证发现交付 INCONCLUSIVE / UNRESOLVED。顶层不可解析、没有可识别有效结构或共享冻结身份/哈希变化仍失败。PARTIAL 必须有有效发现与明确缺口，root_cause=null，不继承被拒摘要；无依据的完成条件为 UNKNOWN，不制造“部分满足”。原始响应、采用结果、筛选索引/原因/哈希和 diagnostic_id 分别留存。同文件不同发现的行引用严格隔离；缺失目标只作缺口，ZIP 仅包含核验后的实际日志，保留原始递增序号，拒绝重复或倒序。
+- **专项回归测试**：`tests/deterministic/unit/runtime/test_methods_selection.py` 直接覆盖混合有效/无效、全无效、重复、冲突、共享漂移、缺失目标完整 finalizer→ZIP 路径和同文件行引用；`tests/deterministic/integration/test_partial_methods_delivery.py` 走实际 HTTP、Application、Runtime、持久 Case、报告下载及异步归档，分别验证 Reviewer 开关和单次模型执行；`tests/deterministic/unit/integrations/test_result_archive.py` 继续核验字节与顺序反例。
+- **验证范围**：本轮只证明合成场景，最新正式验证以本节最终 Dev verdict 元数据为准。
+
+- **最新 Test Flow verdict（8.1 部分发现）**：Linux `dev.default` [run-20260915T142733Z-be69a627](.tmp/pragmatic-dev-evidence-3/run-20260915T142733Z-be69a627/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:bd580c1f836358b1aca427885c6f0604fb7bbfcf60d81294630f352c16a72b3e`（821 files），verdict SHA-256 `2ec047106b8e2aad8b0254dc19131c25e704491607c0811d6c4338c2cd148fd9`。受影响范围由编排器交完整套件覆盖；Core 32、合同 576、单元 2601、集成 110、SameJob 5 项通过，单元 2 项非本平台用例跳过。全部专项纳入本轮，模型调用、token 和费用均为 0。本行是验证后的引用元数据，不属于所引用源码快照；不代表公司内网实测或真实模型 Release 通过。
+
+### 2026-09-15：按用户授权暂时关闭证据语义拒绝，保留模型发现
+
+- **受影响版本与确认结果**：8.1.0 当前工作区（前次快照 `72ba72ef71186557da37833430ce3a6a4a6e89e29dcd8676e3c2275892f14977`）中，仅引用多一个空格、行号偏一行、identity 不完全匹配或 marker 不连续，Reviewer 关闭时会清空发现，开启时会使整份结果失败。源码检查确认模型后还会重复全量 marker 扫描。本条继续记录同一证据拒绝链路，关联 PL-FIX-055 的 marker 提示修复。
+- **修复历史**：用户本轮明确要求暂去证据校验。新增启动配置 `METHODS_EVIDENCE_VALIDATION=advisory|strict`，默认 advisory，strict 保留先前实现。advisory 将可识别发现投影为 SEMANTIC_ONLY/PARTIAL，引用仅绑定本次实际输入；无引用元数据也保留模型判断，同身份冲突不再整组删除。Reviewer 保持整份审核，继承对应诊断的审计策略；历史缺省 strict。原始输出、有效稿和处理回执独立留存并关联 diagnostic_id。
+- **不可回归行为**：不得把 advisory 写成 VERIFIED_PASS 或已确认根因；PARTIAL 有明确缺口、root_cause=null、无依据完成条件 UNKNOWN。空发现正常 INCONCLUSIVE。未知方法名不得冒充已注册方法；错误引用不得用于寻址、生成伪造原文或收录未取得日志。共享身份、归属、路径、实际字节/哈希、工具权限、输出预算及非法 JSON 仍拒绝。模型和审核调用次数不增加，advisory 不在模型后重扫 marker。此前严格证据条件只适用于 strict；不改写历史产物。
+- **专项回归测试**：`test_methods_advisory.py`、`test_advisory_methods_delivery.py` 覆盖引用/身份/方法元数据缺失和不一致、完全重复和同身份冲突、Reviewer 开关、真实 HTTP→运行时→报告→ZIP，以及单次模型调用；`test_settings.py` 验证默认配置和 strict 恢复。原 `test_methods_selection.py`、`test_partial_methods_delivery.py` 和旧运行时旅程显式使用 strict，继续证明恢复路径。
+- **最新 Test Flow verdict（8.1 诊断宽容）**：Linux `dev.default` [run-20260915T142733Z-be69a627](.tmp/pragmatic-dev-evidence-3/run-20260915T142733Z-be69a627/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:bd580c1f836358b1aca427885c6f0604fb7bbfcf60d81294630f352c16a72b3e`（821 files），verdict SHA-256 `2ec047106b8e2aad8b0254dc19131c25e704491607c0811d6c4338c2cd148fd9`。受影响范围由编排器交完整套件覆盖；Core 32、合同 576、单元 2601、集成 110、SameJob 5 项通过，单元 2 项非本平台用例跳过。全部专项纳入本轮，模型调用、token 和费用均为 0。本行是验证后的引用元数据，不属于所引用源码快照；不代表公司内网实测或真实模型 Release 通过。
+
 ## PL-FIX-055：Methods V1 引用提示未明确 marker 必须在当前日志行中连续出现
 
 - **状态**：提示约束修复已实现；验证结论以本条“最新 Test Flow verdict”为准。
+- **后续策略变更（2026-09-15，8.1）**：当前默认 advisory 不再因 marker 不连续拒绝模型发现，详见前述“暂时关闭证据语义拒绝”修复。此处保留的提示与专项继续约束 strict 策略，不代表 advisory 已核验引用。
 - **症状**：Agent 引用 `Rpc call Inventory:Reserve SNO 42 proc timeout` 时选用当前方法声明的
   `Rpc call SNO`，服务端因该 marker 不在当前引用行中连续出现而返回 `METHOD_VALIDATION_FAILED`。
   当前工作区已用合成双端日志复现此机制；用户内网生成 Skill 的完整 marker 列表未核实。
@@ -2633,3 +2729,23 @@
     `test_grounding_rejects_a_receipt_that_does_not_match_injected_marker_cards`，以及
     `test_grounding_rejects_ungrounded_claims` 中的来源行号、marker 与 identity 反例。
 - **最新 Test Flow verdict**：Dev `run-20260905T085215Z-585bef47` 为 `PASS_WITH_WARNINGS`，仅因 performance 为 `NOT_CALIBRATED`；functional、operation、verification 均为 `PASS`，模型调用、token 和费用均为 0。affected 531 passed/24 skipped；完整确定性轨中 Methods V1 Core 30/30、contracts 576/576、unit 1919 passed/68 skipped、integration 41/41、SameJob 5/5，failure/error 均为 0。上述两组 RPC 专项、实际 Specialist prompt 注入检查及复用的 grounding 专项均通过且未跳过。源码快照为 `git-visible-worktree-v1:8324719eb24e4c1288a63660c19234ca5b7ee4a60f5da85d3349432e6a6bbba4`（753 files），工作树与物化源码核验均为 PASS。首轮 `run-20260905T084514Z-ff321bd0` 因借用包路径未加载 `pywintypes` 而在测试收集阶段失败；随后按锁文件创建独立虚拟环境，记录新的 reason、hypothesis 和 expected evidence 后完成本轮验证，两轮证据均保留。本元数据行本身不宣称被其引用的源码快照覆盖；本结论不代表真实模型或内网现场验收。
+
+## PL-FIX-062：Intake 单项元数据误差丢掉已提供的有效参数
+
+- **状态**：已实现，正式结论等待本节最终 Test Flow 元数据。
+- **症状、受影响版本与复现**：8.1.0 / Intake 1.2.0 下，两个有效事实只把引用从 `slot_1` 改为原文 `client_slot=slot_1`，或再加入一个未知字段/重复项，整批输入即失败。同一建案原文中提取 `actual_behavior` 子串还会被误判为改问题。带显式时区的等价 ISO 时间也会被拒绝。已在当前入口以纯内存输入确认，关联 PL-FIX-058 的首次参数采用修复。
+- **根因与修复历史**：来源校验要求引用和值完全相等，批处理任一异常即抛出，重构问题字段被当作更正。Intake 1.3.0 改为有原文支持的逐项采用：允许值为引用内不变的子串，完全重复合并，未知/无来源/不合约束的项过滤，保留其余有效值；忽略无必要的问题字段重构，冻结事实异值仍需新任务。仅完整日期且明确时区的 `problem_time` 可确定性转换为毫秒 UTC。
+- **不可回归行为**：非法顶层 JSON 仍失败；不猜字段别名、日期、时区或改写标识符；不接受不存在于 USER 消息的引用。单项无效不终结其余有效输入，空有效集只追问剩余要求。处理回执只记字段位置、原因与原始/有效摘要，服务端记录一次；五字段模型协议及公开 API/MCP schema 不变，不增加模型调用。
+- **专项回归测试**：`test_intake.py`、`test_intake_tolerance.py` 直接覆盖上下文引用、逐项过滤、重复与冲突、时间规范化、跨轮等价时间重述及重验回执；`test_intake_adoption.py` 和 `test_website_agent.py` 覆盖原始消息到 Skill 参数采用及报告交付；`test_intake_performance.py` 继续验证空闲轮询零模型、零额外状态读写。
+- **最新 Test Flow verdict（8.1 输入宽容）**：Linux `dev.default` [run-20260915T142733Z-be69a627](.tmp/pragmatic-dev-evidence-3/run-20260915T142733Z-be69a627/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:bd580c1f836358b1aca427885c6f0604fb7bbfcf60d81294630f352c16a72b3e`（821 files），verdict SHA-256 `2ec047106b8e2aad8b0254dc19131c25e704491607c0811d6c4338c2cd148fd9`。受影响范围由编排器交完整套件覆盖；Core 32、合同 576、单元 2601、集成 110、SameJob 5 项通过，单元 2 项非本平台用例跳过。全部专项纳入本轮，模型调用、token 和费用均为 0。本行是验证后的引用元数据，不属于所引用源码快照；不代表公司内网实测或真实模型 Release 通过。
+
+## PL-FIX-063：报告与归档重复解析，网站重复快照造成多余请求及误拒绝
+
+- **状态**：已实现，正式结论等待本节最终 Test Flow 元数据。
+- **症状、受影响版本与复现**：8.1.0 每条报告/归档引用都重新拆分同份日志，归档文本与 manifest 重复计算全文摘要。网站先取 CaseView，再取产物列表并逐项交叉匹配；报告下载还会写临时文件再读回。已核对实际调用与数据来源，重复工作随发现数增加，两份产物快照还可能跨归档状态更新。
+- **根因与修复历史**：原辅助函数没有调用级共享结果，网站重复获取同一权威投影。报告和归档改为单次调用内按来源/范围复用拆行与摘要；网站只用已授权 Case 的同一权威产物快照，小报告按声明上限分配内存并流式校验后展示，ZIP 仍走文件流。
+- **不可回归行为**：不增加跨任务缓存；下一次构造重新读取校验，后台 ZIP 实际流哈希保留。多日志处理每次只保留一份完整拆行列表，之后仅保存本次引用需要的行、摘要或片段，不把全部日志拆行结果留到构造结束。只读探针确认初版全来源拆行缓存会增加峰值内存，因此本次同时修正这一问题。网站继续核验归属、来源 Job、类型、可信 ID、大小与实际 SHA-256；可选响应头缺失不误拒，存在则必须匹配；禁止重定向和响应 URL 寻址。SSE 断线不取消诊断，ZIP 异常不撤回已有报告。
+- **专项回归测试**：`test_user_results_performance.py`、`test_result_archive_performance.py` 对重复引用精确计数并检查坏哈希、重复路径和跨调用变化；`examples/website-agent/server.test.mjs` 验证查询次数、流式大小/摘要、缺失响应头及恶意地址。性能验收用操作次数，不据合成耗时承诺内网延迟。
+- **最新 Test Flow verdict（8.1 报告性能）**：Linux `dev.default` [run-20260915T142733Z-be69a627](.tmp/pragmatic-dev-evidence-3/run-20260915T142733Z-be69a627/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:bd580c1f836358b1aca427885c6f0604fb7bbfcf60d81294630f352c16a72b3e`（821 files），verdict SHA-256 `2ec047106b8e2aad8b0254dc19131c25e704491607c0811d6c4338c2cd148fd9`。受影响范围由编排器交完整套件覆盖；Core 32、合同 576、单元 2601、集成 110、SameJob 5 项通过，单元 2 项非本平台用例跳过。全部专项纳入本轮，模型调用、token 和费用均为 0。本行是验证后的引用元数据，不属于所引用源码快照；不代表公司内网实测或真实模型 Release 通过。
+- **首次正式验证后的收口**：`run-20260915T141622Z-7a91517f` 的两项归档计数用例确认验证入口末尾再次调用完整 ZIP 构建，导致第二次拆行和摘要计算。改为复用已核验的报告/manifest 字节完成标准 ZIP 编码，保留逐项与最终字节比较，性能断言不放宽；新增非标准 ZIP 编码拒绝用例。同轮 12 项 advisory 网站旅程均通过，另一集成失败来自显式更正用例仍断言旧提示词，已对齐其固定输出；首轮证据完整保留，最终结论另取新源码 verdict。
+- **第二次正式验证后的收口**：`run-20260915T142244Z-38910c19` 中全部性能计数和 110 项集成旅程通过，唯一失败是归档 AST 边界清单仍绑定提取前的函数名。将原 `build_result_archive` 的两类允许操作原样移到 `_encode_result_archive`，不增加可用归档 API 或输入解包入口，保留精确匹配和禁止清单。

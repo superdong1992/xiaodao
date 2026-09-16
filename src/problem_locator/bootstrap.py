@@ -61,6 +61,7 @@ from problem_locator.entrypoints.replay import (
 from problem_locator.entrypoints.settings import Settings
 from problem_locator.integrations.logparse import build_logparse_runtime
 from problem_locator.dispatch.archive import ArchiveService
+from problem_locator.operational import OperationalState
 from problem_locator.interfaces.composition_hooks import (
     InterfaceDependencies,
     create_asgi_app,
@@ -452,6 +453,11 @@ class ServiceStateAdmin:
         ]
         if all(checks_passed.values()):
             return ReadinessReport(ready=True, checks=checks, error=None)
+
+        operational = getattr(self._scheduler, "operational_state", None)
+        operational_error = None if operational is None else operational.latest_error
+        if operational_error is not None:
+            return ReadinessReport(ready=False, checks=checks, error=operational_error)
 
         if not checks_passed["INSTANCE_LOCK"]:
             code = ErrorCode.INSTANCE_LOCKED
@@ -1193,6 +1199,7 @@ def _assemble(
             replacer=replacer,
         )
         repository.on_terminal = resource_store.forget_case
+        operational_state = OperationalState(clock.now)
         dispatcher = LateBoundDispatcher()
         application = build_application_service(
             repository=repository,
@@ -1207,6 +1214,7 @@ def _assemble(
             notifier=notifier,
             clock=clock,
             ids=ids,
+            operational_state=operational_state,
         )
         route_backend = AgentBackend(
             settings.route_claude_command or settings.claude_command
@@ -1231,6 +1239,7 @@ def _assemble(
             route_backend=route_backend,
             diagnose_backend=diagnose_backend,
             specialized_reviewer_enabled=settings.specialized_reviewer_enabled,
+            methods_evidence_validation=settings.methods_evidence_validation,
             public_progress=agent_store.append_case_progress,
         )
         scheduler = SchedulerService(
@@ -1241,6 +1250,7 @@ def _assemble(
             ids,
             route_workers=settings.route_workers,
             diagnose_workers=settings.diagnose_workers,
+            operational_state=operational_state,
         )
         dispatcher.bind(scheduler)
         retention = RetentionService(
@@ -1262,7 +1272,7 @@ def _assemble(
             scheduler=scheduler,
         )
         archive = ArchiveService(repository, resource_store, publication_guard, notifier, clock,
-            workers=settings.archive_workers)
+            workers=settings.archive_workers, operational_state=operational_state)
         return ServiceComposition(
             settings=settings,
             clock=clock,

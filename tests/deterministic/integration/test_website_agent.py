@@ -6,15 +6,17 @@ import io
 import json
 import threading
 import uuid
+from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
 
-from problem_locator.agent.intake import INTAKE_RESOURCE_LIMITS, IntakeDecision, IntakeValue, build_intake_prompt
+from problem_locator.agent.intake import INTAKE_RESOURCE_LIMITS, IntakeDecision, IntakeError, IntakeValue, build_intake_prompt
 from problem_locator.agent.service import AgentConversationService
 from problem_locator.agent.store import AgentStore
-from problem_locator.contracts import CreateCase, ReviewPolicy, canonical_json_bytes
+from problem_locator.contracts import ApplicationError, ApplicationErrorDetail, ApplicationPortError, CreateCase, ErrorCode, ReviewPolicy, canonical_json_bytes
 from problem_locator.interfaces.http_app import create_http_app
+from problem_locator.operational import OperationalState
 from tests.deterministic.journey.test_rpc_timeout import (
     ARCHIVE, PARAMETER_GROUP_A, _Stack, _windows_extended_path,
 )
@@ -29,13 +31,16 @@ class ScriptedIntake:
     def intake(self, request):
         self.calls.append(request)
         assert request.frozen_problem_spec is not None, "新问题必须先创建 Case，不能先调用 INTAKE。"
-        last = next(item for item in reversed(request.messages) if item.role == "USER")
-
-        def value(name, text):
-            return IntakeValue(name=name, value=text, source_message_id=last.message_id, source_quote=text)
-
-        facts = [value(item.name, PARAMETER_GROUP_A[item.name]) for item in request.requirements
-            if item.kind == "INPUT" and PARAMETER_GROUP_A[item.name] in last.text]
+        facts = []
+        for item in request.requirements:
+            if item.kind != "INPUT":
+                continue
+            text = PARAMETER_GROUP_A[item.name]
+            source = next((message for message in reversed(request.messages)
+                if message.role == "USER" and text in message.text), None)
+            if source is not None:
+                facts.append(IntakeValue(name=item.name, value=text,
+                    source_message_id=source.message_id, source_quote=text))
         if facts:
             return IntakeDecision(action="SUBMIT_SUPPLEMENT", message="已收到补充信息。", problem_fields=[],
                 user_facts=facts)
@@ -105,7 +110,7 @@ def _converse_to_waiting(website):
     "RPC timeout",
     "  RPC timeout\n预期：RPC completes\n订单：synthetic-order-0001\n  ",
 ])
-def test_first_problem_creates_case_with_exact_original_and_mcp_defaults_without_intake(website, monkeypatch, original):
+def test_first_problem_creates_case_before_one_requirement_aware_intake(website, monkeypatch, original):
     stack, store, engine, service, client = website
     commands = []
     execute = stack.application.execute
@@ -123,6 +128,9 @@ def test_first_problem_creates_case_with_exact_original_and_mcp_defaults_without
     assert _post(client, prefix + "/messages", message) == receipt
     assert service.run_once(conversation)
     assert stack.scheduler.wait_until_idle(15)
+    assert engine.calls == []
+    assert service.get_conversation(conversation).current_questions == []
+    assert service.run_once(conversation)
     assert not service.run_once(conversation)
     assert _post(client, prefix + "/messages", message) == receipt
     assert len(commands) == 1
@@ -143,7 +151,7 @@ def test_first_problem_creates_case_with_exact_original_and_mcp_defaults_without
     case = stack.application.get_case(view.case_id).case_view
     assert view.messages[0].status == "APPLIED"
     assert case.raw_problem_text == original and case.user_facts == []
-    assert engine.calls == []
+    assert len(engine.calls) == 1
     events = store.list_events(conversation, limit=500)
     created = next(item for item in events if item.type == "case.updated")
     assert not any(item.type == "assistant.question" for item in events if item.sequence < created.sequence)
@@ -184,14 +192,15 @@ def test_followup_clarification_only_repeats_open_requirement_prompts(website):
     conversation, _, _ = _converse_to_waiting(website)
     before = service.get_conversation(conversation)
     case = stack.application.get_case(before.case_id).case_view
-    expected = [item.prompt for item in case.pending_requirements if item.status.value == "OPEN"]
+    expected = [item.prompt for item in case.pending_requirements
+        if item.status.value == "OPEN" and item.kind.value == "INPUT"]
     service.send_message(conversation, "unclear", "暂时没有更多信息。")
     assert service.run_once(conversation)
     view = service.get_conversation(conversation)
     assert view.case_id == before.case_id and view.current_questions == expected
     assert view.messages[-1].status == "APPLIED"
     assert len(engine.calls) == 1
-    assert stack.application.get_case(view.case_id).case_view.case_revision == case.case_revision
+    assert stack.application.get_case(view.case_id).case_view.case_revision > case.case_revision
     questions = [item for item in store.list_events(conversation, limit=500) if item.type == "assistant.question"]
     assert questions and all(item.data["questions"] == expected for item in questions)
 
@@ -204,7 +213,7 @@ def test_followup_correction_keeps_frozen_problem_and_requires_new_case(website,
 
     def correction(request):
         last = next(item for item in reversed(request.messages) if item.role == "USER")
-        return IntakeDecision(action="NEED_CLARIFICATION", message="收到更正。", user_facts=[],
+        return IntakeDecision(action="NEW_CASE_REQUIRED", message="请新建任务描述更正后的问题。", user_facts=[],
             problem_fields=[IntakeValue(name="statement", value=last.text,
                 source_message_id=last.message_id, source_quote=last.text)])
 
@@ -213,7 +222,7 @@ def test_followup_correction_keeps_frozen_problem_and_requires_new_case(website,
     assert service.run_once(conversation)
     view = service.get_conversation(conversation)
     assert view.case_id == before.case_id and view.messages[-1].status == "UNUSED"
-    assert "新建定位任务" in view.messages[-1].notice
+    assert view.messages[-1].notice == "请新建任务描述更正后的问题。"
     after = stack.application.get_case(view.case_id).case_view
     assert after.problem_spec == case.problem_spec and after.case_revision == case.case_revision
 
@@ -279,6 +288,35 @@ def test_restart_retains_history_and_requires_explicit_new_task(website):
     assert [item.model_dump() for item in store.list_events(conversation)[:len(first_events)]] == first_events
     assert client.post(prefix + "/messages", json={"request_id": "new", "text": "继续"}).status_code == 409
     assert not service.run_once(conversation)
+
+
+@pytest.mark.parametrize("unrelated_runtime_fault", [False, True])
+def test_restart_history_and_sse_survive_missing_volatile_case_with_operational_state(website, unrelated_runtime_fault):
+    stack, store, engine, service, client = website
+    conversation = service.create_conversation("lost-volatile-case").conversation_id
+    service.send_message(conversation, "received", "重启前已接收的问题")
+    missing_case = str(uuid.uuid4())
+    store.bind_case(conversation, missing_case)
+    store.runtime_epoch = "restarted-epoch"
+    store.recover()
+    with pytest.raises(ApplicationPortError) as missing:
+        stack.application.get_case(missing_case)
+    assert missing.value.error.code is ErrorCode.CASE_NOT_FOUND
+    operational = OperationalState()
+    service.application = replace(stack.application, operational_state=operational)
+    if unrelated_runtime_fault:
+        operational.record(case_id=None, job_id=None, phase="RESULT_DELIVERY", error_code=ErrorCode.STATE_WRITE_FAILED)
+    prefix = f"/api/v1/agent/conversations/{conversation}"
+    first = client.get(prefix)
+    assert first.status_code == 200, first.text
+    assert first.json()["data"]["status"] == "INTERRUPTED"
+    assert client.get(prefix).json()["data"]["failure"] == first.json()["data"]["failure"]
+    replay = client.get(prefix + "/events")
+    assert replay.status_code == 200, replay.text
+    frames = [json.loads(frame[6:]) for frame in replay.content.split(b"\n\n") if frame.startswith(b"data: ")]
+    assert frames[-2]["type"] == "conversation.interrupted"
+    assert frames[-1]["type"] == "conversation.completed"
+    assert engine.calls == [] and not service.run_once(conversation)
 
 
 @pytest.mark.parametrize("review_verdict", ["REJECT", "NEED_MORE_EVIDENCE"])
@@ -378,8 +416,168 @@ def test_rejected_case_command_never_claims_the_message_was_adopted(website, mon
     assert view.status == "FAILED"
     assert view.case_id is None
     assert view.messages[0].status == "UNUSED"
+    assert view.failure.code == "AGENT_EXECUTION_FAILED"
+    assert {item["field"]: item["actual"] for item in view.failure.details}["phase"] == "CREATE_CASE"
     public = json.dumps([event.model_dump() for event in store.list_events(conversation)])
     assert "private/path" not in public and "SECRET" not in public
+    assert "private/path" not in view.model_dump_json() and "SECRET" not in view.model_dump_json()
+
+
+def test_invalid_intake_ends_once_with_durable_safe_snapshot_diagnostics(website, monkeypatch):
+    _, store, engine, service, client = website
+    conversation, prefix, _ = _converse_to_waiting(website)
+    calls = []
+
+    def invalid(request):
+        calls.append(request)
+        raise IntakeError("INTAKE_OUTPUT_INVALID", "SECRET /srv/private raw model output")
+
+    monkeypatch.setattr(engine, "intake", invalid)
+    message = {"request_id": "invalid-answer", "text": "现场补充信息"}
+    receipt = _post(client, prefix + "/messages", message)
+    assert service.run_once(conversation)
+    first = client.get(prefix).json()["data"]
+    failure = first["failure"]
+    assert first["status"] == "FAILED" and failure["retryable"] is False
+    assert failure["code"] == "INTAKE_OUTPUT_INVALID"
+    details = {item["field"]: item["actual"] for item in failure["details"]}
+    assert details["phase"] == "INTAKE"
+    uuid.UUID(details["diagnostic_id"])
+    assert len(calls) == 1 and not service.run_once(conversation)
+    assert _post(client, prefix + "/messages", message) == receipt
+    assert client.post(prefix + "/messages", json={"request_id": "again", "text": "更正"}).status_code == 409
+    store.runtime_epoch = "later-runtime"
+    store.recover()
+    assert client.get(prefix).json()["data"]["failure"] == failure
+    events = client.get(prefix + "/events")
+    frames = [json.loads(frame[6:]) for frame in events.content.split(b"\n\n") if frame.startswith(b"data: ")]
+    failed = next(event for event in frames if event["type"] == "agent.failed")
+    assert set(failed["data"]) == {"code", "message"}
+    assert frames[-1]["type"] == "conversation.completed"
+    assert "SECRET" not in json.dumps(first) + events.text
+    assert "/srv/private" not in json.dumps(first) + events.text
+
+
+def test_typed_command_error_keeps_only_safe_field_location_in_failure(website, monkeypatch):
+    stack, store, _, service, client = website
+    conversation = service.create_conversation("typed-location").conversation_id
+    service.send_message(conversation, "message", "待定位的问题")
+
+    def rejected(self, command):
+        raise ApplicationPortError(ApplicationError(code=ErrorCode.VALIDATION_ERROR, message="SECRET /srv/private error",
+            retryable=False, details=[ApplicationErrorDetail(field=field, actual="SECRET actual", expected="SECRET expected",
+                resource_type=None, resource_id=None, resource_ref=None, limit=None, observed=None)
+                for field in ("input_values[2]", "inputs.request_id", "input_values[2]", "raw_output", "inputs./srv/private")]))
+
+    monkeypatch.setattr(type(stack.application), "execute", rejected)
+    assert service.run_once(conversation)
+    prefix = f"/api/v1/agent/conversations/{conversation}"
+    response = client.get(prefix)
+    failure = response.json()["data"]["failure"]
+    assert failure["code"] == "VALIDATION_ERROR" and failure["retryable"] is False
+    assert [item["actual"] for item in failure["details"] if item["field"] == "location"] == ["input_values[2]", "inputs.request_id"]
+    assert next(item["actual"] for item in failure["details"] if item["field"] == "phase") == "CREATE_CASE"
+    assert "SECRET" not in response.text and "/srv/private" not in response.text
+    assert client.get(prefix).json()["data"]["failure"] == failure
+    assert set(next(event.data for event in store.list_events(conversation) if event.type == "agent.failed")) == {"code", "message"}
+
+
+def test_agent_admission_rejects_before_acceptance_and_does_not_finalize_unknown_delivery(website):
+    stack, store, engine, service, client = website
+    conversation, prefix, _ = _converse_to_waiting(website)
+    operational = OperationalState()
+    operational.install_epoch(str(uuid.uuid4()))
+    service.application = replace(stack.application, operational_state=operational)
+    before = store.get_conversation(conversation)
+    operational.record(case_id=before.case_id, job_id=before.job_id, phase="RESULT_DELIVERY",
+        error_code=ErrorCode.STATE_WRITE_FAILED)
+    response = client.post(prefix + "/messages", json={"request_id": "after-fault", "text": "继续"})
+    assert response.status_code == 503 and response.json()["error"]["code"] == "DISPATCH_REJECTED"
+    assert store.get_conversation(conversation) == before
+    assert not service.run_once(conversation) and engine.calls == []
+    response = client.get(prefix)
+    assert response.status_code == 503
+    assert any(item["field"] == "persistence" and item["actual"] == "UNKNOWN" for item in response.json()["error"]["details"])
+    response = client.get(prefix + "/events")
+    assert response.status_code == 503
+    assert not any(event.type == "conversation.completed" for event in store.list_events(conversation, limit=500))
+
+
+def test_accepted_message_before_case_returns_safe_pause_when_another_task_halts_dispatch(website):
+    stack, store, engine, service, client = website
+    conversation = service.create_conversation("accepted-before-fatal").conversation_id
+    empty = service.create_conversation("empty-history").conversation_id
+    closed = service.create_conversation("closed-history").conversation_id
+    store.fail_conversation(closed)
+    prefix = f"/api/v1/agent/conversations/{conversation}"
+    receipt = _post(client, prefix + "/messages", {"request_id": "accepted", "text": "已经接收但尚未创建任务的问题"})
+    before = store.get_conversation(conversation)
+    events = store.list_events(conversation)
+    assert before.case_id is None and before.messages[0].status == "QUEUED"
+    operational = OperationalState()
+    other_case, other_job = str(uuid.uuid4()), str(uuid.uuid4())
+    operational.record(case_id=other_case, job_id=other_job, phase="RESULT_DELIVERY", error_code=ErrorCode.STATE_WRITE_FAILED)
+    service.application = replace(stack.application, operational_state=operational)
+    assert not service.run_once(conversation)
+    for suffix in ("", "/events", ""):
+        response = client.get(prefix + suffix)
+        assert response.status_code == 503, response.text
+        error = response.json()["error"]
+        assert error["code"] == "DISPATCH_REJECTED"
+        assert error["details"] == [{"field": "phase", "actual": "DISPATCH_PAUSED"},
+            {"field": "persistence", "actual": "UNKNOWN"}]
+        assert other_case not in response.text and other_job not in response.text
+    assert client.get(f"/api/v1/agent/conversations/{empty}").status_code == 200
+    assert client.get(f"/api/v1/agent/conversations/{closed}").status_code == 200
+    assert store.get_conversation(conversation) == before and store.get_conversation(conversation).failure is None
+    assert store.list_events(conversation) == events
+    replayed = store.submit_message(conversation, "accepted", "已经接收但尚未创建任务的问题")
+    assert replayed.model_dump(mode="json") == receipt
+    assert engine.calls == []
+
+
+def test_archive_status_double_failure_keeps_json_readable_and_snapshot_uncertainty_ephemeral(website, monkeypatch):
+    stack, store, _, service, client = website
+    conversation, prefix, _ = _converse_to_waiting(website)
+    service.send_message(conversation, "answer", "\n".join(f"{name}={value}" for name, value in PARAMETER_GROUP_A.items()))
+    assert service.run_once(conversation)
+    assert stack.scheduler.wait_until_idle(20)
+    before = store.get_conversation(conversation)
+    assert before.case_status == "RESOLVED" and before.archive_status == "PENDING"
+    operational = OperationalState()
+    operational.install_epoch(str(uuid.uuid4()))
+    service.application = replace(stack.application, operational_state=operational)
+    stack.application.queries._operational = operational
+    stack.archive.operational_state = operational
+    attempted = []
+
+    def fail_status(case_id, status, artifact=None):
+        attempted.append(status)
+        raise RuntimeError("SECRET /srv/private unavailable status persistence")
+
+    monkeypatch.setattr(stack.archive, "_set_status", fail_status)
+    assert stack.archive.run_once()
+    assert attempted == ["READY", "FAILED"]
+    assert operational.faults[-1].phase == "ARCHIVE_STATUS_COMMIT"
+    for _ in range(2):
+        response = client.get(prefix)
+        assert response.status_code == 200, response.text
+        current = response.json()["data"]
+        assert current["status"] == "RUNNING" and current["archive_status"] == "PENDING"
+        details = {item["field"]: item["actual"] for item in current["failure"]["details"]}
+        assert details["phase"] == "ARCHIVE_STATUS_COMMIT" and details["persistence"] == "UNKNOWN"
+        assert "SECRET" not in response.text
+    assert store.get_conversation(conversation).failure is None
+    case_response = client.get(f"/api/v1/cases/{before.case_id}")
+    assert case_response.status_code == 200, case_response.text
+    artifacts = client.get(f"/api/v1/cases/{before.case_id}/artifacts").json()["data"]["artifacts"]
+    report = next(item for item in artifacts if item["kind"] == "USER_RESULT")
+    downloaded = client.get(report["download_url"])
+    assert downloaded.status_code == 200
+    assert hashlib.sha256(downloaded.content).hexdigest() == report["sha256"]
+    assert downloaded.json()["status"] == "COMPLETED"
+    assert service.list_events(conversation)["stream_closed"] is False
+    assert not any(event.type == "conversation.completed" for event in store.list_events(conversation, limit=500))
 
 
 def test_concurrent_message_is_persisted_and_waits_for_serial_intake(website, monkeypatch):

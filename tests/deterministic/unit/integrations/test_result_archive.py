@@ -449,6 +449,14 @@ def test_archive_rejects_a_forged_logparse_source_root() -> None:
         )
 
 
+@pytest.mark.parametrize("ordinals", [(0, 2), (1, 1), (3, 2)])
+def test_archive_rejects_nonpositive_duplicate_or_decreasing_ordinals(ordinals) -> None:
+    logs = tuple(replace(log, target=replace(log.target, ordinal=ordinal))
+                 for log, ordinal in zip(_logs(), ordinals))
+    with pytest.raises(ValueError, match="plan order"):
+        build_result_archive(_report(logs[0]), problem_time=PROBLEM_TIME, target_logs=logs)
+
+
 def test_validator_rejects_any_target_byte_drift() -> None:
     logs = _logs()
     report = _report(logs[0])

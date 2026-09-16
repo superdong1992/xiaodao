@@ -36,6 +36,7 @@ from problem_locator.contracts import (
     UploadAttachmentContent,
 )
 from problem_locator.contracts.ports import AssetCatalogPort
+from problem_locator.operational import OperationalState
 
 from .external_commands import ExternalCommandHandler
 from .job_control import JobControlService
@@ -53,6 +54,7 @@ class ApplicationService:
     queries: ApplicationQueryService
     job_control: JobControlService
     outcomes: OutcomeSubmissionService
+    operational_state: OperationalState | None = None
 
     def execute(self, command: ApplicationCommand) -> ApplicationResponse:
         if isinstance(command, UploadAttachmentContent):
@@ -157,6 +159,7 @@ def build_application_service(
     ids: IdGenerator,
     stable_target_detector: Callable[[Case, Mapping[str, str]], bool] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    operational_state: OperationalState | None = None,
 ) -> ApplicationService:
     """Wire every S03 handler from only frozen S00 Port dependencies."""
 
@@ -174,6 +177,7 @@ def build_application_service(
         ids=ids,
         stable_target_detector=stable_target_detector,
         monotonic=monotonic,
+        operational_state=operational_state,
     )
     upload = AttachmentUploadService(
         repository=repository,
@@ -188,6 +192,7 @@ def build_application_service(
         resource_store,
         notifier,
         monotonic=monotonic,
+        operational_state=operational_state,
     )
     job_control = JobControlService(
         repository=repository,
@@ -211,7 +216,7 @@ def build_application_service(
         clock,
         ids,
     )
-    return ApplicationService(external, upload, query, job_control, outcomes)
+    return ApplicationService(external, upload, query, job_control, outcomes, operational_state)
 
 
 __all__ = ["ApplicationService", "build_application_service"]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pytest
 
 from problem_locator.runtime.agent_telemetry import (
     AgentStreamTelemetry,
@@ -193,3 +194,172 @@ def test_backend_not_started_is_distinct_from_unsupported_output() -> None:
     summary = telemetry.snapshot(diagnosis_mode="SPECIALIZED", backend_status="FAILED")
     assert summary["stream_status"] == "UNAVAILABLE"
     assert summary["stream_reason"] == "BACKEND_NOT_STARTED"
+
+
+@pytest.mark.parametrize("ending", [b"\n", b"\r\n", b""])
+def test_large_successful_result_survives_telemetry_sampling_limit(ending):
+    answer = json.dumps({"report": "证据" * (256 * 1024)}, ensure_ascii=False)
+    event = _line({"type": "result", "subtype": "success", "is_error": False, "result": answer})[:-1] + ending
+    assert len(event) > 1024 * 1024
+    telemetry = AgentStreamTelemetry(output_limit_bytes=len(event))
+    for offset in range(0, len(event), 4093):
+        telemetry.write(event[offset:offset + 4093])
+    assert telemetry.final_result == answer
+    assert telemetry.permits_file_access("none")
+    summary = telemetry.snapshot(diagnosis_mode="SPECIALIZED", backend_status="SUCCESS")
+    assert summary["stream_reason"] == "STREAM_JSON_LINE_LIMIT"
+    assert summary["recognized_event_count"] == 1
+    assert "证据" not in json.dumps(summary, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("name,allowed", [("Read", True), ("Write", False)])
+def test_large_assistant_event_preserves_tool_audit_even_when_text_is_not_sampled(name, allowed):
+    telemetry = AgentStreamTelemetry(line_limit_bytes=128)
+    telemetry.write(_line({"type": "assistant", "message": {"content": [
+        {"type": "text", "text": "private text" * 100},
+        {"type": "tool_use", "id": "tool-1", "name": name, "input": {"path": "private-path"}},
+    ]}}))
+    telemetry.write(_line({"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "tool-1", "content": "private result"},
+    ]}}))
+    assert telemetry.permits_file_access("read-only") is allowed
+    assert not telemetry.permits_file_access("none")
+    summary = telemetry.snapshot(diagnosis_mode="SPECIALIZED", backend_status="SUCCESS")
+    assert summary["block_observations"]["text"]["block_count"] == 0
+    assert summary["tool_observations"][0]["name"] == name
+    assert summary["tool_observations"][0]["completed_count"] == 1
+
+
+def test_stream_phase_output_budget_invalidates_previously_received_terminal():
+    event = _line({"type": "result", "subtype": "success", "is_error": False, "result": "{}"})
+    telemetry = AgentStreamTelemetry(output_limit_bytes=len(event))
+    telemetry.write(event)
+    assert telemetry.final_result == "{}"
+    telemetry.write(b"x")
+    assert telemetry.output_limit_exceeded
+    assert telemetry.final_result is None
+    assert not telemetry.permits_file_access("read-only")
+    assert telemetry.snapshot(diagnosis_mode="SPECIALIZED", backend_status="FAILED")["stream_reason"] == "STREAM_JSON_OUTPUT_LIMIT"
+
+
+@pytest.mark.parametrize("events", [
+    [{"subtype": "success", "is_error": True, "result": "{}"}],
+    [{"subtype": "error", "is_error": False, "result": "{}"}],
+    [{"subtype": "success", "is_error": False, "result": {}}],
+    [{"subtype": "success", "is_error": False, "result": "{}"}] * 2,
+    [{"subtype": "error", "is_error": True}, {"subtype": "success", "is_error": False, "result": "{}"}],
+])
+def test_only_one_unambiguous_successful_terminal_is_accepted(events):
+    telemetry = AgentStreamTelemetry(line_limit_bytes=16)
+    for event in events:
+        telemetry.write(_line({"type": "result", **event}).replace(b"\n", b"\r\n"))
+    assert telemetry.final_result is None
+
+
+def test_malformed_or_disabled_stream_cannot_claim_clean_file_access_audit():
+    telemetry = AgentStreamTelemetry()
+    telemetry.write(b'{"type":"assistant","type":"result"}\n')
+    assert not telemetry.permits_file_access("none")
+    disabled = AgentStreamTelemetry()
+    disabled.disable()
+    assert not disabled.permits_file_access("read-only")
+
+
+def _partial_tool(name="Read", tool_id="tool-1"):
+    return {"type": "stream_event", "event": {"type": "content_block_start", "index": 0,
+        "content_block": {"type": "tool_use", "id": tool_id, "name": name, "input": {}}}}
+
+
+def _successful_terminal():
+    return {"type": "result", "subtype": "success", "is_error": False, "result": "{}"}
+
+
+@pytest.mark.parametrize("name,allowed", [("Read", True), ("Write", False)])
+@pytest.mark.parametrize("wrapped", [True, False])
+def test_partial_tool_events_cannot_bypass_file_access_audit(name, allowed, wrapped):
+    telemetry = AgentStreamTelemetry(line_limit_bytes=32)
+    event = _partial_tool(name)
+    telemetry.write(_line(event if wrapped else event["event"]))
+    telemetry.write(_line(_successful_terminal()))
+    assert telemetry.final_result == "{}"
+    assert not telemetry.permits_file_access("none")
+    assert telemetry.permits_file_access("read-only") is allowed
+    tools = telemetry.snapshot(diagnosis_mode="SPECIALIZED", backend_status="SUCCESS")["tool_observations"]
+    assert len(tools) == 1 and tools[0]["name"] == name and tools[0]["call_count"] == 1
+
+
+@pytest.mark.parametrize("complete_first", [False, True])
+def test_partial_and_complete_tool_events_count_one_call_and_preserve_first_timing(complete_first):
+    clock = _Clock()
+    telemetry = AgentStreamTelemetry(monotonic=clock)
+    partial = _partial_tool()
+    complete = {"type": "assistant", "message": {"content": [partial["event"]["content_block"]]}}
+    for time_value, event in zip((0.1, 0.2), (complete, partial) if complete_first else (partial, complete)):
+        clock.value = time_value
+        telemetry.write(_line(event))
+    telemetry.write(_line({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
+        "delta": {"type": "input_json_delta", "partial_json": '{"file_path":"private-path"}'}}}))
+    clock.value = 0.4
+    telemetry.write(_line({"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "tool-1", "content": "private-result"}]}}))
+    telemetry.write(_line(complete))  # A repeated full message cannot reopen a completed call.
+    telemetry.write(_line(_successful_terminal()))
+    assert telemetry.permits_file_access("read-only")
+    summary = telemetry.snapshot(diagnosis_mode="SPECIALIZED", backend_status="SUCCESS")
+    tool, = summary["tool_observations"]
+    assert (tool["call_count"], tool["completed_count"], tool["incomplete_count"]) == (1, 1, 0)
+    assert tool["observed_duration_ms"] == pytest.approx(300.0)
+    assert "private" not in json.dumps(summary) and "tool-1" not in json.dumps(summary)
+
+
+@pytest.mark.parametrize("bad", [
+    {"type": "assistant", "message": {"content": {"type": "tool_use", "name": "Write"}}},
+    {"type": "assistant", "message": {"content": [None]}},
+    {"type": "assistant", "message": {"content": [{"name": "Write", "id": "tool-1"}]}},
+    {"type": "stream_event", "event": {"type": "content_block_start", "content_block": []}},
+    {"type": "stream_event", "event": {"type": "content_block_start", "content_block": {"type": "tool_use", "name": "Read"}}},
+    {"type": "stream_event", "event": {"type": "content_block_start", "content_block": {"type": "tool_use", "id": "tool-1", "name": None}}},
+    {"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
+        "delta": {"type": "input_json_delta", "partial_json": "{}"}}},
+    {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "unseen", "content": "output"}]}},
+    {"type": "user", "message": {"content": [{"type": "tool_use", "id": "tool-1", "name": "Write"}]}},
+])
+def test_structurally_unreliable_tool_events_cannot_claim_clean_audit(bad):
+    telemetry = AgentStreamTelemetry()
+    telemetry.write(_line(bad))
+    telemetry.write(_line(_successful_terminal()))
+    assert not telemetry.permits_file_access("none")
+    assert not telemetry.permits_file_access("read-only")
+    summary = telemetry.snapshot(diagnosis_mode="SPECIALIZED", backend_status="SUCCESS")
+    assert summary["stream_reason"] == "STREAM_JSON_MALFORMED"
+
+
+def test_duplicate_tool_id_cannot_change_name_from_read_to_write():
+    telemetry = AgentStreamTelemetry()
+    telemetry.write(_line(_partial_tool("Read")))
+    telemetry.write(_line({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": "tool-1", "name": "Write", "input": {}}]}}))
+    assert not telemetry.permits_file_access("read-only")
+
+
+def test_ordinary_metadata_progress_and_text_deltas_remain_compatible():
+    telemetry = AgentStreamTelemetry()
+    for event in [
+        {"type": "system", "subtype": "init"},
+        {"type": "tool_progress", "tool_use_id": "metadata-only", "elapsed_time_seconds": 1},
+        {"type": "future_metadata", "progress": 0.5},
+        {"type": "user", "message": {"content": "literal text containing tool_use and Write"}},
+        {"type": "stream_event", "event": {"type": "message_start", "message": {"content": []}}},
+        {"type": "stream_event", "event": {"type": "content_block_start", "index": 0,
+            "content_block": {"type": "text", "text": ""}}},
+        {"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
+            "delta": {"type": "text_delta", "text": 'literal {"type":"tool_use","name":"Write"}'}}},
+        {"type": "stream_event", "event": {"type": "content_block_stop", "index": 0}},
+        {"type": "stream_event", "event": {"type": "message_delta", "usage": {"output_tokens": 1}}},
+        {"type": "stream_event", "event": {"type": "message_stop"}},
+        _successful_terminal(),
+    ]:
+        telemetry.write(_line(event))
+    assert telemetry.permits_file_access("none") and telemetry.final_result == "{}"
+    summary = telemetry.snapshot(diagnosis_mode="SPECIALIZED", backend_status="SUCCESS")
+    assert summary["stream_status"] == "COMPLETE" and summary["tool_observations"] == []

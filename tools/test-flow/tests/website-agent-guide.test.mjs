@@ -26,13 +26,21 @@ function reportResponse(ok = true) {
   return { ok, json: async () => ({ ok, data: { report: "verified fixture" } }) };
 }
 
-function browser({ fetchReport = async () => reportResponse(), renderReport = async () => {} } = {}) {
+function snapshotResponse(data = {}, ok = true) {
+  return { ok, json: async () => ({ ok, data: { schema_version: 1, conversation_id: conversationId,
+    status: "RUNNING", case_status: null, failure: null, messages: [], attachments: [], current_questions: [], ...data } }) };
+}
+
+function browser({ fetchReport = async () => reportResponse(), renderReport = async () => {},
+  fetchSnapshot = async () => snapshotResponse(), renderFailure = async () => {} } = {}) {
   const listeners = new Map();
   let source;
   const trace = [];
   const retries = [];
   const requests = [];
   const urls = [];
+  const snapshots = [];
+  const failures = [];
   const context = vm.createContext({
     conversationId,
     EventSource: class {
@@ -42,8 +50,10 @@ function browser({ fetchReport = async () => reportResponse(), renderReport = as
     },
     renderEventAsText: async (event) => { trace.push(`${event.sequence}:${event.type}`); },
     renderVerifiedReport: async (data) => { await renderReport(data); trace.push("report-rendered"); },
+    renderConversationAsText: async (data) => { snapshots.push(data); },
+    renderFailureAsText: async (data) => { await renderFailure(data); failures.push(data); trace.push("failure-rendered"); },
     showEventRetry: (error) => { retries.push(error.message); trace.push("retry"); },
-    fetch: (url) => { requests.push(url); return fetchReport(url); },
+    fetch: (url) => { requests.push(url); return url.endsWith("/report") ? fetchReport(url) : fetchSnapshot(url); },
   });
   vm.runInContext(subscriptionSource, context, { filename: "website-agent-api.md", timeout: 1000 });
   assert.deepEqual(urls, [`/api/agent/conversations/${conversationId}/events`]);
@@ -64,7 +74,7 @@ function browser({ fetchReport = async () => reportResponse(), renderReport = as
     }
   };
   return {
-    trace, retries, requests, emitWire,
+    trace, retries, requests, emitWire, snapshots, failures,
     get cursor() { return vm.runInContext("lastSequence", context); },
     get pending() { return vm.runInContext("pending", context); },
     get stopped() { return vm.runInContext("stopped", context); },
@@ -108,7 +118,7 @@ test("documented onmessage dispatches every supported business type from JSON", 
   types.forEach((type, index) => page.emit(type, index + 1));
   await page.drain();
   assert.deepEqual(page.trace.filter((item) => /^\d+:/.test(item)), types.map((type, index) => `${index + 1}:${type}`));
-  assert.equal(page.requests.length, 1);
+  assert.equal(page.requests.filter((url) => url.endsWith("/report")).length, 1);
   assert.equal(page.cursor, types.length);
   assert.equal(page.stopped, true);
   assert.deepEqual(page.retries, []);
@@ -128,7 +138,7 @@ test("documented SSE waits for the verified report before advancing or closing",
   download.resolve(reportResponse());
   await page.drain();
   assert.deepEqual(page.trace, ["1:result.available", "report-rendered", "2:conversation.completed", "closed"]);
-  assert.deepEqual(page.requests, [`/api/agent/conversations/${conversationId}/report`]);
+  assert.deepEqual(page.requests, [`/api/agent/conversations/${conversationId}`, `/api/agent/conversations/${conversationId}/report`]);
   assert.equal(page.cursor, 2);
   assert.equal(page.pending, 0);
   assert.deepEqual(page.retries, []);
@@ -185,7 +195,7 @@ test("documented SSE deduplicates queued and replayed report events", async () =
   page.emit("conversation.completed", 3);
   await page.drain();
   assert.deepEqual(page.trace, ["1:result.available", "report-rendered", "2:agent.progress", "3:conversation.completed", "closed"]);
-  assert.equal(page.requests.length, 1);
+  assert.equal(page.requests.filter((url) => url.endsWith("/report")).length, 1);
   assert.equal(page.cursor, 3);
 });
 
@@ -208,6 +218,89 @@ test("documented SSE bounds pending work to 128 and stops safely on overflow", a
   assert.equal(page.pending, 0);
   assert.equal(page.cursor, 0);
   assert.deepEqual(page.trace, ["1:result.available", "closed", "retry"]);
+});
+
+const publicFailure = { code: "INTAKE_OUTPUT_INVALID", message: "补充信息整理失败，请核对输入后新建任务。", retryable: false,
+  details: [{ field: "phase", actual: "INTAKE" }, { field: "diagnostic_id", actual: "diag-persisted-failure" }] };
+
+test("documented page refresh restores durable failure without skipping unprocessed history", async () => {
+  const page = browser({ fetchSnapshot: async () => snapshotResponse({ status: "FAILED", failure: publicFailure, last_event_id: 99 }) });
+  await page.drain();
+  assert.deepEqual(page.failures, [publicFailure]);
+  assert.equal(page.cursor, 0);
+  assert.equal(page.stopped, false);
+  page.emit("agent.progress", 1);
+  await page.drain();
+  assert.equal(page.cursor, 1);
+  assert.deepEqual(page.requests, [`/api/agent/conversations/${conversationId}`]);
+});
+
+for (const type of ["agent.failed", "conversation.interrupted"]) {
+  test(`documented ${type} waits for snapshot and failure rendering before advancing or closing`, async () => {
+    const snapshot = deferred();
+    const snapshotStarted = deferred();
+    const rendering = deferred();
+    const renderingStarted = deferred();
+    let reads = 0;
+    const page = browser({ fetchSnapshot: async () => {
+      if (++reads === 1) return snapshotResponse();
+      snapshotStarted.resolve();
+      return snapshot.promise;
+    }, renderFailure: async () => { renderingStarted.resolve(); await rendering.promise; } });
+    await page.drain();
+    page.emit(type, 1);
+    page.emit("conversation.completed", 2);
+    await snapshotStarted.promise;
+    assert.equal(page.cursor, 0);
+    assert.equal(page.stopped, false);
+    snapshot.resolve(snapshotResponse({ status: "FAILED", failure: publicFailure }));
+    await renderingStarted.promise;
+    assert.equal(page.cursor, 0);
+    assert.equal(page.stopped, false);
+    rendering.resolve();
+    await page.drain();
+    assert.deepEqual(page.trace, [`1:${type}`, "failure-rendered", "2:conversation.completed", "closed"]);
+    assert.equal(page.cursor, 2);
+    assert.deepEqual(page.failures, [publicFailure]);
+    assert.equal(reads, 2);
+  });
+}
+
+test("documented failed snapshot fetch preserves prior cursor and prevents completion", async () => {
+  let reads = 0;
+  const page = browser({ fetchSnapshot: async () => snapshotResponse({}, ++reads === 1) });
+  page.emit("agent.progress", 1);
+  await page.drain();
+  page.emit("agent.failed", 2);
+  page.emit("conversation.completed", 3);
+  await page.drain();
+  assert.equal(page.cursor, 1);
+  assert.equal(page.stopped, true);
+  assert.deepEqual(page.trace, ["1:agent.progress", "2:agent.failed", "closed", "retry"]);
+  assert.deepEqual(page.failures, []);
+  assert.equal(page.retries.length, 1);
+});
+
+test("documented archive uncertainty on refresh renders failure and loads JSON before ZIP is ready", async () => {
+  const archiveFailure = { ...publicFailure, code: "DISPATCH_REJECTED", message: "报告已生成，但归档状态暂时无法确认。",
+    details: [{ field: "phase", actual: "ARCHIVE_STATUS_COMMIT" }, { field: "persistence", actual: "UNKNOWN" }] };
+  const page = browser({ fetchSnapshot: async () => snapshotResponse({ case_status: "RESOLVED", archive_status: "PENDING", failure: archiveFailure }) });
+  await page.drain();
+  assert.deepEqual(page.trace, ["failure-rendered", "report-rendered"]);
+  assert.deepEqual(page.failures, [archiveFailure]);
+  assert.deepEqual(page.requests, [`/api/agent/conversations/${conversationId}`, `/api/agent/conversations/${conversationId}/report`]);
+  assert.equal(page.cursor, 0);
+  assert.equal(page.stopped, false);
+});
+
+test("documented refresh rejects another conversation before displaying its content", async () => {
+  const page = browser({ fetchSnapshot: async () => snapshotResponse({ conversation_id: "another-conversation", failure: publicFailure }) });
+  page.emit("conversation.completed", 1);
+  await page.drain();
+  assert.deepEqual(page.snapshots, []);
+  assert.deepEqual(page.failures, []);
+  assert.deepEqual(page.trace, ["closed", "retry"]);
+  assert.equal(page.cursor, 0);
 });
 
 for (const [name, overrides, frame] of [
@@ -233,11 +326,11 @@ for (const [name, overrides, frame] of [
     assert.equal(page.pending, 0);
     assert.equal(page.retries.length, 1);
     assert.deepEqual(page.trace, ["closed", "retry"]);
-    assert.deepEqual(page.requests, []);
+    assert.deepEqual(page.requests, [`/api/agent/conversations/${conversationId}`]);
   });
 }
 
-test("website guidance explains data-only replay, manual cursors and preview migration consistently", () => {
+test("website guidance separates unchanged SSE v1 from the required 8.1 r2 data upgrade", () => {
   for (const [name, content] of [["API reference", guide], ["quickstart", quickstart], ["backend README", example]]) {
     for (const term of ["onmessage", "sequence", "type", "Last-Event-ID", "fetch", "conversation.completed"])
       assert.ok(content.includes(term), `${name} is missing ${term}`);
@@ -245,7 +338,11 @@ test("website guidance explains data-only replay, manual cursors and preview mig
     assert.match(content, /(?:重连|回放)[\s\S]*历史/);
     assert.match(content, /(?:处理成功|成功后才推进游标)/);
     assert.match(content, /8\.0\.0.*预览版/);
-    assert.match(content, /V11.*(?:合同不变|持久合同不变)/);
+    assert.match(content, /8\.1\.0/);
+    assert.match(content, /v11-contract-r2/);
+    assert.match(content, /(?:显式.*升级|必须.*副本升级)/);
+    assert.ok(content.includes("data-upgrade-v11-r2.md"));
+    assert.match(content, /(?:那次|历史)[\s\S]*没有改变 V11 数据合同/);
     assert.doesNotMatch(content, /会在短暂断线时自动携带/);
     assert.doesNotMatch(content, /自带的游标表示/);
   }
@@ -255,7 +352,7 @@ test("website guidance explains data-only replay, manual cursors and preview mig
 
 test("quickstart identifies the deployed contract and separates preflight from model acceptance", () => {
   const openapi = JSON.parse(read("schemas/v2/web-api.openapi.snapshot.json"));
-  assert.equal(openapi.info.version, "8.0.0");
+  assert.equal(openapi.info.version, "8.1.0");
   assert.ok(quickstart.includes(`\`${openapi.info.version}\``));
   assert.match(quickstart, /V11/);
   const preflight = quickstart.split("## 2.")[1].split("## 3.")[0];
@@ -292,9 +389,9 @@ test("example setup documents the actual authorization callbacks and safe deploy
 test("website onboarding entry points and relative documentation links resolve", () => {
   const entrypoints = new Map([
     ["README.md", ["docs/website-agent-quickstart.md", "docs/website-agent-api.md", "examples/website-agent/README.md"]],
-    ["docs/website-agent-api.md", ["website-agent-quickstart.md", "../schemas/v2/web-api.openapi.snapshot.json"]],
-    ["docs/website-agent-quickstart.md", ["website-agent-api.md", "../examples/website-agent/README.md", "../tools/test-flow/README.md"]],
-    ["examples/website-agent/README.md", ["../../docs/website-agent-quickstart.md", "../../docs/website-agent-api.md", "server.ts"]],
+    ["docs/website-agent-api.md", ["website-agent-quickstart.md", "../schemas/v2/web-api.openapi.snapshot.json", "data-upgrade-v11-r2.md"]],
+    ["docs/website-agent-quickstart.md", ["website-agent-api.md", "../examples/website-agent/README.md", "../tools/test-flow/README.md", "data-upgrade-v11-r2.md"]],
+    ["examples/website-agent/README.md", ["../../docs/website-agent-quickstart.md", "../../docs/website-agent-api.md", "server.ts", "../../docs/data-upgrade-v11-r2.md"]],
   ]);
   for (const [filename, required] of entrypoints) {
     const markdown = read(filename);

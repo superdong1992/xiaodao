@@ -537,7 +537,7 @@ def test_replay_document_parent_sync_failure_rolls_back_complete_link(
 
 def test_v11_state_contract_is_the_replay_hard_cut() -> None:
     assert SCHEMA_VERSION == 11
-    assert CONTRACT_REVISION == "v11-contract-r1"
+    assert CONTRACT_REVISION == "v11-contract-r2"
     assert ReplayManifest.model_fields["state_schema_version"].annotation is not None
     assert ReplayManifest.model_json_schema()["properties"]["state_schema_version"] == {
         "const": 11,
