@@ -1479,6 +1479,31 @@ class DiagnosisRuntime:
         except RejectedAgentOutputError as exc:
             self._archive_rejected_agent_output(job, exc)
             raise
+        extraction = validated_draft.model_json_extraction
+        if extraction is not None:
+            diagnostic_id = self._id_generator.new("diagnostic")
+            raw_name = {
+                JobType.ROUTE: "route-response.raw.txt",
+                JobType.DIAGNOSE: "method-diagnosis.raw.txt",
+                JobType.REVIEW: "method-review.raw.txt",
+            }[job.job_type]
+            # DIAGNOSE already persists the original before parsing. Other
+            # phases persist it here; no extra audit I/O for plain JSON.
+            if job.job_type is not JobType.DIAGNOSE:
+                self._publish_audit_bytes(job, raw_name, extraction.raw_bytes)
+            self._publish_audit_bytes(job, "model-response.extracted.txt", extraction.effective_bytes)
+            extraction_receipt = {
+                **extraction.to_receipt(), "diagnostic_id": diagnostic_id,
+                "case_id": job.case_id, "job_id": job.job_id,
+                "phase": job.job_type.value, "raw_file": raw_name,
+                "extracted_file": "model-response.extracted.txt",
+                "validated_draft_sha256": bytes_sha256(validated_draft.canonical_bytes),
+            }
+            self._publish_audit_bytes(job, "model-json-extraction.json",
+                canonical_json_bytes(extraction_receipt))
+            log_event("runtime.model_json.extracted", case_id=job.case_id,
+                job_id=job.job_id, diagnostic_id=diagnostic_id,
+                phase=job.job_type.value, **extraction.to_receipt())
         if isinstance(validated_draft, ValidatedAgentDraft) and validated_draft.route_recovery is not None:
             recovery = validated_draft.route_recovery
             diagnostic_id = self._id_generator.new("diagnostic")
@@ -1486,7 +1511,8 @@ class DiagnosisRuntime:
                 **recovery.to_receipt(), "diagnostic_id": diagnostic_id,
                 "case_id": job.case_id, "job_id": job.job_id, "phase": "ROUTE",
             }
-            self._publish_audit_bytes(job, "route-response.raw.txt", recovery.raw_bytes)
+            if extraction is None:
+                self._publish_audit_bytes(job, "route-response.raw.txt", recovery.raw_bytes)
             self._publish_audit_bytes(job, "route-response.effective.txt", recovery.effective_bytes)
             self._publish_audit_bytes(job, "route-json-recovery.json", canonical_json_bytes(recovery_receipt))
             log_event("runtime.route.reason_quotes_recovered", case_id=job.case_id,
@@ -1585,7 +1611,7 @@ class DiagnosisRuntime:
             authoritative_targets = mapped.authoritative_targets
             target_logs = mapped.target_logs
         elif isinstance(validated_draft, ValidatedMethodReviewDraft):
-            if validated_draft.raw_bytes is not None:
+            if validated_draft.raw_bytes is not None and extraction is None:
                 self._publish_audit_bytes(job, "method-review.raw.txt", validated_draft.raw_bytes)
             if prior_methods_diagnosis is None or diagnosis_audit is None:
                 raise _unexpected_failure()

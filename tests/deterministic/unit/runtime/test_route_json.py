@@ -7,6 +7,7 @@ import pytest
 
 from problem_locator.contracts import InvalidJsonBytesError, bytes_sha256
 from problem_locator.runtime.model_json import parse_model_json_bytes
+from problem_locator.runtime import route_json
 from problem_locator.runtime.route_json import (
     MAX_ROUTE_RECOVERY_BYTES,
     MAX_ROUTE_RECOVERY_QUOTES,
@@ -192,3 +193,138 @@ def test_conflicting_possible_control_field_boundaries_are_not_guessed():
     raw = b'{"reason":"x","confidence":0.1,"skill_id":"a"junk","confidence":0.9,"skill_id":null}'
     with pytest.raises(InvalidJsonBytesError):
         parse_route_json_bytes(raw)
+
+
+@pytest.mark.parametrize("fenced", [False, True])
+def test_mixed_markdown_and_final_route_json_use_one_selected_body(fenced):
+    body = _route(json.dumps('选择 "rpc" 方法', ensure_ascii=False))
+    prefix = "## 路由说明\r\n已结合问题描述选择定位方法。\r\n".encode()
+    if fenced:
+        prefix += b"```json\r\n"
+    suffix = b"\r\n```\r\n" if fenced else b"\r\n"
+    raw = prefix + body + suffix
+
+    parsed = parse_route_json_bytes(raw)
+
+    assert parsed.document.value["reason"] == '选择 "rpc" 方法'
+    assert parsed.recovery is None
+    assert parsed.extraction is not None
+    assert parsed.extraction.raw_bytes == raw
+    assert parsed.extraction.effective_bytes.strip() == body
+    assert raw[parsed.extraction.start:parsed.extraction.end] == parsed.extraction.effective_bytes
+
+
+def test_mixed_fence_and_reason_recovery_keep_separate_original_byte_receipts():
+    prefix = "\ufeff## 路由说明 🦊\r\n已完成选择。\r\n```json\r\n".encode()
+    body = _route('"使用 "方法🦊" 定位"')
+    suffix = b"\r\n```\r\n"
+    raw = prefix + body + suffix
+
+    parsed = parse_route_json_bytes(raw)
+
+    assert parsed.document.value["reason"] == '使用 "方法🦊" 定位'
+    assert parsed.extraction is not None
+    assert parsed.recovery is not None
+    extraction = parsed.extraction
+    recovery = parsed.recovery
+    assert extraction.raw_bytes == recovery.raw_bytes == raw
+    assert raw[extraction.start:extraction.end] == extraction.effective_bytes
+    assert extraction.effective_bytes.strip() == body
+    assert recovery.effective_bytes.startswith(prefix)
+    assert recovery.effective_bytes.endswith(suffix)
+    assert recovery.inserted_escape_offsets == (
+        raw.index('"方法'.encode()), raw.index('" 定位'.encode()),
+    )
+    restored = bytearray(recovery.effective_bytes)
+    for number, offset in reversed(list(enumerate(recovery.inserted_escape_offsets))):
+        assert restored[offset + number:offset + number + 2] == b'\\"'
+        del restored[offset + number]
+    assert bytes(restored) == raw
+    adopted_body = recovery.effective_bytes[
+        extraction.start:extraction.end + len(recovery.inserted_escape_offsets)
+    ]
+    assert parse_model_json_bytes(adopted_body) == parsed.document
+    assert extraction.to_receipt()["raw_sha256"] == recovery.to_receipt()["raw_sha256"]
+    assert extraction.to_receipt()["effective_sha256"] == bytes_sha256(extraction.effective_bytes)
+    assert recovery.to_receipt()["effective_sha256"] == bytes_sha256(recovery.effective_bytes)
+
+
+@pytest.mark.parametrize("body", [
+    b'{"skill_id":null,"reason":"use "rpc"","confidence":true}',
+    b'{"skill_id":null,"reason":"use "rpc"","confidence":NaN}',
+    b'{"skill_id":null,"reason":"use "rpc"","confidence":-1}',
+    b'{"skill_id":null,"reason":"use "rpc"","confidence":0.9,"extra":1}',
+    b'{"skill_id":null,"reason":"use "rpc"","confidence":0.9,"skill_id":"a"}',
+    b'{"skill_id":"broken "id"","reason":"good","confidence":0.9}',
+])
+def test_extracted_route_keeps_existing_quote_recovery_controls(body):
+    raw = b"## Explanation\nFinal result:\n```json\n" + body + b"\n```\n"
+    with pytest.raises(InvalidJsonBytesError):
+        parse_route_json_bytes(raw)
+
+
+@pytest.mark.parametrize("fenced", [False, True])
+def test_quote_recovery_cannot_disambiguate_multiple_mixed_json_candidates(fenced):
+    first = _route('"use "rpc""')
+    second = _route('"other"')
+    if fenced:
+        raw = b"## Explanation\n```json\n" + first + b"\n```\n```json\n" + second + b"\n```"
+    else:
+        raw = b"## Explanation\n" + first + b"\n" + second
+    with pytest.raises(InvalidJsonBytesError):
+        parse_route_json_bytes(raw)
+
+
+@pytest.mark.parametrize("raw", [
+    _route('"valid"'),
+    _route('"use "rpc""'),
+    b"```json\n" + _route('"use "rpc""') + b"\n```",
+])
+def test_existing_single_json_path_never_scans_mixed_output(raw, monkeypatch):
+    def unexpected_extraction(_raw):
+        pytest.fail("existing JSON responses must not scan for mixed candidates")
+
+    monkeypatch.setattr(route_json, "extract_model_json_bytes", unexpected_extraction)
+    assert parse_route_json_bytes(raw).extraction is None
+
+
+@pytest.mark.parametrize("raw", [
+    _route('"use "rpc""') + _route('"other"'),
+    b"```json\nExplanation:\n" + _route('"valid"') + b"\n```",
+    b"```json\n" + _route('"use "rpc""') + b"\n" + _route('"other"') + b"\n```",
+])
+def test_rejected_complete_json_or_fence_does_not_search_for_an_inner_result(raw, monkeypatch):
+    def unexpected_extraction(_raw):
+        pytest.fail("a rejected complete JSON wrapper must not select a nested result")
+
+    monkeypatch.setattr(route_json, "extract_model_json_bytes", unexpected_extraction)
+    with pytest.raises(InvalidJsonBytesError):
+        parse_route_json_bytes(raw)
+
+
+def test_mixed_reason_recovery_selects_once_without_multiplying_candidate_parses(monkeypatch):
+    real_extract = route_json.extract_model_json_bytes
+    real_parse = route_json.parse_agent_json_bytes
+    extractions: list[bytes] = []
+    parses: list[bytes] = []
+
+    def counted_extract(raw):
+        extractions.append(raw)
+        return real_extract(raw)
+
+    def counted_parse(raw):
+        parses.append(raw)
+        return real_parse(raw)
+
+    monkeypatch.setattr(route_json, "extract_model_json_bytes", counted_extract)
+    monkeypatch.setattr(route_json, "parse_agent_json_bytes", counted_parse)
+    body = _route('"use "rpc" because "timeout" matches"')
+    plain = parse_route_json_bytes(body)
+    plain_parses = len(parses)
+    assert not extractions
+    parses.clear()
+    mixed_raw = b"## Explanation\n```json\n" + body + b"\n```"
+    mixed = parse_route_json_bytes(mixed_raw)
+    assert mixed.document == plain.document
+    assert extractions == [mixed_raw]
+    assert len(parses) == plain_parses + 1

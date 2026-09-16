@@ -18,7 +18,11 @@ from problem_locator.integrations.agent_json import (
     AgentJsonDocument,
     parse_agent_json_bytes,
 )
-from problem_locator.runtime.model_json import normalize_model_json_bytes
+from problem_locator.runtime.model_json import (
+    ModelJsonExtraction,
+    extract_model_json_bytes,
+    normalize_model_json_bytes,
+)
 
 
 # These limits apply only after strict parsing fails. At most 128 candidates of
@@ -56,6 +60,7 @@ class RouteQuoteRecovery:
 class RouteJsonParse:
     document: AgentJsonDocument
     recovery: RouteQuoteRecovery | None = None
+    extraction: ModelJsonExtraction | None = None
 
 
 def _skip_space(text: str, offset: int) -> int:
@@ -131,14 +136,8 @@ def _route_shape(value: Any) -> bool:
     )
 
 
-def parse_route_json_bytes(raw: bytes) -> RouteJsonParse:
-    """Strictly parse, or recover one unambiguous ROUTE reason quote failure.
-
-    The returned effective bytes preserve all original bytes, including any BOM
-    or complete presentation fence, except for the recorded inserted backslashes.
-    The caller must still perform the complete normal ROUTE business validation.
-    """
-    normalized, body_offset = normalize_model_json_bytes(raw)
+def _parse_route_body(raw: bytes, normalized: bytes, body_offset: int) -> RouteJsonParse:
+    """Parse one selected body; never search another candidate during recovery."""
     try:
         return RouteJsonParse(parse_agent_json_bytes(normalized))
     except RecursionError as exc:
@@ -182,18 +181,19 @@ def parse_route_json_bytes(raw: bytes) -> RouteJsonParse:
         if len(quotes) >= MAX_ROUTE_RECOVERY_QUOTES:
             raise InvalidJsonBytesError("ROUTE quote recovery exceeds the 128-quote search budget") from original_error
         if quotes and _FIELD_SHAPE.search(text[start:offset]) is None:
-            byte_offsets = tuple(
-                body_offset + len(text[:position].encode("utf-8"))
-                for position in quotes
-            )
-            effective = _insert_escapes(raw, byte_offsets)
-            effective_body, _ = normalize_model_json_bytes(effective)
+            relative_offsets = tuple(len(text[:position].encode("utf-8")) for position in quotes)
+            byte_offsets = tuple(body_offset + position for position in relative_offsets)
+            effective_body = _insert_escapes(normalized, relative_offsets)
             try:
                 document = parse_agent_json_bytes(effective_body)
             except (InvalidJsonBytesError, RecursionError):
                 pass
             else:
                 if _route_shape(document.value):
+                    effective = (
+                        effective_body if body_offset == 0 and len(normalized) == len(raw)
+                        else _insert_escapes(raw, byte_offsets)
+                    )
                     candidates.append(RouteJsonParse(
                         document, RouteQuoteRecovery(raw, effective, byte_offsets)
                     ))
@@ -204,6 +204,30 @@ def parse_route_json_bytes(raw: bytes) -> RouteJsonParse:
     if len(candidates) != 1:
         raise InvalidJsonBytesError("ROUTE reason quotes cannot be recovered unambiguously") from original_error
     return candidates[0]
+
+
+def parse_route_json_bytes(raw: bytes) -> RouteJsonParse:
+    """Parse a complete ROUTE response, with bounded presentation compatibility.
+
+    Strict parsing and existing reason-only recovery run first. Mixed Markdown
+    may supply one unambiguous final JSON body, which then receives exactly the
+    same parsing and recovery. Recovery receipts preserve all original bytes
+    except their recorded inserted backslashes, even when extraction is needed.
+    Extraction receipts retain the selected original body before quote recovery.
+    The caller must still perform the complete normal ROUTE business validation.
+    """
+    normalized, body_offset = normalize_model_json_bytes(raw)
+    try:
+        return _parse_route_body(raw, normalized, body_offset)
+    except InvalidJsonBytesError:
+        # A JSON root or an already unwrapped complete fence must not be searched
+        # again for nested fragments after syntax/semantic/recovery rejection.
+        consumed_fence = raw[:body_offset].removeprefix(b"\xef\xbb\xbf").strip(b" \t\r\n")
+        if consumed_fence or normalized.startswith((b"{", b"[", b'"')):
+            raise
+    extraction = extract_model_json_bytes(raw)
+    parsed = _parse_route_body(raw, extraction.effective_bytes, extraction.start)
+    return RouteJsonParse(parsed.document, parsed.recovery, extraction)
 
 
 __all__ = [

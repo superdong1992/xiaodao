@@ -131,6 +131,8 @@ def _write_file_proposal(root: Path, relative_path: str, content: bytes) -> Path
     (b"\xef\xbb\xbf", b""),
     (b"```json\n", b"\n```"),
     (b"\xef\xbb\xbf```\r\n", b"\r\n```"),
+    (b"## Analysis\nFinal answer:\n```json\n", b"\n```"),
+    (b"## Analysis\r\nFinal answer:\r\n", b"\r\n"),
 ])
 def test_methods_model_file_normalization_preserves_exact_raw_audit_bytes(tmp_path, role, prefix, suffix):
     job, manifest, value = _diagnosis_inputs()
@@ -147,6 +149,12 @@ def test_methods_model_file_normalization_preserves_exact_raw_audit_bytes(tmp_pa
     assert result.raw_bytes == raw
     assert result.canonical_bytes == canonical_json_bytes(value)
     assert path.read_bytes() == raw
+    if prefix.startswith(b"##"):
+        assert result.model_json_extraction is not None
+        assert result.model_json_extraction.raw_bytes == raw
+        assert json.loads(result.model_json_extraction.effective_bytes) == value
+    else:
+        assert result.model_json_extraction is None
 
 
 @pytest.mark.parametrize("raw", [

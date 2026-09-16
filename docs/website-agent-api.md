@@ -460,4 +460,6 @@ node --test examples/website-agent/server.test.mjs
 
 `INTAKE_CLAUDE_COMMAND` 配置独立补充信息整理角色；缺省沿用路由角色命令。该角色只在已建 Case 的补充点整理用户消息和公开 requirements，不负责创建任务，不获得诊断工具、日志读取或发布结果权限。`METHODS_EVIDENCE_VALIDATION` 当前默认为 `advisory`，暂时关闭 Methods 证据语义一致性的拒绝检查，保留模型判断并在 PARTIAL 报告中说明未经复核；`strict` 恢复原核验。`SPECIALIZED_REVIEWER_ENABLED` 单独控制整份结果的模型审核，Reviewer 继承对应诊断的证据策略。输入单项无效只影响该项；非法顶层 JSON、共享输入变化和权限异常仍失败。不增加模型重试或续办。详见[诊断交付策略](diagnosis-advisory.md)。
 
+公司模型若在最终 `result` 中先写 Markdown 说明、再给唯一完整 JSON，服务端模型入口会按[受限提取规则](model-output-compatibility.md#说明文字与最终-json)处理，前端无需自行截取或修复。多个候选、截断或无法识别的结果仍返回具体失败信息。`stream-json` 只规定 CLI 事件外层，不保证其中的业务字符串符合 JSON；提示仍要求只输出合同对象，兼容逻辑不增加模型调用。
+
 新部署使用全新空 `DATA_ROOT`；升级 `8.0.0` 时使用显式生成并核验的 r2 副本，原目录保持原样。其他旧数据按升级说明支持范围处理，不自动迁移，也不从旧 `methods_result` 反推报告。MCP 仍为原来的七个工具，输入继续根层扁平；网站直接使用 REST Agent 接口。

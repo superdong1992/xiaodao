@@ -76,7 +76,7 @@ from .methods_evaluation_v2 import (
     evaluate_method_role_v2,
 )
 from .methods_grounding import MethodDiagnosisDraftV1, MethodReviewV1
-from .model_json import parse_model_json_bytes
+from .model_json import ModelJsonExtraction, parse_model_json_response
 from .route_json import RouteQuoteRecovery
 from .outcome_finalizer import (
     DRAFT_FINALIZATION_MARKER_NAME,
@@ -416,6 +416,7 @@ class ValidatedAgentDraft:
     authoritative_targets: AuthoritativeTargetSet | None
     target_logs: tuple[CapturedTargetLog, ...]
     route_recovery: RouteQuoteRecovery | None = None
+    model_json_extraction: ModelJsonExtraction | None = None
 
 
 class ValidatedOutputKind(StrEnum):
@@ -437,6 +438,7 @@ class ValidatedMethodDiagnosisDraft:
     draft: MethodDiagnosisDraftV1 | Mapping[str, Any]
     canonical_bytes: bytes
     raw_bytes: bytes | None = None
+    model_json_extraction: ModelJsonExtraction | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -450,6 +452,7 @@ class ValidatedMethodReviewDraft:
     draft: MethodReviewV1
     canonical_bytes: bytes
     raw_bytes: bytes | None = None
+    model_json_extraction: ModelJsonExtraction | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2077,6 +2080,7 @@ def _read_method_agent_output(
     final_outcome_state = "not_checked"
     final_outcome_bytes: int | None = None
     raw_draft_bytes: bytes | None = None
+    model_json_extraction: ModelJsonExtraction | None = None
     parsed: MethodDiagnosisDraftV1 | MethodReviewV1 | None = None
     canonical_bytes: bytes | None = None
     try:
@@ -2112,7 +2116,9 @@ def _read_method_agent_output(
             max_bytes=job.resource_limits.workspace_bytes,
         )
         assert raw_draft_bytes is not None
-        document = parse_model_json_bytes(raw_draft_bytes)
+        result = parse_model_json_response(raw_draft_bytes)
+        document = result.document
+        model_json_extraction = result.extraction
         parsed = parser(document.value)
         canonical_bytes = document.canonical_bytes
         _scan_bytes(raw_draft_bytes, patterns)
@@ -2182,6 +2188,7 @@ def _read_method_agent_output(
             draft=parsed,
             canonical_bytes=canonical_bytes,
             raw_bytes=raw_draft_bytes,
+            model_json_extraction=model_json_extraction,
         )
     assert kind is ValidatedOutputKind.METHOD_REVIEW_DRAFT
     assert isinstance(parsed, MethodReviewV1)
@@ -2189,6 +2196,7 @@ def _read_method_agent_output(
         draft=parsed,
         canonical_bytes=canonical_bytes,
         raw_bytes=raw_draft_bytes,
+        model_json_extraction=model_json_extraction,
     )
 
 

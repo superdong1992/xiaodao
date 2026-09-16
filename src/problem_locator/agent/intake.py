@@ -11,6 +11,7 @@ import json
 import re
 import threading
 import uuid
+from collections.abc import Callable
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,9 +29,10 @@ from problem_locator.contracts import (
 )
 from problem_locator.contracts.ports import CancellationSignal
 from problem_locator.contracts.models import NonEmptyText, derive_attachment_filename_suffix
+from problem_locator.diagnostics import log_event
 from problem_locator.runtime.agent_backend import AgentBackend
 from problem_locator.runtime.failures import RuntimeExecutionError
-from problem_locator.runtime.model_json import parse_model_json_bytes
+from problem_locator.runtime.model_json import ModelJsonExtraction, parse_model_json_response
 from problem_locator.runtime.input_profile import load_builtin_input_profile
 
 
@@ -417,18 +419,29 @@ def _parse_decision_items(value, issues) -> IntakeDecision:
     return IntakeDecision.model_validate(cleaned)
 
 
-def parse_intake_response(text: str | None, request: IntakeInput) -> IntakeDecision:
+def parse_intake_response(
+    text: str | None, request: IntakeInput, *,
+    on_extracted: Callable[[ModelJsonExtraction], None] | None = None,
+) -> IntakeDecision:
     try:
-        if not isinstance(text, str) or len(text.encode("utf-8")) > INTAKE_MAX_RESULT_BYTES:
+        if not isinstance(text, str):
             raise ValueError("无有效最终响应。")
-        document = parse_model_json_bytes(text.encode("utf-8"))
+        raw = text.encode("utf-8")
+        if len(raw) > INTAKE_MAX_RESULT_BYTES:
+            raise ValueError("无有效最终响应。")
+        parsed = parse_model_json_response(raw)
         issues = []
-        decision = _parse_decision_items(document.value, issues)
+        decision = _parse_decision_items(parsed.document.value, issues)
         decision = _with_receipt(decision, decision, issues,
-            raw_hash=hashlib.sha256(text.encode("utf-8")).hexdigest())
-        return validate_intake_decision(decision, request)
+            raw_hash=hashlib.sha256(raw).hexdigest())
+        decision = validate_intake_decision(decision, request)
     except (ValueError, TypeError, RecursionError):
         raise IntakeError("INTAKE_OUTPUT_INVALID", "问题整理结果未通过校验，请补充信息后重试。") from None
+    # Preserve the public result shape and existing item-processing receipt.
+    # Extraction is adopted only after the stage's own contract has passed.
+    if parsed.extraction is not None and on_extracted is not None:
+        on_extracted(parsed.extraction)
+    return decision
 
 
 def _load_prompt_assets() -> tuple[str, str]:
@@ -515,6 +528,28 @@ class ClaudeIntakeEngine:
         self._backend = backend if backend is not None else AgentBackend(command)
         self._workspace_root = Path(workspace_root)
 
+    @staticmethod
+    def _record_extraction(workspace: Path, request: IntakeInput, extraction: ModelJsonExtraction) -> None:
+        receipt = {
+            **extraction.to_receipt(), "diagnostic_id": workspace.name,
+            "conversation_id": request.conversation_id, "phase": "INTAKE",
+        }
+        try:
+            for name, content in (
+                ("intake-response-original.txt", extraction.raw_bytes),
+                ("intake-response-effective.json", extraction.effective_bytes),
+                ("intake-response-extraction.json", json.dumps(receipt, ensure_ascii=False,
+                    allow_nan=False, sort_keys=True, separators=(",", ":")).encode("utf-8")),
+            ):
+                with (workspace / "runtime" / name).open("xb") as stream:
+                    stream.write(content)
+        except OSError as exc:
+            log_event("agent.intake.model_json_extraction_audit_failed",
+                diagnostic_id=workspace.name, conversation_id=request.conversation_id,
+                phase="INTAKE", exception_type=type(exc).__name__)
+            raise IntakeError("INTAKE_EXECUTION_FAILED", "问题整理记录未能保存，请稍后重新提交。") from None
+        log_event("agent.intake.model_json_extracted", **receipt)
+
     def intake(self, request: IntakeInput, *, cancellation: CancellationSignal | None = None) -> IntakeDecision:
         prompt = build_intake_prompt(request, frozen_assets=self._prompt_assets)
         # UUID directory names preserve the existing workspace retention convention.
@@ -536,7 +571,8 @@ class ClaudeIntakeEngine:
                 resource_limits=INTAKE_RESOURCE_LIMITS.model_copy(deep=True),
                 broker_environment=None, file_access="none", backend_phase="INTAKE",
             )
-            return parse_intake_response(result.final_result, request)
+            return parse_intake_response(result.final_result, request,
+                on_extracted=lambda extraction: self._record_extraction(workspace, request, extraction))
         except RuntimeExecutionError:
             raise IntakeError("INTAKE_EXECUTION_FAILED", "问题整理未完成，请稍后重新提交。") from None
         finally:

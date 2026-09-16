@@ -115,6 +115,32 @@ def test_specialist_preserves_all_items_before_independent_evidence_validation()
         parse_specialist_response(text)
 
 
+@pytest.mark.parametrize('prefix,suffix', [
+    ('## 分析\n最终结果如下：\n```json\r\n', '\r\n```'),
+    ('## 分析\n最终结果如下：\n', ''),
+])
+def test_route_and_specialist_extract_final_json_with_raw_receipts(prefix, suffix):
+    route = '{"skill_id":null,"reason":"无匹配","confidence":1}'
+    routed = parse_route_response(prefix + route + suffix, route_job())
+    assert routed.draft.payload.skill_ref is None
+    assert routed.route_recovery is None
+    assert routed.model_json_extraction.raw_bytes == (prefix + route + suffix).encode()
+    value = {'schema_version': 1, 'status': 'INSUFFICIENT', 'confirmed_methods': [],
+        'candidate_methods': [], 'evidence': [], 'limitations': ['缺少证据'], 'safety_notes': []}
+    text = prefix + json.dumps(value, ensure_ascii=False) + suffix
+    result = parse_specialist_response(text)
+    assert result.draft.status == 'INSUFFICIENT'
+    assert result.raw_bytes == text.encode()
+    assert result.model_json_extraction.raw_bytes == result.raw_bytes
+    assert json.loads(result.model_json_extraction.effective_bytes) == value
+
+
+def test_markdown_prefix_cannot_hide_private_capability_from_specialist():
+    text = '## private-token\n{"note":"plain"}'
+    with pytest.raises(RuntimeExecutionError):
+        parse_specialist_response(text, secrets=('private-token',), preserve_evidence_items=True)
+
+
 @pytest.mark.parametrize('text', ['[]', 'null', '```json\n{}\n``` trailing'])
 def test_specialist_preserving_items_still_rejects_non_object_and_invalid_json(text):
     with pytest.raises(RuntimeExecutionError):

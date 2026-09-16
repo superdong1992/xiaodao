@@ -1962,6 +1962,17 @@
 - **验证范围**：只验证本地合成场景，不宣称公司内网验收或真实模型 Release 通过。使用方式与限制见 `docs/model-output-compatibility.md`。
 - **最新 Test Flow verdict（8.1 路由引号恢复）**：Linux `dev.default` [run-20260915T142733Z-be69a627](.tmp/pragmatic-dev-evidence-3/run-20260915T142733Z-be69a627/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:bd580c1f836358b1aca427885c6f0604fb7bbfcf60d81294630f352c16a72b3e`（821 files），verdict SHA-256 `2ec047106b8e2aad8b0254dc19131c25e704491607c0811d6c4338c2cd148fd9`。受影响范围由编排器交完整套件覆盖；Core 32、合同 576、单元 2601、集成 110、SameJob 5 项通过，单元 2 项非本平台用例跳过。全部专项纳入本轮，模型调用、token 和费用均为 0。本行是验证后的引用元数据，不属于所引用源码快照；不代表公司内网实测或真实模型 Release 通过。
 
+### 2026-09-16：模型最终响应中的 Markdown 说明与唯一 JSON 统一提取
+
+- **状态**：已实现，正式结论以本节最终 Test Flow 元数据为准。
+- **症状、受影响版本与确认结果**：8.1.0 / `e22024e` 中，`AgentStreamTelemetry → ROUTE/Specialist` 的纯 JSON 通过，同一内容加上 Markdown 前缀和完整 JSON 围栏或裸对象后报 `OUTCOME_INVALID`；telemetry 保留了原文。共享解析器只接受包住全文的围栏，Intake 与 Reviewer 草稿也使用该入口。这是 PL-FIX-042 模型展示格式兼容范围的继续补齐，不将合成复现等同于公司现场取证。
+- **修复历史与根因**：2026-09-16，保留严格解析快路径，统一模型 JSON 边界；仅失败后的混合文本可提取说明之后唯一的末尾 JSON 围栏或独立行对象。候选扫描尊重嵌套、字符串与转义，重复对象、前置示例、坏外层和尾部说明不猜测。ROUTE 在选定片段上组合既有 reason 引号恢复，原文偏移不变。Intake、运行时和文件读取仍执行各自业务校验。
+- **不可回归行为**：普通 JSON 一次解析、零候选扫描、无新增审计文件；混合提取上限 1 MiB，仍受阶段输出预算约束，不按每个左花括号重解析。公开 HTTP/MCP/Agent 工具输入保持原合同，Generic Markdown 字节不变。重复键、非有限数、截断、多终态、异常退出、权限/身份/哈希变化仍拒绝。模型调用、repair、续办次数不增加。原文、选定片段、最终采用对象及哈希/字节范围/规则分开保留，以 `diagnostic_id` 关联内容外日志。
+- **专项回归测试**：`tests/deterministic/unit/runtime/test_model_json.py`、`test_route_json.py` 覆盖直接复现、边界与操作次数；`test_final_response.py`、`test_output_reader.py` 覆盖实际解析和冻结文件；`tests/deterministic/unit/agent/test_intake_tolerance.py` 覆盖事实采用及审计。`tests/deterministic/integration/test_mixed_model_json_delivery.py` 验证网站全旅程、Reviewer 开关、strict/advisory、报告/归档/SSE 交付、调用计数与多候选可见失败。既有转义、工具权限、非零退出和 Generic 正文专项继续覆盖。
+- **验证范围**：只运行 Dev affected + full deterministic，不调用真实模型，不宣称内网完成率或真实模型 Release。使用方式见 `docs/model-output-compatibility.md`。
+- **验证修正历史**：首轮 `run-20260916T095255Z-78473e31` 在四个新增深嵌套用例失败：Python 3.12 的 C JSON 解析限制不等于 `sys.getrecursionlimit()`，原测试深度不足以触发异常。该轮其余 2731 个单元用例、120 个集成用例、Core、合同与 SameJob 均通过。按现有深嵌套回归使用真实 10000 层输入修正测试，生产逻辑和阈值不变；完整失败证据保留于 `.tmp/mixed-json-evidence-2/`，重新冻结源码并执行完整 Dev 验证。
+- **最新 Test Flow verdict（8.1 混合模型 JSON）**：Linux `dev.default` [run-20260916T100113Z-28ef1038](.tmp/mixed-json-evidence-3/run-20260916T100113Z-28ef1038/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:c38c6839f5ca6b0469c039dcd797762f21144eb58904b48ae11d76b040693331`（825 files），verdict SHA-256 `06f323d1a85afe174dd482ea8e7ec1739fce32b632f2cc226be338a3dc38aef9`。Core 32、合同 576、单元 2735、集成 120、SameJob 5 项通过；单元 2 项平台用例跳过。本轮专项、单次模型执行及解析/扫描次数检查均通过，真实模型调用、token 和费用均为 0。本行是验证后的引用元数据，不属于所引用源码快照；不代表公司内网实测或真实模型 Release 通过。
+
 ## PL-FIX-043：Methods marker 大小写语义在多阶段校验中不一致
 
 - **状态**：已按 Evidence V2 单次扫描合同再次修复；是否验证通过以本条“最新 Test Flow verdict”为准。

@@ -77,6 +77,8 @@ _AUDIT_FILENAMES = frozenset(
         "route-response.raw.txt",
         "route-response.effective.txt",
         "route-json-recovery.json",
+        "model-response.extracted.txt",
+        "model-json-extraction.json",
         "agent_job_outcome.draft.json",
         "method-diagnosis.draft.json",
         "method-diagnosis.raw.txt",
