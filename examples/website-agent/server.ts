@@ -48,6 +48,10 @@ const MAX_JSON_BYTES = 1024 * 1024;
 const MAX_ATTACHMENT_BYTES = 2_684_354_560;
 const MAX_DOWNLOAD_BYTES = 5_368_709_120;
 const MAX_REPORT_BYTES = 16 * 1024 * 1024;
+// A JSON string can expand one source byte to six bytes (for example, \u0000).
+// Report bytes stay bounded separately by the native API; only its envelope
+// needs this transport allowance. Ordinary API responses retain their limit.
+const MAX_REPORT_RESPONSE_BYTES = 6 * MAX_REPORT_BYTES + 64 * 1024;
 const KINDS = new Set(["USER_RESULT", "USER_RESULT_ARCHIVE", "AUDIT_BUNDLE", "GENERIC_REPORT"]);
 const ZIP_NOTICE = "该文件包含原始目标日志，可能含有业务信息。请确认后下载。";
 const AUDIT_NOTICE = "该文件是本次定位的审计包，请按内部数据管理要求保存。";
@@ -147,13 +151,13 @@ async function jsonBody(request: IncomingMessage): Promise<Json> {
   } catch { throw new HttpError(400, "请求不是有效的 JSON 对象。"); }
 }
 
-async function boundedResponseJson(response: Response): Promise<Json> {
+async function boundedResponseJson(response: Response, maxBytes = MAX_REPORT_BYTES): Promise<Json> {
   if (!response.body) throw new HttpError(502, "定位服务返回了空响应。");
   let size = 0;
   const chunks: Buffer[] = [];
   for await (const chunk of Readable.fromWeb(response.body as any)) {
     size += chunk.length;
-    if (size > MAX_REPORT_BYTES) throw new HttpError(502, "定位服务响应超出接入限制。");
+    if (size > maxBytes) throw new HttpError(502, "定位服务响应超出接入限制。");
     chunks.push(Buffer.from(chunk));
   }
   try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
@@ -207,10 +211,10 @@ export function createAgentBackend(options: {
   }
   const upstreamUrl = (path: string) => new URL(path.replace(/^\//, ""), base);
   const upstreamFetch = (path: string, init?: RequestInit) => fetchImpl(upstreamUrl(path), { ...init, redirect: "manual" });
-  const api = async (path: string, init?: RequestInit): Promise<Json> => {
+  const api = async (path: string, init?: RequestInit, maxBytes = MAX_REPORT_BYTES): Promise<Json> => {
     const response = await upstreamFetch(path, init);
     if (response.status >= 300 && response.status < 400) throw new HttpError(502, "定位服务返回了未允许的重定向。");
-    const envelope = await boundedResponseJson(response);
+    const envelope = await boundedResponseJson(response, maxBytes);
     if (!response.ok || envelope.ok !== true || envelope.error !== null) {
       // 只返回受控公共错误，不转发 HTML、模型输出或堆栈。
       const error = safeError(envelope.error);
@@ -333,7 +337,7 @@ export function createAgentBackend(options: {
       if (!user) throw new HttpError(401, "请先登录。");
       const url = new URL(request.url ?? "/", "http://website.local");
       const creation = url.pathname === "/api/agent/conversations";
-      const matched = url.pathname.match(/^\/api\/agent\/conversations\/([^/]+)(?:\/(messages|events|attachments|artifacts|report))?(?:\/([^/]+)\/content)?$/);
+      const matched = url.pathname.match(/^\/api\/agent\/conversations\/([^/]+)(?:\/(messages|events|attachments|artifacts|report|status))?(?:\/([^/]+)\/content)?$/);
       const uploadMatch = url.pathname.match(/^\/api\/agent\/attachments\/([^/]+)\/content$/);
       const method = request.method ?? "GET";
       if (creation && method === "POST") {
@@ -399,7 +403,37 @@ export function createAgentBackend(options: {
         await pipeline(Readable.fromWeb(upstream.body as any), response);
         return;
       }
-      if ((action === "artifacts" || action === "report") && method === "GET") {
+      if ((action === "report" || action === "status") && method === "GET") {
+        const result = await api(`/api/v1/agent/conversations/${conversationId}/${action}`, undefined,
+          action === "report" ? MAX_REPORT_RESPONSE_BYTES : MAX_REPORT_BYTES);
+        if (!result || result.schema_version !== 1 || result.conversation_id !== conversationId ||
+            !["PENDING", "READY", "UNAVAILABLE"].includes(result.report_state)) {
+          throw new HttpError(502, "定位服务返回的会话结果不符合约定。");
+        }
+        if (action === "report") {
+          if (result.report_state !== "READY") {
+            if (result.format !== null || result.report !== null || result.markdown !== null || result.artifact !== null) {
+              throw new HttpError(502, "报告尚不可用，但响应中包含了报告内容。");
+            }
+          } else if (result.format === "problem-locator-diagnosis-v3") {
+            if (!result.report || typeof result.report !== "object" || Array.isArray(result.report) || result.markdown !== null) {
+              throw new HttpError(502, "定位报告缺少必需内容。");
+            }
+            result.sections = reportSections(result.report);
+          } else if (result.format === "markdown") {
+            if (typeof result.markdown !== "string" || result.report !== null) {
+              throw new HttpError(502, "通用诊断报告缺少必需内容。");
+            }
+          } else if (result.format === "generic-v1") {
+            if (typeof result.report?.conclusion !== "string" || typeof result.report?.root_cause_analysis !== "string" ||
+                result.markdown !== null) throw new HttpError(502, "通用诊断结果缺少必需内容。");
+          } else throw new HttpError(502, "定位报告格式不符合约定。");
+        }
+        if (result.failure) result.failure = safeError(result.failure, true);
+        json(response, 200, { ok: true, data: result, error: null });
+        return;
+      }
+      if (action === "artifacts" && method === "GET") {
         const current = await artifacts(conversationId);
         const websiteUrl = (id: string) => `/api/agent/conversations/${conversationId}/artifacts/${id}/content`;
         if (action === "artifacts" && !artifactId) {
@@ -407,30 +441,6 @@ export function createAgentBackend(options: {
             download_url: websiteUrl(item.artifact_id),
             download_notice: item.kind === "USER_RESULT_ARCHIVE" ? ZIP_NOTICE : item.kind === "AUDIT_BUNDLE" ? AUDIT_NOTICE : null,
           })) }, error: null });
-          return;
-        }
-        if (action === "report") {
-          const reports = current.artifacts.filter((item) => ["USER_RESULT", "GENERIC_REPORT"].includes(item.kind));
-          if (!reports.length && current.view.generic_result && !current.view.generic_result_v2) {
-            const legacy = current.view.generic_result;
-            if (typeof legacy.conclusion !== "string" || typeof legacy.root_cause_analysis !== "string") {
-              throw new HttpError(502, "通用诊断结果缺少必需内容。");
-            }
-            json(response, 200, { ok: true, data: { format: "generic-v1", report: legacy }, error: null });
-            return;
-          }
-          if (reports.length !== 1) throw new HttpError(409, "报告尚未就绪，或产物列表不完整。");
-          const report = reports[0];
-          const text = (await verifiedReport(report)).toString("utf8");
-          if (report.kind === "GENERIC_REPORT") {
-            json(response, 200, { ok: true, data: { format: "markdown", markdown: text }, error: null });
-          } else {
-            let payload: Json;
-            try { payload = JSON.parse(text); } catch { throw new HttpError(502, "报告 JSON 无效。"); }
-            const expected = { RESOLVED: "COMPLETED", PARTIALLY_RESOLVED: "PARTIAL", UNRESOLVED: "INCONCLUSIVE" }[current.view.status as string];
-            if (!expected || payload.status !== expected) throw new HttpError(502, "报告状态与任务不一致。");
-            json(response, 200, { ok: true, data: { format: "problem-locator-diagnosis-v3", report: payload, sections: reportSections(payload) }, error: null });
-          }
           return;
         }
         const artifact = current.artifacts.find((item) => item.artifact_id === artifactId);

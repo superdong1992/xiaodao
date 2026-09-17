@@ -416,6 +416,8 @@ def test_openapi_and_swagger_publish_the_browser_contract() -> None:
         ("/live", "get"): "get_liveness",
         ("/api/v1/agent/conversations", "post"): "create_agent_conversation",
         ("/api/v1/agent/conversations/{conversation_id}", "get"): "get_agent_conversation",
+        ("/api/v1/agent/conversations/{conversation_id}/status", "get"): "get_agent_conversation_status",
+        ("/api/v1/agent/conversations/{conversation_id}/report", "get"): "get_agent_conversation_report",
         ("/api/v1/agent/conversations/{conversation_id}/messages", "post"): "send_agent_message",
         ("/api/v1/agent/conversations/{conversation_id}/events", "get"): "subscribe_agent_events",
         ("/api/v1/agent/conversations/{conversation_id}/attachments", "post"): "prepare_agent_attachment",

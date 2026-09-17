@@ -18,7 +18,7 @@ from problem_locator.diagnostics import log_event
 from .failures import interrupted_execution_failure, public_failure
 from .models import (AgentAttachment, AgentEvent, AgentMessage, AgentStoreError,
                      AttachmentRecord, CreateConversationRequest, ConversationReceipt, ConversationView,
-                     MessageReceipt, SendMessageRequest, PUBLIC_PROGRESS_MESSAGES)
+                     MessageReceipt, SendMessageRequest, PUBLIC_PROGRESS_MESSAGES, ConversationStatusView)
 
 _CLOSED = {"COMPLETED", "FAILED", "INTERRUPTED"}
 _RESULT = {"RESOLVED", "PARTIALLY_RESOLVED", "UNRESOLVED"}
@@ -191,6 +191,21 @@ class AgentStore:
             public["attachments"] = [AgentAttachment.model_validate_json(row[0]) for row in db.execute(
                 "SELECT body FROM agent_attachments WHERE conversation_id=? ORDER BY rowid", (conversation_id,))]
             return ConversationView.model_validate(public)
+
+    def get_status(self, conversation_id):
+        """Read only conversation metadata; history is loaded on explicit request."""
+        with self.repository.database_read() as db:
+            body = self._load(db, conversation_id)
+            public = {key: value for key, value in body.items() if key in ConversationStatusView.model_fields}
+            public["report_state"] = ("READY" if body.get("report_available", False) or body.get("case_status") in _RESULT else
+                "UNAVAILABLE" if body["status"] in _CLOSED else "PENDING")
+            return ConversationStatusView.model_validate(public)
+
+    def has_pending_messages(self, conversation_id):
+        with self.repository.database_read() as db:
+            return db.execute("SELECT 1 FROM agent_messages WHERE conversation_id=? "
+                "AND json_extract(body, '$.status') IN ('QUEUED','PROCESSING') LIMIT 1",
+                (conversation_id,)).fetchone() is not None
 
     def list_events(self, conversation_id, after=0, limit=100):
         if not isinstance(after, int) or after < 0 or not isinstance(limit, int) or not 1 <= limit <= 500:

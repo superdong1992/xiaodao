@@ -4,13 +4,14 @@ import asyncio
 import hashlib
 import json
 import threading
+from pathlib import Path
 
 import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 
-from problem_locator.agent.models import AgentEvent, AgentStoreError
+from problem_locator.agent.models import AgentEvent, AgentStoreError, ConversationReportView
 from problem_locator.interfaces import agent_http
 from problem_locator.interfaces.error_mapping import error_envelope, validation_error_from
 from fastapi.responses import JSONResponse
@@ -19,6 +20,7 @@ from fastapi.responses import JSONResponse
 CONVERSATION = "10000000-0000-0000-0000-000000000001"
 ATTACHMENT = "20000000-0000-0000-0000-000000000001"
 CASE = "30000000-0000-0000-0000-000000000001"
+JOB = "40000000-0000-0000-0000-000000000001"
 WHEN = "2026-09-07T08:00:00.000Z"
 BASE = "/api/v1/agent"
 VIEW = f"{BASE}/conversations/{CONVERSATION}"
@@ -67,6 +69,15 @@ class FakeAgent:
         return dict(conversation_id=CONVERSATION, message_id=ATTACHMENT,
                     request_id=kwargs["request_id"], event_id=1, status="ACCEPTED")
 
+    def get_status(self, **kwargs):
+        self.calls.append(("status", kwargs))
+        return dict(schema_version=1, conversation_id=CONVERSATION, status="INTAKE",
+                    report_state="PENDING", created_at=WHEN, updated_at=WHEN)
+
+    def get_report(self, **kwargs):
+        self.calls.append(("report", kwargs))
+        return dict(schema_version=1, conversation_id=CONVERSATION, report_state="PENDING")
+
     def list_events(self, conversation_id, after_sequence, limit):
         self.calls.append(("events", (conversation_id, after_sequence, limit)))
         if after_sequence > len(self.events):
@@ -106,19 +117,25 @@ def run_request(service, method, path, **kwargs):
     return asyncio.run(scenario())
 
 
-def test_all_six_routes_are_present_without_runtime_and_have_typed_contracts():
+def test_all_eight_routes_are_present_without_runtime_and_have_typed_contracts():
     schema = app_for(None).openapi()
-    assert len(schema["paths"]) == 6
+    assert len(schema["paths"]) == 8
     response = schema["paths"][f"{BASE}/conversations/{{conversation_id}}/events"]["get"]["responses"]["200"]
     assert set(response["content"]) == {"text/event-stream"}
     assert response["content"]["text/event-stream"]["schema"]["$ref"].endswith("/AgentEvent")
     assert "AgentEvent" in schema["components"]["schemas"]
     assert "AgentErrorEnvelope" in schema["components"]["schemas"]
+    for endpoint, model in (("status", "ConversationStatusView"), ("report", "ConversationReportView")):
+        route = schema["paths"][f"{BASE}/conversations/{{conversation_id}}/{endpoint}"]["get"]
+        assert route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
+            f"/SuccessEnvelope_{model}_")
 
 
 @pytest.mark.parametrize("method,path,kwargs", [
     ("POST", f"{BASE}/conversations", {"json": {"request_id": "create-1"}}),
     ("GET", VIEW, {}),
+    ("GET", f"{VIEW}/status", {}),
+    ("GET", f"{VIEW}/report", {}),
     ("GET", f"{VIEW}/events", {}),
     ("POST", f"{VIEW}/messages", {"json": {"request_id": "m-1", "text": "日志超时"}}),
     ("POST", f"{VIEW}/attachments", {"json": dict(request_id="a-1", name="logs.zip", content_type="application/zip", declared_size=1, declared_sha256=DIGEST)}),
@@ -169,11 +186,129 @@ def test_message_validation_rejects_bad_input_before_dispatch(body):
 
 @pytest.mark.parametrize("path", [
     f"{BASE}/conversations/NOT-A-UUID", VIEW + "?unknown=1", VIEW + "/events?after=1",
+    VIEW + "/status?unknown=1", VIEW + "/report?case_id=" + CASE,
+    f"{BASE}/conversations/NOT-A-UUID/status", f"{BASE}/conversations/NOT-A-UUID/report",
 ])
 def test_path_and_unknown_query_rejected(path):
     fake = FakeAgent()
     assert run_request(fake, "GET", path).status_code == 400
     assert not fake.calls
+
+
+def test_lightweight_status_delegates_without_loading_history():
+    fake = FakeAgent()
+    response = run_request(fake, "GET", VIEW + "/status")
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["report_state"] == "PENDING"
+    assert data["failure"] is None
+    assert "messages" not in data and "attachments" not in data
+    assert fake.calls == [("status", {"conversation_id": CONVERSATION})]
+
+
+@pytest.mark.parametrize("state", ["PENDING", "UNAVAILABLE"])
+def test_report_waiting_and_unavailable_are_successful_read_states(state):
+    class ReportAgent(FakeAgent):
+        def get_report(self, **kwargs):
+            return {**super().get_report(**kwargs), "report_state": state}
+
+    fake = ReportAgent()
+    response = run_request(fake, "GET", VIEW + "/report")
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["report_state"] == state
+    assert all(data[key] is None for key in ("format", "report", "markdown", "artifact", "source_job_id"))
+    assert fake.calls == [("report", {"conversation_id": CONVERSATION})]
+
+
+def ready_report(format="problem-locator-diagnosis-v3", status="COMPLETED"):
+    report = json.loads((Path(__file__).resolve().parents[3] / "fixtures/contracts/positive/user-result.json").read_bytes())
+    report["status"] = status
+    if status != "COMPLETED":
+        report["evidence_gaps"] = ["缺少服务端日志。"]
+        report["completion_criteria_mapping"][0]["status"] = "UNKNOWN"
+    if status == "INCONCLUSIVE":
+        report.update(root_cause=None, causal_factors=[])
+    content = json.dumps(report).encode()
+    artifact = dict(artifact_id=ATTACHMENT, kind="USER_RESULT", name="diagnosis-result.json",
+                    content_type="application/json", resource_kind="FILE", size=len(content),
+                    sha256=hashlib.sha256(content).hexdigest(), created_by_job_id=JOB,
+                    created_at=WHEN, downloadable=True)
+    value = dict(schema_version=1, conversation_id=CONVERSATION, case_id=CASE, case_revision=8,
+                 case_status={"COMPLETED": "RESOLVED", "PARTIAL": "PARTIALLY_RESOLVED", "INCONCLUSIVE": "UNRESOLVED"}[status],
+                 archive_status="PENDING", report_state="READY", source_job_id=JOB,
+                 format=format, report=report, markdown=None, artifact=artifact, failure=None)
+    if format == "markdown":
+        value.update(report=None, markdown="# 定位报告\r\n\n原因仍待确认。\n")
+        value["artifact"].update(kind="GENERIC_REPORT", content_type="text/markdown", name="report.md")
+    if format == "generic-v1":
+        value.update(artifact=None, report=dict(status="RESOLVED", conclusion="已找到超时原因。",
+            root_cause_analysis="服务端处理超过客户端截止时间。", skill_name="generic-locator",
+            source_job_id=JOB, source_outcome_id=ATTACHMENT, occurred_at=WHEN))
+    return value
+
+
+@pytest.mark.parametrize("format,status", [
+    ("problem-locator-diagnosis-v3", "COMPLETED"),
+    ("problem-locator-diagnosis-v3", "PARTIAL"),
+    ("problem-locator-diagnosis-v3", "INCONCLUSIVE"),
+    ("markdown", "COMPLETED"), ("generic-v1", "COMPLETED"),
+])
+@pytest.mark.parametrize("archive", ["PENDING", "FAILED"])
+def test_ready_report_formats_do_not_wait_for_archive(format, status, archive):
+    expected = ready_report(format, status)
+    expected["archive_status"] = archive
+
+    class ReportAgent(FakeAgent):
+        def get_report(self, **kwargs):
+            self.calls.append(("report", kwargs))
+            return expected
+
+    fake = ReportAgent()
+    response = run_request(fake, "GET", VIEW + "/report")
+    assert response.status_code == 200
+    assert response.json()["data"] == expected
+    assert fake.calls == [("report", {"conversation_id": CONVERSATION})]
+
+
+@pytest.mark.parametrize("change", [
+    {"report_state": "PENDING"}, {"format": None}, {"markdown": "额外正文"},
+    {"case_status": "UNRESOLVED"}, {"source_job_id": ATTACHMENT},
+    {"case_id": None}, {"case_revision": None}, {"artifact": None},
+])
+def test_report_rejects_inconsistent_result_structure(change):
+    with pytest.raises(ValueError):
+        ConversationReportView.model_validate_json(json.dumps({**ready_report(), **change}))
+
+
+def test_report_http_does_not_revalidate_already_typed_payload(monkeypatch):
+    parsed = ConversationReportView.model_validate_json(json.dumps(ready_report()))
+
+    class ReportAgent(FakeAgent):
+        def get_report(self, **kwargs):
+            return parsed
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("HTTP adapter must not validate a typed report twice")
+
+    monkeypatch.setattr(ConversationReportView, "model_validate", forbidden)
+    monkeypatch.setattr(ConversationReportView, "model_validate_json", forbidden)
+    response = run_request(ReportAgent(), "GET", VIEW + "/report")
+    assert response.status_code == 200
+    assert response.json()["data"]["report"]["status"] == "COMPLETED"
+
+
+@pytest.mark.parametrize("endpoint", ["status", "report"])
+def test_read_endpoints_preserve_controlled_operational_error(endpoint):
+    class UncertainAgent(FakeAgent):
+        def get_status(self, **kwargs):
+            raise AgentStoreError("DISPATCH_REJECTED", "最终状态暂时无法确认。", 503,
+                                  details=[{"field": "persistence", "actual": "UNKNOWN"}])
+        get_report = get_status
+
+    response = run_request(UncertainAgent(), "GET", VIEW + "/" + endpoint)
+    assert response.status_code == 503
+    assert response.json()["error"]["details"] == [{"field": "persistence", "actual": "UNKNOWN"}]
 
 
 @pytest.mark.parametrize("cursor", ["-1", "01", "1.0", " 1", "+1", "9223372036854775808"])

@@ -42,21 +42,26 @@ node examples/website-agent/server.ts
 
 ## 3. 网站调用哪些路径
 
-这里的 `/api/agent` 是**网站同源路径**；xiaodao 上游使用 `/api/v1/agent`。本例只向配置的 `XIAODAO_BASE_URL` 发请求；下载路径由已经核验的 Case 和产物 ID 构造，上游返回的 `download_url` 不参与寻址。因此网站内部地址可以与服务端 `PUBLIC_BASE_URL` 不同。上传地址会改写为网站同源路径。
+这里的 `/api/agent` 是**网站同源路径**；xiaodao 上游使用 `/api/v1/agent`。原生服务已提供会话 `/status` 和 `/report`，本例分别用一次上游请求获取状态或报告，再补上网站授权和中文展示结构。只向配置的 `XIAODAO_BASE_URL` 发请求；原始产物的下载路径由已经核验的 Case 和产物 ID 构造，上游返回的 `download_url` 不参与寻址。因此网站内部地址可以与服务端 `PUBLIC_BASE_URL` 不同。上传地址会改写为网站同源路径。
 
 收到非空问题原话后，服务端按 MCP 客户端的固定中性模板创建 Case，初始事实为空。网站不应先要求用户填写预期行为、范围或日志；创建前不调用 INTAKE。建案后只按原文展示 OPEN requirements 的追问，并用消息接口提交回答。没有 OPEN requirements 时不额外追问。
 
 - 创建、发送消息、查询、订阅、预约和上传：使用 `/api/agent/...` 对应路径，详见 [API 参考](../../docs/website-agent-api.md)。
-- `GET /api/agent/conversations/{id}/report`：收到 `result.available` 后调用，返回校验后的 JSON 或 Generic Markdown 和展示结构。
+- `GET /api/agent/conversations/{id}/status`：获取状态、追问、失败原因和 `report_state`，不返回完整消息及附件历史；适合状态轮询。初次打开和刷新页面仍用会话查询恢复历史。
+- `GET /api/agent/conversations/{id}/report`：收到 `result.available` 或恢复状态发现报告就绪时调用，返回正式 JSON、Generic Markdown 或历史 Generic V1 结果。`READY` 时可展示；`PENDING` 表示仍在诊断或等待补充；`UNAVAILABLE` 表示已结束且没有报告。三者都返回 HTTP 200，只有 `READY` 含报告内容。JSON 报告保留现有 `format`、`report`、`sections` 字段。
 - `GET /api/agent/conversations/{id}/artifacts`：查询授权后的产物，下载地址已改为网站同源路径。
 - 结果 ZIP：用户确认包含原始目标日志后，给相应下载路径添加 `?download=archive&acknowledge_raw_logs=true`。
 - 审计包：只按用户请求下载，给相应下载路径添加 `?download=audit`。
 
-`/report` 自动获取并校验 JSON 或 Generic Markdown；ZIP 只在用户主动确认后下载。所有产物均先落入唯一临时文件，真实字节数和 SHA-256 必须与权威产物描述一致，校验后才转发，结束后清理。响应可省略 `Content-Length` 和 `X-Content-SHA256`；提供时必须匹配。下载不接受重定向。测试使用假上游，不调用真实模型。
+`/report` 复用原生服务已发布且校验完成的报告，不再查询 Case 或下载产物，不重新生成报告或调用模型。报告原始内容最多 16 MiB；JSON 转义会扩大传输内容，因此此接口的上游响应限额为 `6 × 16 MiB + 64 KiB`，其他 JSON 接口仍为 16 MiB。`PARTIAL` 和 `INCONCLUSIVE` 都属于可展示的 `READY` 报告。归档仍在处理或已经失败时，报告也可以立即展示。
+
+原始产物继续走 `/artifacts/{id}/content`。不超过 16 MiB 的 JSON 和 Markdown 用有界内存校验；ZIP 及更大产物写入唯一临时文件，核对实际字节数和 SHA-256 后再转发，结束后清理。响应可省略 `Content-Length` 和 `X-Content-SHA256`；提供时必须匹配。下载不接受重定向。ZIP 只在用户主动确认后下载。测试使用假上游，不调用真实模型。
 
 SSE 原样转发基础单行帧：每条业务消息是 `data: <完整 AgentEvent JSON>` 加空行，不包含 `id:`、`event:`、`retry:` 行。前端只需 `onmessage`，从 JSON 的 `type` 分发，从 `sequence` 去重。连接和心跳注释不会触发业务消息；结束使用 `conversation.completed`，没有 `[DONE]` 或 OpenAI `choices` / `delta` 包装。进度仍是已公开的阶段消息和追问，不转发模型内部推理或未审核报告。
 
 原生 `EventSource` 不会从 data-only 响应记录业务游标，自动重连会重放历史。需要精准续传时，前端用流式 `fetch` 手动设置最后处理成功的 `Last-Event-ID`，网站后端将此请求头转发给上游。事件应串行处理，报告下载、校验和展示成功后才推进游标；完整有界队列和失败重试示例见 [API 参考](../../docs/website-agent-api.md)。
+
+页面恢复和历史事件回放可能同时触发报告读取。前端应合并同一会话尚未完成的读取；报告展示成功后保留结果，重复的就绪事件不再下载。`PENDING` 和读取失败不能缓存成已就绪，下一次就绪通知或用户重试仍须重新查询。
 
 收到 `agent.failed` 或 `conversation.interrupted` 后，重新读取会话快照并展示 `failure`。其中 `code` 是安全错误码；`details` 提供实际失败阶段和稳定的诊断关联 ID，供服务端查证。页面刷新也从快照恢复错误，不从 SSE 的固定错误文案猜测原因。终态任务不会因为重新查询或上传重试而重新调用模型。
 

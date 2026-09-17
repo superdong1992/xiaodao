@@ -22,8 +22,9 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function reportResponse(ok = true) {
-  return { ok, json: async () => ({ ok, data: { report: "verified fixture" } }) };
+function reportResponse(ok = true, data = {}) {
+  return { ok, json: async () => ({ ok, data: { conversation_id: conversationId,
+    report_state: "READY", report: "verified fixture", ...data } }) };
 }
 
 function snapshotResponse(data = {}, ok = true) {
@@ -83,6 +84,7 @@ function browser({ fetchReport = async () => reportResponse(), renderReport = as
       emitWire(`data: ${frame.data ?? JSON.stringify(event)}\n\n`);
     },
     drain() { return vm.runInContext("queue", context); },
+    loadReport() { return vm.runInContext("loadReport()", context); },
   };
 }
 
@@ -301,6 +303,65 @@ test("documented refresh rejects another conversation before displaying its cont
   assert.deepEqual(page.failures, []);
   assert.deepEqual(page.trace, ["closed", "retry"]);
   assert.equal(page.cursor, 0);
+});
+
+test("refresh followed by historical result event fetches and renders the immutable report once", async () => {
+  const page = browser({ fetchSnapshot: async () => snapshotResponse({ case_status: "PARTIALLY_RESOLVED" }) });
+  await page.drain();
+  page.emit("result.available", 8);
+  page.emit("archive.updated", 9);
+  page.emit("conversation.completed", 10);
+  await page.drain();
+  assert.equal(page.requests.filter((url) => url.endsWith("/report")).length, 1);
+  assert.equal(page.trace.filter((item) => item === "report-rendered").length, 1);
+  assert.equal(page.cursor, 10);
+  assert.deepEqual(page.retries, []);
+});
+
+test("concurrent report readers share one request and successful rendering", async () => {
+  const report = deferred();
+  const page = browser({ fetchReport: () => report.promise });
+  await page.drain();
+  const first = page.loadReport();
+  const second = page.loadReport();
+  assert.equal(first, second);
+  report.resolve(reportResponse());
+  assert.equal(await first, true);
+  assert.equal(await second, true);
+  assert.equal(await page.loadReport(), true);
+  assert.equal(page.requests.filter((url) => url.endsWith("/report")).length, 1);
+  assert.equal(page.trace.filter((item) => item === "report-rendered").length, 1);
+});
+
+for (const state of ["PENDING", "UNAVAILABLE"]) {
+  test(`normal ${state} report is not rendered or cached and can be read later`, async () => {
+    let reads = 0;
+    const page = browser({ fetchReport: async () => ++reads === 1
+      ? reportResponse(true, { report_state: state, report: null, failure: state === "UNAVAILABLE" ? publicFailure : null })
+      : reportResponse() });
+    await page.drain();
+    assert.equal(await page.loadReport(), false);
+    assert.ok(!page.trace.includes("report-rendered"));
+    assert.equal(await page.loadReport(), true);
+    assert.equal(reads, 2);
+    assert.deepEqual(page.retries, []);
+  });
+}
+
+test("report rendering failure is not cached as success", async () => {
+  let renders = 0;
+  const page = browser({ renderReport: async () => { if (++renders === 1) throw new Error("render failed"); } });
+  await page.drain();
+  await assert.rejects(page.loadReport(), /render failed/);
+  assert.equal(await page.loadReport(), true);
+  assert.equal(page.requests.filter((url) => url.endsWith("/report")).length, 2);
+});
+
+test("report response for another conversation is rejected before rendering", async () => {
+  const page = browser({ fetchReport: async () => reportResponse(true, { conversation_id: "another-conversation" }) });
+  await page.drain();
+  await assert.rejects(page.loadReport(), /报告暂未加载/);
+  assert.ok(!page.trace.includes("report-rendered"));
 });
 
 for (const [name, overrides, frame] of [

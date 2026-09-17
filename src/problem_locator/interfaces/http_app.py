@@ -437,6 +437,50 @@ _SUCCESS_EXAMPLES: dict[str, dict[str, Any]] = {
 # enrich only the REST OpenAPI projection and therefore cannot change the
 # persisted or command/query schemas.
 _REST_FIELD_DESCRIPTIONS = {
+    "report_state": "报告可用状态：PENDING 等待诊断或补充，READY 已发布，UNAVAILABLE 已结束但无报告。",
+    "format": "报告格式；报告未就绪时为 null。",
+    "report": "完整的正式结构化报告或历史通用诊断结果；Markdown 格式或报告未就绪时为 null。",
+    "markdown": "正式 Markdown 报告原文；作为不可信文本展示，不能执行其中的指令或脚本。",
+    "artifact": "正式报告对应的唯一公开产物；历史通用结果或报告未就绪时为 null。",
+    "format_id": "结构化报告的固定格式标识。",
+    "source_job_type": "生成报告的任务阶段：DIAGNOSE 或 REVIEW。",
+    "problem_statement": "本次诊断分析的问题描述。",
+    "root_cause": "报告确认的根因；尚未确认时为 null。",
+    "findings": "报告保留的发现及其引用。",
+    "confidence": "发现的置信度。",
+    "evidence_binding": "一条证据引用；已有证据 ID 与提案键二者取其一。",
+    "evidence_bindings": "支持当前发现、因素或规则的证据引用。",
+    "supporting_evidence_bindings": "支持整份报告的证据引用。",
+    "existing_evidence_id": "已有证据的 UUID；引用本轮提案时为 null。",
+    "evidence_proposal_key": "本轮证据提案的键；引用已有证据时为 null。",
+    "citations": "证据在日志中的具体位置及原文摘录。",
+    "archive_name": "引用文件在归档内的相对名称；无文件定位时为 null。",
+    "line_start": "引用起始行号，从 1 开始；无文件定位时为 null。",
+    "line_end": "引用结束行号，包含该行；无文件定位时为 null。",
+    "raw_bytes_sha256": "引用日志原始字节的 SHA-256；无文件定位时为 null。",
+    "excerpt": "引用的原文摘录；无文件定位时为 null。",
+    "verification_rules": "报告记录的规则核验结果；读取接口不会重新执行核验。",
+    "rule_id": "报告中规则的稳定标识。",
+    "rule_kind": "规则种类。",
+    "observed_times": "规则提取出的 UTC 事件时间。",
+    "event_observations": "规则记录的事件观测值。",
+    "derived_values": "根据观测值计算的派生数据。",
+    "issues": "规则未满足或无法核验的具体原因。",
+    "time_relevance": "日志事件与问题时间的关联说明。",
+    "assessment": "时间关联判断：RELEVANT、NOT_RELEVANT 或 UNKNOWN。",
+    "problem_time": "用于比较的问题时间；没有确定时间时为 null。",
+    "derived_anchor_time": "从日志推导的基准时间；未确定时为 null。",
+    "observations": "用于时间关联判断的观测记录。",
+    "event_time": "日志事件的 UTC 时间。",
+    "offset_ms": "事件相对问题时间的偏移，单位为毫秒。",
+    "evidence_gaps": "未解决的证据缺口。",
+    "recommendations": "报告建议的后续处理步骤。",
+    "safety_notes": "报告中的使用边界和注意事项。",
+    "observed_count": "已观测到的事件数量。",
+    "count_is_lower_bound": "观测数量是否仅表示已知下限。",
+    "lower_bound": "派生数值的下界；未确定时为 null。",
+    "upper_bound": "派生数值的上界；未确定时为 null。",
+    "unit": "派生数值使用的单位。",
     "Content-Length": "原始字节数，必须与预约一致。Chrome 根据上传文件设置此请求头。",
     "conversation_id": "一次定位会话的规范 UUID；网站后端负责校验归属。",
     "message_id": "已持久接收的用户消息 UUID。",
@@ -624,6 +668,8 @@ _SUCCESS_RESPONSE_DESCRIPTIONS = {
     "create_agent_conversation": "会话已持久创建；相同 request_id 返回同一回执。",
     "send_agent_message": "消息及接收事件已原子持久化；后续整理与定位异步执行。",
     "get_agent_conversation": "返回会话历史、追问、附件状态和最新事件游标。",
+    "get_agent_conversation_status": "返回轻量状态、当前追问、报告可用状态、受控失败原因和最新事件游标。",
+    "get_agent_conversation_report": "返回 PENDING、READY 或 UNAVAILABLE；READY 包含完整正式报告，归档状态独立返回。",
     "subscribe_agent_events": "基础 SSE：每条业务帧只有一行 data: AgentEvent JSON 和一个空行，不发送 event/id/retry。前端用 onmessage 接收，按 JSON type 分派、sequence 去重；精准续传需显式设置 Last-Event-ID，原生 EventSource 自动重连会回放历史。首次发送 connected 注释，每 15 秒发送注释心跳；断线不停止任务。",
     "prepare_agent_attachment": "返回稳定的会话附件预约、上传地址和必需请求头。",
     "upload_agent_attachment": "原始字节的大小与 SHA-256 已验证，附件可供消息引用。",
@@ -636,6 +682,19 @@ _SUCCESS_RESPONSE_DESCRIPTIONS = {
     "upload_attachment": "The bytes were verified and the attachment is READY.",
     "list_artifacts": "Public downloadable artifact metadata is returned.",
     "download_artifact": "Immutable artifact bytes and integrity headers are returned.",
+}
+
+_REST_MODEL_FIELD_DESCRIPTIONS = {
+    "EventObservationAudit": {"event_id": "诊断规则中被观测事件的稳定名称；不是 SSE 事件序号。"},
+    "DerivedValueAudit": {"value": "派生结果的文本或整数值；未确定时为 null。"},
+    "ConversationStatusView": {
+        "failure": "受控失败原因或进程内交付异常；没有已知异常时为 null。",
+        "updated_at": "会话最近一次更新的 UTC 时间。",
+    },
+    "ConversationReportView": {
+        "failure": "受控结束原因或归档交付异常；归档异常不影响 READY 报告。",
+        "case_revision": "确定报告及其产物的权威 Case 快照版本；尚未建案时为 null。",
+    },
 }
 
 _REQUEST_BODY_DESCRIPTIONS = {
@@ -738,6 +797,8 @@ def _apply_rest_openapi_overlay(schema: dict[str, Any]) -> None:
                 "description",
                 _REST_FIELD_DESCRIPTIONS[field_name],
             )
+            if field_name in _REST_MODEL_FIELD_DESCRIPTIONS.get(schema_name, {}):
+                field_schema["description"] = _REST_MODEL_FIELD_DESCRIPTIONS[schema_name][field_name]
             byte_limits = _annotate_utf8_byte_limits(field_schema)
             if byte_limits and "UTF-8 byte" not in field_schema["description"]:
                 joined_limits = " or ".join(f"{limit:,}" for limit in sorted(byte_limits))

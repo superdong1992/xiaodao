@@ -2,9 +2,9 @@
 
 ## 内部网站 Agent 接入
 
-网站后端可以直接提交用户原话和日志附件，无需生成 `problem_spec`。新增 Agent 会话接口负责追问、补充和定位，SSE 返回可回放的阶段消息，完整报告仍由原有 Case 产物接口交付。一次会话对应一次定位，关闭页面不会停止任务。
+网站后端可以直接提交用户原话和日志附件，无需生成 `problem_spec`。Agent 会话接口负责追问、补充和定位，SSE 返回可回放的阶段消息；原生 `/api/v1/agent/conversations/{conversation_id}/report` 一次返回正式报告，`/status` 提供不含聊天历史的轻量状态。原有 Case 产物接口继续支持文件下载。一次会话对应一次定位，关闭页面不会停止任务。
 
-部署后先看 [网站 Agent 快速接入与联调清单](docs/website-agent-quickstart.md)，再查 [完整 API 参考](docs/website-agent-api.md) 和 [TypeScript 后端示例](examples/website-agent/README.md)。在线接口说明位于服务的 `/docs`，机器可读合同位于 `/openapi.json`。网站后端必须负责登录、会话归属校验和下载转发；部署方限制 xiaodao 的可达来源。新增六条 Agent 路由不改变现有 REST 路径和七个 MCP 工具。
+部署后先看 [网站 Agent 快速接入与联调清单](docs/website-agent-quickstart.md)，再查 [完整 API 参考](docs/website-agent-api.md) 和 [TypeScript 后端示例](examples/website-agent/README.md)。在线接口说明位于服务的 `/docs`，机器可读合同位于 `/openapi.json`。网站后端必须负责登录、会话归属校验和下载转发；部署方限制 xiaodao 的可达来源。八条 Agent 路由不改变原有 REST 路径和七个 MCP 工具。
 
 ## Methods V1 专有定位报告
 

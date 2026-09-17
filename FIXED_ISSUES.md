@@ -2782,6 +2782,18 @@
 - **首次正式验证后的收口**：`run-20260915T141622Z-7a91517f` 的两项归档计数用例确认验证入口末尾再次调用完整 ZIP 构建，导致第二次拆行和摘要计算。改为复用已核验的报告/manifest 字节完成标准 ZIP 编码，保留逐项与最终字节比较，性能断言不放宽；新增非标准 ZIP 编码拒绝用例。同轮 12 项 advisory 网站旅程均通过，另一集成失败来自显式更正用例仍断言旧提示词，已对齐其固定输出；首轮证据完整保留，最终结论另取新源码 verdict。
 - **第二次正式验证后的收口**：`run-20260915T142244Z-38910c19` 中全部性能计数和 110 项集成旅程通过，唯一失败是归档 AST 边界清单仍绑定提取前的函数名。将原 `build_result_archive` 的两类允许操作原样移到 `_encode_result_archive`，不增加可用归档 API 或输入解包入口，保留精确匹配和禁止清单。
 
+### 2026-09-17：原生报告接口与轻量状态查询收口
+
+- **状态**：本轮实现已完成，是否验证通过以本节最终 Test Flow 元数据为准；关联 PL-FIX-058 的会话与 SSE 交付能力。
+- **症状、受影响版本与确认**：8.1.0 / `1ce3450` 的原生 OpenAPI 没有 `/report`，只有网站示例串行查询会话、Case 和文件，接入方必须复制报告选择及下载逻辑。`AgentConversationService.list_events` 每 0.5 秒调用完整 `get_conversation`，每次加载全部消息与附件。文档前端刷新已加载报告后，历史 `result.available` 会再次下载。修改前已核对实际路由、SQL 与调用路径；未将公司部署视为已完成实测。
+- **根因与修复历史**：报告聚合只存在于示例，状态读取没有独立投影，前端没有已成功展示报告的读取缓存。新增原生 `GET /api/v1/agent/conversations/{conversation_id}/report` 与 `/status`；报告从一次权威 Case 快照选择已发布产物、校验实际字节后读取，SSE 共用不含消息/附件历史的状态查询。网站报告路径改为一次上游请求，前端合并并发读取并在显示成功后缓存本会话不可变结果。原生 OpenAPI、完整字段参考、接入流程及网站示例同步更新，旧下载指南的 URL 寻址和可选响应头说明与现有实现对齐。
+- **不可回归行为**：`PENDING`、`READY`、`UNAVAILABLE` 是成功查询的业务状态；`COMPLETED`、`PARTIAL`、`INCONCLUSIVE` 均可交付正式报告。Generic V1 历史结果及 V2 原始 Markdown 保持可读。归档 PENDING、FAILED 或状态提交未知不撤回报告；交付未知仍返回真实错误，不伪造持久终态。只有关闭且原本无报告的历史会话可在关联 Case 缺失时返回 UNAVAILABLE，已发布报告丢失 Case 仍报错。读取不生成新诊断 ID，不调用模型、不重跑证据审核、不写业务状态、不读取 ZIP；归属、来源、大小和 SHA-256 校验保留。
+- **性能与兼容边界**：网站报告请求从三次串行上游 HTTP 收敛为一次；正常 `/report` 只读一次 Case 快照，状态及 SSE 不解析消息/附件历史。沿用资源读取的完整性合同，无跨任务缓存，不宣称文件 hash 次数或公司内网时延下降。原始报告仍为 16 MiB 上限，JSON envelope 使用有界 `6 × 16 MiB + 64 KiB` 传输预算以覆盖转义膨胀。创建、消息、上传、底层产物接口及 SSE v1 事件形状不变；state schema 11、报告 schema 3、`v11-contract-r2` 不变，无数据升级或清理。
+- **专项回归测试**：`tests/deterministic/unit/application/test_reports.py` 验证正式报告状态、历史格式、来源/归属/唯一性和大小/哈希/UTF-8/JSON 损坏；`tests/deterministic/integration/test_agent_reports.py` 覆盖实际 HTTP、报告/归档分离、交付故障、历史会话、SQL 只读与快照/历史读取计数；`test_agent_http.py` 覆盖两条原生路由、三态、DTO 和受控错误；`examples/website-agent/server.test.mjs` 验证一次上游请求、归属、配置前缀、转义膨胀和显式下载完整性；`tools/test-flow/tests/website-agent-guide.test.mjs` 验证刷新回放和并发只读取一次、渲染失败不缓存、普通等待状态不渲染；OpenAPI 快照和文档字段表由合同专项核对。
+- **首次验证收口**：`run-20260917T020510Z-7204fae5` 的权威结果为 FAIL，源码快照 `e87c22183516e667cf80c781735287d7c462e8c4680910f3aec1a06545f83f13`（828 files）。框架文档合同检查发现 `report_state` 与 `format` 首次出现的简表只有两列，未满足字段含义表规则；产品测试尚未启动。将三态简表明确拆为状态、HTTP 状态、网站行为三列，保留既有检查门槛和全部失败凭据。
+- **第二轮验证与环境收口**：`run-20260917T021007Z-05a675ce` 为 FAIL，源码快照 `ff39177dd8147b585335ed7dd675a41700a59c3d5728a6bc3ae0879037c818a5`（828 files）。新增报告/状态、网站、Core、合同及完整集成旅程均通过；两个既有 POSIX 进程树测试失败。现场 `ps` 确认相关 Python 子进程已退出，但因容器遗漏上一轮使用的 `--init` 而以 PPID 1、STAT Z 保留。补回子进程回收器，保持产品代码、断言、门槛不变；全部失败证据留存后重新执行相同 Dev 闭包，不将这一轮记录为通过。
+- **最新 Test Flow verdict（原生报告与轻量状态）**：Linux `dev.default` [run-20260917T021716Z-f6f988f3](.tmp/report-api-evidence-3/run-20260917T021716Z-f6f988f3/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:564c5dab53d7c82f93afffbbdfb59fb5fbc0b77ff7ea4ff2fc608e2ef070061e`（828 files），verdict SHA-256 `24b4fc8b24793ab1ab3744893ef5007cc4f290965ff410563b68461a4a9f1e07`。Core 32、合同 576、单元 2806、集成 133、SameJob 5 项通过；单元 2 项平台用例跳过。本轮报告/状态专项、HTTP 请求和快照计数、无历史解析及只读检查均通过，网站后端 68 项用例通过，真实模型调用、token 和费用均为 0。本行是验证后的引用元数据，不属于所引用源码快照；不代表公司内网实测或真实模型 Release 通过。
+
 ## PL-FIX-064：Skill 已登记的角色含义没有传给网站参数提取
 
 - **状态**：本轮修复的正式结论以本节最终 Test Flow 元数据为准。

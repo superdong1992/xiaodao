@@ -11,7 +11,7 @@
 1. 创建会话，保存网站用户与 `conversation_id` 的归属关系。
 2. 用户发送非空的问题原话，服务端立即按 MCP 客户端的固定中性模板创建 Case；创建前不追问预期行为、范围、日志或时间，也不调用 INTAKE。网站不需要构造 `problem_spec` 或命名事实。日志可先上传，再随问题消息发送附件 ID。
 3. 订阅 SSE。选中 Skill 后，服务端先从已有消息（包括首条原文）提取所需参数，并提交通过校验的部分；此时显示 `INTAKE` 的整理进度。采用结果后，`assistant.question` 只列出仍未满足的要求，用户继续调用消息接口回答。没有剩余要求时不额外追问。
-4. 收到 `result.available` 后查询关联 Case 和产物列表，校验并下载报告 JSON，按中文结构展示。不要等待 ZIP 才展示报告。
+4. 收到 `result.available` 后调用原生 `GET /api/v1/agent/conversations/{conversation_id}/report`，直接读取正式报告；服务端负责选择并校验产物。采用网站示例时调用同源 `/api/agent/conversations/{conversation_id}/report`。不要等待 ZIP 才展示报告。
 5. `archive.updated` 的状态变为 `READY` 后提供 ZIP 下载按钮。用户点击并确认包含原始目标日志后才下载。
 6. 收到 `conversation.completed` 后关闭订阅。报告完成后的新问题另建会话。
 
@@ -42,6 +42,8 @@
 | `POST /api/v1/agent/conversations` | 创建会话，JSON：`request_id` |
 | `POST /api/v1/agent/conversations/{conversation_id}/messages` | 发送消息，JSON：`request_id`、可空 `text`、`attachment_ids` |
 | `GET /api/v1/agent/conversations/{conversation_id}` | 会话快照、追问、消息采用状态、附件、Case ID、事件游标 |
+| `GET /api/v1/agent/conversations/{conversation_id}/status` | 轻量状态、追问、报告可用状态与失败信息，不读取消息和附件历史 |
+| `GET /api/v1/agent/conversations/{conversation_id}/report` | 一次请求返回正式 JSON、Generic Markdown 或历史 Generic V1 结果 |
 | `GET /api/v1/agent/conversations/{conversation_id}/events` | SSE 历史回放和实时订阅；可带 `Last-Event-ID` 请求头 |
 | `POST /api/v1/agent/conversations/{conversation_id}/attachments` | 预约日志上传 |
 | `PUT /api/v1/agent/attachments/{attachment_id}/content` | 上传文件原始字节 |
@@ -49,7 +51,7 @@
 | `GET /api/v1/cases/{case_id}/artifacts` | 现有公共产物列表和下载描述符 |
 | `GET /api/v1/artifacts/{artifact_id}/content?case_id={case_id}` | 网站后端使用配置地址和已核验的 Case/产物 ID 下载 |
 
-六个 Agent 接口均不接受查询参数。路径标识和 `attachment_ids` 必须是小写规范 UUID。JSON 未定义字段、字符串化数组、重复附件 ID 会被拒绝。消息至少包含非空文本或一个已上传附件；`text` 可省略或为 `null`。文本和 `request_id` 分别最多 65,536 UTF-8 字节，一条消息最多 20 个附件。
+八个 Agent 接口均不接受查询参数。路径标识和 `attachment_ids` 必须是小写规范 UUID。JSON 未定义字段、字符串化数组、重复附件 ID 会被拒绝。消息至少包含非空文本或一个已上传附件；`text` 可省略或为 `null`。文本和 `request_id` 分别最多 65,536 UTF-8 字节，一条消息最多 20 个附件。
 
 创建、发消息和预约上传都使用稳定 `request_id`。同一逻辑请求重试时保持内容和 ID 不变；内容改变会返回幂等冲突。新消息使用新 ID。网站应按登录用户为创建请求划分命名空间，避免不同用户使用相同 ID 命中同一个创建回执；下方 TypeScript 示例已实现。
 
@@ -349,12 +351,29 @@ const fail = (error) => {
   closeAgentEvents();
   showEventRetry(error); // 网站组件：保留页面；重试时重新创建订阅，从历史回放。
 };
-const loadReport = async () => {
-  const response = await fetch(`/api/agent/conversations/${conversationId}/report`);
-  const result = await response.json();
-  if (!response.ok || !result.ok) throw new Error("报告暂未加载成功，请重试。");
-  if (stopped) return;
-  await renderVerifiedReport(result.data);
+let reportLoaded = false;
+let reportRequest = null;
+const loadReport = () => {
+  if (reportLoaded) return Promise.resolve(true);
+  if (reportRequest) return reportRequest;
+  reportRequest = (async () => {
+    const response = await fetch(`/api/agent/conversations/${conversationId}/report`);
+    const result = await response.json();
+    if (!response.ok || !result.ok || result.data?.conversation_id !== conversationId)
+      throw new Error("报告暂未加载成功，请重试。");
+    if (stopped) return false;
+    if (result.data.report_state === "PENDING") return false;
+    if (result.data.report_state === "UNAVAILABLE") {
+      if (result.data.failure) await renderFailureAsText(result.data.failure);
+      return false;
+    }
+    if (result.data.report_state !== "READY") throw new Error("报告状态不符合约定。");
+    await renderVerifiedReport(result.data);
+    if (stopped) return false;
+    reportLoaded = true; // 一次会话只有一份不可变正式报告；显示成功后才缓存。
+    return true;
+  })().finally(() => { reportRequest = null; });
+  return reportRequest;
 };
 const restoreConversation = async () => {
   const response = await fetch(`/api/agent/conversations/${conversationId}`);
@@ -386,7 +405,8 @@ events.onmessage = (message) => {
       throw new Error("事件格式不符合约定。");
     if (event.sequence <= lastSequence) return;
     await renderEventAsText(event); // 网站组件：按 ID 更新，文本不得作为 HTML 执行。
-    if (event.type === "result.available") await loadReport();
+    if (event.type === "result.available" && !await loadReport())
+      throw new Error("报告尚未就绪，请稍后重新读取。");
     if (event.type === "agent.failed" || event.type === "conversation.interrupted") await restoreConversation();
     if (stopped) return;
     lastSequence = event.sequence; // 所有业务处理成功后才能推进游标。
@@ -401,7 +421,27 @@ events.onmessage = (message) => {
 
 ## 4. 正式报告与下载校验
 
-`result.available` 只是产物已正式发布的通知，不是报告全文。按会话 `case_id` 获取现有 Case 和产物列表，并核对产物 ID、种类、来源 Job、大小和 SHA-256。`ArtifactView` 提供下载 URL；来源 Job 位于 Case 的 `artifacts[].created_by_job_id`，需与 `final_result.proposed_by_job_id`、`unresolved_result.source_job_id` 或 Generic 结果来源一致。
+### 按会话直接读取状态与报告
+
+原生 `GET /api/v1/agent/conversations/{conversation_id}/status` 返回 `ConversationStatusView`，包含完整会话快照的状态、追问、失败和事件游标字段，以及 `report_state`，但不含 `messages`、`attachments`。列表页或定时检查使用此接口；需要恢复聊天内容时仍读取完整会话。SSE 内部同样使用轻量查询，不会每次检查都重新加载消息正文和附件历史。
+
+原生 `GET /api/v1/agent/conversations/{conversation_id}/report` 返回 `ConversationReportView`。网站后端只需传已授权的会话 ID，不必再查询 Case、挑选报告和下载文件。该接口直接读取已经发布的产物，不调用模型、不重跑证据审核、不写入状态；报告选择和来源校验使用同一份 Case 快照。
+
+| `report_state` | HTTP 状态 | 网站行为 |
+| --- | --- | --- |
+| `PENDING` | `200 / ok=true` | 尚未产出报告，包括等待补充，正文为空，继续显示状态或追问 |
+| `READY` | `200 / ok=true` | 按 `format` 展示正式报告，报告内部可为 `COMPLETED`、`PARTIAL` 或 `INCONCLUSIVE` |
+| `UNAVAILABLE` | `200 / ok=true` | 任务已结束且没有报告，展示 `failure`；旧历史的 failure 可为 null |
+
+`format=problem-locator-diagnosis-v3` 时正文在 `report`；`format=markdown` 时正文在 `markdown`；历史 `format=generic-v1` 时正文在 `report`，且 `artifact=null`。未就绪和无报告不是 HTTP 错误；非法 ID、会话不存在、读取故障或文件损坏仍返回受控的 `4xx/5xx`。`artifact.sha256` 描述原始产物字节，不是整个 API 响应的哈希。
+
+报告已发布时，即使 `archive_status=PENDING/FAILED` 或 failure 提示归档状态无法确认，`report_state` 仍为 `READY`。`/report` 不读取 ZIP。报告原始内容上限为 16 MiB；网站示例为 JSON 转义后的报告响应单独保留 `6 × 16 MiB + 64 KiB` 的传输上限，其他上游 JSON 响应仍为 16 MiB。
+
+上面的前端示例会合并并发读取，并在报告显示成功后缓存本会话结果。因此刷新时读取的报告不会因历史 `result.available` 回放再次下载；读取或渲染失败不会写入成功缓存。归档状态仍由事件或 `/status` 更新。
+
+### 原始产物下载与旧客户端
+
+`result.available` 只是产物已正式发布的通知，不是报告全文。新网站优先调用原生 `/report`；已有客户端仍可按会话 `case_id` 查询 Case 和产物，核对产物 ID、种类、来源 Job、大小和 SHA-256，再下载原始文件。`ArtifactView` 提供下载描述符；来源 Job 位于 Case 的 `artifacts[].created_by_job_id`，需与 `final_result.proposed_by_job_id`、`unresolved_result.source_job_id` 或 Generic 结果来源一致。
 
 专有报告是唯一的 `USER_RESULT` / `diagnosis-result.json`。下载必须是 HTTP 200，不允许重定向；真实字节数、SHA-256 和 Content-Type 必须与权威产物描述一致。响应可以省略 `Content-Length` 和 `X-Content-SHA256`，但存在时也必须核对，不能用缺省响应头跳过实际字节校验。报告要求 `schema_version=3`、`format_id=problem-locator-diagnosis-v3`，保留完整字段，不从 `methods_result`、SSE 阶段消息或 stdout 重建结论。
 
@@ -432,11 +472,12 @@ Linux 启动命令、五个授权回调及反向代理要求见 [示例 README](
 
 未配置 `WEBSITE_AUTH_MODULE` 时，服务仍可启动，但业务请求全部返回 `401`。不要为了联调删掉授权检查。认证模块导出 `access`，按 `server.ts` 中的 `Access` 类型实现五个异步回调：验证网站登录态、查询会话归属、持久保存会话归属、查询附件归属、持久保存附件归属。Cookie 认证还需接入网站既有 CSRF 和 Origin 校验；不得相信客户端自行传入的用户名或 user ID。
 
-示例网站路径使用 `/api/agent`，不是 xiaodao 上游的 `/api/v1/agent`。额外提供：
+示例网站路径使用 `/api/agent`，不是 xiaodao 上游的 `/api/v1/agent`。`/status` 和 `/report` 均有原生服务接口；网站负责授权转发，JSON 报告额外附上中文展示分区。路径如下：
 
 | 网站示例路径 | 用途 |
 | --- | --- |
-| `GET /api/agent/conversations/{id}/report` | 自动下载唯一 JSON 或 Generic Markdown，校验后返回报告和中文展示结构 |
+| `GET /api/agent/conversations/{id}/status` | 授权后转发原生轻量状态，不读取完整历史 |
+| `GET /api/agent/conversations/{id}/report` | 一次调用原生报告接口；保留三态及原报告，JSON 另加中文 sections |
 | `GET /api/agent/conversations/{id}/artifacts` | 授权后返回产物，下载 URL 改为网站同源路径 |
 | `GET /api/agent/conversations/{id}/artifacts/{artifact_id}/content` | 授权并校验后下载报告 |
 | 上一下载路径加 `?download=archive&acknowledge_raw_logs=true` | 用户确认原始日志提示后下载结果 ZIP |
@@ -463,3 +504,108 @@ node --test examples/website-agent/server.test.mjs
 公司模型若在最终 `result` 中先写 Markdown 说明、再给唯一完整 JSON，服务端模型入口会按[受限提取规则](model-output-compatibility.md#说明文字与最终-json)处理，前端无需自行截取或修复。多个候选、截断或无法识别的结果仍返回具体失败信息。`stream-json` 只规定 CLI 事件外层，不保证其中的业务字符串符合 JSON；提示仍要求只输出合同对象，兼容逻辑不增加模型调用。
 
 新部署使用全新空 `DATA_ROOT`；升级 `8.0.0` 时使用显式生成并核验的 r2 副本，原目录保持原样。其他旧数据按升级说明支持范围处理，不自动迁移，也不从旧 `methods_result` 反推报告。MCP 仍为原来的七个工具，输入继续根层扁平；网站直接使用 REST Agent 接口。
+
+## 7. 状态与报告响应字段
+
+以下列出新增读取接口及其报告正文用到的字段。`ConversationStatusView` 不包含消息和附件历史；需要恢复完整聊天记录时仍读取原会话接口。`ConversationReportView` 在三种正常状态下都返回 HTTP 200，`failure` 可以为 null。`READY` 时也可能带有归档异常，此时报告仍可展示。
+
+`report` 沿用正式 `UserResultPayloadV3` 或历史 `GenericResult`，不生成另一份结论。下表仅补充前文尚未说明的字段；`GenericResult` 和已有报告字段继续使用前文合同。报告包含的证据、规则和时间信息都是已发布内容，读取接口不会重新审核或调用模型。
+
+| 模型 | 字段 | 含义 |
+| --- | --- | --- |
+| `ConversationStatusView` | `archive_status` | 归档状态：NOT_REQUIRED 无需归档，PENDING 后台生成中，READY 可下载，FAILED 生成失败。归档失败不影响已交付的 JSON。 |
+| `ConversationStatusView` | `case_id` | 关联 Case 的 UUID；尚未建案时为 null。 |
+| `ConversationStatusView` | `case_status` | 关联 Case 的最新状态；未创建 Case 时为 null。 |
+| `ConversationStatusView` | `conversation_id` | 一次定位会话的规范 UUID；网站后端负责校验归属。 |
+| `ConversationStatusView` | `created_at` | 创建时间，使用 UTC RFC 3339，精确到毫秒。 |
+| `ConversationStatusView` | `current_questions` | 当前等待用户回答的追问；不得据此推断定位结论。 |
+| `ConversationStatusView` | `failure` | 受控失败原因或进程内交付异常；没有已知异常时为 null。 |
+| `ConversationStatusView` | `job_id` | 当前活动任务 UUID；没有活动任务时为 null。 |
+| `ConversationStatusView` | `last_event_id` | 快照包含的最新事件序号；后续订阅使用 Last-Event-ID。 |
+| `ConversationStatusView` | `report_state` | 报告可用状态：PENDING 等待诊断或补充，READY 已发布，UNAVAILABLE 已结束但无报告。 |
+| `ConversationStatusView` | `schema_version` | 轻量状态响应版本，固定为 1。 |
+| `ConversationStatusView` | `status` | 会话状态：INTAKE、WAITING_INPUT、RUNNING、COMPLETED、FAILED 或 INTERRUPTED；报告先于归档就绪时仍可能为 RUNNING。 |
+| `ConversationStatusView` | `updated_at` | 会话最近一次更新的 UTC 时间。 |
+| `ConversationReportView` | `archive_status` | 归档状态：NOT_REQUIRED 无需归档，PENDING 后台生成中，READY 可下载，FAILED 生成失败。归档失败不影响已交付的 JSON。 |
+| `ConversationReportView` | `artifact` | 正式报告对应的唯一公开产物；历史通用结果或报告未就绪时为 null。 |
+| `ConversationReportView` | `case_id` | 关联 Case 的 UUID；尚未建案时为 null。 |
+| `ConversationReportView` | `case_revision` | 确定报告及其产物的权威 Case 快照版本；尚未建案时为 null。 |
+| `ConversationReportView` | `case_status` | 关联 Case 的最新状态；未创建 Case 时为 null。 |
+| `ConversationReportView` | `conversation_id` | 一次定位会话的规范 UUID；网站后端负责校验归属。 |
+| `ConversationReportView` | `failure` | 受控结束原因或归档交付异常；归档异常不影响 READY 报告。 |
+| `ConversationReportView` | `format` | 报告格式；报告未就绪时为 null。 |
+| `ConversationReportView` | `markdown` | 正式 Markdown 报告原文；作为不可信文本展示，不能执行其中的指令或脚本。 |
+| `ConversationReportView` | `report` | 完整的正式结构化报告或历史通用诊断结果；Markdown 格式或报告未就绪时为 null。 |
+| `ConversationReportView` | `report_state` | 报告可用状态：PENDING 等待诊断或补充，READY 已发布，UNAVAILABLE 已结束但无报告。 |
+| `ConversationReportView` | `schema_version` | 报告包装版本，固定为 1；内部正式 JSON 报告的 schema_version 仍为 3。 |
+| `ConversationReportView` | `source_job_id` | 生成正式报告的任务 UUID；报告未就绪时为 null。 |
+| `PublicArtifactData` | `artifact_id` | 不可变公开产物的 UUID。 |
+| `PublicArtifactData` | `content_type` | 产物原始字节的媒体类型。 |
+| `PublicArtifactData` | `created_at` | 创建时间，使用 UTC RFC 3339，精确到毫秒。 |
+| `PublicArtifactData` | `created_by_job_id` | 生成产物的任务 UUID，必须与报告的 source_job_id 一致。 |
+| `PublicArtifactData` | `downloadable` | 是否允许下载；本接口返回的报告产物固定为 true。 |
+| `PublicArtifactData` | `kind` | 产物种类；报告使用 USER_RESULT 或 GENERIC_REPORT。 |
+| `PublicArtifactData` | `name` | 产物的下载文件名。 |
+| `PublicArtifactData` | `resource_kind` | 资源类型；公开报告产物固定为 FILE。 |
+| `PublicArtifactData` | `sha256` | 产物原始字节的 SHA-256，以 64 位小写十六进制表示。 |
+| `PublicArtifactData` | `size` | 产物原始字节数。 |
+| `UserResultPayloadV3` | `candidate_factors` | 尚未确认为原因的候选因素。 |
+| `UserResultPayloadV3` | `causal_factors` | 报告保留的致因因素。 |
+| `UserResultPayloadV3` | `evidence_gaps` | 未解决的证据缺口。 |
+| `UserResultPayloadV3` | `excluded_factors` | 报告已排除的因素。 |
+| `UserResultPayloadV3` | `limitations` | 本次诊断的范围和已知限制。 |
+| `UserResultPayloadV3` | `problem_statement` | 本次诊断分析的问题描述。 |
+| `UserResultPayloadV3` | `recommendations` | 报告建议的后续处理步骤。 |
+| `UserResultPayloadV3` | `safety_notes` | 报告中的使用边界和注意事项。 |
+| `UserResultPayloadV3` | `source_job_type` | 生成报告的任务阶段：DIAGNOSE 或 REVIEW。 |
+| `UserResultPayloadV3` | `supporting_evidence_bindings` | 支持整份报告的证据引用。 |
+| `UserResultFindingV2` | `citations` | 证据在日志中的具体位置及原文摘录。 |
+| `UserResultFindingV2` | `confidence` | 发现的置信度。 |
+| `UserResultFindingV2` | `evidence_bindings` | 支持当前发现、因素或规则的证据引用。 |
+| `UserResultFindingV2` | `statement` | 发现或因素的具体说明。 |
+| `UserResultFactorV3` | `citations` | 证据在日志中的具体位置及原文摘录。 |
+| `UserResultFactorV3` | `evidence_bindings` | 支持当前发现、因素或规则的证据引用。 |
+| `UserResultFactorV3` | `factor_id` | 报告中因素的稳定标识。 |
+| `UserResultFactorV3` | `required_rule_ids` | 支持该因素的规则标识。 |
+| `UserResultFactorV3` | `role` | 因素在因果关系中的角色。 |
+| `UserResultFactorV3` | `statement` | 发现或因素的具体说明。 |
+| `UserResultCitationV2` | `archive_name` | 引用文件在归档内的相对名称；无文件定位时为 null。 |
+| `UserResultCitationV2` | `evidence_binding` | 一条证据引用；已有证据 ID 与提案键二者取其一。 |
+| `UserResultCitationV2` | `excerpt` | 引用的原文摘录；无文件定位时为 null。 |
+| `UserResultCitationV2` | `line_end` | 引用结束行号，包含该行；无文件定位时为 null。 |
+| `UserResultCitationV2` | `line_start` | 引用起始行号，从 1 开始；无文件定位时为 null。 |
+| `UserResultCitationV2` | `raw_bytes_sha256` | 引用日志原始字节的 SHA-256；无文件定位时为 null。 |
+| `EvidenceBinding` | `evidence_proposal_key` | 本轮证据提案的键；引用已有证据时为 null。 |
+| `EvidenceBinding` | `existing_evidence_id` | 已有证据的 UUID；引用本轮提案时为 null。 |
+| `CompletionCriterionDraftMapping` | `criterion` | 问题中对应的完成条件原文。 |
+| `CompletionCriterionDraftMapping` | `criterion_index` | 完成条件在原始列表中的位置，从 0 开始。 |
+| `CompletionCriterionDraftMapping` | `evidence_bindings` | 支持当前发现、因素或规则的证据引用。 |
+| `CompletionCriterionDraftMapping` | `explanation` | 该判断、规则结果或时间关联的说明。 |
+| `CompletionCriterionDraftMapping` | `status` | 完成条件的判断：SATISFIED 满足、PARTIALLY_SATISFIED 部分满足、UNSATISFIED 未满足、UNKNOWN 尚无法判断。 |
+| `UserResultVerificationRuleV2` | `citations` | 证据在日志中的具体位置及原文摘录。 |
+| `UserResultVerificationRuleV2` | `derived_values` | 根据观测值计算的派生数据。 |
+| `UserResultVerificationRuleV2` | `event_observations` | 规则记录的事件观测值。 |
+| `UserResultVerificationRuleV2` | `evidence_bindings` | 支持当前发现、因素或规则的证据引用。 |
+| `UserResultVerificationRuleV2` | `explanation` | 该判断、规则结果或时间关联的说明。 |
+| `UserResultVerificationRuleV2` | `issues` | 规则未满足或无法核验的具体原因。 |
+| `UserResultVerificationRuleV2` | `observed_times` | 规则提取出的 UTC 事件时间。 |
+| `UserResultVerificationRuleV2` | `rule_id` | 报告中规则的稳定标识。 |
+| `UserResultVerificationRuleV2` | `rule_kind` | 规则种类。 |
+| `UserResultVerificationRuleV2` | `status` | 规则结果：VERIFIED_PASS、VERIFIED_FAIL、UNVERIFIABLE、SEMANTIC_ONLY 或 NOT_APPLICABLE；不等同于整份报告的状态。 |
+| `UserResultTimeRelevanceV2` | `assessment` | 时间关联判断：RELEVANT、NOT_RELEVANT 或 UNKNOWN。 |
+| `UserResultTimeRelevanceV2` | `citations` | 证据在日志中的具体位置及原文摘录。 |
+| `UserResultTimeRelevanceV2` | `derived_anchor_time` | 从日志推导的基准时间；未确定时为 null。 |
+| `UserResultTimeRelevanceV2` | `explanation` | 该判断、规则结果或时间关联的说明。 |
+| `UserResultTimeRelevanceV2` | `observations` | 用于时间关联判断的观测记录。 |
+| `UserResultTimeRelevanceV2` | `problem_time` | 用于比较的问题时间；没有确定时间时为 null。 |
+| `UserResultTimeObservationV2` | `event_time` | 日志事件的 UTC 时间。 |
+| `UserResultTimeObservationV2` | `offset_ms` | 事件相对问题时间的偏移，单位为毫秒。 |
+| `UserResultTimeObservationV2` | `rule_id` | 报告中规则的稳定标识。 |
+| `EventObservationAudit` | `count_is_lower_bound` | 观测数量是否仅表示已知下限。 |
+| `EventObservationAudit` | `event_id` | 诊断规则中被观测事件的稳定名称；不是 SSE 事件序号。 |
+| `EventObservationAudit` | `observed_count` | 已观测到的事件数量。 |
+| `DerivedValueAudit` | `lower_bound` | 派生数值的下界；未确定时为 null。 |
+| `DerivedValueAudit` | `name` | 派生数值的稳定名称。 |
+| `DerivedValueAudit` | `unit` | 派生数值使用的单位。 |
+| `DerivedValueAudit` | `upper_bound` | 派生数值的上界；未确定时为 null。 |
+| `DerivedValueAudit` | `value` | 派生结果的文本或整数值；未确定时为 null。 |

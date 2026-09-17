@@ -17,6 +17,8 @@ from problem_locator.agent.models import (
     AgentEvent,
     AgentStoreError,
     ConversationReceipt,
+    ConversationReportView,
+    ConversationStatusView,
     ConversationView,
     MessageReceipt,
 )
@@ -180,7 +182,7 @@ async def _events(
 
 
 def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: str) -> None:
-    """Register all six routes even when Agent service is not configured."""
+    """Register all Agent routes even when its service is not configured."""
     # HTTP helpers are imported at registration time to avoid the composition
     # module's import cycle. Upload cancellation follows the established port.
     from .http_app import _port_call, parse_upload_headers
@@ -206,9 +208,17 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
                 "create_conversation": ConversationReceipt,
                 "send_message": MessageReceipt,
                 "get_conversation": ConversationView,
+                "get_status": ConversationStatusView,
+                "get_report": ConversationReportView,
                 "prepare_attachment": AgentAttachment,
             }[function]
-            result = result_model.model_validate(model_json(result))
+            if function == "get_report":
+                # A service report was already validated. Avoid serializing and
+                # parsing its full contents again merely to produce an envelope.
+                if not isinstance(result, result_model):
+                    result = result_model.model_validate_json(canonical_json_bytes(model_json(result)))
+            else:
+                result = result_model.model_validate(model_json(result))
             return JSONResponse(success_envelope(result))
         except AgentStoreError as exc:
             return _failure(exc.code, exc.message, exc.status_code, details=exc.details, retryable=exc.retryable)
@@ -254,6 +264,31 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
         conversation_id: Annotated[OpaqueId, Path()], request: Request,
     ) -> JSONResponse:
         return await respond("get_conversation", request, conversation_id=conversation_id)
+
+    @app.get(
+        f"{_PREFIX}/conversations/{{conversation_id}}/status", tags=["Agent"],
+        response_model=SuccessEnvelope[ConversationStatusView], responses=errors,
+        summary="读取会话轻量状态",
+        description="返回追问、失败原因、报告可用状态及事件游标；不加载消息正文或附件历史。",
+        operation_id="get_agent_conversation_status",
+    )
+    async def get_status(
+        conversation_id: Annotated[OpaqueId, Path()], request: Request,
+    ) -> JSONResponse:
+        return await respond("get_status", request, conversation_id=conversation_id)
+
+    @app.get(
+        f"{_PREFIX}/conversations/{{conversation_id}}/report", tags=["Agent"],
+        response_model=SuccessEnvelope[ConversationReportView], responses=errors,
+        summary="读取会话正式诊断报告",
+        description=("PENDING 表示等待诊断或补充，READY 返回完整报告，UNAVAILABLE 表示已结束但无报告。"
+                     "三种状态均返回 HTTP 200；读取不运行模型或重新审核证据，归档失败不影响已发布报告。"),
+        operation_id="get_agent_conversation_report",
+    )
+    async def get_report(
+        conversation_id: Annotated[OpaqueId, Path()], request: Request,
+    ) -> JSONResponse:
+        return await respond("get_report", request, conversation_id=conversation_id)
 
     @app.get(
         f"{_PREFIX}/conversations/{{conversation_id}}/events", tags=["Agent"],

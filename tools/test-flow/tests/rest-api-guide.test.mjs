@@ -22,6 +22,8 @@ const SERVICE_OPERATIONS = ["GET /live", "GET /ready"];
 const AGENT_OPERATIONS = [
   "GET /api/v1/agent/conversations/{conversation_id}",
   "GET /api/v1/agent/conversations/{conversation_id}/events",
+  "GET /api/v1/agent/conversations/{conversation_id}/report",
+  "GET /api/v1/agent/conversations/{conversation_id}/status",
   "POST /api/v1/agent/conversations",
   "POST /api/v1/agent/conversations/{conversation_id}/attachments",
   "POST /api/v1/agent/conversations/{conversation_id}/messages",

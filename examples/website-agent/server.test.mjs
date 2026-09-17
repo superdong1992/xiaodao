@@ -13,6 +13,7 @@ const artifactId = "30000000-0000-0000-0000-000000000001";
 const jobId = "40000000-0000-0000-0000-000000000001";
 const base = `http://xiaodao.internal`;
 const conversationPath = `/api/agent/conversations/${conversation}`;
+const reportDownloadPath = `${conversationPath}/artifacts/${artifactId}/content`;
 const access = {
   authenticate: async () => ({ id: "alice" }),
   ownsConversation: async (_user, id) => id === conversation,
@@ -79,6 +80,206 @@ function artifactFixture({ kind = "USER_RESULT", payload = Buffer.from(JSON.stri
   return { calls, artifact, fetchImpl };
 }
 
+function nativeReport(overrides = {}) {
+  const artifact = artifactFixture().artifact;
+  delete artifact.download_url;
+  return {
+    schema_version: 1, conversation_id: conversation, case_id: caseId, case_revision: 5,
+    case_status: "RESOLVED", archive_status: "PENDING", report_state: "READY", source_job_id: jobId,
+    format: "problem-locator-diagnosis-v3", report, markdown: null,
+    artifact: { ...artifact, resource_kind: "FILE", created_by_job_id: jobId,
+      created_at: "2026-09-17T00:00:00.000Z", downloadable: true }, failure: null,
+    ...overrides,
+  };
+}
+
+function nativeFixture(data, { action = "report" } = {}) {
+  const calls = [];
+  return { calls, fetchImpl: async (url, init) => {
+    calls.push(String(url));
+    assert.equal(new URL(url).pathname, `/api/v1/agent/conversations/${conversation}/${action}`);
+    assert.equal(init.redirect, "manual");
+    assert.equal(init.method, undefined);
+    return envelope(data);
+  } };
+}
+
+test("report uses one native query and keeps the existing report and Chinese sections", async () => {
+  const fixture = nativeFixture(nativeReport());
+  await withServer({ access, fetchImpl: fixture.fetchImpl }, async (origin) => {
+    const response = await fetch(origin + conversationPath + "/report");
+    assert.equal(response.status, 200);
+    const value = (await response.json()).data;
+    assert.equal(value.report_state, "READY");
+    assert.deepEqual(value.report, report);
+    assert.equal(value.artifact.artifact_id, artifactId);
+    assert.deepEqual(value.sections.map((section) => section.title), ["定位结论", "问题描述", "关键发现", "原因与因素", "完成条件", "服务端验证", "时间相关性", "证据缺口", "限制", "处置建议与安全说明"]);
+  });
+  assert.deepEqual(fixture.calls, [`${base}/api/v1/agent/conversations/${conversation}/report`]);
+});
+
+for (const reportState of ["PENDING", "UNAVAILABLE"]) {
+  test(`${reportState} report returns HTTP 200 without a download or fabricated content`, async () => {
+    const value = nativeReport({ report_state: reportState, case_id: null, case_revision: null, case_status: null,
+      source_job_id: null, format: null, report: null, markdown: null, artifact: null });
+    const fixture = nativeFixture(value);
+    await withServer({ access, fetchImpl: fixture.fetchImpl }, async (origin) => {
+      const response = await fetch(origin + conversationPath + "/report");
+      assert.equal(response.status, 200);
+      assert.deepEqual((await response.json()).data, value);
+    });
+    assert.equal(fixture.calls.length, 1);
+  });
+}
+
+for (const status of ["PARTIAL", "INCONCLUSIVE"]) {
+  test(`${status} remains a READY report and preserves its limitations`, async () => {
+    const payload = { ...report, status, root_cause: null, limitations: ["缺少一段日志"] };
+    const fixture = nativeFixture(nativeReport({ case_status: status === "PARTIAL" ? "PARTIALLY_RESOLVED" : "UNRESOLVED",
+      report: payload }));
+    await withServer({ access, fetchImpl: fixture.fetchImpl }, async (origin) => {
+      const response = await fetch(origin + conversationPath + "/report");
+      assert.equal(response.status, 200);
+      const value = (await response.json()).data;
+      assert.equal(value.report_state, "READY");
+      assert.deepEqual(value.report, payload);
+    });
+    assert.equal(fixture.calls.length, 1);
+  });
+}
+
+test("native Markdown and legacy Generic reports retain the existing success fields", async () => {
+  const markdown = "# 诊断结果\r\n采用 \"rpc_timeout\" 方法 🧭\r\n";
+  const legacy = { conclusion: "当前证据不足", root_cause_analysis: "缺少服务端日志", source_job_id: jobId };
+  for (const fields of [
+    { format: "markdown", report: null, markdown },
+    { format: "generic-v1", report: legacy, markdown: null, artifact: null },
+  ]) {
+    const value = nativeReport(fields);
+    const fixture = nativeFixture(value);
+    await withServer({ access, fetchImpl: fixture.fetchImpl }, async (origin) => {
+      const response = await fetch(origin + conversationPath + "/report");
+      assert.equal(response.status, 200);
+      assert.deepEqual((await response.json()).data, value);
+    });
+    assert.equal(fixture.calls.length, 1);
+  }
+});
+
+test("native report routing keeps the configured internal path prefix", async () => {
+  const calls = [];
+  await withServer({ access, upstream: base + "/internal/xiaodao", fetchImpl: async (url, init) => {
+    calls.push(String(url));
+    assert.equal(init.redirect, "manual");
+    return envelope(nativeReport());
+  } }, async (origin) => {
+    assert.equal((await fetch(origin + conversationPath + "/report")).status, 200);
+  });
+  assert.deepEqual(calls, [`${base}/internal/xiaodao/api/v1/agent/conversations/${conversation}/report`]);
+});
+
+test("status forwards one compact native query with safe failure details", async () => {
+  const value = { schema_version: 1, conversation_id: conversation, status: "RUNNING", case_id: caseId,
+    case_status: "RESOLVED", report_state: "READY", archive_status: "PENDING", current_questions: [],
+    failure: { code: "DISPATCH_REJECTED", message: "SECRET /srv/private", retryable: true,
+      details: [{ field: "phase", actual: "ARCHIVE_STATUS_COMMIT" }, { field: "persistence", actual: "UNKNOWN" }] } };
+  const fixture = nativeFixture(value, { action: "status" });
+  await withServer({ access, fetchImpl: fixture.fetchImpl }, async (origin) => {
+    const response = await fetch(origin + conversationPath + "/status");
+    assert.equal(response.status, 200);
+    const text = await response.text();
+    assert.ok(!text.includes("SECRET") && !text.includes("/srv"));
+    const received = JSON.parse(text).data;
+    assert.equal(received.failure.message, "报告已生成，但归档状态暂时无法确认。");
+    assert.equal(received.failure.retryable, false);
+    assert.equal(received.report_state, "READY");
+    assert.equal(received.messages, undefined);
+    assert.equal(received.attachments, undefined);
+  });
+  assert.equal(fixture.calls.length, 1);
+});
+
+test("unavailable report failure uses controlled Chinese text", async () => {
+  const fixture = nativeFixture(nativeReport({ report_state: "UNAVAILABLE", format: null, report: null,
+    markdown: null, artifact: null, failure: { code: "INTAKE_OUTPUT_INVALID", message: "SECRET /srv/private",
+      details: [{ field: "phase", actual: "INTAKE" }, { field: "raw_output", actual: "SECRET" }], retryable: true } }));
+  await withServer({ access, fetchImpl: fixture.fetchImpl }, async (origin) => {
+    const response = await fetch(origin + conversationPath + "/report");
+    assert.equal(response.status, 200);
+    const text = await response.text();
+    assert.ok(!text.includes("SECRET") && !text.includes("/srv"));
+    assert.deepEqual(JSON.parse(text).data.failure, { code: "INTAKE_OUTPUT_INVALID",
+      message: "补充信息整理失败，请核对输入后新建任务。", details: [{ field: "phase", actual: "INTAKE" }], retryable: false });
+  });
+});
+
+for (const action of ["status", "report"]) {
+  test(`${action} preserves controlled upstream failures without fetching another resource`, async () => {
+    const calls = [];
+    await withServer({ access, fetchImpl: async (url) => {
+      calls.push(String(url));
+      return new Response(JSON.stringify({ ok: false, data: null, error: { code: "STATE_WRITE_FAILED",
+        message: "SECRET /srv/private", details: [{ field: "phase", actual: "RESULT_DELIVERY" }], retryable: true } }),
+      { status: 503, headers: { "Content-Type": "application/json" } });
+    } }, async (origin) => {
+      const response = await fetch(`${origin}${conversationPath}/${action}`);
+      assert.equal(response.status, 503);
+      assert.deepEqual((await response.json()).error, { code: "STATE_WRITE_FAILED",
+        message: "定位状态暂时无法确认，请稍后查询。", details: [{ field: "phase", actual: "RESULT_DELIVERY" }], retryable: true });
+    });
+    assert.deepEqual(calls, [`${base}/api/v1/agent/conversations/${conversation}/${action}`]);
+  });
+}
+
+for (const overrides of [
+  { conversation_id: caseId }, { schema_version: 2 }, { report_state: "UNKNOWN" },
+  { report_state: "PENDING" }, { report_state: "UNAVAILABLE" }, { format: "html" },
+  { format: "markdown", report: null, markdown: {} }, { report: [] },
+]) {
+  test(`native report rejects invalid response shape ${JSON.stringify(overrides)}`, async () => {
+    const fixture = nativeFixture(nativeReport(overrides));
+    await withServer({ access, fetchImpl: fixture.fetchImpl }, async (origin) => {
+      const response = await fetch(origin + conversationPath + "/report");
+      assert.equal(response.status, 502);
+      assert.equal((await response.json()).data, null);
+    });
+    assert.equal(fixture.calls.length, 1);
+  });
+}
+
+test("native report permits JSON escaping expansion without changing Markdown text", async () => {
+  const markdown = "# 日志 🧭\r\n" + "\u0001".repeat(3 * 1024 * 1024);
+  const fixture = nativeFixture(nativeReport({ format: "markdown", report: null, markdown }));
+  await withServer({ access, fetchImpl: fixture.fetchImpl }, async (origin) => {
+    const response = await fetch(origin + conversationPath + "/report");
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).data.markdown, markdown);
+  });
+  assert.equal(fixture.calls.length, 1);
+});
+
+for (const [action, limit] of [["status", 16 * 1024 * 1024], ["report", 6 * 16 * 1024 * 1024 + 64 * 1024]]) {
+  test(`${action} enforces its response budget even without Content-Length`, async () => {
+    const chunk = new Uint8Array(1024 * 1024).fill(32);
+    let sent = 0;
+    let calls = 0;
+    await withServer({ access, fetchImpl: async () => {
+      calls++;
+      return new Response(new ReadableStream({ pull(controller) {
+        if (sent > limit) { controller.close(); return; }
+        sent += chunk.length;
+        controller.enqueue(chunk);
+      } }), { headers: { "Content-Type": "application/json" } });
+    } }, async (origin) => {
+      const response = await fetch(`${origin}${conversationPath}/${action}`);
+      assert.equal(response.status, 502);
+      assert.equal((await response.json()).data, null);
+    });
+    assert.equal(calls, 1);
+    assert.ok(sent <= limit + 2 * chunk.length);
+  });
+}
+
 test("default access denies before any upstream request", async () => {
   let calls = 0;
   await withServer({ fetchImpl: async () => { calls++; throw new Error(); } }, async (origin) => {
@@ -92,7 +293,7 @@ test("every conversation read, SSE, mutation and download enforces ownership", a
   let calls = 0;
   await withServer({ access: { ...access, ownsConversation: async () => false },
     fetchImpl: async () => { calls++; throw new Error(); } }, async (origin) => {
-    for (const path of ["", "/events", "/artifacts", "/report", `/artifacts/${artifactId}/content`]) {
+    for (const path of ["", "/events", "/artifacts", "/report", "/status", `/artifacts/${artifactId}/content`]) {
       const response = await fetch(origin + conversationPath + path);
       assert.equal(response.status, 403, path);
     }
@@ -149,14 +350,12 @@ test("SSE transparently forwards data-only frames, Last-Event-ID and connection 
   });
 });
 
-test("report endpoint verifies bytes and exposes fixed Chinese sections", async () => {
+test("explicit report download verifies original bytes", async () => {
   const fixture = artifactFixture();
   await withServer({ access, fetchImpl: fixture.fetchImpl }, async (origin) => {
-    const response = await fetch(origin + conversationPath + "/report");
+    const response = await fetch(origin + reportDownloadPath);
     assert.equal(response.status, 200);
-    const value = (await response.json()).data;
-    assert.equal(value.report.root_cause, "连接池耗尽");
-    assert.deepEqual(value.sections.map((section) => section.title), ["定位结论", "问题描述", "关键发现", "原因与因素", "完成条件", "服务端验证", "时间相关性", "证据缺口", "限制", "处置建议与安全说明"]);
+    assert.deepEqual(await response.json(), report);
   });
   assert.equal(fixture.calls.filter((url) => url.includes("/content?")).length, 1);
   assert.deepEqual(fixture.calls, [
@@ -170,7 +369,7 @@ for (const fault of ["badHash", "badSource"]) {
   test(`report rejects ${fault} and never returns unverified bytes`, async () => {
     const fixture = artifactFixture({ [fault]: true });
     await withServer({ access, fetchImpl: fixture.fetchImpl }, async (origin) => {
-      const response = await fetch(origin + conversationPath + "/report");
+      const response = await fetch(origin + reportDownloadPath);
       assert.equal(response.status, 502);
       assert.equal((await response.json()).data, null);
     });
@@ -181,9 +380,9 @@ for (const fault of ["badHash", "badSource"]) {
 test("published download URL cannot choose the host or path of an internal download", async () => {
   const fixture = artifactFixture({ badUrl: true });
   await withServer({ access, fetchImpl: fixture.fetchImpl }, async (origin) => {
-    const response = await fetch(origin + conversationPath + "/report");
+    const response = await fetch(origin + reportDownloadPath);
     assert.equal(response.status, 200);
-    assert.equal((await response.json()).data.report.root_cause, report.root_cause);
+    assert.equal((await response.json()).root_cause, report.root_cause);
   });
   assert.deepEqual(fixture.calls.filter((url) => url.includes("/content?")), [
     `${base}/api/v1/artifacts/${artifactId}/content?case_id=${caseId}`,
@@ -201,7 +400,7 @@ test("configured internal path prefix survives reconstructed download routing", 
     parsed.pathname = parsed.pathname.slice("/internal/xiaodao".length);
     return fixture.fetchImpl(parsed, init);
   } }, async (origin) => {
-    assert.equal((await fetch(origin + conversationPath + "/report")).status, 200);
+    assert.equal((await fetch(origin + reportDownloadPath)).status, 200);
   });
   assert.ok(requested.includes(`${base}/internal/xiaodao/api/v1/artifacts/${artifactId}/content?case_id=${caseId}`));
 });
@@ -211,7 +410,7 @@ test("missing optional download integrity headers still verifies received bytes"
   for (const options of [{}, { badHash: true }, { receivedPayload: Buffer.from("short") }]) {
     const fixture = artifactFixture({ ...options, headerOverrides: absent });
     await withServer({ access, fetchImpl: fixture.fetchImpl }, async (origin) => {
-      const response = await fetch(origin + conversationPath + "/report");
+      const response = await fetch(origin + reportDownloadPath);
       assert.equal(response.status, Object.keys(options).length ? 502 : 200);
       if (!response.ok) assert.equal((await response.json()).data, null);
     });
@@ -228,7 +427,7 @@ for (const options of [
   test(`present incorrect integrity headers or redirect rejects ${JSON.stringify(options)}`, async () => {
     const fixture = artifactFixture(options);
     await withServer({ access, fetchImpl: fixture.fetchImpl }, async (origin) => {
-      const response = await fetch(origin + conversationPath + "/report");
+      const response = await fetch(origin + reportDownloadPath);
       assert.equal(response.status, 502);
       assert.equal((await response.json()).data, null);
     });
@@ -280,9 +479,9 @@ test("archive uncertainty remains visible without blocking the already published
     assert.equal(snapshot.failure.message, "报告已生成，但归档状态暂时无法确认。");
     assert.equal(snapshot.status, "RUNNING");
     assert.equal(snapshot.failure.retryable, false);
-    const response = await fetch(origin + conversationPath + "/report");
+    const response = await fetch(origin + reportDownloadPath);
     assert.equal(response.status, 200);
-    assert.equal((await response.json()).data.report.root_cause, report.root_cause);
+    assert.equal((await response.json()).root_cause, report.root_cause);
   });
 });
 
@@ -326,20 +525,6 @@ test("missing report fields are errors, never fabricated conclusions", () => {
   assert.equal(sections[0].value, null);
 });
 
-test("legacy Generic V1 preserves its result when no downloadable artifact exists", async () => {
-  const legacy = { conclusion: "当前证据不足", root_cause_analysis: "缺少服务端日志", source_job_id: jobId };
-  await withServer({ access, fetchImpl: async (url) => {
-    const path = new URL(url).pathname;
-    if (path.endsWith(`/conversations/${conversation}`)) return envelope({ case_id: caseId });
-    if (path.endsWith("/artifacts")) return envelope({ artifacts: [] });
-    return envelope({ case_view: { case_id: caseId, status: "UNRESOLVED", artifacts: [], generic_result: legacy } });
-  }}, async (origin) => {
-    const response = await fetch(origin + conversationPath + "/report");
-    assert.equal(response.status, 200);
-    assert.deepEqual((await response.json()).data, { format: "generic-v1", report: legacy });
-  });
-});
-
 for (const count of [1, 200]) {
   test(`artifact listing uses one Case snapshot for ${count} entries`, async () => {
     const seed = artifactFixture({ kind: "USER_RESULT_ARCHIVE", payload: Buffer.from("zip bytes") });
@@ -359,23 +544,20 @@ for (const count of [1, 200]) {
   });
 }
 
-test("report rendering and small report downloads perform no temporary-file IO", async (context) => {
+test("small report downloads perform no temporary-file IO", async (context) => {
   const directory = context.mock.method(fsPromises, "mkdtemp", () => { throw new Error("report unexpectedly created a temporary directory"); });
   const writing = context.mock.method(fs, "createWriteStream", () => { throw new Error("report unexpectedly opened a temporary file"); });
   syncBuiltinESMExports();
   try {
     const fixture = artifactFixture();
     await withServer({ access, fetchImpl: fixture.fetchImpl }, async (origin) => {
-      const rendered = await fetch(origin + conversationPath + "/report");
-      assert.equal(rendered.status, 200);
-      assert.deepEqual((await rendered.json()).data.report, report);
       const downloaded = await fetch(origin + conversationPath + `/artifacts/${artifactId}/content`);
       assert.equal(downloaded.status, 200);
       assert.equal(await downloaded.text(), JSON.stringify(report));
     });
     assert.equal(directory.mock.callCount(), 0);
     assert.equal(writing.mock.callCount(), 0);
-    assert.equal(fixture.calls.length, 6);
+    assert.equal(fixture.calls.length, 3);
   } finally {
     context.mock.restoreAll();
     syncBuiltinESMExports();
@@ -396,9 +578,9 @@ test("chunked Generic report bytes preserve Unicode and CRLF after verification"
     headerOverrides: { "Content-Length": null, "X-Content-SHA256": null },
     caseOverrides: { final_result: null, generic_result_v2: { source_job_id: jobId, report_artifact_id: artifactId } } });
   await withServer({ access, fetchImpl: fixture.fetchImpl }, async (origin) => {
-    const response = await fetch(origin + conversationPath + "/report");
+    const response = await fetch(origin + reportDownloadPath);
     assert.equal(response.status, 200);
-    assert.deepEqual((await response.json()).data, { format: "markdown", markdown });
+    assert.equal(await response.text(), markdown);
   });
   assert.equal(fixture.calls.length, 3);
 });
@@ -421,7 +603,7 @@ for (const [name, options] of [
   test(`single-snapshot report rejects ${name} before downloading`, async () => {
     const fixture = artifactFixture(options);
     await withServer({ access, fetchImpl: fixture.fetchImpl }, async (origin) => {
-      const response = await fetch(origin + conversationPath + "/report");
+      const response = await fetch(origin + reportDownloadPath);
       assert.equal(response.status, 502);
       assert.equal((await response.json()).data, null);
     });
@@ -435,17 +617,17 @@ test("single-snapshot report still rejects duplicate artifact identities", async
   const duplicate = { ...seed, resource_kind: "FILE", created_by_job_id: jobId, downloadable: true };
   const fixture = artifactFixture({ caseOverrides: { artifacts: [duplicate, duplicate] } });
   await withServer({ access, fetchImpl: fixture.fetchImpl }, async (origin) => {
-    const response = await fetch(origin + conversationPath + "/report");
+    const response = await fetch(origin + reportDownloadPath);
     assert.equal(response.status, 502);
     assert.equal((await response.json()).data, null);
   });
   assert.equal(fixture.calls.length, 2);
 });
 
-test("oversized report metadata is rejected before content fetch or allocation", async () => {
-  const fixture = artifactFixture({ artifactOverrides: { size: 16 * 1024 * 1024 + 1 } });
+test("oversized download metadata is rejected before content fetch or allocation", async () => {
+  const fixture = artifactFixture({ artifactOverrides: { size: 5_368_709_120 + 1 } });
   await withServer({ access, fetchImpl: fixture.fetchImpl }, async (origin) => {
-    const response = await fetch(origin + conversationPath + "/report");
+    const response = await fetch(origin + reportDownloadPath);
     assert.equal(response.status, 502);
     assert.equal((await response.json()).data, null);
   });
@@ -459,7 +641,7 @@ for (const difference of [-1, 1]) {
     const fixture = artifactFixture({ payload, receivedPayload,
       headerOverrides: { "Content-Length": null, "X-Content-SHA256": null } });
     await withServer({ access, fetchImpl: fixture.fetchImpl }, async (origin) => {
-      const response = await fetch(origin + conversationPath + "/report");
+      const response = await fetch(origin + reportDownloadPath);
       assert.equal(response.status, 502);
       const envelope = await response.json();
       assert.equal(envelope.data, null);

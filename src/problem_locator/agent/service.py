@@ -16,7 +16,7 @@ from .intake import (
     IntakeRequirement, IntakeValue, build_initial_problem_spec, validate_intake_decision,
     intake_processing_receipt,
 )
-from .models import AgentPublicFailure, AgentStoreError
+from .models import AgentPublicFailure, AgentStoreError, ConversationReportView, PublicArtifactData
 from .failures import exception_code, exception_details
 from .uploads import ConversationUploads
 
@@ -88,10 +88,16 @@ class AgentConversationService:
 
     def get_conversation(self, conversation_id):
         view = self.store.get_conversation(conversation_id)
+        return self._read_failure(view)
+
+    def get_status(self, conversation_id):
+        return self._read_failure(self.store.get_status(conversation_id))
+
+    def _read_failure(self, view, *, case=None):
         operational = getattr(self.application, "operational_state", None)
-        if operational is not None and view.case_id is None and view.status not in _CLOSED and any(
-            message.status in {"QUEUED", "PROCESSING"} for message in view.messages
-        ) and not operational.accepting and operational.latest_error is not None:
+        if (operational is not None and view.case_id is None and view.status not in _CLOSED
+                and not operational.accepting and operational.latest_error is not None
+                and self.store.has_pending_messages(view.conversation_id)):
             # This accepted message has no Case whose delivery can be queried.
             # Reveal the pause, never identifiers from the task that stopped us.
             raise AgentStoreError("DISPATCH_REJECTED", "服务异常，已接收的任务暂时无法继续。", 503,
@@ -102,7 +108,8 @@ class AgentConversationService:
             if error is None:
                 return view
             try:
-                case = self.application.get_case(view.case_id).case_view
+                if case is None:
+                    case = self.application.get_case(view.case_id).case_view
             except ApplicationPortError as query_error:
                 if query_error.error.code.value == "CASE_NOT_FOUND" and (view.status in _CLOSED or
                     operational.error_for_case(view.case_id, None, view.archive_status) is None):
@@ -119,9 +126,52 @@ class AgentConversationService:
                 raise ApplicationPortError(error)
         return view
 
+    def get_report(self, conversation_id):
+        view = self.store.get_status(conversation_id)
+        result = None
+        if view.case_id is not None:
+            try:
+                result = self.application.get_report(view.case_id)
+            except ApplicationPortError as error:
+                # Closed, report-less conversations survive a missing volatile
+                # Case after recovery. Never hide a lost published report.
+                if not (error.error.code.value == "CASE_NOT_FOUND" and view.status in _CLOSED
+                        and view.report_state == "UNAVAILABLE"):
+                    raise
+        # The already-read authoritative Case also resolves delivery uncertainty;
+        # never issue a second Case query for this report request.
+        view = self._read_failure(view, case=None if result is None else result.case)
+        values = dict(conversation_id=conversation_id, case_id=view.case_id,
+            report_state=view.report_state, case_status=view.case_status,
+            archive_status=view.archive_status, failure=view.failure)
+        if result is not None:
+            case = result.case
+            ready = result.format is not None
+            values.update(case_revision=case.case_revision, case_status=case.status.value,
+                archive_status=case.archive_status,
+                report_state="READY" if ready else "UNAVAILABLE" if (
+                    view.status in _CLOSED or case.status.value in _CASE_DONE) else "PENDING",
+                format=result.format, report=result.report, markdown=result.markdown,
+                source_job_id=result.source_job_id,
+                artifact=None if result.artifact is None else PublicArtifactData.model_validate(
+                    result.artifact.model_dump(mode="json")))
+            if not ready and values["report_state"] == "UNAVAILABLE" and values["failure"] is None:
+                if case.failure is not None:
+                    details = []
+                    if case.failure.diagnostic_id is not None:
+                        details.append({"field": "diagnostic_id", "actual": case.failure.diagnostic_id})
+                    if case.failure.reason_code is not None:
+                        details.append({"field": "reason_code", "actual": case.failure.reason_code.value})
+                    values["failure"] = AgentPublicFailure(code=case.failure.code.value,
+                        message="本次定位未能完成，请重新发起任务。", details=details)
+                elif case.status.value in {"CANCELLED", "INTERRUPTED"}:
+                    values["failure"] = AgentPublicFailure(code="AGENT_INTERRUPTED",
+                        message="本次任务已结束，未生成诊断报告。")
+        return ConversationReportView(**values)
+
     def list_events(self, conversation_id, after_sequence=0, limit=100):
         events = self.store.list_events(conversation_id, after=after_sequence, limit=limit)
-        view = self.get_conversation(conversation_id)
+        view = self.get_status(conversation_id)
         delivered = events[-1].sequence if events else after_sequence
         return {"events": events, "stream_closed": view.status in _CLOSED and delivered >= view.last_event_id}
 

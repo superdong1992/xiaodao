@@ -70,7 +70,7 @@ Content-Type: application/json
 | 回答追问 | Case 创建后按原文展示 OPEN requirements 的 `assistant.question`，仍调用同一消息接口回答 | 仅补充任务当前要求；没有 OPEN requirements 就不追问，不要求网站生成诊断字段 |
 | 补充日志 | 预约附件 → 按描述符 PUT 原始字节 → 发消息引用 `attachment_ids` | 上传为 `READY`；消息是否被采用另看 `APPLIED` / `notice` |
 | 显示进度 | 展示 `agent.progress`，同步 `case.updated` | 能看到实际执行阶段；审核前没有根因或 Candidate 报告 |
-| 展示报告 | 收到 `result.available` 后查 Case 和产物列表，下载并校验 JSON；采用示例时调用网站 `/report` | 页面展示具体结论、依据、完成条件、限制和建议，不只是“定位完成” |
+| 展示报告 | 收到 `result.available` 后调用原生 `GET /api/v1/agent/conversations/{conversation_id}/report`；采用示例时由网站 `/report` 授权转发 | `report_state=READY` 后按 `format` 展示报告；`PARTIAL` 和 `INCONCLUSIVE` 也正常展示 |
 | 提供 ZIP | JSON 先展示；`archive.updated=READY` 后允许用户确认下载 | 提示“包含原始目标日志”；没有用户请求就不下载 ZIP 或审计包 |
 
 输入只需 `request_id`、`text`、`attachment_ids`；每个新逻辑请求生成新 ID，网络重试保持 ID 和内容不变。完整可复制的请求/响应、文件哈希和请求头见 [API 参考](website-agent-api.md)。附件仅支持现有压缩日志格式，不是截图、PDF 或任意文件上传接口。
@@ -81,7 +81,7 @@ Content-Type: application/json
 
 基础 SSE 只发送单行 `data:` 业务帧，不发送 `event:`、`id:` 或 `retry:` 行；`type` 和 `sequence` 保留在 JSON 内。连接注释 `: connected` 和心跳注释不会触发 `onmessage`。网站统一接收 `message`，再按 JSON 的 `type` 显示追问、进度或报告通知；不要按命名事件注册监听器，也不要等待 `[DONE]` 或按 OpenAI `choices` / `delta` 解析。完整前端示例见 [API 参考](website-agent-api.md)。
 
-刷新时先查询会话快照，恢复消息、追问、附件和报告状态，再回放事件并去重。响应不含 `id:`，原生 `EventSource` 自动重连时不会携带业务游标，会重新回放历史。需要精准续传时，用流式 `fetch` 手动设置 `Last-Event-ID`，使用最后**处理成功**的序号；不要直接把快照的最大序号当作所有事件都已展示。处理事件要串行；报告加载失败时提供重试，不能被随后到达的完成事件掩盖。
+刷新时先查询会话快照，恢复消息、追问、附件和报告状态，再回放事件并去重。仅检查状态使用原生 `/api/v1/agent/conversations/{conversation_id}/status`，避免重复加载完整历史。`/report` 的 `PENDING` 和 `UNAVAILABLE` 均为正常 `200` 响应；仅在 `READY` 时渲染正文，成功显示后缓存本会话报告，合并重复读取。响应不含 `id:`，原生 `EventSource` 自动重连时不会携带业务游标，会重新回放历史。需要精准续传时，用流式 `fetch` 手动设置 `Last-Event-ID`，使用最后**处理成功**的序号；不要直接把快照的最大序号当作所有事件都已展示。处理事件要串行；报告加载失败时提供重试，不能被随后到达的完成事件掩盖。
 
 收到 `agent.failed` 或 `conversation.interrupted` 时，先读取会话快照并展示 `failure`，再推进游标。它提供安全错误码、实际阶段和稳定的 `diagnostic_id`；刷新页面也读取同一信息。若 details 中是 `ARCHIVE_STATUS_COMMIT / persistence=UNKNOWN`，提示“报告已生成，但归档状态暂时无法确认”，继续获取正式 JSON，不把它当成任务失败或伪造完成事件。
 

@@ -14,7 +14,7 @@
 - 服务没有登录、Cookie、令牌、Case 所有权或租户隔离。它只适合部署在受控网络；知道 ID 的调用方可能读取对应资源。
 - 首版没有 Case 列表、恢复、取消接口。前端必须持久保存创建响应中的 `case_id`，并把 `INTERRUPTED` 视为只能查询的状态。
 
-底层 Case 与运维入口如下；六个会话入口及其独立合同见上述 Agent 指南：
+底层 Case 与运维入口如下；八个会话入口及其独立合同见上述 Agent 指南。网站读取报告优先使用原生 `/api/v1/agent/conversations/{conversation_id}/report`，定时检查状态使用 `/status`；下列底层路径继续兼容：
 
 | 方法与路径 | 用途 | 响应类型 |
 | --- | --- | --- |
@@ -509,7 +509,7 @@ const response = await fetch(upload.url, {
 | --- | --- | --- | --- | --- |
 | path | `case_id` | `uuid` | 是 | 要列出公开产物的 Case。 |
 
-此端点不接受任何 query。不要根据 `CaseView.artifacts` 自行拼下载 URL；使用此响应的 `download_url`。
+此端点不接受任何 query。下载必须基于已授权 Case 和权威产物 ID。网站后端使用配置的 `XIAODAO_BASE_URL` 及固定内容路径构造内部地址，保留配置前缀；响应中的 `download_url` 仅作描述，不决定网络寻址。网站示例可直接使用同一 CaseView 的公开产物元数据，避免再次查询列表。
 
 完整请求：
 
@@ -574,7 +574,7 @@ GET /api/v1/cases/10000000-0000-4000-8000-000000000001/artifacts
 GET /api/v1/artifacts/40000000-0000-4000-8000-000000000001/content?case_id=10000000-0000-4000-8000-000000000001
 ```
 
-完整成功响应由以上四个响应头和恰好 `Content-Length` 字节组成，不套 JSON envelope。下载完成前不要把文件标记为可用；必须同时校验响应头、实际字节数和 SHA-256。
+原生服务返回以上响应头及原始内容，不套 JSON envelope。下载完成前不要把文件标记为可用；以权威产物元数据校验实际字节数、SHA-256 和内容类型。经过代理后 `Content-Length`、`X-Content-SHA256` 可缺失，存在时必须一致；仍禁止重定向和不支持的内容编码。
 
 代表性错误仍为 JSON envelope：`400 VALIDATION_ERROR`、`404 CASE_NOT_FOUND`、`404 ARTIFACT_NOT_FOUND`、`500 RESOURCE_NOT_FOUND`、`422 RESOURCE_SIZE_MISMATCH`、`422 RESOURCE_HASH_MISMATCH`、`503 STATE_CORRUPT` 或 `STATE_SCHEMA_UNSUPPORTED`。
 

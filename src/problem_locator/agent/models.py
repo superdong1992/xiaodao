@@ -5,7 +5,7 @@ from copy import deepcopy
 from typing import Annotated, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
-from problem_locator.contracts.models import NonEmptyText, OpaqueId, UtcTimestamp
+from problem_locator.contracts.models import GenericResult, NonEmptyText, OpaqueId, UserResultPayloadV3, UtcTimestamp
 
 PUBLIC_PROGRESS_MESSAGES = {
     "INTAKE": "正在整理问题", "ROUTE": "正在选择定位方法",
@@ -119,6 +119,24 @@ class ConversationView(AgentModel):
     updated_at: str
 
 
+class ConversationStatusView(AgentModel):
+    """会话的轻量状态，不加载消息正文或附件历史。"""
+
+    schema_version: Literal[1] = 1
+    conversation_id: OpaqueId
+    status: ConversationStatus
+    case_id: OpaqueId | None = None
+    job_id: OpaqueId | None = None
+    case_status: str | None = None
+    archive_status: Literal["NOT_REQUIRED", "PENDING", "READY", "FAILED"] = "NOT_REQUIRED"
+    current_questions: list[str] = Field(default_factory=list)
+    failure: AgentPublicFailure | None = None
+    report_state: Literal["PENDING", "READY", "UNAVAILABLE"]
+    last_event_id: int = 0
+    created_at: str
+    updated_at: str
+
+
 class MessageUpdatedData(AgentModel):
     message_id: NonEmptyText
     status: MessageStatus
@@ -172,6 +190,54 @@ class PublicArtifactData(AgentModel):
                     "GENERIC_REPORT": "text/markdown", "AUDIT_BUNDLE": "application/zip"}
         if not self.downloadable or self.content_type != expected[self.kind]:
             raise ValueError("事件产物必须是可下载且类型一致的公开文件。")
+        return self
+
+
+class ConversationReportView(AgentModel):
+    """按会话读取已发布报告；报告可读性与归档状态相互独立。"""
+
+    schema_version: Literal[1] = 1
+    conversation_id: OpaqueId
+    case_id: OpaqueId | None = None
+    case_revision: int | None = Field(default=None, ge=1)
+    case_status: str | None = None
+    archive_status: Literal["NOT_REQUIRED", "PENDING", "READY", "FAILED"] = "NOT_REQUIRED"
+    report_state: Literal["PENDING", "READY", "UNAVAILABLE"]
+    source_job_id: OpaqueId | None = None
+    format: Literal["problem-locator-diagnosis-v3", "markdown", "generic-v1"] | None = None
+    report: UserResultPayloadV3 | GenericResult | None = None
+    markdown: str | None = None
+    artifact: PublicArtifactData | None = None
+    failure: AgentPublicFailure | None = None
+
+    @model_validator(mode="after")
+    def report_shape(self):
+        if self.report_state != "READY":
+            if any(value is not None for value in (
+                self.source_job_id, self.format, self.report, self.markdown, self.artifact,
+            )):
+                raise ValueError("报告未就绪时不能返回报告正文或产物。")
+            return self
+        if self.case_id is None or self.case_revision is None or self.source_job_id is None:
+            raise ValueError("正式报告必须关联 Case、版本及来源任务。")
+        if self.format == "problem-locator-diagnosis-v3":
+            expected = {"RESOLVED": "COMPLETED", "PARTIALLY_RESOLVED": "PARTIAL", "UNRESOLVED": "INCONCLUSIVE"}
+            if (not isinstance(self.report, UserResultPayloadV3) or self.markdown is not None
+                    or self.artifact is None or self.artifact.kind != "USER_RESULT"
+                    or self.report.status != expected.get(self.case_status)):
+                raise ValueError("诊断报告的格式、正文或状态不一致。")
+        elif self.format == "markdown":
+            if (self.report is not None or not self.markdown or self.artifact is None
+                    or self.artifact.kind != "GENERIC_REPORT"):
+                raise ValueError("Markdown 报告必须包含正文及对应产物。")
+        elif self.format == "generic-v1":
+            if (not isinstance(self.report, GenericResult) or self.markdown is not None
+                    or self.artifact is not None or self.report.source_job_id != self.source_job_id):
+                raise ValueError("历史通用诊断报告必须保留原始结果及来源任务。")
+        else:
+            raise ValueError("正式报告必须声明支持的格式。")
+        if self.artifact is not None and self.artifact.created_by_job_id != self.source_job_id:
+            raise ValueError("报告产物与来源任务不一致。")
         return self
 
 

@@ -101,6 +101,9 @@ class ApplicationService:
     ) -> ArtifactListResponse:
         return self.queries.list_artifacts(case_id, include_internal)
 
+    def get_report(self, case_id: str):
+        return self.queries.get_report(case_id)
+
     def open_artifact(
         self,
         case_id: str,

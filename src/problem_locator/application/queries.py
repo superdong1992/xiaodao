@@ -29,6 +29,7 @@ from problem_locator.contracts.ports import (
 from problem_locator.operational import OperationalState
 
 from .errors import raise_port_error
+from .reports import PublishedReport, read_published_report
 from .projection import (
     project_artifact_summaries,
     project_artifact_summary,
@@ -162,6 +163,17 @@ class ApplicationQueryService:
             case_view=project_case_view(snapshot, case_id),
             wait_timed_out=timed_out,
         )
+
+    def get_report(self, case_id: str) -> PublishedReport:
+        """Select and read the public report against one checked snapshot."""
+        try:
+            case_id = GetCase.model_validate({"case_id": case_id}, strict=True).case_id
+        except (TypeError, ValueError):
+            raise_port_error(ErrorCode.VALIDATION_ERROR, "任务标识无效。")
+        aggregate = self._checked_snapshot(case_id).cases.get(case_id)
+        if aggregate is None:
+            raise_port_error(ErrorCode.CASE_NOT_FOUND, "定位任务不存在。")
+        return read_published_report(aggregate, self._resource_store)
 
     def list_artifacts(
         self,
