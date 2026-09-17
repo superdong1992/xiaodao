@@ -142,7 +142,8 @@ def test_shared_module_binding_preserves_the_winning_time_or_role_template(share
         assert actual.constraints.min_utf8_bytes == actual.constraints.max_utf8_bytes == 24
 
 
-@pytest.mark.parametrize("description", ["调用方负责发送请求。" * 1000, "🔍调用方🧭等待响应。" * 1000])
+@pytest.mark.parametrize("description", ["调用方负责发送请求。" * 1000, "🔍调用方🧭等待响应。" * 1000],
+                         ids=["long-chinese", "long-emoji"])
 def test_long_role_descriptions_are_bounded_without_splitting_utf8(description):
     skill = _skill((description, description))
     projection = _methods_user_input_projection(skill, set())

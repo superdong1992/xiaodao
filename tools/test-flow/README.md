@@ -41,6 +41,31 @@ records，不进入模型工作区；
 
 ## Dev 确定性测试
 
+### 单元测试与两条公开诊断路径
+
+`dev.default` 的完整确定性阶段同时承担以下检查；各 Gate 的 JUnit 和摘要分别保存在
+`payload/stages/deterministic.full/gates/<gate-id>/`，最终仍以外层 `verdict.json` 为准。
+
+| Gate | 覆盖内容 | 证明边界 |
+| --- | --- | --- |
+| `det.unit` | 基本功能、状态机、存储、运行时和接口单元测试 | 平台专属用例允许显式跳过；错误和失败不能忽略 |
+| `det.journey.mcp` | 从正式客户端 Skill 读取参数模板，经官方 MCP SDK 初始化、发现工具和调用生产 `/mcp` 路由，完成诊断与重启查询 | 真实 MCP 编解码，进程内 ASGI；不代表真实用户 Agent 已加载或遵循 Skill |
+| `det.journey.web-api` | 经 Case REST API 建单、补参、上传、诊断、下载及重启查询 | 生产 HTTP 路由与业务组件，进程内 ASGI；不代表浏览器或网络验收 |
+| `det.integration` | 网站自然语言会话、权威追问、附件导入、状态与报告接口、SSE 重放，以及异常交付 | 确定性 INTAKE、诊断 Agent 和 Logparse 夹具 |
+| `det.journey.same-job` | 既有跨模块持久化和 SameJob 旅程 | 保留原有状态、证据、归档和重启断言 |
+
+两条公开路径各运行 Specialist-only 和独立 Reviewer 两种模式，禁止跳过，至少两条用例通过。
+共同断言包括：原话及空初始事实、创建幂等、变更内容冲突、过期 revision 不写入、分批补参不重复
+派发、错误 hash 上传被拒绝、正确字节重试与重放、附件提交幂等、终态和审核 Job 数、报告长度与
+SHA-256、ZIP 内日志字节，以及重新打开存储后状态和产物保持一致。客户端 Skill 字节计入确定性
+证明身份，修改模板后不能复用旧结果。
+
+真实使用验收仍须单独检查：用户 Agent 实际加载 `problem-locator-client`，从新问题开始经 MCP
+建单、按服务端 requirements 追问、补参、上传、诊断和下载；网站路径则经过真实浏览器及网站
+Agent API。当前 `release.full` 执行完整网站路径，用户 Agent 只在重启阶段查询既有 Case。
+因此该 Release 不能宣称已覆盖用户 Agent 从建单开始的完整 MCP 诊断。这个缺口及真实环境输入
+记录在根目录 `TODO.md`，不能用上述零模型测试或旧 provider model-cert 代替。
+
 日常迭代可以先运行快速检查：
 
 ```sh

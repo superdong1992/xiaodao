@@ -10,6 +10,9 @@
 
 ## P0：8.0 网站 Agent 真实 Release 与内部网站联调
 
+- **2026-09-17 / 8.1.0 测试路径核对**：已补充两个独立的零模型 MCP/Case REST 诊断 Gate，覆盖实际协议与生产业务闭环；这不证明真实 Agent 遵循 Skill。当前 `cross-job-core.mjs` 的 route/upload/diagnose 走网站，`runClaude` 只用于重启后查询。仍需补齐用户 Agent 从加载正式 `problem-locator-client`、新问题建单、按权威 requirements 追问、补参和上传，到诊断、报告下载的完整路径，并与网站路径分别保存验收结果。不得把旧 Phase prompt/validator 的单测当成实际执行证明，也不得用旧 provider model-cert 替代。
+- 本轮官方 `release.full --client windows --plan-only` 未指定 Claude CLI、env-only settings、Logparse 和外部 MCP 源码，准入为 BLOCKED；计划为正常/最多 7 次模型调用、费用上限 22 美元，未执行模型。继续前须明确实际测试环境和这些输入，审阅新计划；若扩展真实 MCP 旅程，必须同步调整 Proof/Stage/Gate、身份、调用预算和 Linux 服务端事件取证，仍遵守客户端直连边界。
+
 - Agent REST、自然语言追问、持久 SSE、报告下载和网站后端示例已实现。正式 Dev 验证以当前源码快照的 `verdict.json` 为准。
 - `release.full` 已改为一条网站原话 → 建案与权威追问 → 附件上传 → Reviewer → 报告下载 → 重启检查旅程；中间不再重启丢失活动 Case。首条非空原话直接建案，补充字段和提交附件各调用一次 INTAKE，正常/硬上限均为 7 次真实模型调用，不允许 repair。
 - 2026-09-07 的官方 `--plan-only` 因当时 Docker Linux daemon 未启动、外部依赖未对齐而未进入真实模型。fresh Release 仍须从全新 V11 数据根执行，不能用 Dev 检查代替。

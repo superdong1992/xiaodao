@@ -600,6 +600,16 @@ function crossValidate(config) {
   for (const track of Object.values(config.policy.tracks)) assertFlow(Object.hasOwn(config.proofs.goals, track.default_goal), "CONFIG_TRACK_GOAL_UNKNOWN", `Unknown default goal ${track.default_goal}`);
 
   const release = config.proofs.goals["release.full"];
+  for (const [gateId, testName] of [["det.journey.mcp", "test_mcp_diagnosis"], ["det.journey.web-api", "test_rest_diagnosis"]]) {
+    const gate = config.gates.gates[gateId];
+    assertFlow(
+      deterministicFull?.gates.includes(gateId)
+        && gate?.kind === "pytest" && gate.skip_policy === "forbid" && gate.min_passed >= 2
+        && canonicalJson(gate.selectors) === canonicalJson([`tests/deterministic/journey/test_public_diagnosis.py::${testName}`]),
+      "CONFIG_PUBLIC_DIAGNOSIS_COVERAGE",
+      `${gateId} 必须在 deterministic.full 中执行两种公开诊断模式。`,
+    );
+  }
   assertFlow(release && release.tracks.length === 1 && release.tracks[0] === "release", "CONFIG_RELEASE_GOAL", "release.full must be Release-only");
   const releaseStages = new Set(release.required_proofs.flatMap((proofId) => config.proofs.proofs[proofId].stages));
   const journey = config.stages.stages.filter((stage) => stage.id.startsWith("journey.cross-job."));

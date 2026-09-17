@@ -38,7 +38,7 @@
       "id": "deterministic.full",
       "kind": "deterministic",
       "depends_on": ["deterministic.affected"],
-      "gates": ["det.evidence-v2-core", "det.contracts", "det.unit", "det.integration", "det.journey.same-job", "det.website-example"],
+      "gates": ["det.evidence-v2-core", "det.contracts", "det.unit", "det.integration", "det.journey.same-job", "det.journey.mcp", "det.journey.web-api", "det.website-example"],
       "identity_set": "deterministic",
       "timeout_seconds": 600,
       "progress_class": "local",

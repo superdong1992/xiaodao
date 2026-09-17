@@ -6,6 +6,11 @@ import fsPromises from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import test from "node:test";
 import { createAgentBackend, reportSections } from "./server.ts";
+// 与后端示例同一 Gate 执行，保证浏览器模块变化后重新验证。
+import "./report-view.test.mjs";
+import "./browser-client.test.mjs";
+import "./preview.test.mjs";
+import "./onboarding.test.mjs";
 
 const conversation = "10000000-0000-0000-0000-000000000001";
 const caseId = "20000000-0000-0000-0000-000000000001";

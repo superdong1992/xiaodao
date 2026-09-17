@@ -1,10 +1,35 @@
-# 网站 Agent 接入：部署后的第一轮联调
+# 网站 Agent 接入：先预览报告，再联调服务
 
-面向网站前后端开发和 Linux 测试环境运维，适用于 xiaodao `8.1.0` / V11 / `v11-contract-r2`。目标是跑通一次“用户原话 → 创建任务 → 按要求补充 → 日志 → 实时进度 → 具体定位报告”。本文不代表你的测试服务已通过验收。
+面向网站前后端开发和 Linux 测试环境运维，适用于 xiaodao `8.1.0` / V11 / `v11-contract-r2`。先用离线预览确认报告界面，再复制浏览器模块，最后接上授权、日志上传和实时进度，跑通一次完整定位。本文不代表你的测试服务已通过验收。
 
 网站保留原有问答，新建一个 Agent 入口。调用关系是：**浏览器 → 网站后端 → xiaodao**。网站不用安装 MCP 客户端，也不用把用户原话加工成 `problem_spec`。
 
-## 1. 先把这几项交给网站开发人员
+## 1. 先预览报告，再复制到网站
+
+使用 Node.js 24+，从仓库根目录运行：
+
+```bash
+node examples/website-agent/preview.mjs
+```
+
+打开 [http://127.0.0.1:8788/](http://127.0.0.1:8788/)。这是本地报告预览，使用固定示例数据，不连接服务端、不创建任务、不调用模型。先查看完整结果、部分结果、尚无定论和等待或失败提示，确定网站需要的展示方式。
+
+将 `examples/website-agent/` 中的 `report-view.js`、`report-view.css` 和 `browser-client.js` 复制到网站的静态资源目录，例如 `/xiaodao/`。这些模块没有额外依赖，可以嵌入现有页面。后端接好同源 `/api/agent/` 后，用已有会话 ID 读取报告：
+
+```javascript
+import { createAgentClient } from "/xiaodao/browser-client.js";
+import { renderReport } from "/xiaodao/report-view.js";
+
+const client = createAgentClient();
+const reportData = await client.getReport(conversationId);
+renderReport(document.querySelector("#diagnosis-report"), reportData);
+```
+
+页面需加载 `report-view.css` 并提供 `#diagnosis-report` 容器。客户端方法返回解包后的 `data`，失败抛出 `AgentApiError`，不会自动重发；网站在独立错误区提示重试，保留已经显示的报告。直接用 `fetch` 时，检查 HTTP 状态和 `ok` 后调用 `renderReport(container, reportResponse.data)`。
+
+渲染模块先处理 `report_state` 的三态，再按 `format` 展示 JSON、Markdown 或历史 Generic V1 结果。JSON 按 `report.root_cause`、`report.findings`、`report.evidence_gaps` 等固定字段绑定组件，不按 `sections.title` 的中文标题提取内容。Markdown 默认安全展示原文；需要排版时可接网站自己的渲染器，并过滤不安全 HTML 和链接。读取已有报告不会重新运行模型。
+
+完整可复制 HTML、文件用途和“字段 → 组件”映射见[网站示例说明](../examples/website-agent/README.md)。确认界面后，再准备真实接入所需的信息：
 
 | 交接项 | 需要提供什么 |
 | --- | --- |
@@ -12,7 +37,7 @@
 | 部署版本 | 应为 `8.1.0` / `v11-contract-r2`，同时记录部署的 commit 或源码快照；不能仅凭进程启动判断版本 |
 | 接口合同 | 在线 `GET /openapi.json`；可视化入口 `GET /docs`；仓库 [OpenAPI 快照](../schemas/v2/web-api.openapi.snapshot.json) |
 | 完整说明 | [Agent API 参考](website-agent-api.md)：请求响应、附件、SSE、字段、错误与报告校验 |
-| 网站后端示例 | [TypeScript 示例和启动说明](../examples/website-agent/README.md)：登录/归属回调、上传、SSE、报告下载 |
+| 网站接入示例 | [预览、浏览器模块和后端启动说明](../examples/website-agent/README.md)：先显示报告，再接登录/归属回调、上传和 SSE |
 | 联调样本 | 经批准可用于测试的真实问题和配套压缩日志；时间、环境等信息按任务要求补充，预期行为不作为建案前置条件，不要用虚构事实补齐追问 |
 | 网络和运行约束 | 允许访问的后端来源、反向代理配置、上传限制、模型调用预算、测试负责人 |
 
@@ -50,13 +75,19 @@ Content-Type: application/json
 
 ## 3. 网站前后端分别做什么
 
+先接网站的登录和归属检查，再启用真实 API。浏览器模块 `createAgentClient()` 默认使用同源 `/api/agent`；可以配置 `basePath`、`fetchImpl` 和用于 CSRF 的 `headers` 回调，无需把服务端地址交给浏览器。
+
 | 负责方 | 首版必须完成 |
 | --- | --- |
-| 网站后端 | 验证登录；持久保存用户与会话、附件的归属；每次查询、上传、订阅、下载都检查权限；转发 SSE 和文件；校验报告来源、大小和 SHA-256 |
+| 网站后端 | 验证登录；持久保存用户与会话、附件的归属；每次查询、上传、订阅、下载都检查权限；转发原生报告、SSE 和文件；下载原始产物时校验来源、大小和 SHA-256 |
 | 网站前端 | 提供输入框、压缩日志上传、追问、消息采用状态、阶段进度、报告区和下载按钮；刷新后恢复历史；按事件序号去重 |
 | xiaodao 运维 | 配置问题整理和诊断角色、日志解析与可选审核；确认模型身份和预算；限制服务可达来源；保证 SSE 不被代理缓冲 |
 
 网站前端访问网站自己的 `/api/agent/...`（示例路径）；网站后端访问 xiaodao 的 `/api/v1/agent/...`。两者不要混用。UUID 不是授权凭据；网站不得相信前端自报的 `user_id`。示例没有内置登录系统，未接入授权回调时返回 `401` 是预期行为。
+
+从 `createConversation(requestId)`、`sendMessage(id, message)` 开始接入。刷新页面用 `getConversation(id)` 恢复历史，日常状态更新用 `getStatus(id)`，报告展示用 `getReport(id)`。逻辑请求的 ID 和原内容保存在按钮及网络重试函数之外；不要用被网站后端改写的创建回执 `request_id` 重新创建会话。最短提交代码见[网站示例](../examples/website-agent/README.md)。
+
+上传先调用 `prepareAttachment(id, metadata)`，再把完整预约结果和文件传给 `uploadAttachment(prepared, file)`。文件 SHA-256 需要接入网站现有的增量哈希组件或后端上传模块，避免一次读取数 GiB 日志；客户端示例不自动计算哈希。`file.type` 可能为空，按支持的压缩后缀确定 MIME。仅带附件的消息省略 `text` 或传 null。`eventsUrl(id)` 返回本站 SSE 路径，继续配合 [API 参考](website-agent-api.md)的串行事件处理和游标续传代码。
 
 ## 4. 按这个顺序跑通第一条旅程
 

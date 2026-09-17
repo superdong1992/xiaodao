@@ -49,7 +49,7 @@
       "proof": ["framework.runner"]
     },
     "deterministic": {
-      "producer": ["product.source", "product.fixtures", "case.journey", "skill.generic-adapter", "evidence.v2.validation", "runtime.environment"],
+      "producer": ["product.source", "product.fixtures", "case.journey", "skill.generic-adapter", "skill.client", "evidence.v2.validation", "runtime.environment"],
       "proof": ["proof.deterministic", "case.oracle", "framework.runner"]
     },
     "host-client": {

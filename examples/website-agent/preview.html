@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>xiaodao · 报告展示示例</title>
+  <link rel="stylesheet" href="/report-view.css">
+  <link rel="stylesheet" href="/preview.css">
+  <script type="module" src="/preview.js"></script>
+</head>
+<body>
+  <main class="preview">
+    <header class="preview__header">
+      <p class="preview__eyebrow">XIAODAO / 网站开发示例</p>
+      <h1>把诊断结果清楚地交给用户</h1>
+      <p>切换不同结果，查看固定字段怎样组成报告。以下均为本地合成样例，不连接定位服务，也不调用模型。</p>
+    </header>
+    <nav id="scenarios" class="preview__scenarios" aria-label="报告场景"></nav>
+    <p id="scenario-note" class="preview__note"></p>
+    <section id="report" aria-label="诊断报告"></section>
+    <details class="preview__contract">
+      <summary>查看这个场景的完整 API 响应</summary>
+      <p>直接 fetch 读取 body.data；browser-client.js 已解包，返回值可以直接传给 renderReport。</p>
+      <pre id="response"></pre>
+    </details>
+    <footer>接入自己的页面：复制 report-view.js 和 report-view.css；用实际 report API 的 data 替换样例。</footer>
+  </main>
+</body>
+</html>

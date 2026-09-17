@@ -45,6 +45,27 @@ test("unknown configuration fields fail closed", () => {
   }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_GATE_FIELDS");
 });
 
+test("full deterministic closure cannot replace either public journey with unit tests or skips", () => {
+  for (const gateId of ["det.journey.mcp", "det.journey.web-api"]) {
+    for (const mutation of [
+      (gate) => { gate.selectors = ["tests/deterministic/unit"]; },
+      (gate) => { gate.min_passed = 1; },
+      (gate) => { gate.skip_policy = "allow-explicit"; },
+    ]) {
+      assert.throws(() => withConfigMutation("gates.v2.json", (value) => {
+        mutation(value.gates[gateId]);
+      }, (root) => loadConfiguration(REPO_ROOT, root)),
+      (error) => error.code === "CONFIG_PUBLIC_DIAGNOSIS_COVERAGE");
+    }
+    const config = loadConfiguration(REPO_ROOT);
+    for (const [goalId, track] of [["dev.default", "dev"], ["release.full", "release"]]) {
+      const closure = resolveGoalClosure(config, { goalId, track, client: "windows" });
+      assert.ok(closure.stages.some((stage) => stage.gates.includes(gateId)));
+    }
+    assert.ok(config.identities.sets.deterministic.producer.includes("skill.client"));
+  }
+});
+
 test("Evidence V2 provider and CrossJob diagnosis stages are schedulable and the V1 direct adapter is gone", () => {
   const config = loadConfiguration(REPO_ROOT);
   const migratedStageIds = [

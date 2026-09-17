@@ -415,7 +415,9 @@ events.onmessage = (message) => {
 };
 ```
 
-上面的 `renderEventAsText`、`renderConversationAsText`、`renderFailureAsText`、`renderVerifiedReport`、`showEventRetry` 由网站组件实现；渲染须幂等，失败要抛错，所有普通文本都不得作为 HTML 执行。`renderFailureAsText` 展示安全 code、phase 和诊断关联 ID；归档 UNKNOWN 保留报告区。组件销毁时调用 `closeAgentEvents()`，只断开订阅，不取消诊断。服务器和示例均限制待处理事件数量，慢连接不会无限积压。
+报告区已有可直接使用的 [report-view.js](../examples/website-agent/report-view.js)：导入 `renderReport` 后，将 `renderVerifiedReport(data)` 实现为 `renderReport(reportContainer, data)` 即可。组件按固定字段显示结构化报告、通用 Markdown 原文和历史报告，处理空值、证据缺口及归档异常。先运行 [离线预览](../examples/website-agent/README.md)查看效果，再复制组件和 CSS 到网站。若使用 [browser-client.js](../examples/website-agent/browser-client.js)，其方法已经检查响应并返回 `data`，不要再次取 `.data`。
+
+其余 `renderEventAsText`、`renderConversationAsText`、`renderFailureAsText`、`showEventRetry` 接入网站自己的消息、状态和重试组件；渲染须幂等，失败要抛错，所有普通文本都不得作为 HTML 执行。`renderFailureAsText` 展示安全 code、phase 和诊断关联 ID；归档 UNKNOWN 保留报告区。组件销毁时调用 `closeAgentEvents()`，只断开订阅，不取消诊断。服务器和示例均限制待处理事件数量，慢连接不会无限积压。
 
 临时网络断线可由 `EventSource` 自动重连，但这里不会自动携带业务 `Last-Event-ID`，重连会回放历史，本例按 `lastSequence` 跳过已经处理成功的事件。报告加载、解析或显示失败时，本例关闭连接并显示重试入口，不处理排队中的完成事件；点击重试需重新执行订阅初始化，从历史回放，页面按 ID 更新已有内容。需要持久精准续传时，用流式 `fetch` 携带最后处理成功的 `Last-Event-ID`；按空行拆帧并忽略以冒号开头的注释，不按读取到的网络块直接 `JSON.parse`。刷新恢复还应根据会话快照重新获取已经发布的报告，不能只恢复进度文字。
 
