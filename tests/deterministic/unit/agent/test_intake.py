@@ -90,6 +90,7 @@ def test_initial_problem_spec_matches_current_mcp_client_create_example(raw_prob
         for name in ProblemSpecInput.model_fields
     }
     assert build_initial_problem_spec(raw_problem_text).model_dump() == expected
+    assert "证据不足" not in " ".join(expected["completion_criteria"])
     assert template["raw_problem_text"] == "<raw_problem_text>"
     assert template["initial_user_fact_names"] == template["initial_user_fact_values"] == []
 

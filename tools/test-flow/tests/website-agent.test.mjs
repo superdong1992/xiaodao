@@ -26,7 +26,7 @@ const requirements = [{ status: "OPEN", kind: "INPUT", name: "order_id", prompt:
 const initialCase = { case_id: caseId, status: "WAITING_INPUT", raw_problem_text: driver.problem.raw_problem_text,
   problem_spec: { statement: driver.problem.raw_problem_text, actual_behavior: driver.problem.raw_problem_text,
     expected_behavior: "用户未单独说明；以 raw_problem_text 为准。", scope: "仅定位 raw_problem_text 所述问题。",
-    goals: ["定位问题原因并给出结论。"], non_goals: [], constraints: [], completion_criteria: ["给出基于证据的结论；证据不足时明确说明。"] },
+    goals: ["定位问题原因并给出结论。"], non_goals: [], constraints: [], completion_criteria: ["按所选 Skill 的要求给出诊断结果。"] },
   user_facts: [], pending_requirements: requirements };
 const event = (sequence, type, data = {}, withCase = false) => ({ schema_version: 2, run_id: "50000000-0000-0000-0000-000000000001", sequence, conversation_id: conversationId, case_id: withCase ? caseId : null, job_id: null, type, created_at: "2026-09-07T00:00:00Z", data });
 const frame = (value) => `data: ${JSON.stringify(value)}\n\n`;

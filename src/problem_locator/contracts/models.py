@@ -347,6 +347,64 @@ class VersionedRef(ContractModel):
     content_hash: Sha256
 
 
+SPECIALIZED_DIRECT_OUTPUT_CONTRACT_ID = "output-contract/skill-direct"
+SPECIALIZED_DIRECT_AGENT_PROFILE_ID = "agent-profile/skill-direct"
+
+
+def is_specialized_direct(value: object) -> bool:
+    """Identify direct delivery from immutable Job/Spec/Bindings, never settings."""
+
+    return (
+        getattr(value, "job_type", JobType.DIAGNOSE) is JobType.DIAGNOSE
+        and getattr(value, "diagnosis_mode", None) is DiagnosisMode.SPECIALIZED
+        and getattr(value, "review_policy", None) is ReviewPolicy.NONE
+        and isinstance(getattr(value, "skill_ref", None), VersionedRef)
+        and getattr(getattr(value, "output_contract_ref", None), "id", None)
+        == SPECIALIZED_DIRECT_OUTPUT_CONTRACT_ID
+        and getattr(getattr(value, "agent_profile_ref", None), "id", None)
+        == SPECIALIZED_DIRECT_AGENT_PROFILE_ID
+    )
+
+
+def specialized_direct_skill_name(value: object) -> str:
+    """Bind the Markdown carrier's Skill name to the pinned specialized ref."""
+
+    if not is_specialized_direct(value):
+        raise ValueError("direct delivery requires its frozen specialized bindings")
+    skill_ref = getattr(value, "skill_ref")
+    prefix = "diagnosis-skill/"
+    name = skill_ref.id.removeprefix(prefix)
+    if (
+        not skill_ref.id.startswith(prefix)
+        or len(name) > 64
+        or re.fullmatch(SKILL_NAME_PATTERN, name) is None
+    ):
+        raise ValueError("direct delivery requires a registered specialized Skill")
+    return name
+
+
+def _validate_specialized_direct_bindings(value: object) -> None:
+    output_direct = (
+        getattr(value, "output_contract_ref").id == SPECIALIZED_DIRECT_OUTPUT_CONTRACT_ID
+    )
+    profile_direct = (
+        getattr(value, "agent_profile_ref").id == SPECIALIZED_DIRECT_AGENT_PROFILE_ID
+    )
+    if output_direct or profile_direct:
+        specialized_direct_skill_name(value)
+        snapshot = getattr(value, "context_snapshot", None)
+        if (
+            getattr(value, "review_target", None) is not None
+            or getattr(value, "review_target_binding", None) is not None
+            or getattr(value, "methods_review_target", None) is not None
+            or (
+                snapshot is not None
+                and snapshot.candidate_conclusion is not None
+            )
+        ):
+            raise ValueError("direct delivery forbids Candidate and Review bindings")
+
+
 class ResourceLimits(ContractModel):
     context_bytes: PositiveInt
     wall_time_seconds: PositiveInt
@@ -1352,11 +1410,17 @@ class Case(ContractModel):
             if (
                 self.final_result is not None
                 or self.unresolved_result is not None
-                or self.selected_skill_ref is not None
             ):
                 raise ValueError(
-                    "generic terminal cases forbid specialized result and selected Skill fields"
+                    "Markdown terminal cases forbid specialized result fields"
                 )
+            if self.selected_skill_ref is not None and (
+                self.generic_result_v2 is None
+                or self.selected_skill_ref.id
+                != f"diagnosis-skill/{generic_result.skill_name}"
+                or self.diagnosis_state.candidate_conclusion is not None
+            ):
+                raise ValueError("direct Markdown Case must retain its exact Skill name without a Candidate")
         elif self.status in {
             CaseStatus.RESOLVED,
             CaseStatus.PARTIALLY_RESOLVED,
@@ -1467,6 +1531,7 @@ class Job(ContractModel):
 
     @model_validator(mode="after")
     def validate_job(self) -> Job:
+        _validate_specialized_direct_bindings(self)
         generic = (
             self.job_type is JobType.DIAGNOSE
             and self.diagnosis_mode is DiagnosisMode.GENERIC
@@ -2035,6 +2100,7 @@ class RuntimeBindings(ContractModel):
 
     @model_validator(mode="after")
     def validate_logparse_pair(self) -> RuntimeBindings:
+        _validate_specialized_direct_bindings(self)
         if (self.logparse_tool_ref is None) != (self.logparse_product is None):
             raise ValueError("logparse_tool_ref and logparse_product must be both null or both non-null")
         _unique(
@@ -4384,6 +4450,7 @@ class JobSpec(ContractModel):
 
     @model_validator(mode="after")
     def validate_spec(self) -> JobSpec:
+        _validate_specialized_direct_bindings(self)
         _unique(
             [
                 binding.existing_resource_id
@@ -4829,11 +4896,18 @@ class TransitionPlan(ContractModel):
                 raise ValueError(
                     "generic terminal plans forbid specialized results, resources, and next Jobs"
                 )
-            if (
-                self.selected_skill_update is None
-                or self.selected_skill_update.action is not FieldUpdateAction.CLEAR
-            ):
-                raise ValueError("generic terminal plans must clear selected_skill_ref")
+            if self.selected_skill_update is None:
+                raise ValueError("Markdown terminal plans require a selected Skill update")
+            if self.selected_skill_update.action is not FieldUpdateAction.CLEAR:
+                selected = self.selected_skill_update.value
+                if (
+                    self.generic_result_v2_draft is None
+                    or self.selected_skill_update.action is not FieldUpdateAction.SET
+                    or selected is None
+                    or selected.id != f"diagnosis-skill/{generic_result.skill_name}"
+                    or any(self.accepted_state_delta.model_dump(mode="python").values())
+                ):
+                    raise ValueError("direct Markdown plans must retain the matching selected Skill")
         if self.target_case_status is CaseStatus.UNRESOLVED:
             if (
                 self.unresolved_result_draft is None
@@ -5513,11 +5587,28 @@ class CaseAggregate(ContractModel):
                 if artifact.kind is ArtifactKind.GENERIC_REPORT
                 and artifact.created_by_job_id == generic.source_job_id
             ]
+            direct = source_job is not None and is_specialized_direct(source_job)
+            source_binding_matches = (
+                source_job is not None
+                and (
+                    (
+                        direct
+                        and source_job.skill_ref == self.case.selected_skill_ref
+                        and specialized_direct_skill_name(source_job) == generic.skill_name
+                        and self.case.diagnosis_state.candidate_conclusion is None
+                    )
+                    or (
+                        not direct
+                        and source_job.diagnosis_mode is DiagnosisMode.GENERIC
+                        and source_job.generic_skill_name == generic.skill_name
+                        and self.case.selected_skill_ref is None
+                    )
+                )
+            )
             if (
                 source_job is None
                 or source_job.job_type is not JobType.DIAGNOSE
-                or source_job.diagnosis_mode is not DiagnosisMode.GENERIC
-                or source_job.generic_skill_name != generic.skill_name
+                or not source_binding_matches
                 or source_job.status is not JobStatus.SUCCEEDED
                 or source_outcome is None
                 or source_outcome.job_id != source_job.job_id
@@ -5983,9 +6074,14 @@ class CaseView(ContractModel):
             if (
                 self.final_result is not None
                 or self.unresolved_result is not None
-                or self.selected_skill_ref is not None
             ):
                 raise ValueError("generic CaseView forbids specialized result fields")
+            if self.selected_skill_ref is not None and (
+                self.generic_result_v2 is None
+                or self.selected_skill_ref.id
+                != f"diagnosis-skill/{generic_result.skill_name}"
+            ):
+                raise ValueError("direct Markdown CaseView must retain its matching Skill name")
         if self.status in {CaseStatus.RESOLVED, CaseStatus.PARTIALLY_RESOLVED}:
             if generic_result is None and methods_terminal is None and (
                 self.final_result is None
@@ -6904,6 +7000,8 @@ __all__ = [model.__name__ for model in _CONTRACT_MODEL_TYPES] + [
     "RelativePosixPath",
     "RequirementConstraints",
     "Sha256",
+    "SPECIALIZED_DIRECT_OUTPUT_CONTRACT_ID",
+    "SPECIALIZED_DIRECT_AGENT_PROFILE_ID",
     "SkillName",
     "TriggerPayload",
     "UNTRUSTED_OUTCOME_REJECTION_CODES",
@@ -6918,6 +7016,8 @@ __all__ = [model.__name__ for model in _CONTRACT_MODEL_TYPES] + [
     "derive_attachment_filename_suffix",
     "finalize_generic_result_v2",
     "finalize_unresolved_result",
+    "is_specialized_direct",
+    "specialized_direct_skill_name",
     "validate_job_instruction_for_job",
     "validate_methods_reviewer_terminal_v2",
     "review_required_evidence_refs",

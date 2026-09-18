@@ -130,7 +130,7 @@ export function renderReport(container, data) {
   if (!ready) {
     root.append(paragraph(data.report_state === "PENDING" ? "诊断尚未完成，或正在等待补充信息。" : "本次任务已结束，未生成可展示的报告。"));
   } else if (data.format === "markdown") {
-    card("通用诊断报告", paragraph("以下为报告原文，保留原始格式。", true), raw(data.markdown));
+    card("诊断报告", paragraph("以下为报告原文，保留原始格式。", true), raw(data.markdown));
   } else if (data.format === "generic-v1") {
     card("历史诊断结论", paragraph(data.report.conclusion));
     card("原因分析", paragraph(data.report.root_cause_analysis));

@@ -86,6 +86,8 @@ from .models import (
     WorkspaceArtifactInput,
     WorkspaceAttachmentInput,
     WorkspaceInputManifest,
+    is_specialized_direct,
+    specialized_direct_skill_name,
     review_required_evidence_refs,
     validate_workspace_manifest_for_job,
     validate_methods_reviewer_terminal_v2,
@@ -314,6 +316,7 @@ def validate_outcome_for_job(
     ):
         if (
             job.diagnosis_mode is DiagnosisMode.GENERIC
+            or is_specialized_direct(job)
             or job.context_snapshot is None
             or job.context_snapshot.candidate_conclusion is not None
             or outcome.payload is not None
@@ -416,6 +419,48 @@ def validate_outcome_for_job(
                 "GENERIC Job requires a matching generic diagnosis Outcome"
             )
         return outcome
+
+    if is_specialized_direct(job):
+        proposed_evidence = (
+            outcome.proposed_evidence_drafts
+            if isinstance(outcome, AgentJobOutcome)
+            else outcome.proposed_evidence
+        )
+        proposed_artifacts = (
+            outcome.proposed_artifact_drafts
+            if isinstance(outcome, AgentJobOutcome)
+            else outcome.proposed_artifacts
+        )
+        if (
+            isinstance(outcome, AgentJobOutcome)
+            or outcome.consumed_evidence_refs
+            or proposed_evidence
+            or proposed_artifacts
+            or outcome.decision_audit is not None
+        ):
+            raise ValueError("direct specialized Outcomes forbid evidence, proposals, and decision audit")
+        if outcome.result_type is OutcomeResultType.FAILED:
+            return outcome
+        if outcome.result_type is OutcomeResultType.COMPLETED:
+            if (
+                not isinstance(payload, GenericDiagnosisOutcomeV2)
+                or payload.skill_name != specialized_direct_skill_name(job)
+            ):
+                raise ValueError("direct specialized completion requires its exact Skill Markdown report")
+            return outcome
+        if (
+            outcome.result_type not in {
+                OutcomeResultType.NEED_INPUT, OutcomeResultType.NEED_ATTACHMENT,
+            }
+            or not isinstance(payload, DiagnosisOutcome)
+            or payload.candidate_conclusion_draft is not None
+            or payload.findings
+            or any(
+                value for name, value in payload.state_delta.model_dump(mode="python").items()
+                if name != "add_pending_requirements"
+            )
+        ):
+            raise ValueError("direct specialized Outcomes allow only Markdown completion or input preparation")
 
     audit = outcome.decision_audit
     if audit is not None:

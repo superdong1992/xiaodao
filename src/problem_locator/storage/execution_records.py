@@ -82,6 +82,7 @@ _AUDIT_FILENAMES = frozenset(
         "agent_job_outcome.draft.json",
         "method-diagnosis.draft.json",
         "method-diagnosis.raw.txt",
+        "skill-direct-delivery.json",
         "method-diagnosis.effective.json",
         "method-evidence-selection.json",
         "method-evidence-advisory.json",

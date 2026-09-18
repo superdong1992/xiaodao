@@ -314,7 +314,7 @@ function validateResult(result, conversation) {
             throw new HttpError(502, "定位报告格式或状态与任务不一致。");
         }
     } else if (result.format === "markdown") {
-        if (typeof result.markdown !== "string" || result.report !== null) throw new HttpError(502, "通用诊断报告缺少必需内容。");
+        if (typeof result.markdown !== "string" || result.report !== null) throw new HttpError(502, "Markdown 诊断报告缺少必需内容。");
     } else if (result.format === "generic-v1") {
         if (typeof result.report?.conclusion !== "string" || typeof result.report?.root_cause_analysis !== "string" || result.markdown !== null) throw new HttpError(502, "通用诊断结果缺少必需内容。");
     } else throw new HttpError(502, "定位报告格式不符合约定。");

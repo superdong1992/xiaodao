@@ -84,7 +84,10 @@ from problem_locator.contracts import (
     ValidatedTrigger,
     VersionedRef,
     apply_problem_spec_patch,
+    is_specialized_direct,
+    specialized_direct_skill_name,
     validate_coordinator_plan_result,
+    validate_outcome_for_job,
 )
 
 
@@ -617,13 +620,20 @@ class DomainCoordinator:
                 source_outcome_id=outcome.outcome_id,
                 disposition=OutcomeDisposition.APPLIED,
             )
-        if active.diagnosis_mode is DiagnosisMode.GENERIC:
+        direct = is_specialized_direct(active)
+        if active.diagnosis_mode is DiagnosisMode.GENERIC or (
+            direct and outcome.result_type is OutcomeResultType.COMPLETED
+        ):
             generic = outcome.payload
             if (
                 not isinstance(
                     generic, (GenericDiagnosisOutcome, GenericDiagnosisOutcomeV2)
                 )
-                or generic.skill_name != active.generic_skill_name
+                or (direct and not isinstance(generic, GenericDiagnosisOutcomeV2))
+                or generic.skill_name != (
+                    specialized_direct_skill_name(active)
+                    if direct else active.generic_skill_name
+                )
                 or outcome.result_type is not OutcomeResultType.COMPLETED
                 or outcome.consumed_evidence_refs
                 or outcome.proposed_evidence
@@ -645,15 +655,15 @@ class DomainCoordinator:
                 accepted_artifact_proposal_keys=[],
                 accepted_candidate_proposal_key=None,
                 selected_skill_update=SelectedSkillUpdate(
-                    action=FieldUpdateAction.CLEAR,
-                    value=None,
+                    action=FieldUpdateAction.SET if direct else FieldUpdateAction.CLEAR,
+                    value=active.skill_ref if direct else None,
                 ),
                 case_failure_update=None,
                 candidate_mutation=None,
                 next_job_spec=None,
                 final_result_target=None,
                 clear_active_job=True,
-                reason="Apply the generic diagnosis result directly without review.",
+                reason="Deliver the Skill Markdown report directly without review.",
             )
             if isinstance(generic, GenericDiagnosisOutcomeV2):
                 return TransitionPlan(
@@ -1862,6 +1872,11 @@ class DomainCoordinator:
             or outcome.base_state_revision != active.base_state_revision
         ):
             return _validation("The Outcome does not match the current active Job.")
+        if is_specialized_direct(active):
+            try:
+                validate_outcome_for_job(active, outcome)
+            except (TypeError, ValueError):
+                return _validation("A direct Skill result must match its frozen Job and Markdown contract.")
         return None
 
     def _failure_plan(

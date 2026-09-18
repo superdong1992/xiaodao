@@ -1065,6 +1065,7 @@ def _assemble(
             logparse_broker_factory=broker_factory,
             generic_skill_name=settings.generic_skill_name,
             specialized_reviewer_enabled=settings.specialized_reviewer_enabled,
+            methods_evidence_validation=settings.methods_evidence_validation,
             allow_test_skills=allow_test_skills,
         )
     except (OSError, TypeError, ValueError) as exc:

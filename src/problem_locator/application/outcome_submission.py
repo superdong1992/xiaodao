@@ -56,6 +56,7 @@ from problem_locator.contracts import (
     canonical_json_bytes,
     finalize_generic_result_v2,
     finalize_unresolved_result,
+    is_specialized_direct,
 )
 from problem_locator.contracts.errors import deterministic_outcome_failure
 from problem_locator.contracts.outcomes import (
@@ -1104,7 +1105,8 @@ class OutcomeSubmissionService:
                             artifact_id=generated_generic_report_artifact_id,
                             case_id=job.case_id,
                             kind=ArtifactKind.GENERIC_REPORT,
-                            name="generic-diagnosis-report.md",
+                            name=("skill-diagnosis-report.md" if is_specialized_direct(job)
+                                  else "generic-diagnosis-report.md"),
                             content_type="text/markdown",
                             resource_kind=ResourceKind.FILE,
                             size=published.size,
@@ -1114,7 +1116,8 @@ class OutcomeSubmissionService:
                                 schema_version=1,
                                 format_id="problem-locator-generic-report-v1",
                                 description=(
-                                    "Server-generated public copy of the validated "
+                                    "Skill 输出的 Markdown 报告原文。" if is_specialized_direct(job)
+                                    else "Server-generated public copy of the validated "
                                     "generic diagnosis Markdown report."
                                 ),
                                 generic_result_format_version=2,

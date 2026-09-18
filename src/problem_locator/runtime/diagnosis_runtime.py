@@ -66,9 +66,11 @@ from problem_locator.contracts import (
     bytes_sha256,
     canonical_json_bytes,
     canonical_json_sha256,
+    is_specialized_direct,
     method_pre_evaluation_diagnostic_id_v2,
     parse_canonical_json_bytes,
     review_required_evidence_refs,
+    specialized_direct_skill_name,
     validate_outcome_for_job,
     validate_logparse_claim_for_job,
 )
@@ -115,6 +117,7 @@ from .context_policy import ResolvedJobAssets, RuntimeAssetResolver
 from .failures import RuntimeExecutionError, runtime_failure
 from .final_response import parse_route_response, parse_specialist_response, specialist_prompt
 from .generic_locator import GenericLocatorExecutor
+from .skill_direct import parse_skill_direct_response
 from .input_profile import expand_profile_requirements
 from .outcome_finalizer import (
     AgentOutcomeDraftSealWriteError,
@@ -1067,8 +1070,8 @@ class DiagnosisRuntime:
         self._clock = clock
         self._id_generator = id_generator
         self._specialized_reviewer_enabled = specialized_reviewer_enabled
-        if methods_evidence_validation not in {"advisory", "strict"}:
-            raise ValueError("METHODS_EVIDENCE_VALIDATION 必须是 advisory 或 strict")
+        if methods_evidence_validation not in {"off", "advisory", "strict"}:
+            raise ValueError("METHODS_EVIDENCE_VALIDATION 必须是 off、advisory 或 strict")
         self._methods_evidence_validation = methods_evidence_validation
         self._public_progress = public_progress
         self._publisher = OutcomePublisher(execution_records, clock, id_generator)
@@ -1374,10 +1377,16 @@ class DiagnosisRuntime:
                 )
                 methods_skill = self._resolved_methods_skill(assets)
                 self._announce(job, "DIAGNOSING")
-                methods_skill_load = scan_method_markers(
-                    skill=methods_skill,
-                    target_logs=methods_preprocessing.frozen.target_logs,
-                )
+                if is_specialized_direct(job) and not methods_preprocessing.frozen.target_logs:
+                    methods_skill_load = SkillLoadReceiptV1(
+                        package_tree_sha256=methods_skill.package_tree_sha256,
+                        scanned_source_ids=(), marker_hits=(), loaded_method_ids=(),
+                    )
+                else:
+                    methods_skill_load = scan_method_markers(
+                        skill=methods_skill,
+                        target_logs=methods_preprocessing.frozen.target_logs,
+                    )
                 resolved = assets.bind_workspace(
                     workspace,
                     loaded_method_ids=methods_skill_load.loaded_method_ids,
@@ -1395,7 +1404,7 @@ class DiagnosisRuntime:
                     materials,
                 )
                 specialist_context = context.body
-                if self._methods_evidence_validation == "advisory":
+                if not is_specialized_direct(job) and self._methods_evidence_validation == "advisory":
                     specialist_context += (
                         "\nServer evidence policy: advisory. Return your best supported diagnosis in the "
                         "existing JSON structure. Missing quotation metadata is a limitation, not a reason "
@@ -1407,6 +1416,7 @@ class DiagnosisRuntime:
                     specialist_context, workspace.root, methods_preprocessing.frozen.target_logs,
                     skill_load=methods_skill_load,
                     skill=methods_skill,
+                    direct_output=is_specialized_direct(job),
                 )
                 record_journey_event("job.inputs.prepared", data={
                     "inputs_inlined": inputs_inlined, "complete_input_bytes": complete_input_bytes,
@@ -1460,6 +1470,35 @@ class DiagnosisRuntime:
             self._publish_audit_bytes(job, "broker_audit.json", broker_audit_bytes)
         if job.job_type is JobType.DIAGNOSE and isinstance(final_response, str):
             self._publish_audit_bytes(job, "method-diagnosis.raw.txt", final_response.encode("utf-8"))
+        if is_specialized_direct(job):
+            validating = record_stage_started(ExecutionStage.OUTCOME_VALIDATE)
+            payload = parse_skill_direct_response(
+                final_response, skill_name=specialized_direct_skill_name(job), secrets=secrets,
+            )
+            outcome = JobOutcome(
+                outcome_id=self._id_generator.new("job_outcome"), job_id=job.job_id,
+                case_id=job.case_id, job_type=job.job_type,
+                base_state_revision=job.base_state_revision,
+                result_type=OutcomeResultType.COMPLETED, payload=payload,
+                consumed_evidence_refs=[], proposed_evidence=[], proposed_artifacts=[],
+                error=None, produced_at=self._clock.now(), decision_audit=None,
+            )
+            self._publish_audit_bytes(job, "skill-direct-delivery.json", canonical_json_bytes({
+                "schema_version": 1, "validation_mode": "off",
+                "job_id": job.job_id, "skill_ref": job.skill_ref.model_dump(mode="json"),
+                "status": payload.status.value, "report_sha256": payload.report_sha256,
+                "report_utf8_size": payload.report_utf8_size,
+            }))
+            record_stage_completed(ExecutionStage.OUTCOME_VALIDATE, validating,
+                data={"validation_mode": "off", "skill_status": payload.status.value})
+            self._announce(job, "REPORTING")
+            publishing = record_stage_started(ExecutionStage.EXECUTION_RECORD,
+                data={"operation": "publish_skill_direct_success"})
+            receipt = self._publisher.publish_success(job, outcome, workspace.manifest)
+            record_stage_completed(ExecutionStage.EXECUTION_RECORD, publishing,
+                data={"outcome_file_ref": receipt.outcome_file_ref})
+            self._record_produced_outcome(receipt)
+            return receipt
         self._announce(job, "VERIFYING")
         validating = record_stage_started(ExecutionStage.OUTCOME_VALIDATE)
         try:
@@ -4531,6 +4570,7 @@ class DiagnosisRuntime:
                     for item in validated.target_logs
                 ],
                 receipt_context=receipt_context,
+                allow_empty_targets=is_specialized_direct(job),
             )
         except RuntimeExecutionError:
             raise

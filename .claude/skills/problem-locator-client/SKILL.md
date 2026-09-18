@@ -61,7 +61,7 @@ Use only the following flat argument shapes:
   "goals": ["定位问题原因并给出结论。"],
   "non_goals": [],
   "constraints": [],
-  "completion_criteria": ["给出基于证据的结论；证据不足时明确说明。"],
+  "completion_criteria": ["按所选 Skill 的要求给出诊断结果。"],
   "initial_user_fact_names": [],
   "initial_user_fact_values": [],
   "wait_seconds": 0

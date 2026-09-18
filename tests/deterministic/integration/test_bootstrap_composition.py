@@ -256,6 +256,21 @@ def test_production_composition_injects_enabled_specialized_reviewer(
         graph.close()
 
 
+def test_production_evidence_off_freezes_direct_delivery_and_disables_reviewer(tmp_path):
+    from problem_locator.contracts import is_specialized_direct
+
+    graph = build_service(_settings(tmp_path / "data", reviewer_enabled=True, evidence_validation="off"))
+    try:
+        assert graph.runtime._methods_evidence_validation == "off"
+        assert graph.settings.specialized_reviewer_enabled is False
+        for skill_ref in graph.asset_catalog.route_bindings().available_skill_refs:
+            bindings = graph.asset_catalog.diagnose_bindings(skill_ref)
+            assert is_specialized_direct(bindings)
+            assert bindings.review_policy.value == "NONE"
+    finally:
+        graph.close()
+
+
 def test_production_composition_routes_each_job_role_to_its_agent_backend(
     tmp_path: Path,
 ) -> None:

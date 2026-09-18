@@ -107,7 +107,7 @@ function checkInitialCase(view, caseView, raw) {
     && caseView.status === "WAITING_INPUT", "WEBSITE_CASE_FIRST_REQUIRED");
   const expected = { statement: raw, expected_behavior: "用户未单独说明；以 raw_problem_text 为准。",
     actual_behavior: raw, scope: "仅定位 raw_problem_text 所述问题。", goals: ["定位问题原因并给出结论。"],
-    non_goals: [], constraints: [], completion_criteria: ["给出基于证据的结论；证据不足时明确说明。"] };
+    non_goals: [], constraints: [], completion_criteria: ["按所选 Skill 的要求给出诊断结果。"] };
   check(caseView.raw_problem_text === raw && caseView.user_facts?.length === 0
     && Object.entries(expected).every(([name, value]) => JSON.stringify(caseView.problem_spec?.[name]) === JSON.stringify(value)), "WEBSITE_CASE_FIRST_DEFAULTS");
   const questions = caseView.pending_requirements.filter((item) => item.status === "OPEN").map((item) => item.prompt);

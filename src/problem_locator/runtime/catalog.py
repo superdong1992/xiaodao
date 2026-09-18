@@ -27,6 +27,8 @@ from problem_locator.contracts import (
     ResolvedAsset,
     RuntimeBindings,
     ReviewPolicy,
+    SPECIALIZED_DIRECT_AGENT_PROFILE_ID,
+    SPECIALIZED_DIRECT_OUTPUT_CONTRACT_ID,
     VersionedRef,
     default_resource_limits,
 )
@@ -88,6 +90,8 @@ class _SkillDescriptor:
 
 
 _BUILTIN_SPECS = (
+    _BuiltinSpec("profiles/skill-direct", AssetKind.AGENT_PROFILE, SPECIALIZED_DIRECT_AGENT_PROFILE_ID),
+    _BuiltinSpec("output-contracts/skill-direct", AssetKind.OUTPUT_CONTRACT, SPECIALIZED_DIRECT_OUTPUT_CONTRACT_ID),
     _BuiltinSpec("profiles/router", AssetKind.AGENT_PROFILE, "agent-profile/router"),
     _BuiltinSpec("profiles/specialist", AssetKind.AGENT_PROFILE, "agent-profile/specialist", "8.0.0"),
     _BuiltinSpec("profiles/reviewer", AssetKind.AGENT_PROFILE, "agent-profile/reviewer", "7.0.0"),
@@ -213,12 +217,16 @@ class VersionedAssetCatalog:
         logparse_broker_factory: LogparseBrokerFactory | None = None,
         generic_skill_name: str,
         specialized_reviewer_enabled: bool = False,
+        methods_evidence_validation: str = "strict",
         allow_test_skills: bool = False,
     ) -> None:
         if type(allow_test_skills) is not bool:
             raise TypeError("allow_test_skills must be boolean")
         if type(specialized_reviewer_enabled) is not bool:
             raise TypeError("specialized_reviewer_enabled must be boolean")
+        if methods_evidence_validation not in {"off", "advisory", "strict"}:
+            raise ValueError("Methods evidence policy is invalid")
+        self._methods_evidence_validation = methods_evidence_validation
         if (
             not isinstance(generic_skill_name, str)
             or len(generic_skill_name) > 64
@@ -241,7 +249,7 @@ class VersionedAssetCatalog:
         self._generic_skill_name = generic_skill_name
         self._specialized_review_policy = (
             ReviewPolicy.INDEPENDENT
-            if specialized_reviewer_enabled
+            if specialized_reviewer_enabled and methods_evidence_validation != "off"
             else ReviewPolicy.NONE
         )
 
@@ -458,6 +466,7 @@ class VersionedAssetCatalog:
     def diagnose_bindings(self, skill_ref: VersionedRef) -> RuntimeBindings:
         descriptor = self._descriptor(skill_ref, "diagnose_bindings")
         registration = descriptor.specialized.registration
+        direct = self._methods_evidence_validation == "off"
         preprocessing = registration.preprocessing
         if preprocessing.requires_logparse and (
             self._logparse_tool_ref is None or not self._ref_is_current(self._logparse_tool_ref)
@@ -470,14 +479,14 @@ class VersionedAssetCatalog:
         try:
             bindings = RuntimeBindings(
                 diagnosis_mode=DiagnosisMode.SPECIALIZED,
-                review_policy=self._specialized_review_policy,
+                review_policy=ReviewPolicy.NONE if direct else self._specialized_review_policy,
                 generic_skill_name=None,
-                agent_profile_ref=self._builtin_ref(registration.diagnose.agent_profile_id),
+                agent_profile_ref=self._builtin_ref(SPECIALIZED_DIRECT_AGENT_PROFILE_ID if direct else registration.diagnose.agent_profile_id),
                 available_skill_refs=[],
                 skill_ref=_clone(descriptor.resolved_asset.ref),
                 tool_bundle_ref=self._builtin_ref(registration.diagnose.tool_bundle_id),
                 context_policy_ref=self._builtin_ref(registration.diagnose.context_policy_id),
-                output_contract_ref=self._builtin_ref(registration.diagnose.output_contract_id),
+                output_contract_ref=self._builtin_ref(SPECIALIZED_DIRECT_OUTPUT_CONTRACT_ID if direct else registration.diagnose.output_contract_id),
                 logparse_tool_ref=(
                     _clone(self._logparse_tool_ref) if preprocessing.requires_logparse else None
                 ),

@@ -148,7 +148,7 @@ def test_first_problem_creates_case_before_one_requirement_aware_intake(website,
         "goals": ["定位问题原因并给出结论。"],
         "non_goals": [],
         "constraints": [],
-        "completion_criteria": ["给出基于证据的结论；证据不足时明确说明。"],
+        "completion_criteria": ["按所选 Skill 的要求给出诊断结果。"],
     }
     assert command.initial_user_facts == [] and command.wait_seconds == 0
     view = service.get_conversation(conversation)

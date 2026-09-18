@@ -518,7 +518,7 @@ events.onmessage = (message) => {
 };
 ```
 
-报告区已有可直接使用的 [report-view.js](../examples/website-agent/report-view.js)：导入 `renderReport` 后，将 `renderVerifiedReport(data)` 实现为 `renderReport(reportContainer, data)` 即可。组件按固定字段显示结构化报告、通用 Markdown 原文和历史报告，处理空值、证据缺口及归档异常。先运行 [离线预览](../examples/website-agent/README.md)查看效果，再复制组件和 CSS 到网站。若使用 [browser-client.js](../examples/website-agent/browser-client.js)，其方法已经检查响应并返回 `data`，不要再次取 `.data`。
+报告区已有可直接使用的 [report-view.js](../examples/website-agent/report-view.js)：导入 `renderReport` 后，将 `renderVerifiedReport(data)` 实现为 `renderReport(reportContainer, data)` 即可。组件按固定字段显示结构化报告、Skill 直出或通用诊断的 Markdown 原文，以及历史报告，处理空值、证据缺口及归档异常。先运行 [离线预览](../examples/website-agent/README.md)查看效果，再复制组件和 CSS 到网站。若使用 [browser-client.js](../examples/website-agent/browser-client.js)，其方法已经检查响应并返回 `data`，不要再次取 `.data`。
 
 其余 `renderEventAsText`、`renderConversationAsText`、`renderFailureAsText`、`showEventRetry` 接入网站自己的消息、状态和重试组件；渲染须幂等，失败要抛错，所有普通文本都不得作为 HTML 执行。`renderFailureAsText` 展示安全 code、phase 和诊断关联 ID；归档 UNKNOWN 保留报告区。历史结果事件只更新摘要卡片，用户点击后再用 SDK 的 `conversations.get(id, {include: ["report", "artifacts"], run_id: runId})` 获取并展示，独立于订阅生命周期，不会在刷新时下载全部旧报告。当前轮结束后订阅会关闭；用户明确发送新问题后重新初始化订阅和快照。组件销毁时调用 `closeAgentEvents()`，只断开订阅，不取消诊断。服务器和示例均限制待处理事件数量，慢连接不会无限积压。
 
@@ -535,10 +535,12 @@ events.onmessage = (message) => {
 | `report_state` | HTTP 状态 | 网站行为 |
 | --- | --- | --- |
 | `PENDING` | `200 / ok=true` | 尚未产出报告，包括等待补充，正文为空，继续显示状态或追问 |
-| `READY` | `200 / ok=true` | 按 `format` 展示正式报告，报告内部可为 `COMPLETED`、`PARTIAL` 或 `INCONCLUSIVE` |
+| `READY` | `200 / ok=true` | 按 `format` 展示正式报告；Markdown 原样渲染，结构化报告内部可为 `COMPLETED`、`PARTIAL` 或 `INCONCLUSIVE` |
 | `UNAVAILABLE` | `200 / ok=true` | 任务已结束且没有报告，展示 `failure`；旧历史的 failure 可为 null |
 
 `format=problem-locator-diagnosis-v3` 时正文在 `report`；`format=markdown` 时正文在 `markdown`；历史 `format=generic-v1` 时正文在 `report`，且 `artifact=null`。未就绪和无报告不是 HTTP 错误；非法 ID、会话不存在、读取故障或文件损坏仍返回受控的 `4xx/5xx`。`artifact.sha256` 描述原始产物字节，不是整个 API 响应的哈希。
+
+当前默认 `METHODS_EVIDENCE_VALIDATION=off`，专有定位也返回 `format=markdown`。正文直接采用 Skill 输出，`case_status` 采用 Skill 自己选择的 `RESOLVED` 或 `UNRESOLVED`；框架不再复核结论证据、清空根因或自动改为 `PARTIAL`。网站按已有 Markdown 分支展示，不能因为诊断模式是 `SPECIALIZED` 就要求 JSON 报告。该模式不生成 `diagnosis-result.json` 或 `result.zip`，`archive_status=NOT_REQUIRED`。
 
 报告已发布时，即使 `archive_status=PENDING/FAILED` 或 failure 提示归档状态无法确认，`report_state` 仍为 `READY`。读取会话报告不会读取 ZIP。报告原始内容上限为 16 MiB；网站示例为含报告的响应保留 `6 × 16 MiB + 64 KiB`，同时包含历史时再加 16 MiB。不含报告的 JSON 响应上限仍为 16 MiB。
 
@@ -548,16 +550,16 @@ events.onmessage = (message) => {
 
 `result.available` 是报告已发布的通知。会话 `artifacts` 给出已核验产物的 ID、种类、类型、字节数、SHA-256、来源 Job 和下载入口；`created_by_job_id` 与同一会话响应的 `source_job_id` 一致。网站直接显示这些下载项，不再请求 Case 或单独产物列表。
 
-专有报告是唯一的 `USER_RESULT` / `diagnosis-result.json`。下载必须是 HTTP 200，不允许重定向；真实字节数、SHA-256 和 Content-Type 必须与权威产物描述一致。响应可以省略 `Content-Length` 和 `X-Content-SHA256`，但存在时也必须核对，不能用缺省响应头跳过实际字节校验。报告要求 `schema_version=3`、`format_id=problem-locator-diagnosis-v3`，保留完整字段，不从 `methods_result`、SSE 阶段消息或 stdout 重建结论。
+默认专有定位与 Generic V2 都发布唯一的 `GENERIC_REPORT` Markdown 产物。只有显式恢复 `advisory` / `strict` 的专有定位才发布 `USER_RESULT` / `diagnosis-result.json`。下载必须是 HTTP 200，不允许重定向；真实字节数、SHA-256 和 Content-Type 必须与权威产物描述一致。响应可以省略 `Content-Length` 和 `X-Content-SHA256`，但存在时也必须核对，不能用缺省响应头跳过实际字节校验。结构化报告要求 `schema_version=3`、`format_id=problem-locator-diagnosis-v3`，保留完整字段。不从 `methods_result`、SSE 阶段消息或 stdout 重建结论。
 
-| Case 状态 | JSON 报告状态和可用产物 |
+| Case 状态 | 报告和可用产物 |
 | --- | --- |
-| `RESOLVED` | `COMPLETED` JSON；ZIP 可处于 `PENDING` |
-| `PARTIALLY_RESOLVED` | `PARTIAL` JSON；明确展示限制和证据缺口 |
-| `UNRESOLVED` | `INCONCLUSIVE` JSON 和审计包；`root_cause=null`，没有结果 ZIP |
+| `RESOLVED` | 默认展示 Skill Markdown 原文；`advisory` / `strict` 的结构化结果为 `COMPLETED` JSON，ZIP 可处于 `PENDING` |
+| `PARTIALLY_RESOLVED` | `advisory` / `strict` 的 `PARTIAL` JSON；默认直出不会自动产生该状态 |
+| `UNRESOLVED` | 默认仍展示 Skill Markdown 原文；`advisory` / `strict` 的结果为 `INCONCLUSIVE` JSON 和审计包，`root_cause=null`，没有结果 ZIP |
 | `FAILED` / `CANCELLED` / `INTERRUPTED` | 展示 failure 或状态，不伪造报告 |
 
-展示顺序：定位结论、问题描述、关键发现、确认/候选/排除因素、完成条件、服务端验证及证据、时间相关性、证据缺口、限制、处置建议与安全说明。缺失必需字段属于协议错误；`null` 或空数组按其真实含义显示，不自动补写根因。会话中的 `result` 已由原生服务按原始产物字节校验，前端直接渲染，不必重复下载，也不要对重新序列化的 JSON 计算产物哈希。通用诊断沿用 Generic 合同；Markdown 渲染器应关闭原始 HTML。
+Markdown 报告按原文展示，渲染器应关闭原始 HTML。结构化报告的展示顺序为：定位结论、问题描述、关键发现、确认/候选/排除因素、完成条件、服务端验证及证据、时间相关性、证据缺口、限制、处置建议与安全说明。缺失必需字段属于协议错误；`null` 或空数组按其真实含义显示，不自动补写根因。会话中的 `result` 已由原生服务按原始产物字节校验，前端直接渲染，不必重复下载，也不要对重新序列化的 JSON 计算产物哈希。这些字节校验不代表对报告结论的证据复核。
 
 `archive_status=PENDING`：JSON 立即可展示，继续等 `archive.updated`。`READY`：按用户请求下载 `USER_RESULT_ARCHIVE` / `result.zip`。`FAILED`：归档失败，但已经交付的报告仍有效。`NOT_REQUIRED`：没有待生成的结果 ZIP，审计包是否可下载以产物列表为准。
 
@@ -605,9 +607,13 @@ node --test examples/website-agent/server.test.mjs
 
 历史兼容说明：早期 `8.0.0` 预览版曾把命名事件改成 data-only 帧，那次 SSE 调整本身没有改变 V11 数据合同。仍使用旧版 `event:` 监听器的网站须改用 `onmessage`，从 JSON 读取 `type` 和 `sequence`，不再依赖 `lastEventId` 或服务端 `retry:`。这段历史说明不代表本次 8.1 升级无需处理数据合同。
 
-`INTAKE_CLAUDE_COMMAND` 配置独立补充信息整理角色；缺省沿用路由角色命令。该角色只在已建 Case 的补充点整理用户消息和公开 requirements，不负责创建任务，不获得诊断工具、日志读取或发布结果权限。`METHODS_EVIDENCE_VALIDATION` 当前默认为 `advisory`，暂时关闭 Methods 证据语义一致性的拒绝检查，保留模型判断并在 PARTIAL 报告中说明未经复核；`strict` 恢复原核验。`SPECIALIZED_REVIEWER_ENABLED` 单独控制整份结果的模型审核，Reviewer 继承对应诊断的证据策略。输入单项无效只影响该项；非法顶层 JSON、共享输入变化和权限异常仍失败。不增加模型重试或续办。详见[诊断交付策略](diagnosis-advisory.md)。
+`INTAKE_CLAUDE_COMMAND` 配置独立补充信息整理角色；缺省沿用路由角色命令。该角色只在已建 Case 的补充点整理用户消息和公开 requirements，不负责创建任务，不获得诊断工具、日志读取或发布结果权限。
 
-公司模型若在最终 `result` 中先写 Markdown 说明、再给唯一完整 JSON，服务端模型入口会按[受限提取规则](model-output-compatibility.md#说明文字与最终-json)处理，前端无需自行截取或修复。多个候选、截断或无法识别的结果仍返回具体失败信息。`stream-json` 只规定 CLI 事件外层，不保证其中的业务字符串符合 JSON；提示仍要求只输出合同对象，兼容逻辑不增加模型调用。
+`METHODS_EVIDENCE_VALIDATION` 当前默认为 `off`：直接交付 Skill Markdown，关闭输出后的 grounding、证据一致性复核、Candidate 语义判定和独立 Reviewer。即使旧配置仍有 `SPECIALIZED_REVIEWER_ENABLED=true`，也不会启动审核。模型执行前的 Logparse、日志冻结、marker 扫描和命中方法卡加载保持不变。新 Job 冻结 `agent-profile/skill-direct` 和 `output-contract/skill-direct`，保持 `SPECIALIZED` 模式与 `selected_skill_ref`；Case 使用 `generic_result_v2` 记录 Markdown 和实际 `skill_name`。已有 Job 保留原冻结身份，升级或切换策略前先结束活跃任务，再重启服务。
+
+显式设置 `advisory` 可恢复原建议模式及 `PARTIAL` / `INCONCLUSIVE` 结构化交付，`strict` 恢复原核验；这两种策略下，`SPECIALIZED_REVIEWER_ENABLED` 继续控制独立审核。输入单项无效只影响该项；非法输入、模型执行协议错误、共享输入变化、权限、路径和文件完整性异常仍失败。不增加模型重试或续办。详见[诊断交付策略](diagnosis-advisory.md)。
+
+使用 JSON 合同的模型阶段若在最终 `result` 中先写 Markdown 说明、再给唯一完整 JSON，服务端会按[受限提取规则](model-output-compatibility.md#说明文字与最终-json)处理，前端无需自行截取或修复。多个候选、截断或无法识别的结果仍返回具体失败信息。默认 Skill 直出使用首行 `SKILL_DIAGNOSIS_RESULT_V1` 终态标记和 Markdown 正文，不做 JSON 提取。`stream-json` 只规定 CLI 事件外层，不改变各阶段的业务输出合同；兼容逻辑不增加模型调用。
 
 新部署使用全新空 `DATA_ROOT`；升级 `8.0.0` 时使用显式生成并核验的 r2 副本，原目录保持原样。其他旧数据按升级说明支持范围处理，不自动迁移，也不从旧 `methods_result` 反推报告。MCP 仍为原来的七个工具，输入继续根层扁平；网站直接使用 REST Agent 接口。
 
@@ -615,7 +621,7 @@ node --test examples/website-agent/server.test.mjs
 
 统一会话顶层字段见第 2 节。以下 `ConversationReportView` 是 `data.result` 的固定结构，不是独立接口。三种正常报告状态都返回 HTTP 200，`failure` 可为 null；READY 时可能附带归档异常，报告仍可展示。
 
-`report` 沿用正式 `UserResultPayloadV3` 或历史 `GenericResult`，不生成另一份结论。下表仅补充前文尚未说明的字段；`GenericResult` 和已有报告字段继续使用前文合同。报告包含的证据、规则和时间信息都是已发布内容，读取接口不会重新审核或调用模型。
+默认专有定位和 Generic V2 都使用 `markdown` 字段交付原文，`report=null`。结构化 `report` 沿用正式 `UserResultPayloadV3` 或历史 `GenericResult`，不生成另一份结论。下表仅补充前文尚未说明的字段；已有报告字段继续使用前文合同。报告包含的证据、规则和时间信息都是已发布内容，读取接口不会重新审核或调用模型。
 
 | 模型 | 字段 | 含义 |
 | --- | --- | --- |

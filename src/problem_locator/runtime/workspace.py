@@ -1738,6 +1738,7 @@ class WorkspaceManager:
         request: Mapping[str, Any],
         target_logs: Sequence[tuple[str, str, bytes]],
         receipt_context: Mapping[str, Any],
+        allow_empty_targets: bool = False,
     ) -> FrozenMethodsWorkspaceInputs:
         """Atomically publish the server-owned Methods V1 input surface.
 
@@ -1753,7 +1754,7 @@ class WorkspaceManager:
         if set(receipt_context) != _METHODS_RECEIPT_CONTEXT_FIELDS:
             raise ValueError("Methods receipt context fields are invalid")
         entries = tuple(target_logs)
-        if not entries:
+        if not entries and not allow_empty_targets:
             raise ValueError("Methods preprocessing must freeze at least one target log")
         source_ids: set[str] = set()
         for source_id, label, content in entries:

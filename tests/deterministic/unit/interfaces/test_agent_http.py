@@ -52,7 +52,7 @@ def conversation_detail(result, include=INCLUDES, *, last_event_id=0):
 
 
 def event(sequence, kind="agent.progress"):
-    data = {"stage": "DIAGNOSE", "message": "正在核对证据"}
+    data = {"stage": "DIAGNOSE", "message": "正在分析日志"}
     if kind == "archive.updated":
         data = {"status": "READY", "artifacts": []}
     return AgentEvent(

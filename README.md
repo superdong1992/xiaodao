@@ -24,6 +24,7 @@
 | ROUTE / DIAGNOSE / REVIEW output contract | `5.0.0` / `11.0.0` / `10.0.0` |
 | GENERIC output contract / profile | `2.0.0` / `2.0.0` |
 | Specialist / Reviewer profile | `8.0.0` / `7.0.0` |
+| 默认 Skill 直出绑定 | `agent-profile/skill-direct` / `output-contract/skill-direct` |
 | Router / Diagnose / Review tool bundle | `3.0.0` / `4.0.0` / `3.0.0` |
 
 State、Job 和权威 Outcome 使用 V11。8.0 / 8.1 数据须按[离线升级说明](docs/data-upgrade-v11-r2.md)复制并校验后切换到 8.2；网站历史归属从旧归属库显式导入，未知归属不会自动分配。源目录和历史报告字节保持不变，新目录标记阻止旧服务误用。新安装使用空 `DATA_ROOT`，首次启动会写入 `data-format.json` 和 `completed.sqlite3`。V1–V10 旧目录原样保留，不迁移、不删除、不兼容读取。活动 Case 只保存在内存，服务退出后不自动续办；未完成诊断标记中断，用户可在原会话明确发起新一轮。已交付的报告和待归档任务继续保留。
@@ -33,9 +34,9 @@ State、Job 和权威 Outcome 使用 V11。8.0 / 8.1 数据须按[离线升级�
 - 产品注册只声明路由、必需用户输入/附件、Logparse 产品与 anchor，以及 DIAGNOSE/REVIEW 的内置运行时绑定。
 - `.agents` 下的 Wiki 元 Skill 只生成闭合的 Methods package；`.claude` 下的局域网部署元 Skill 生成完整的生产 registration root，并在其 `package/` 中放置同一 Methods package。两者都不生成 GenerationSpec、`diagnosis-skill.json` 或验证合同。
 - 产品拥有的 Logparse 预处理在独立 Workspace 中直接执行一次 job-scoped broker parse/reuse，不再启动只负责转发固定命令的 Agent。broker 关闭并撤销能力后，服务端才读取冻结目标日志、扫描方法并启动 Specialist。
-- Specialist 从冻结请求、目标日志、Logparse receipt 和精确方法卡生成 `MethodDiagnosisDraftV1`，给出具体 summary、identity token、source、marker、一基行号和完整日志原文。服务端重新读取权威日志并校验哈希，再映射 Candidate、DecisionAuditV2、DiagnosisOutcome 和用户报告。Reviewer 开启时在独立 Job 中提交 `MethodReviewV1`。
+- Specialist 根据冻结请求、目标日志、Logparse receipt 和命中方法卡执行 Skill。默认直接提交 `RESOLVED` 或 `UNRESOLVED` 与 Markdown 正文，服务端原样交付。显式恢复 `advisory` 或 `strict` 后，才使用 `MethodDiagnosisDraftV1`、Candidate 和结构化用户报告；独立 Reviewer 也只在这两种策略下按开关启用。
 
-`.agents/skills/wiki-to-diagnosis-skill` 直接从一份已评审 Wiki 生成 `SKILL.md`、`methods.json` 和独立可加载的 `references/*.md` 方法卡。`methods.json` 固定声明源 Wiki SHA-256、必需用户输入、必需附件、日志派生字段、共享参考和有序方法索引；`shared_references[0]` 固定绑定逐项逐序保留源 Wiki 机械日志模板的 `references/source-log-templates.md`。每个方法用 `evidence_markers` 收齐判断所需日志，`activation_markers` 仅作为包格式的辅助索引；Methods V1 仍检查全部方法和权威目标日志。
+`.agents/skills/wiki-to-diagnosis-skill` 直接从一份已评审 Wiki 生成 `SKILL.md`、`methods.json` 和独立可加载的 `references/*.md` 方法卡。方法卡记录一个诊断方法的适用条件、日志线索和判断步骤。`methods.json` 固定声明源 Wiki SHA-256、必需用户输入、必需附件、日志派生字段、共享参考和有序方法索引；`shared_references[0]` 固定绑定逐项逐序保留源 Wiki 机械日志模板的 `references/source-log-templates.md`。服务在模型执行前扫描 marker，并按命中加载方法卡；`evidence_markers` 用于收集判断所需日志，`activation_markers` 仅作为包格式的辅助索引。这些输入准备步骤在默认直出模式下保留。
 
 这是一次不兼容的模型输入合同升级。仍要求 `evaluation_input`、Evidence Graph/Plan 或
 `supporting_event_refs` 的旧 Evidence V2 package 不会继续加载；部署新版本前，必须用当前元 Skill
@@ -45,19 +46,13 @@ State、Job 和权威 Outcome 使用 V11。8.0 / 8.1 数据须按[离线升级�
 
 Logparse 产品可以省略。省略时 Runtime 记录有效产品 `default`，Broker 不向上游强制传入 `--product`；只有非默认产品才显式传参。生成定位 Skill 时，作者只声明 Logparse 归档 requirement 的数量约束，不填写 Content-Type；上传时用户也只选择归档文件。平台按文件后缀确定内部 Content-Type：`.gz/.tar.gz/.tgz` 为 `application/gzip`，`.zip` 为 `application/zip`，`.tar` 为 `application/x-tar`。
 
-Agent 不直接产生权威 Outcome 或公开用户产物。SPECIALIZED DIAGNOSE 只写一个
-`MethodDiagnosisDraftV1` JSON object；REVIEW 只写一个 `MethodReviewV1` JSON object。模型必须提交具体
-evidence summary 和精确日志来源，但不能创建 Evidence、Candidate、Artifact、USER_RESULT、ZIP、
-requirement 或权威 Outcome。
+Agent 不直接创建权威 Outcome 或公开产物。默认 SPECIALIZED DIAGNOSE 首行提交 `<<<SKILL_DIAGNOSIS_RESULT_V1:RESOLVED>>>` 或 `<<<SKILL_DIAGNOSIS_RESULT_V1:UNRESOLVED>>>`，换行后是 Markdown 正文；服务端负责持久化和交付。显式恢复 `advisory` 或 `strict` 时，DIAGNOSE 使用 `MethodDiagnosisDraftV1`，REVIEW 使用 `MethodReviewV1`。
 
-默认配置只运行 Specialist：服务端验证通过的 COMPLETE/PARTIAL Candidate 直接接受，持久化后立即公开
-`diagnosis-result.json`，再在后台生成 `result.zip`。设置 `SPECIALIZED_REVIEWER_ENABLED=true` 后，Reviewer 才会在
-独立 Job、Workspace 和上下文中复核；`REVIEWING` 阶段不公开产物，只有 PASS 后才公开。非 PASS
-进入 `UNRESOLVED`，只公开 `INCONCLUSIVE` JSON 和审计包。详细语义见下文“Methods V1、可选审核与报告”。
+当前生产默认使用 `METHODS_EVIDENCE_VALIDATION=off`：直接交付 Skill 的 Markdown 原文，并采用 Skill 自己选择的 `RESOLVED` 或 `UNRESOLVED`。框架关闭输出后的 grounding、证据一致性复核、Candidate 语义判定和独立 Reviewer，不自动生成 `PARTIAL`、清空根因或补写“证据不足”。即使旧配置仍有 `SPECIALIZED_REVIEWER_ENABLED=true`，`off` 也强制不启用审核。Skill 自己表达的限制或未解决判断仍按原文保留。
 
-8.1 当前默认使用 `METHODS_EVIDENCE_VALIDATION=advisory`：Methods 诊断暂不因引用文字、行号、marker、身份词或方法标识不一致而清空模型发现。报告明确标注这些内容是未经证据一致性复核的模型判断，交付 `PARTIAL`；没有可识别发现时交付 `INCONCLUSIVE`。`root_cause=null`，无依据的完成条件保持 `UNKNOWN`，不增加模型调用。实际引用只来自本次冻结日志，文件归属、路径、权限、字节数和 SHA-256 检查继续生效。设置 `strict` 可恢复原证据校验及 Reviewer 关闭时的逐项筛选。详情见 [诊断交付策略](docs/diagnosis-advisory.md)。
+前置 Logparse、日志冻结、marker 扫描和命中方法卡加载保持不变；路径、文件归属、权限、字节数、SHA-256 和执行协议检查继续生效。默认报告使用现有 Markdown 交付载体，不生成证据核验 JSON 或 `result.zip`，`archive_status=NOT_REQUIRED`。设置 `advisory` 或 `strict` 可显式恢复原交付策略。详情见 [诊断交付策略](docs/diagnosis-advisory.md)。
 
-模型 JSON 输出接受开头 BOM、完整代码围栏和 CRLF；这些兼容仅位于模型输出入口，七个 MCP 工具的输入合同不变。网站快照新增安全 `failure`，可定位失败阶段并关联服务端日志。调度或持久化异常会停止接收新任务；结果提交最多在现有 30 秒窗口内再次尝试，窗口不会强行中断单次阻塞 I/O，也不会重跑模型。
+使用 JSON 合同的模型阶段接受开头 BOM、完整代码围栏和 CRLF；这些兼容不用于 Skill 直出正文，七个 MCP 工具的输入合同不变。网站快照新增安全 `failure`，可定位失败阶段并关联服务端日志。调度或持久化异常会停止接收新任务；结果提交最多在现有 30 秒窗口内再次尝试，窗口不会强行中断单次阻塞 I/O，也不会重跑模型。
 
 ROUTE 另允许对 `reason` 中遗漏的双引号转义执行一次本地恢复：必须唯一确定字段边界，保持 `skill_id`、`confidence` 和已有转义不变，并重新通过完整校验。原始响应、采用结果和恢复记录分别归档。其他模型阶段和公开输入不自动修复 JSON 语法；边界与排查方式见[模型输出兼容说明](docs/model-output-compatibility.md)。
 
@@ -73,7 +68,7 @@ Methods V1 contract digest 和 Core verdict digest；旧 Evidence V2 Fast E2E �
 当前版本的认证证据复用。任何 standalone verdict 只证明它声明的短路径，不代表完整 Test Flow、
 Release 或物理局域网部署验收。
 
-Problem Locator 是一个单实例故障诊断服务。它接收结构化问题，收集事实与附件，执行固定版本的路由和诊断任务；Reviewer 默认关闭。专有定位以服务端验证后的 `diagnosis-result.json` 为用户报告，并按需提供含原始目标日志的 `result.zip`。Generic V2 终态继续发布 Markdown 结果。
+Problem Locator 是一个单实例故障诊断服务。它接收结构化问题，收集事实与附件，执行固定版本的路由和诊断任务。默认专有定位直接交付 Skill 的 Markdown 原文；Generic V2 继续使用原有 Markdown 交付方式。只有显式恢复 `advisory` 或 `strict` 时，专有定位才生成 `diagnosis-result.json` 并按原合同归档。
 
 Problem Locator 8.2 的活动 Case、Job 和核心命令幂等记录保存在内存中，每个 Case 有独立锁和 revision。会话、轮次、消息、派发记录和公共事件存入 SQLite，继续使用 SQLite WAL + FULL 同步。终态结果与报告可用事件使用同一事务，归档状态与归档事件也使用同一事务；提交后才通知客户端。阶段事件不会增加 Case revision。历史 Case 按需读取，不在每次写操作中复制全库或重新读取历史附件。
 
@@ -114,8 +109,8 @@ uv lock --check
 | `LOGPARSE_PYTHON` | 否 | 当前 Python | Logparse 使用的 Python 启动命令 |
 | `DFX_LOG_LEVEL` | 否 | `INFO` | 结构化诊断日志级别：`DEBUG`、`INFO`、`WARNING`、`ERROR` 或 `CRITICAL` |
 | `DFX_LOG_DIR` | 否 | 无 | 服务端可观测日志目录的绝对路径；配置后生成 `debug.jsonl`、`journey.jsonl` 和按 Case 渲染的人类可读日志 |
-| `SPECIALIZED_REVIEWER_ENABLED` | 否 | `false` | 只接受小写 `true` 或 `false`；开启后，新完成的 Specialist Candidate 才进入独立审核 |
-| `METHODS_EVIDENCE_VALIDATION` | 否 | `advisory` | `advisory` 保留未经证据一致性复核的模型判断；`strict` 恢复原核验。启动时固定，Reviewer 继承对应诊断的策略 |
+| `SPECIALIZED_REVIEWER_ENABLED` | 否 | `false` | 只接受小写 `true` 或 `false`；仅在 `advisory` 或 `strict` 下控制独立审核，`off` 强制关闭 |
+| `METHODS_EVIDENCE_VALIDATION` | 否 | `off` | `off` 直接交付 Skill Markdown，关闭输出后的证据复核和 Reviewer；`advisory` 恢复原建议模式，`strict` 恢复原核验。启动时固定 |
 | `ROUTE_WORKERS` | 否 | `1` | 独立 ROUTE 队列的 worker 数 |
 | `DIAGNOSE_WORKERS` | 否 | `2` | DIAGNOSE/REVIEW 队列的 worker 数 |
 | `LOGPARSE_CONCURRENCY` | 否 | `1` | 同时执行的 Logparse 子进程数 |
@@ -126,7 +121,7 @@ uv lock --check
 ROUTE 只返回 `skill_id`、简短 `reason` 和 `confidence`；无匹配时返回 `skill_id=null`。服务端从启动快照补全 Skill ref 和 Outcome。非法 JSON、未知 Skill 或异常退出直接失败，不自动修复。
 Reviewer 必须继续复用 `DIAGNOSE_CLAUDE_COMMAND`，以保持与 Specialist 相同的模型身份。
 
-Specialist 完整输入不超过 128 KiB 时，请求、方法卡和目标日志直接放入上下文，不必调用 Read/Write；超过上限时完整列出允许读取的输入文件，不静默裁剪。模型返回最终 JSON，服务端继续核验 marker、source、行号、日志原文和身份信息。
+Specialist 完整输入不超过 128 KiB 时，请求、命中方法卡和目标日志直接放入上下文，不必调用 Read/Write；超过上限时完整列出允许读取的输入文件，不静默裁剪。默认 `off` 下模型返回首行终态标记和 Markdown 正文，服务端检查执行协议并原样交付正文，不做 JSON 提取或结论证据复核。
 
 MCP 的写操作和默认查询返回紧凑进度及 `artifact_views`，完整事实和结果元数据使用 `get_case(include_details=true)` 查询。写操作等待后已完成时，直接使用同一响应的下载信息。客户端合同不兼容缺少下载字段的旧服务。HTTP keep-alive 保持 75 秒。
 
@@ -134,7 +129,7 @@ MCP 的写操作和默认查询返回紧凑进度及 `artifact_views`，完整�
 
 上述四个并发配置接受正整数，默认值面向 4 核、8 GB Server。同一 Case 串行，不同 Case 可并行；取消只终止所属 Job。其他上下文、资源和保留期限限制保持固定，`JOB_CONCURRENCY` 及未知覆盖项仍被拒绝。
 
-Skill registration、方法卡、内置提示词和输出合同在启动时形成不可变快照。更新后重启才能生效。Logparse 源码、配置和解释器放在按发布版本区分的固定目录中，运行期间不要原地覆盖；身份只在启动时确认。
+Skill registration、方法卡、内置提示词和输出合同在启动时形成不可变快照。默认 `off` 下新 Job 冻结 `agent-profile/skill-direct` 和 `output-contract/skill-direct`；旧 Job 保留原冻结身份。升级或切换策略前先结束活跃任务，重启后才对新任务生效。Logparse 源码、配置和解释器放在按发布版本区分的固定目录中，运行期间不要原地覆盖；身份只在启动时确认。
 
 不要配置或持久化 `PROBLEM_LOCATOR_LOGPARSE_ENDPOINT` 和 `PROBLEM_LOCATOR_LOGPARSE_TOKEN`。
 当前专用热路径不会把它们交给 Agent；只有兼容的委托流程显式请求 Agent broker 环境时，Runtime 才会
@@ -396,27 +391,24 @@ uv run python -m problem_locator serve --env-file /absolute/path/to/service.env 
 
 ## Methods V1、可选审核与报告
 
-SPECIALIZED 定位恢复 `Candidate → 可选 Review → USER_RESULT`：
+默认 `METHODS_EVIDENCE_VALIDATION=off` 时，SPECIALIZED 定位直接交付 Skill 结果：
 
 1. Case 创建后，服务端根据已安装 Methods package 返回缺失 requirements。客户端不在建案前猜测输入。
-2. 输入齐备后，产品拥有的 Logparse 预处理冻结目标日志。Specialist 读取固定请求、目标日志、receipt
-   和方法卡，输出 `MethodDiagnosisDraftV1`，其中包含具体 evidence summary、identity token、source、
-   marker、一基行号、完整日志原文、限制和安全说明。
-3. 服务端重新核对方法、marker、行号、原文和哈希，并映射 Evidence、CandidateConclusionDraft、
-   DecisionAuditV2 和 DiagnosisOutcome。Agent 不能创建 Candidate、Outcome、USER_RESULT 或 ZIP。
-4. 默认 `review_policy=NONE`。COMPLETE/PARTIAL Candidate 持久化后立即公开 `diagnosis-result.json`，并在同一事务中保存待归档任务。
-5. 设置 `SPECIALIZED_REVIEWER_ENABLED=true` 后，新 DIAGNOSE Job 冻结
-   `review_policy=INDEPENDENT`。Candidate 先进入 `REVIEWING`，结果产物保持内部不可下载；只有
-   `MethodReviewV1` PASS 后才公开 JSON，并开始后台生成 ZIP。REJECT/NEED_MORE_EVIDENCE 进入 `UNRESOLVED`，原 Candidate
-   JSON/ZIP 永不公开，只发布新的 `INCONCLUSIVE` JSON 和审计包。
-6. 报告发布失败不会提交 RESOLVED。ZIP 使用 DEFLATE level 1 流式写临时文件，完成后发布；`archive_status=PENDING|READY|FAILED` 反映归档进度，`NOT_REQUIRED` 表示无需归档。ZIP 失败不撤销 JSON，重启会恢复已持久化的待归档任务。
+2. 输入齐备后，Logparse 预处理冻结目标日志，服务端扫描 marker 并加载命中的方法卡。Specialist 读取固定请求、目标日志、receipt 和这些方法卡。
+3. Skill 输出 Markdown 报告，并在首行 `SKILL_DIAGNOSIS_RESULT_V1` 标记中选择 `RESOLVED` 或 `UNRESOLVED`。服务端不做输出后的 grounding、证据一致性复核或 Candidate 语义判定，不重写正文、不自动降级结论。
+4. Job 保持 `SPECIALIZED`，Case 保留 `selected_skill_ref`。报告复用 `generic_result_v2` 和 `GENERIC_REPORT`，`skill_name` 记录实际使用的 Skill；网站返回 `format=markdown`。
+5. `review_policy=NONE`，即使配置 `SPECIALIZED_REVIEWER_ENABLED=true` 也不启动 Reviewer。报告持久化后公开，不生成证据核验 JSON 或结果 ZIP，`archive_status=NOT_REQUIRED`。文件安全、内容哈希和执行协议检查仍保留；报告发布失败不会提交成功终态。
 
-`diagnosis-result.json` 固定使用 `problem-locator-diagnosis-v3`，包含具体根因、发现、原因与候选因素、
+显式设置 `advisory` 或 `strict` 后，恢复 `MethodDiagnosisDraftV1 → Candidate → 可选 Review → USER_RESULT`。`advisory` 保留未经证据一致性复核的模型发现，按原合同交付 `PARTIAL` 或 `INCONCLUSIVE`，并保持 `root_cause=null`；`strict` 恢复原证据核验。
+
+这两种策略下，`SPECIALIZED_REVIEWER_ENABLED=true` 使新 DIAGNOSE Job 冻结 `review_policy=INDEPENDENT`。Candidate 进入 `REVIEWING`，只有 `MethodReviewV1` PASS 后公开 JSON，并开始后台生成 ZIP；REJECT/NEED_MORE_EVIDENCE 进入 `UNRESOLVED`，只发布新的 `INCONCLUSIVE` JSON 和审计包。Reviewer 关闭时直接交付服务端接受的 Candidate。ZIP 的 `archive_status=PENDING|READY|FAILED` 不阻塞已交付 JSON，重启会恢复已持久化的待归档任务。
+
+`advisory` / `strict` 的 `diagnosis-result.json` 固定使用 `problem-locator-diagnosis-v3`，包含具体根因、发现、原因与候选因素、
 完成条件、服务端验证、时间相关性、证据缺口、限制、处置建议和安全说明。`result.zip` 固定包含九段式
 `result.txt`、`archive-manifest.json` 和按权威 Logparse plan 排列的全部可交付目标日志。客户端自动
 下载、校验并展示 JSON；只有用户要求时才下载 ZIP，并先提示其中包含原始目标日志。
 
-INCONCLUSIVE 专有结果只包含 JSON 和 `AUDIT_BUNDLE`，不生成 `result.zip`。FAILED、CANCELLED 和
+这两种策略下的 INCONCLUSIVE 专有结果只包含 JSON 和 `AUDIT_BUNDLE`，不生成 `result.zip`。FAILED、CANCELLED 和
 INTERRUPTED 不伪造用户报告。`methods_result` 不属于当前客户端结果合同。
 
 ## 隔离重放指定 Job
@@ -447,17 +439,16 @@ uv run python -m problem_locator replay-job \
 
 `WorkspaceAttachmentInput.filename_suffix` 为必填字段，但允许值为 `null`。归档文件后缀及 content-type 的校验使用冻结的公共契约辅助函数；路径形式、包含大写字母的别名以及不匹配的后缀都会被拒绝。
 
-默认只列出可下载的公开产物。专有 `RESOLVED/PARTIALLY_RESOLVED` 结果各公开一个
-`USER_RESULT`，ZIP 完成后再公开 `USER_RESULT_ARCHIVE`；`UNRESOLVED` 各公开一个 `INCONCLUSIVE` `USER_RESULT`
-和 `AUDIT_BUNDLE`，不生成 `result.zip`。GENERIC V2
-终态会公开一份 `text/markdown` `GENERIC_REPORT`，其内容必须与
+默认只列出可下载的公开产物。默认 `off` 的专有定位和 GENERIC V2 终态都公开一份 `text/markdown` `GENERIC_REPORT`，其内容必须与
 `generic_result_v2.report_markdown` 的 UTF-8 bytes、size 和 SHA-256 完全一致。下载内容必须
 与声明的字节数和 SHA-256 一致。内部 `LOGPARSE_RUN` 目录会作为后续任务的持久化输入，但永远
 不可下载。
 
+显式恢复 `advisory` / `strict` 后，专有 `RESOLVED/PARTIALLY_RESOLVED` 结果公开一个 `USER_RESULT`，ZIP 完成后再公开 `USER_RESULT_ARCHIVE`；`UNRESOLVED` 公开一个 `INCONCLUSIVE` `USER_RESULT` 和一个 `AUDIT_BUNDLE`，不生成 `result.zip`。
+
 ## 重启与交付语义
 
-每次启动创建新的运行时 epoch，不重放活动任务或未确认的 Outcome，不重新投递旧 PENDING Job。服务退出后，活动 Case、Job、幂等记录和中间状态不恢复，需要重新创建 Case。已经返回终态的 JSON 报告、引用资源、查询索引和幂等记录持久化保留。
+每次启动创建新的运行时 epoch，不重放活动任务或未确认的 Outcome，不重新投递旧 PENDING Job。服务退出后，活动 Case、Job、幂等记录和中间状态不恢复，需要重新创建 Case。已经返回终态的报告、引用资源、查询索引和幂等记录持久化保留。
 
 进程存活期间，Outcome 提交遇到允许重试的错误，仍复用同一份结果，不重新调用 Agent。终态 SQLite 提交失败时不会通知客户端报告已交付。已知存储故障会使 readiness 失败，但不会主动撤销已经交付的报告。
 

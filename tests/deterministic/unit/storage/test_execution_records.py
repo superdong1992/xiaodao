@@ -578,6 +578,7 @@ def test_rejected_agent_output_replace_failure_leaves_no_partial_file(
     "filename",
     (
         "method-diagnosis.draft.json",
+        "skill-direct-delivery.json",
         "method-review.draft.json",
         "logparse_broker_audit.json",
         "method-grounding-audit.json",

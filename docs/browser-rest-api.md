@@ -587,20 +587,22 @@ GET /api/v1/artifacts/40000000-0000-4000-8000-000000000001/content?case_id=10000
 | `WAITING_INPUT` | 否 | 只读取 `status=OPEN` 且 `kind=INPUT` 的 `pending_requirements`，按 `prompt` 和 `constraints` 收集值，再提交 supplement。 |
 | `WAITING_ATTACHMENT` | 否 | 只读取 `status=OPEN` 且 `kind=ATTACHMENT` 的 requirement，依次执行 prepare → raw PUT → `READY` → supplement。 |
 | `REVIEWING` | 否 | 展示审核中；以新的 `active_job.job_id` 长轮询，不能把先前诊断 Job 的 ID 继续当作当前目标。 |
-| `RESOLVED` | 是 | `final_result` 非空时重新列出产物，下载并校验 `diagnosis-result.json`，展示具体专有定位报告；`result.zip` 仅在用户要求时下载，并先提示其中含原始目标日志。Generic V2 仍按 `generic_result_v2` 展示。 |
+| `RESOLVED` | 是 | `generic_result_v2` 非空时直接展示 Markdown 原文，适用于默认专有定位和 Generic V2；`final_result` 非空时下载并校验 `diagnosis-result.json`。`result.zip` 仅在用户要求时下载，并先提示其中含原始目标日志。 |
 | `PARTIALLY_RESOLVED` | 是 | 按 `final_result` 展示已确认因素、待确认因素、未满足条件和限制；自动下载并校验 `diagnosis-result.json`，ZIP 仍按需下载。 |
-| `UNRESOLVED` | 是 | `unresolved_result` 非空时自动下载并校验其 `INCONCLUSIVE` `diagnosis-result.json`；只在用户要求时下载 `AUDIT_BUNDLE`。Generic V2 仍按原合同展示。 |
+| `UNRESOLVED` | 是 | `generic_result_v2` 非空时仍展示诊断的 Markdown 原文；`unresolved_result` 非空时自动下载并校验其 `INCONCLUSIVE` `diagnosis-result.json`。只在用户要求时下载 `AUDIT_BUNDLE`。 |
 | `FAILED` | 是 | 展示 `failure.code`、`message`、`reason_code` 和 `diagnostic_id`，不要伪造用户报告，也不要自动创建替代 Case。 |
 | `CANCELLED` | 是 | 展示已取消；当前 REST 不能从此状态恢复。 |
 | `INTERRUPTED` | 否，但当前 REST 不可推进 | 保留并允许查询；当前 REST 没有恢复端点，不得靠重新提交 supplement 猜测恢复。 |
 
 `active_job` 只会在 `RUNNING` 或 `REVIEWING` 非空；等待状态、终态和 `INTERRUPTED` 均为 `null`。不能根据 `wait_timed_out` 推断状态，必须读取 `case_view.status`。
 
-7.0 专有路径使用 `Candidate → 可选 Review → USER_RESULT`。审核关闭时，服务端验证并持久化 JSON 后立即公开；审核开启时，`REVIEWING` 阶段不公开结果，PASS 后先交付 JSON。ZIP 在后台生成，`archive_status=PENDING` 或 `FAILED` 都不影响 JSON 展示；只有 `READY` 才显示 ZIP 下载入口。`NOT_REQUIRED` 表示无需归档。非 PASS 隐藏原 Candidate 产物，只公开重新生成的 `INCONCLUSIVE` JSON 和审计包。`methods_result` 不属于当前结果合同。
+当前默认专有定位使用 `generic_result_v2` 和 `GENERIC_REPORT` 交付 Markdown 诊断原文，`skill_name` 记录实际使用的专有定位定义名称。Job 仍为 `SPECIALIZED`，Case 保留 `selected_skill_ref`，前端不能仅按诊断模式选择 JSON 报告。`RESOLVED` / `UNRESOLVED` 采用诊断方法给出的判断；框架不再做输出后的证据复核，不自动降级为 `PARTIALLY_RESOLVED` 或补写“证据不足”。该交付方式不会进入 `REVIEWING`，不生成证据核验 JSON 或结果 ZIP，`archive_status=NOT_REQUIRED`。
+
+服务端也保留结构化报告交付方式，前端按实际非空结果字段选择展示分支。`final_result` 非空时读取 `USER_RESULT`；`unresolved_result` 非空时读取其绑定的 `INCONCLUSIVE` JSON 和审计包。`REVIEWING` 阶段不公开结果。ZIP 在后台生成，`archive_status=PENDING` 或 `FAILED` 都不影响 JSON 展示；只有 `READY` 才显示 ZIP 下载入口。`methods_result` 不属于当前结果合同。服务端策略及切换说明见[诊断交付策略](diagnosis-advisory.md)。
 
 Case 的 `attachments` 包含附件摘要。活动 Case 在服务重启后不恢复；已交付的终态报告和待归档任务保留。查询继续返回完整 CaseView。
 
-`diagnosis-result.json` 固定使用 `problem-locator-diagnosis-v3`。前端必须校验列表元数据、响应头、实际字节数和 SHA-256，再按固定结构展示根因、发现、因素、完成条件、验证结果、时间判断、证据缺口、限制、建议和安全说明。不得根据缺失字段补写结论。
+Markdown 正文原样展示，渲染器关闭原始 HTML。结构化报告 `diagnosis-result.json` 固定使用 `problem-locator-diagnosis-v3`。前端必须校验下载文件的列表元数据、响应头、实际字节数和 SHA-256；结构化报告再按固定结构展示根因、发现、因素、完成条件、验证结果、时间判断、证据缺口、限制、建议和安全说明。不得根据缺失字段补写结论；文件完整性校验不代表结论证据复核。
 
 ## 6. 附件端到端流程
 
@@ -1264,13 +1266,13 @@ latestCaseRevision = ready.case_revision;
 | `CaseView` | `open_questions` | `DiagnosisItem[]` | 尚未解决的问题。 |
 | `CaseView` | `pending_requirements` | `PendingRequirement[]` | 所有待办记录；收集输入时只看 `OPEN`。 |
 | `CaseView` | `attachments` | `AttachmentSummary[]` | 已准备或上传的附件摘要，包括 ID、名称、大小和上传状态。 |
-| `CaseView` | `archive_status` | `NOT_REQUIRED \| PENDING \| READY \| FAILED` | ZIP 归档状态；仅 `READY` 时提供 ZIP，其他状态不阻塞已交付 JSON。 |
+| `CaseView` | `archive_status` | `NOT_REQUIRED \| PENDING \| READY \| FAILED` | ZIP 归档状态；默认专有定位的 Markdown 结果为 `NOT_REQUIRED`。仅 `READY` 时提供 ZIP，其他状态不阻塞已交付报告。 |
 | `CaseView` | `active_job` | `JobSummary \| null` | 仅 `RUNNING`/`REVIEWING` 存在。 |
 | `CaseView` | `selected_skill_ref` | `VersionedRef \| null` | 服务所选执行定义的固定版本引用；前端只展示，不提交。 |
-| `CaseView` | `final_result` | `CandidateConclusion \| null` | 专有定位在 `RESOLVED`/`PARTIALLY_RESOLVED` 的最终 Candidate。 |
-| `CaseView` | `unresolved_result` | `UnresolvedResult \| null` | 专有定位在 `UNRESOLVED` 的结果与产物绑定。 |
+| `CaseView` | `final_result` | `CandidateConclusion \| null` | 专有定位结构化报告在 `RESOLVED`/`PARTIALLY_RESOLVED` 的最终 Candidate；Markdown 交付时为 null。 |
+| `CaseView` | `unresolved_result` | `UnresolvedResult \| null` | 专有定位结构化报告在 `UNRESOLVED` 的结果与产物绑定；Markdown 交付时为 null。 |
 | `CaseView` | `generic_result` | `GenericResult \| null` | 通用流程终态结果。 |
-| `CaseView` | `generic_result_v2` | `GenericResultV2 \| null` | Generic V2 终态 Markdown 结果；与 `generic_result` 互斥，正文是不可信数据。 |
+| `CaseView` | `generic_result_v2` | `GenericResultV2 \| null` | 默认专有定位或 Generic V2 的终态 Markdown 结果；与 `generic_result` 互斥，正文是不可信数据。 |
 | `CaseView` | `methods_result` | `MethodsTerminalProjectionV2`，可省略 | 仅为 wire 兼容保留；V9 始终缺省，禁止作为结果来源。 |
 | `MethodsTerminalProjectionV2` | `schema_version` | `2` | 旧投影版本；V9 不产生。 |
 | `MethodsTerminalProjectionV2` | `case_id` | `uuid` | 旧投影所属 Case；V9 不产生。 |
@@ -1294,8 +1296,8 @@ latestCaseRevision = ready.case_revision;
 | `GenericResultV2` | `report_utf8_size` | `integer >= 0` | `report_markdown` 的精确 UTF-8 字节数。 |
 | `GenericResultV2` | `report_sha256` | `sha256` | `report_markdown` 精确 UTF-8 字节的小写 SHA-256。 |
 | `GenericResultV2` | `report_artifact_id` | `uuid` | 对应不可变 `GENERIC_REPORT` Markdown 产物。 |
-| `GenericResultV2` | `status` | `RESOLVED \| UNRESOLVED` | 通用流程终态，必须与 Case 状态一致。 |
-| `GenericResultV2` | `skill_name` | `text` | 产生报告的固定通用定位定义名称。 |
+| `GenericResultV2` | `status` | `RESOLVED \| UNRESOLVED` | 当前 Markdown 诊断的终态，适用于专有或通用定位，必须与 Case 状态一致。 |
+| `GenericResultV2` | `skill_name` | `text` | 产生报告的固定定位定义名称，可为专有或通用定位定义。 |
 | `GenericResultV2` | `source_job_id` | `uuid` | 产生报告的 Job。 |
 | `GenericResultV2` | `source_outcome_id` | `uuid` | 产生报告的 Outcome。 |
 | `GenericResultV2` | `occurred_at` | `timestamp` | 结果产生的 UTC 时间。 |
@@ -1431,14 +1433,16 @@ latestCaseRevision = ready.case_revision;
 | `CaseFailure` | `reason_code` | `MethodsValidationReasonCode \| null`，可省略 | 服务端证据复核失败时的稳定原因码。 |
 | `CaseFailure` | `diagnostic_id` | `uuid \| ^diag-[0-9a-f]{64}$ \| null`，可省略 | 与 `reason_code` 同时出现或同时缺省，用于关联执行记录。 |
 
-专有结果下载规则：
+默认专有定位和 Generic V2 都从 `generic_result_v2` 读取 Markdown，并提供对应的 `GENERIC_REPORT`；`RESOLVED` 与 `UNRESOLVED` 均适用，不要求 JSON 或 ZIP。
 
-- `RESOLVED` / `PARTIALLY_RESOLVED`：必须各有一个 `USER_RESULT` 和 `USER_RESULT_ARCHIVE`，且来源 Job 等于 `final_result.proposed_by_job_id`。
+专有定位的结构化结果下载规则如下：
+
+- `RESOLVED` / `PARTIALLY_RESOLVED`：公开一个 `USER_RESULT`，ZIP 就绪后再公开 `USER_RESULT_ARCHIVE`，来源 Job 等于 `final_result.proposed_by_job_id`。
 - `UNRESOLVED`：必须有一个 `INCONCLUSIVE` `USER_RESULT` 和一个 `AUDIT_BUNDLE`，分别匹配 `unresolved_result` 中的两个 Artifact ID；不得出现 `USER_RESULT_ARCHIVE`。
 - `REVIEWING`：结果产物不可列出或下载。
 - `FAILED` / `CANCELLED` / `INTERRUPTED`：不生成替代用户报告。
 
-前端自动下载的只有 `diagnosis-result.json`。`result.zip` 和审计包都由用户主动请求；ZIP 下载前必须提示包含原始目标日志。任何类型、来源 Job、大小、SHA-256、响应头或实际字节不一致，都应停止展示并报告协议错误。
+结构化报告分支中，前端自动下载的只有 `diagnosis-result.json`。`result.zip` 和审计包都由用户主动请求；ZIP 下载前必须提示包含原始目标日志。任何类型、来源 Job、大小、SHA-256、响应头或实际字节不一致，都应停止展示并报告协议错误。
 
 ### 8.7 附件描述与产物
 
@@ -1513,9 +1517,9 @@ latestCaseRevision = ready.case_revision;
 | `DiagnosisResolutionStatus` | `COMPLETE`, `PARTIAL` | 完整或部分解决。 |
 | `CompletionCriterionStatus` | `SATISFIED`, `PARTIALLY_SATISFIED`, `UNSATISFIED`, `UNKNOWN` | 每条完成判据的结果。 |
 | `CausalFactorRole` | `CAUSE`, `CONTRIBUTOR`, `CONDITION` | 直接原因、贡献因素、必要条件。 |
-| `GenericResultStatus` | `RESOLVED`, `UNRESOLVED` | 通用结果终态。 |
+| `GenericResultStatus` | `RESOLVED`, `UNRESOLVED` | 专有 Markdown 或通用定位结果的终态。 |
 | `UnresolvedReasonCode` | `MECHANICAL_VERIFICATION_FAILED`, `INSUFFICIENT_EVIDENCE`, `SEMANTIC_REVIEW_REJECTED`, `INVALID_NEED_MORE_REQUEST` | 机械校验失败、证据不足、语义审核拒绝、追加请求非法。 |
-| `ArtifactKind` | `USER_RESULT`, `USER_RESULT_ARCHIVE`, `DIAGNOSTIC_EXPORT`, `LOGPARSE_RUN`, `AUDIT_BUNDLE`, `GENERIC_REPORT` | 结果 JSON、结果归档、诊断导出、内部目录、审计包与 Generic V2 Markdown；列表端点只返回公开可下载项。 |
+| `ArtifactKind` | `USER_RESULT`, `USER_RESULT_ARCHIVE`, `DIAGNOSTIC_EXPORT`, `LOGPARSE_RUN`, `AUDIT_BUNDLE`, `GENERIC_REPORT` | 结果 JSON、结果归档、诊断导出、内部目录、审计包，以及专有或通用定位的 Markdown 报告；列表端点只返回公开可下载项。 |
 | `ResourceKind` | `FILE`, `DIRECTORY` | 文件或目录；下载端点只开放文件。 |
 
 ### 9.2 全部 `ErrorCode`

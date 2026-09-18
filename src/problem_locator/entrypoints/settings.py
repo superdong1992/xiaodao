@@ -57,7 +57,7 @@ class Settings:
     diagnose_workers: int = 2
     logparse_concurrency: int = 1
     archive_workers: int = 1
-    methods_evidence_validation: str = "advisory"
+    methods_evidence_validation: str = "off"
 
     @classmethod
     def load(
@@ -179,9 +179,9 @@ class Settings:
             raise SettingsError(
                 "SPECIALIZED_REVIEWER_ENABLED must be true or false"
             )
-        methods_evidence_validation = values.get("METHODS_EVIDENCE_VALIDATION", "advisory")
-        if methods_evidence_validation not in {"advisory", "strict"}:
-            raise SettingsError("METHODS_EVIDENCE_VALIDATION 必须是 advisory 或 strict")
+        methods_evidence_validation = values.get("METHODS_EVIDENCE_VALIDATION", "off")
+        if methods_evidence_validation not in {"off", "advisory", "strict"}:
+            raise SettingsError("METHODS_EVIDENCE_VALIDATION 必须是 off、advisory 或 strict")
 
         workers = {}
         for key, default in (("ROUTE_WORKERS", 1), ("DIAGNOSE_WORKERS", 2), ("LOGPARSE_CONCURRENCY", 1), ("ARCHIVE_WORKERS", 1)):
@@ -204,7 +204,7 @@ class Settings:
             logparse_python=logparse_python,
             dfx_log_level=dfx_log_level,
             dfx_log_dir=dfx_log_dir,
-            specialized_reviewer_enabled=raw_reviewer_enabled == "true",
+            specialized_reviewer_enabled=(raw_reviewer_enabled == "true" and methods_evidence_validation != "off"),
             methods_evidence_validation=methods_evidence_validation,
             route_claude_command=route_claude_command,
             diagnose_claude_command=diagnose_claude_command,
@@ -226,7 +226,8 @@ class Settings:
             f"dfx_log_level={self.dfx_log_level!r}, "
             f"dfx_log_dir={self.dfx_log_dir!r}, "
             "specialized_reviewer_enabled="
-            f"{self.specialized_reviewer_enabled!r})"
+            f"{self.specialized_reviewer_enabled!r}, "
+            f"methods_evidence_validation={self.methods_evidence_validation!r})"
         )
 
 
