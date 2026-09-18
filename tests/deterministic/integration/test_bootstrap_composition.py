@@ -369,7 +369,7 @@ def test_production_agent_thread_creates_case_from_http_message_and_stops_before
     # Keep the real Case commit and worker wiring, but never start a model Job.
     monkeypatch.setattr(graph.dispatcher, "submit", accept_without_backend)
     assert graph.agent._thread is None
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Agent-Owner-Key": "a" * 64}) as client:
         worker = graph.agent._thread
         assert worker is not None and worker.is_alive()
         assert graph.agent.store.runtime_epoch == graph.scheduler.recovery_result.runtime_epoch
@@ -387,7 +387,7 @@ def test_production_agent_thread_creates_case_from_http_message_and_stops_before
         view = client.get(f"/api/v1/agent/conversations/{conversation_id}").json()["data"]
         assert view["status"] == "RUNNING" and view["case_id"] is not None
         assert view["current_questions"] == []
-        assert view["messages"][0]["status"] == "APPLIED"
+        assert view["history"][0]["message"]["status"] == "APPLIED"
         assert len(commands) == len(jobs) == 1
         assert commands[0].raw_problem_text == "付款请求超时。"
         assert commands[0].initial_user_facts == []

@@ -1,31 +1,33 @@
-# 内部网站接入 Agent 对话与实时进度
+# 网站 API：会话与附件
 
-适用于 xiaodao `8.1.0`、V11 / `v11-contract-r2`。网站把用户原话和日志交给 xiaodao，展示追问、执行进度和经过服务端验证的定位报告。一次会话只对应一次定位任务。
+已有网站升级请先读 [8.2 前端必改清单](website-agent-upgrade-8.2.md)，再按本文核对完整合同。
+
+适用于 xiaodao `8.2.0`、V11 / `v11-contract-r2`。网站把用户原话和日志交给 xiaodao，展示追问、执行进度和经过服务端验证的定位报告。一个会话包含多轮独立诊断，历史消息、追问和结果按轮次保留。网站只操作会话与附件两个抽象：所有展示信息由会话返回，文件单独流式传输。会话查询合同为 `schema_version=3`；SSE 为 schema_version=2，报告内部合同仍为 schema 3。
 
 首次接入先读 [部署后快速接入与联调清单](website-agent-quickstart.md)。本文是完整接口参考。在线入口是 xiaodao 服务的 `/docs` 和 `/openapi.json`；仓库保存 [完整 OpenAPI 快照](../schemas/v2/web-api.openapi.snapshot.json)。联调前核对线上 `info.version` 和路由，不能假设已部署服务与当前源码一致。
 
-调用关系：网站前端 → 网站后端 → Linux 上的 xiaodao REST API。网站原有问答功能保持独立。网站后端负责登录校验、会话和附件归属、事件订阅权限，以及报告下载权限；UUID 不是授权凭据。不要把 xiaodao 内部地址或下载地址直接交给浏览器。
+调用关系：网站前端 → 网站后端 → Linux 上的 xiaodao REST API。网站原有问答功能保持独立。网站后端负责登录校验；xiaodao 持久保存并统一检查会话、附件、订阅和文件的归属；UUID 不是授权凭据。不要把 xiaodao 内部地址或下载地址直接交给浏览器。
 
 ## 1. 网站开发者需要实现的流程
 
-1. 创建会话，保存网站用户与 `conversation_id` 的归属关系。
+1. 网站后端从登录身份派生归属键，再创建会话；xiaodao 保存归属，网站不再维护另一份目录。
 2. 用户发送非空的问题原话，服务端立即按 MCP 客户端的固定中性模板创建 Case；创建前不追问预期行为、范围、日志或时间，也不调用 INTAKE。网站不需要构造 `problem_spec` 或命名事实。日志可先上传，再随问题消息发送附件 ID。
 3. 订阅 SSE。选中 Skill 后，服务端先从已有消息（包括首条原文）提取所需参数，并提交通过校验的部分；此时显示 `INTAKE` 的整理进度。采用结果后，`assistant.question` 只列出仍未满足的要求，用户继续调用消息接口回答。没有剩余要求时不额外追问。
-4. 收到 `result.available` 后调用原生 `GET /api/v1/agent/conversations/{conversation_id}/report`，直接读取正式报告；服务端负责选择并校验产物。采用网站示例时调用同源 `/api/agent/conversations/{conversation_id}/report`。不要等待 ZIP 才展示报告。
+4. 初次打开或刷新调用 `GET /api/v1/agent/conversations/{conversation_id}`，一次获取状态、历史、报告和下载信息。收到 `result.available` 且页面尚无报告时，用同一路径加 `?include=report` 读取 `data.result`。采用网站示例时前缀是 `/api/agent`。不要等待 ZIP 才展示报告。
 5. `archive.updated` 的状态变为 `READY` 后提供 ZIP 下载按钮。用户点击并确认包含原始目标日志后才下载。
-6. 收到 `conversation.completed` 后关闭订阅。报告完成后的新问题另建会话。
+6. 只有当前轮的 `conversation.completed` 才关闭本轮订阅；旧轮完成事件不能关闭新轮订阅。本轮结束后可在同一会话发送新问题，服务端创建新轮；重新建立订阅以接收新轮事件。
 
-关闭页面或断开事件流不会停止后台任务。刷新页面后可查询会话快照并回放历史。服务重启后，未完成任务会明确标为 `INTERRUPTED`；用户需重新创建会话。任务失败或中断后，当前追问会清空，页面按 `failure` 展示结束原因，历史问题仍可回看。已完成报告保留，待生成 ZIP 继续按既有归档机制恢复。
+关闭页面或断开事件流不会停止后台任务。刷新页面后可查询会话快照并回放历史。服务重启后，未完成任务会明确标为 `INTERRUPTED`；用户可在原会话发送新问题开始下一轮。任务失败或中断后，当前追问会清空，页面按 `failure` 展示结束原因，历史问题仍可回看。已完成报告保留，待生成 ZIP 继续按既有归档机制恢复。
 
 全部用户原话保存在会话历史中。关联 Case 的 `raw_problem_text` 保留创建任务的完整用户原话，`statement` 和 `actual_behavior` 使用同一文本。其余问题字段使用 MCP 客户端的固定中性默认值，初始事实为空；`expected_behavior` 不要求用户单独填写。后续消息按当前 OPEN requirements 补充，不拼接进 `raw_problem_text`；网站展示聊天历史时读取会话消息。只有附件、没有问题文本时，服务端先提示用户提供问题原话。
 
-消息已经用于建案（`APPLIED`）不表示其中的 Skill 参数已提取。首次参数提取在路由产生具体要求之后执行；若此时已有新消息排队，会连同首条原文一起处理，避免重复提取。每条消息最多触发一次 Intake，GET、SSE、轮询和已接收命令的重放不增加模型调用。单条消息中的部分有效参数会立即采用；下一轮会携带已冻结事实和仍相关的原文草稿。同值重述不重复提交，更正已冻结值仍需新建任务。
+消息已经用于建案（`APPLIED`）不表示其中的 Skill 参数已提取。首次参数提取在路由产生具体要求之后执行；若此时已有新消息排队，会连同首条原文一起处理，避免重复提取。每条消息最多触发一次 Intake，GET、SSE、轮询和已接收命令的重放不增加模型调用。单条消息中的部分有效参数会立即采用；同一次诊断的后续补充会携带已冻结事实和仍相关的原文草稿。同值重述不重复提交，更正已冻结值需结束当前轮后重新诊断；新诊断不自动继承旧事实。
 
 先发描述、再单独发送附件也支持上述流程：服务端会检查此前是否还有未提取的文字，不会因为最新消息没有 `text` 就跳过首条描述。文字已经整理后，仅选择或补交附件不再调用提取模型。网站可以先把一个日志包上传到 `READY`，再用同一条消息发送问题文字和 `attachment_ids`。
 
 当前诊断要求一份日志归档。尚未采用附件时，以最近一条携带 `attachment_ids` 的消息作为附件选择；只发文字不会清除已有选择。一次选了多个包时，会话继续等待选择或合包，有效文字参数仍会采用。重新发送一条只引用目标附件 ID 的消息即可选择已有文件，无需重复上传。已被 Case 采用的日志不受后续选择影响。
 
-模型只负责提取，不决定是否忽略已提供参数：即使返回 `NEED_CLARIFICATION`，服务端也会提交有效的新事实和附件，然后按最新 Case 展示剩余要求。引用可以包含值两侧的原文上下文；完全重复项合并，未知字段、无原文依据或格式不符的单项被过滤，不影响其余有效项。明确包含日期和时区的 `problem_time` 可确定性转换为毫秒 UTC；不猜测时区，不改写标识符。缺少的要求继续追问，更正已冻结值仍需另建任务。未完成的输入整理和参数提交期间，快照不暴露过时追问，并发新消息也会保持待处理。
+模型只负责提取，不决定是否忽略已提供参数：即使返回 `NEED_CLARIFICATION`，服务端也会提交有效的新事实和附件，然后按最新 Case 展示剩余要求。引用可以包含值两侧的原文上下文；完全重复项合并，未知字段、无原文依据或格式不符的单项被过滤，不影响其余有效项。明确包含日期和时区的 `problem_time` 可确定性转换为毫秒 UTC；不猜测时区，不改写标识符。缺少的要求继续追问，更正已冻结值需结束当前轮后重新诊断。未完成的输入整理和参数提交期间，快照不暴露过时追问，并发新消息也会保持待处理。
 
 时间须包含完整日期、时分秒及 `Z` 或明确时区偏移，日期与时间之间支持 `T` 或一个普通空格，例如 `2026-09-16 10:00:00+08:00`。不接受缺少时区的时间，也不会舍弃亚毫秒精度。Skill 已登记的角色说明会随对应字段要求传给提取模型，每段说明最多使用 256 个 UTF-8 字节；没有登记的字段别名和含义不会自动补造。
 
@@ -37,21 +39,29 @@
 
 以下路径是 **xiaodao 服务接口**。部署示例的 `$BASE` 是网站后端可访问的 xiaodao 地址，例如 `http://xiaodao.internal:8000`。本文 UUID 仅用于说明，实际调用需使用创建响应中的值。
 
-| 方法与路径 | 输入或用途 |
-| --- | --- |
-| `POST /api/v1/agent/conversations` | 创建会话，JSON：`request_id` |
-| `POST /api/v1/agent/conversations/{conversation_id}/messages` | 发送消息，JSON：`request_id`、可空 `text`、`attachment_ids` |
-| `GET /api/v1/agent/conversations/{conversation_id}` | 会话快照、追问、消息采用状态、附件、Case ID、事件游标 |
-| `GET /api/v1/agent/conversations/{conversation_id}/status` | 轻量状态、追问、报告可用状态与失败信息，不读取消息和附件历史 |
-| `GET /api/v1/agent/conversations/{conversation_id}/report` | 一次请求返回正式 JSON、Generic Markdown 或历史 Generic V1 结果 |
-| `GET /api/v1/agent/conversations/{conversation_id}/events` | SSE 历史回放和实时订阅；可带 `Last-Event-ID` 请求头 |
-| `POST /api/v1/agent/conversations/{conversation_id}/attachments` | 预约日志上传 |
-| `PUT /api/v1/agent/attachments/{attachment_id}/content` | 上传文件原始字节 |
-| `GET /api/v1/cases/{case_id}` | 读取权威 Case、结果来源 Job 和产物摘要 |
-| `GET /api/v1/cases/{case_id}/artifacts` | 现有公共产物列表和下载描述符 |
-| `GET /api/v1/artifacts/{artifact_id}/content?case_id={case_id}` | 网站后端使用配置地址和已核验的 Case/产物 ID 下载 |
+| 抽象 | 方法与路径 | 输入或用途 |
+| --- | --- | --- |
+| 会话 | `POST /api/v1/agent/conversations` | 创建会话，JSON：`request_id` |
+| 会话 | `GET /api/v1/agent/conversations` | 当前用户的目录，`limit` 默认 20、最大 100；`cursor` 原样传回 |
+| 会话 | `PATCH /api/v1/agent/conversations/{conversation_id}` | 修改标题，JSON：`title`，1 到 80 个字符 |
+| 会话 | `POST /api/v1/agent/conversations/{conversation_id}/stop` | 停止指定轮次，JSON：稳定 `request_id` 和 `run_id` |
+| 会话 | `DELETE /api/v1/agent/conversations/{conversation_id}` | 删除会话，无请求体；按会话 ID 幂等 |
+| 会话 | `POST /api/v1/agent/conversations/{conversation_id}/messages` | 发送问题、补充回答或附件引用，JSON：`request_id`、可空 `text`、`attachment_ids` |
+| 会话 | `GET /api/v1/agent/conversations/{conversation_id}` | 一次返回状态、进度、追问、失败、历史、完整报告和下载信息 |
+| 会话 | `GET /api/v1/agent/conversations/{conversation_id}/events` | SSE 历史回放和实时订阅；可带 `Last-Event-ID` |
+| 会话 | `GET /api/v1/agent/conversations/{conversation_id}/files/{artifact_id}/content` | 下载文件，可用 `run_id` 固定历史轮次 |
+| 附件 | `POST /api/v1/agent/attachments` | 预约日志上传，JSON 含 `conversation_id` 和文件元数据 |
+| 附件 | `PUT /api/v1/agent/attachments/{attachment_id}/content` | 上传文件原始字节 |
 
-八个 Agent 接口均不接受查询参数。路径标识和 `attachment_ids` 必须是小写规范 UUID。JSON 未定义字段、字符串化数组、重复附件 ID 会被拒绝。消息至少包含非空文本或一个已上传附件；`text` 可省略或为 `null`。文本和 `request_id` 分别最多 65,536 UTF-8 字节，一条消息最多 20 个附件。
+会话 GET 支持 `include`、`run_id`、`history_before`、`history_limit`。不传时加载 `history,report,artifacts`；`include=none` 只返回状态、追问、最新阶段和事件游标；也可传 `include=report`、`include=artifacts` 或不重复的逗号组合。目录查询支持 `cursor`、`limit`；文件支持 `run_id`；其余路由不接受查询参数。未知项、重复项和重复 `include` 参数返回明确校验错误。
+
+返回字段固定，`included` 明确本次加载的部分。未加载的 `history`、`attachments`、`result`、`artifacts` 为 null；空数组表示已加载且没有记录。前端只更新本次加载的部分，不能用 null 清空此前的报告。`report_state` 表示业务可用性，`READY` 与 `result=null` 可以同时出现，含义是本次没有请求报告。
+
+默认完整查询适合首次打开和刷新；持续更新用 SSE 或 `include=none`。收到报告或归档就绪事件时再加载相应部分。正常轻量查询不读消息正文、附件历史、Case 快照或报告文件；交付异常时仍需查询权威状态以判断是否真正完成。最新阶段使用可重建索引读取，首次启动补建一次，不改历史事件字节或序号。
+
+旧 `/status`、`/report`、网站产物列表和会话下预约附件路径已删除，不提供兼容别名。底层 Case API 仍供已有 Case 集成使用，网站无需查询。文件下载入口随 `artifacts[].download_url` 返回，点击后才传输二进制文件。
+
+路径标识和 `attachment_ids` 必须是小写规范 UUID。JSON 未定义字段、字符串化数组、重复附件 ID 会被拒绝。消息至少包含非空文本或一个已上传附件；`text` 可省略或为 `null`。文本和 `request_id` 分别最多 65,536 UTF-8 字节，一条消息最多 20 个附件。
 
 创建、发消息和预约上传都使用稳定 `request_id`。同一逻辑请求重试时保持内容和 ID 不变；内容改变会返回幂等冲突。新消息使用新 ID。网站应按登录用户为创建请求划分命名空间，避免不同用户使用相同 ID 命中同一个创建回执；下方 TypeScript 示例已实现。
 
@@ -79,6 +89,16 @@
 常见 HTTP 状态：`400` 参数错误；`404` 不存在；`409` 状态或幂等冲突；`413` 超出限制；`422` 文件校验失败；`503` 服务未配置或暂时不可用。网站自身还应返回 `401` 未登录和 `403` 无权访问。Agent 错误码属于 Agent 接口；现有 Case 接口仍使用既有错误合同。
 
 ### 创建与发送消息
+
+每个原生 Agent 请求都必须带 `X-Agent-Owner-Key`。网站后端计算 `SHA-256(JSON.stringify([固定网站命名空间, 已认证用户 ID]))`，得到 64 位小写十六进制。命名空间与用户 ID 必须长期稳定。该头不是登录凭据，xiaodao 只能开放给可信网站后端；浏览器不得选择它。Core Case 接口访问 Agent 创建的数据时也检查同一归属。
+
+`current_run` 始终是当前轮；`selected_run_id` 指明这次读取的状态、报告和文件属于哪一轮。省略 `run_id` 选当前轮，传历史轮 ID 即可读取旧报告，不重新诊断。`capabilities` 给出发送、停止、重新诊断、重命名和删除按钮是否可用，前端不必自行猜测状态组合。
+
+`history` 是唯一聊天展示序列，仅有 `user.message`、`assistant.question`、`diagnosis.result`；结果记录只含摘要，点击后按其 `run_id` 读取正文。默认取最近 50 条，最多 100 条；将 `history_next_cursor` 原样传入 `history_before` 加载更早记录。每页按时间正序返回，前端在顶部插入并按 `id` 去重。历史跨越多轮，分页不复制报告正文；不再返回 `messages`。
+
+停止请求的 `request_id` 和 `run_id` 必须一起保存。`CANCELLING` 表示已接收但后台尚未退出，`CANCELLED` 表示已停止，`ALREADY_FINISHED` 表示目标轮已结束。旧停止请求不能误停新轮。关闭 SSE 不等于停止。新一轮仍调用消息接口，明确发送完整问题及需要复用的附件 ID，不自动继承旧文本、事实或结论。
+
+DELETE 无请求体，返回 `DELETING` 或 `DELETED`。接收删除后目录立即隐藏会话，新查询、发送、上传、事件和下载返回 404；正在使用的资源释放后再清理字节。网络中断时重发同一 DELETE 可确认状态。
 
 ```http
 POST /api/v1/agent/conversations
@@ -120,7 +140,7 @@ Content-Type: application/json
 }
 ```
 
-`ACCEPTED` 只表示消息已持久接收。后台收到首条非空问题文本就创建 Case；建案本身不调用 INTAKE，随后路由和诊断仍可能调用模型。INTAKE 仅在 Case 创建后的合法补充点整理用户输入，按 OPEN INPUT requirements 提取有原文来源的事实；公开追问始终使用 requirements 的原始 prompt。定位运行期间的新消息显示“已收到，尚未用于本次诊断”。更正已冻结事实或任务目标时应另建任务。
+`ACCEPTED` 只表示消息已持久接收。后台收到首条非空问题文本就创建 Case；建案本身不调用 INTAKE，随后路由和诊断仍可能调用模型。INTAKE 仅在 Case 创建后的合法补充点整理用户输入，按 OPEN INPUT requirements 提取有原文来源的事实；公开追问始终使用 requirements 的原始 prompt。定位运行期间的新消息显示“已收到，尚未用于本次诊断”。更正已冻结事实或任务目标时应停止当前轮，再发送完整的新问题。
 
 ### 预约和上传日志
 
@@ -129,10 +149,11 @@ Content-Type: application/json
 先计算文件真实字节数和完整 SHA-256，再预约。以下 digest 仅演示字段格式，不能直接用于上传真实文件。
 
 ```http
-POST /api/v1/agent/conversations/10000000-0000-0000-0000-000000000001/attachments
+POST /api/v1/agent/attachments
 Content-Type: application/json
 
 {
+  "conversation_id": "10000000-0000-0000-0000-000000000001",
   "request_id": "attachment-001",
   "name": "logs.zip",
   "content_type": "application/zip",
@@ -208,6 +229,7 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `SendMessageBody` | `request_id` | 此条消息的稳定请求标识。 |
 | `SendMessageBody` | `text` | 用户原话；可省略或为 `null`，不能与附件列表同时为空。 |
 | `SendMessageBody` | `attachment_ids` | 当前会话内已经上传完成的附件 UUID 数组。 |
+| `PrepareAgentAttachmentBody` | `conversation_id` | 已创建且归当前用户所有的会话 UUID。 |
 | `PrepareAgentAttachmentBody` | `request_id` | 本次预约的稳定请求标识。 |
 | `PrepareAgentAttachmentBody` | `name` | 不含目录的压缩日志文件名。 |
 | `PrepareAgentAttachmentBody` | `content_type` | 与文件压缩格式一致的媒体类型。 |
@@ -240,21 +262,28 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `AgentAttachment` | `case_attachment_id` | 导入既有 Case 后的附件 UUID；导入前为 `null`。 |
 | `PreparedAgentAttachment` | `attachment` | 本次预约的完整 `AgentAttachment`。 |
 | `PreparedAgentAttachment` | `upload` | `WebUploadDescriptor`，含上传 URL、方法、请求头和大小上限。 |
-| `ConversationView` | `schema_version` | 会话快照合同版本，固定为 `1`。 |
-| `ConversationView` | `conversation_id` | 会话 UUID。 |
-| `ConversationView` | `status` | `INTAKE`、`WAITING_INPUT`、`RUNNING`、`COMPLETED`、`FAILED` 或 `INTERRUPTED`。 |
-| `ConversationView` | `case_id` | 关联 Case UUID；整理问题阶段尚未创建时为 `null`。 |
-| `ConversationView` | `job_id` | 当前关联 Job UUID；没有活动 Job 时可为 `null`。 |
-| `ConversationView` | `case_status` | 关联 Case 的公开状态；尚未绑定时为 `null`。 |
-| `ConversationView` | `archive_status` | `NOT_REQUIRED`、`PENDING`、`READY` 或 `FAILED`；JSON 报告不受 ZIP 失败影响。 |
-| `ConversationView` | `current_questions` | 当前需要展示的中文追问数组。 |
-| `ConversationView` | `failure` | 可空的安全失败信息；终态错误持久保存，当前进程的归档交付未知只作临时投影。旧历史可为 `null`。 |
-| `ConversationView` | `messages` | 按接收顺序保存的 `AgentMessage` 列表。 |
-| `ConversationView` | `attachments` | 当前会话附件列表，每项为 `AgentAttachment`。 |
-| `ConversationView` | `last_event_id` | 当前最新事件序号；恢复页面时与本地已处理游标配合使用。 |
-| `ConversationView` | `created_at` | 会话创建时间。 |
-| `ConversationView` | `updated_at` | 最近一次会话持久更新的时间。 |
-| `AgentEvent` | `schema_version` | 公共事件合同版本，固定为 `1`。 |
+| `ConversationDetailResponse` | `schema_version` | 统一会话读取合同版本，固定为 `3`。 |
+| `ConversationDetailResponse` | `conversation_id` | 会话 UUID。 |
+| `ConversationDetailResponse` | `status` | `INTAKE`、`WAITING_INPUT`、`RUNNING`、`CANCELLING`、`CANCELLED`、`COMPLETED`、`FAILED` 或 `INTERRUPTED`。 |
+| `ConversationDetailResponse` | `case_id` | 关联 Case UUID；整理问题阶段尚未创建时为 `null`。 |
+| `ConversationDetailResponse` | `job_id` | 当前关联 Job UUID；没有活动 Job 时可为 `null`。 |
+| `ConversationDetailResponse` | `case_status` | 关联 Case 的公开状态；尚未绑定时为 `null`。 |
+| `ConversationDetailResponse` | `archive_status` | `NOT_REQUIRED`、`PENDING`、`READY` 或 `FAILED`；JSON 报告不受 ZIP 失败影响。 |
+| `ConversationDetailResponse` | `current_questions` | 当前需要展示的中文追问数组。 |
+| `ConversationDetailResponse` | `failure` | 可空的安全失败信息；终态错误持久保存，当前进程的归档交付未知只作临时投影。旧历史可为 `null`。 |
+| `ConversationDetailResponse` | `history` | 按时间排序的跨轮展示序列；仅含用户消息、追问和结果摘要；未请求 history 时为 null。 |
+| `ConversationDetailResponse` | `attachments` | 当前会话附件列表，每项为 `AgentAttachment`；未请求 history 时为 null。 |
+| `ConversationDetailResponse` | `last_event_id` | 当前最新事件序号；恢复页面时与本地已处理游标配合使用。 |
+| `ConversationDetailResponse` | `created_at` | 会话创建时间。 |
+| `ConversationDetailResponse` | `updated_at` | 最近一次会话持久更新的时间。 |
+| `ConversationDetailResponse` | `case_revision` | 加载报告或产物时捕获的权威 Case 版本；未读取时为 null。 |
+| `ConversationDetailResponse` | `source_job_id` | 报告及产物的来源 Job；无结果或未加载时为 null。 |
+| `ConversationDetailResponse` | `progress` | 最新公开阶段和固定中文说明；尚无阶段事件时为 null。 |
+| `ConversationDetailResponse` | `report_state` | PENDING 等待诊断或补充，READY 已发布，UNAVAILABLE 已结束且无报告。 |
+| `ConversationDetailResponse` | `included` | 实际加载的 history、report、artifacts；轻量查询为空数组。 |
+| `ConversationDetailResponse` | `result` | 请求 report 时返回完整 ConversationReportView；未请求时为 null。 |
+| `ConversationDetailResponse` | `artifacts` | 请求 artifacts 时返回下载元数据和入口；未请求时为 null。 |
+| `AgentEvent` | `schema_version` | 公共事件合同版本，固定为 `2`；每条事件含 `run_id`。旧事件字节不改，读取时投影到 v2。 |
 | `AgentEvent` | `sequence` | 会话内递增序号；用于去重和手动续传，不另发送 SSE `id` 行。 |
 | `AgentEvent` | `conversation_id` | 事件所属会话 UUID。 |
 | `AgentEvent` | `case_id` | 事件关联 Case UUID，创建前为 `null`。 |
@@ -274,6 +303,68 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `AgentPublicFailure` | `details` | `field`/`actual` 形式的安全详情，例如 `phase`、`diagnostic_id`、`reason_code`、`location`；运行态故障还可含 `persistence=UNKNOWN`。 |
 | `AgentPublicFailure` | `retryable` | 固定为 `false`；查询或读取报告不会重新运行模型，也不能据此续办已结束的任务。 |
 
+### 会话管理和历史字段
+
+| 模型 | 字段 | 含义与使用方式 |
+| --- | --- | --- |
+| `RenameConversationBody` | `title` | 新的会话标题，1 到 80 个字符。 |
+| `StopConversationBody` | `request_id` | 稳定停止幂等键。 |
+| `StopConversationBody` | `run_id` | 本次停止的目标轮次，重试不得改写。 |
+| `ConversationRun` | `run_id` | 独立轮次 UUID。 |
+| `ConversationRun` | `ordinal` | 会话内从 1 开始的轮次序号。 |
+| `ConversationRun` | `status` | 当前轮次状态，包含停止中和已停止。 |
+| `ConversationRun` | `case_id` | 该轮关联的 Case UUID，可空。 |
+| `ConversationRun` | `job_id` | 该轮 Job UUID，可空。 |
+| `ConversationRun` | `case_status` | 该轮 Case 状态，可空。 |
+| `ConversationRun` | `archive_status` | 该轮归档状态。 |
+| `ConversationRun` | `report_state` | 该轮报告是否可用。 |
+| `ConversationRun` | `created_at` | 本轮开始时间。 |
+| `ConversationRun` | `updated_at` | 本轮最近更新时间。 |
+| `ConversationCapabilities` | `can_send` | 是否可发送消息。 |
+| `ConversationCapabilities` | `can_stop` | 是否可停止当前轮。 |
+| `ConversationCapabilities` | `can_rediagnose` | 是否可开始新轮。 |
+| `ConversationCapabilities` | `can_rename` | 是否可重命名。 |
+| `ConversationCapabilities` | `can_delete` | 是否可删除会话。 |
+| `ConversationSummary` | `conversation_id` | 会话 UUID。 |
+| `ConversationSummary` | `title` | 会话标题。 |
+| `ConversationSummary` | `current_run` | 当前轮的轻量摘要。 |
+| `ConversationSummary` | `capabilities` | 当前可用操作。 |
+| `ConversationSummary` | `created_at` | 会话创建时间。 |
+| `ConversationSummary` | `updated_at` | 会话更新时间。 |
+| `ConversationList` | `items` | 当前页摘要数组。 |
+| `ConversationList` | `next_cursor` | 下一页游标；结束时为 null。 |
+| `ConversationHistoryEntry` | `id` | 稳定记录 ID，页面按此去重。 |
+| `ConversationHistoryEntry` | `run_id` | 所属轮次 UUID。 |
+| `ConversationHistoryEntry` | `type` | user.message、assistant.question 或 diagnosis.result。 |
+| `ConversationHistoryEntry` | `created_at` | 记录时间。 |
+| `ConversationHistoryEntry` | `message` | 用户消息载荷，其他类型为 null。 |
+| `ConversationHistoryEntry` | `questions` | 追问列表，其他类型为 null。 |
+| `ConversationHistoryEntry` | `result` | 结果摘要，其他类型为 null。 |
+| `ConversationResultSummary` | `status` | COMPLETED、FAILED、INTERRUPTED 或 CANCELLED；无报告的结束轮也保留卡片。 |
+| `ConversationResultSummary` | `case_id` | 该轮关联 Case；建案前结束时为 null。 |
+| `ConversationResultSummary` | `case_status` | 该轮 Case 状态，可空。 |
+| `ConversationResultSummary` | `report_state` | READY 表示正式报告可读，UNAVAILABLE 表示本轮结束但没有报告。 |
+| `ConversationResultSummary` | `source_job_id` | 报告来源 Job，可空。 |
+| `ConversationResultSummary` | `failure` | 受控失败信息，可空；取消不伪造失败或报告。 |
+| `StopReceipt` | `conversation_id` | 会话 UUID。 |
+| `StopReceipt` | `run_id` | 停止目标轮次。 |
+| `StopReceipt` | `request_id` | 停止幂等键。 |
+| `StopReceipt` | `status` | CANCELLING、CANCELLED 或 ALREADY_FINISHED。 |
+| `DeleteReceipt` | `conversation_id` | 会话 UUID。 |
+| `DeleteReceipt` | `status` | DELETING 或 DELETED。 |
+| `RunStartedData` | `ordinal` | 新轮次序号。 |
+| `RunStoppingData` | `status` | 固定 CANCELLING。 |
+| `ConversationDetailResponse` | `title` | 会话标题。 |
+| `ConversationDetailResponse` | `current_run` | 当前轮摘要，历史读取也不改变。 |
+| `ConversationDetailResponse` | `capabilities` | 当前允许的管理操作。 |
+| `ConversationDetailResponse` | `selected_run_id` | 当前状态、报告和文件的所属轮次。 |
+| `ConversationDetailResponse` | `run_id` | 所选轮次 UUID。 |
+| `ConversationDetailResponse` | `history_next_cursor` | 更早记录游标，可空。 |
+| `ConversationReceipt` | `run_id` | 创建的首轮 UUID。 |
+| `MessageReceipt` | `run_id` | 消息归属的轮次 UUID。 |
+| `AgentMessage` | `run_id` | 消息归属轮次。 |
+| `AgentEvent` | `run_id` | 该事件归属轮次；sequence 仍在整个会话递增。 |
+
 ## 3. 实时事件、历史和状态显示
 
 响应是 UTF-8 `text/event-stream`，每个业务事件只发送一行 `data: <AgentEvent JSON>`，后接一个空行（`\n\n`）。JSON 内的换行会转义，不能把网络分块当作事件边界。浏览器统一用 `onmessage` 接收，再按 JSON 的 `type` 分发；不需要注册命名事件。
@@ -290,9 +381,9 @@ curl --no-buffer --fail-with-body \
 ```text
 : connected
 
-data: {"schema_version":1,"sequence":13,"conversation_id":"10000000-0000-0000-0000-000000000001","case_id":"40000000-0000-0000-0000-000000000001","job_id":null,"type":"case.updated","created_at":"2026-09-07T08:00:01.000Z","data":{"status":"WAITING_INPUT","case_revision":2}}
+data: {"schema_version":2,"run_id":"50000000-0000-0000-0000-000000000001","sequence":13,"conversation_id":"10000000-0000-0000-0000-000000000001","case_id":"40000000-0000-0000-0000-000000000001","job_id":null,"type":"case.updated","created_at":"2026-09-07T08:00:01.000Z","data":{"status":"WAITING_INPUT","case_revision":2}}
 
-data: {"schema_version":1,"sequence":14,"conversation_id":"10000000-0000-0000-0000-000000000001","case_id":"40000000-0000-0000-0000-000000000001","job_id":null,"type":"assistant.question","created_at":"2026-09-07T08:00:02.000Z","data":{"questions":["问题发生在哪个时间段？"]}}
+data: {"schema_version":2,"run_id":"50000000-0000-0000-0000-000000000001","sequence":14,"conversation_id":"10000000-0000-0000-0000-000000000001","case_id":"40000000-0000-0000-0000-000000000001","job_id":null,"type":"assistant.question","created_at":"2026-09-07T08:00:02.000Z","data":{"questions":["问题发生在哪个时间段？"]}}
 
 : heartbeat
 
@@ -307,14 +398,14 @@ data: {"schema_version":1,"sequence":14,"conversation_id":"10000000-0000-0000-00
 | `message.accepted` | 完整消息记录；显示已接收，用 `message_id` 去重 |
 | `message.updated` | `message_id`、`status`、`notice`；更新采用状态 |
 | `assistant.question` | `questions` 数组；按原文显示追问 |
-| `agent.progress` | `stage`、`message`；显示已经发生的阶段动作 |
+| `agent.progress` | 执行阶段和固定中文进度说明；显示已经发生的阶段动作 |
 | `case.updated` | `status`、`case_revision`；更新定位状态 |
 | `result.available` | `status`、报告 `artifacts` 摘要、`result_field`；获取并校验正式报告 |
 | `archive.updated` | `status`、归档 `artifacts` 摘要；更新 ZIP 或审计包下载入口 |
 | `attachment.updated` | 完整会话附件状态；同步上传/导入状态 |
 | `agent.failed` | `code`、`message`；读取会话快照并展示 `failure` 后，再推进处理游标 |
 | `conversation.interrupted` | `code`、`message`；读取快照展示具体错误或中断说明，不能从固定 SSE 文案猜测失败阶段 |
-| `conversation.completed` | `status`；本会话事件流即将结束，可关闭订阅 |
+| `conversation.completed` | `status`；对应 `run_id` 的诊断已结束，只有当前轮完成才关闭本轮订阅 |
 
 公共进度不包含百分比、内部思考过程、工具参数、原始日志或路径。审核通过前，不会发出 Candidate 报告或根因结论。阶段事件不会增加 `case_revision`。
 
@@ -323,13 +414,15 @@ data: {"schema_version":1,"sequence":14,"conversation_id":"10000000-0000-0000-00
 | `INTAKE` | 正在整理问题 |
 | `WAITING_INPUT` | 请补充信息或上传日志 |
 | `RUNNING` | 定位进行中，显示最新阶段消息 |
+| `CANCELLING` | 正在停止，请等待当前操作退出 |
+| `CANCELLED` | 已停止，可再次诊断 |
 | `COMPLETED` | 本次定位已结束，请查看报告 |
 | `FAILED` | 本次定位未能完成，请重新发起任务 |
 | `INTERRUPTED` | 本次任务已中断，请重新发起 |
 
 消息采用状态：`QUEUED` 表示已排队、`PROCESSING` 表示正在整理、`APPLIED` 表示已经采用、`UNUSED` 表示未用于本次诊断。请优先显示服务端的 `notice`，不要把排队消息显示为“已用于诊断”。
 
-`GET conversation` 的 `data` 含 `schema_version`、`conversation_id`、`status`、`case_id`、`job_id`、`case_status`、`archive_status`、`current_questions`、`failure`、`messages`、`attachments`、`last_event_id`、`created_at`、`updated_at`。快照和 SSE 可能重叠；按消息 ID 更新消息，按事件序号去重。终态错误的 `diagnostic_id` 在刷新、历史回放和服务重启后保持不变，可交给运维关联服务端记录。
+`GET conversation` 返回 schema 3 的完整会话视图；状态字段始终存在，历史、报告和下载列表按 `included` 更新，固定字段见上表。快照和 SSE 可能重叠；按消息 ID 更新消息，按事件序号去重。终态错误的 `diagnostic_id` 在刷新、历史回放和服务重启后保持不变，可交给运维关联服务端记录。
 
 字段校验错误若有可公开的位置，`failure.details` 会含 `{"field":"location","actual":"input_values[2]"}` 这类条目。位置仅来自结构化错误的字段路径，不包含被拒绝的原始值、预期值或异常原文；没有安全位置时展示错误码、阶段和诊断 ID 即可。
 
@@ -351,46 +444,54 @@ const fail = (error) => {
   closeAgentEvents();
   showEventRetry(error); // 网站组件：保留页面；重试时重新创建订阅，从历史回放。
 };
-let reportLoaded = false;
-let reportRequest = null;
-const loadReport = () => {
-  if (reportLoaded) return Promise.resolve(true);
-  if (reportRequest) return reportRequest;
-  reportRequest = (async () => {
-    const response = await fetch(`/api/agent/conversations/${conversationId}/report`);
-    const result = await response.json();
-    if (!response.ok || !result.ok || result.data?.conversation_id !== conversationId)
+let currentRunId = null;
+let snapshotSequence = 0;
+const loadedReports = new Set();
+const reportRequests = new Map();
+const loadReport = (snapshot = null, runId = snapshot?.selected_run_id ?? currentRunId) => {
+  if (loadedReports.has(runId)) return Promise.resolve(true);
+  if (reportRequests.has(runId)) return reportRequests.get(runId);
+  const reportRequest = (async () => {
+    const response = snapshot ? null : await fetch(`/api/agent/conversations/${conversationId}?include=report&run_id=${encodeURIComponent(runId)}`);
+    const result = snapshot ? { ok: true, data: snapshot } : await response.json();
+    if ((response && !response.ok) || !result.ok || result.data?.schema_version !== 3 ||
+        result.data?.conversation_id !== conversationId || result.data.selected_run_id !== runId || !result.data.included?.includes("report"))
       throw new Error("报告暂未加载成功，请重试。");
     if (stopped) return false;
-    if (result.data.report_state === "PENDING") return false;
-    if (result.data.report_state === "UNAVAILABLE") {
-      if (result.data.failure) await renderFailureAsText(result.data.failure);
+    const report = result.data.result;
+    if (!report || report.conversation_id !== conversationId) throw new Error("报告暂未加载成功，请重试。");
+    if (report.report_state === "PENDING") return false;
+    if (report.report_state === "UNAVAILABLE") {
+      if (report.failure) await renderFailureAsText(report.failure);
       return false;
     }
-    if (result.data.report_state !== "READY") throw new Error("报告状态不符合约定。");
-    await renderVerifiedReport(result.data);
+    if (report.report_state !== "READY") throw new Error("报告状态不符合约定。");
+    await renderVerifiedReport(report, runId); // 网站组件按 run_id 放到对应轮次卡片。
     if (stopped) return false;
-    reportLoaded = true; // 一次会话只有一份不可变正式报告；显示成功后才缓存。
+    loadedReports.add(runId); // 每轮成功显示后才缓存；新轮不会复用旧结论。
     return true;
-  })().finally(() => { reportRequest = null; });
+  })().finally(() => { reportRequests.delete(runId); });
+  reportRequests.set(runId, reportRequest);
   return reportRequest;
 };
 const restoreConversation = async () => {
   const response = await fetch(`/api/agent/conversations/${conversationId}`);
   const result = await response.json();
   const snapshot = result.data;
-  if (!response.ok || !result.ok || !snapshot || snapshot.schema_version !== 1 ||
+  if (!response.ok || !result.ok || !snapshot || snapshot.schema_version !== 3 ||
       snapshot.conversation_id !== conversationId) throw new Error("会话信息暂未加载成功，请重试。");
   if (stopped) return;
+  currentRunId = snapshot.current_run.run_id;
+  snapshotSequence = snapshot.last_event_id;
   await renderConversationAsText(snapshot); // 网站组件：恢复消息、追问、附件和状态。
   if (stopped) return;
   if (snapshot.failure) await renderFailureAsText(snapshot.failure);
   if (stopped) return;
-  if (["RESOLVED", "PARTIALLY_RESOLVED", "UNRESOLVED"].includes(snapshot.case_status)) await loadReport();
+  if (snapshot.report_state === "READY") await loadReport(snapshot);
 };
 // 页面初次打开或刷新先恢复快照；事件排在恢复之后，不能用快照最大序号跳过未展示事件。
 queue = restoreConversation().catch(fail);
-const types = ["message.accepted", "message.updated", "assistant.question", "agent.progress",
+const types = ["run.started", "run.stopping", "message.accepted", "message.updated", "assistant.question", "agent.progress",
   "case.updated", "result.available", "archive.updated", "attachment.updated",
   "agent.failed", "conversation.interrupted", "conversation.completed"];
 events.onmessage = (message) => {
@@ -400,34 +501,36 @@ events.onmessage = (message) => {
   queue = queue.then(async () => {
     if (stopped) return;
     const event = JSON.parse(message.data);
-    if (event.schema_version !== 1 || event.conversation_id !== conversationId ||
+    if (event.schema_version !== 2 || typeof event.run_id !== "string" || event.conversation_id !== conversationId ||
         !types.includes(event.type) || !Number.isSafeInteger(event.sequence) || event.sequence < 1)
       throw new Error("事件格式不符合约定。");
     if (event.sequence <= lastSequence) return;
-    await renderEventAsText(event); // 网站组件：按 ID 更新，文本不得作为 HTML 执行。
-    if (event.type === "result.available" && !await loadReport())
+    if (event.type === "run.started" && event.sequence > snapshotSequence) await restoreConversation();
+    await renderEventAsText(event); // 按 run_id 更新对应卡片；旧轮事件不能覆盖当前轮状态。
+    if (event.type === "result.available" && event.run_id === currentRunId && !await loadReport(null, event.run_id))
       throw new Error("报告尚未就绪，请稍后重新读取。");
-    if (event.type === "agent.failed" || event.type === "conversation.interrupted") await restoreConversation();
+    if ((event.type === "agent.failed" || event.type === "conversation.interrupted") &&
+        event.run_id === currentRunId && event.sequence > snapshotSequence) await restoreConversation();
     if (stopped) return;
     lastSequence = event.sequence; // 所有业务处理成功后才能推进游标。
-    if (event.type === "conversation.completed") closeAgentEvents();
+    if (event.type === "conversation.completed" && event.run_id === currentRunId) closeAgentEvents();
   }).catch(fail).finally(() => { pending -= 1; });
 };
 ```
 
 报告区已有可直接使用的 [report-view.js](../examples/website-agent/report-view.js)：导入 `renderReport` 后，将 `renderVerifiedReport(data)` 实现为 `renderReport(reportContainer, data)` 即可。组件按固定字段显示结构化报告、通用 Markdown 原文和历史报告，处理空值、证据缺口及归档异常。先运行 [离线预览](../examples/website-agent/README.md)查看效果，再复制组件和 CSS 到网站。若使用 [browser-client.js](../examples/website-agent/browser-client.js)，其方法已经检查响应并返回 `data`，不要再次取 `.data`。
 
-其余 `renderEventAsText`、`renderConversationAsText`、`renderFailureAsText`、`showEventRetry` 接入网站自己的消息、状态和重试组件；渲染须幂等，失败要抛错，所有普通文本都不得作为 HTML 执行。`renderFailureAsText` 展示安全 code、phase 和诊断关联 ID；归档 UNKNOWN 保留报告区。组件销毁时调用 `closeAgentEvents()`，只断开订阅，不取消诊断。服务器和示例均限制待处理事件数量，慢连接不会无限积压。
+其余 `renderEventAsText`、`renderConversationAsText`、`renderFailureAsText`、`showEventRetry` 接入网站自己的消息、状态和重试组件；渲染须幂等，失败要抛错，所有普通文本都不得作为 HTML 执行。`renderFailureAsText` 展示安全 code、phase 和诊断关联 ID；归档 UNKNOWN 保留报告区。历史结果事件只更新摘要卡片，用户点击后再用 SDK 的 `conversations.get(id, {include: ["report", "artifacts"], run_id: runId})` 获取并展示，独立于订阅生命周期，不会在刷新时下载全部旧报告。当前轮结束后订阅会关闭；用户明确发送新问题后重新初始化订阅和快照。组件销毁时调用 `closeAgentEvents()`，只断开订阅，不取消诊断。服务器和示例均限制待处理事件数量，慢连接不会无限积压。
 
 临时网络断线可由 `EventSource` 自动重连，但这里不会自动携带业务 `Last-Event-ID`，重连会回放历史，本例按 `lastSequence` 跳过已经处理成功的事件。报告加载、解析或显示失败时，本例关闭连接并显示重试入口，不处理排队中的完成事件；点击重试需重新执行订阅初始化，从历史回放，页面按 ID 更新已有内容。需要持久精准续传时，用流式 `fetch` 携带最后处理成功的 `Last-Event-ID`；按空行拆帧并忽略以冒号开头的注释，不按读取到的网络块直接 `JSON.parse`。刷新恢复还应根据会话快照重新获取已经发布的报告，不能只恢复进度文字。
 
 ## 4. 正式报告与下载校验
 
-### 按会话直接读取状态与报告
+### 会话中的报告
 
-原生 `GET /api/v1/agent/conversations/{conversation_id}/status` 返回 `ConversationStatusView`，包含完整会话快照的状态、追问、失败和事件游标字段，以及 `report_state`，但不含 `messages`、`attachments`。列表页或定时检查使用此接口；需要恢复聊天内容时仍读取完整会话。SSE 内部同样使用轻量查询，不会每次检查都重新加载消息正文和附件历史。
+会话查询的 `data.result` 复用固定的 `ConversationReportView`，内部 JSON 报告 schema 仍为 3。完整会话一次返回报告；只更新报告时请求 `GET /api/v1/agent/conversations/{conversation_id}?include=report`。服务端从同一份 Case 快照选择报告和产物，不在网站后端串联 Case 查询，不调用模型或重跑证据审核。
 
-原生 `GET /api/v1/agent/conversations/{conversation_id}/report` 返回 `ConversationReportView`。网站后端只需传已授权的会话 ID，不必再查询 Case、挑选报告和下载文件。该接口直接读取已经发布的产物，不调用模型、不重跑证据审核、不写入状态；报告选择和来源校验使用同一份 Case 快照。
+以下 `report_state` 和正文字段均相对于 `data.result`：
 
 | `report_state` | HTTP 状态 | 网站行为 |
 | --- | --- | --- |
@@ -437,13 +540,13 @@ events.onmessage = (message) => {
 
 `format=problem-locator-diagnosis-v3` 时正文在 `report`；`format=markdown` 时正文在 `markdown`；历史 `format=generic-v1` 时正文在 `report`，且 `artifact=null`。未就绪和无报告不是 HTTP 错误；非法 ID、会话不存在、读取故障或文件损坏仍返回受控的 `4xx/5xx`。`artifact.sha256` 描述原始产物字节，不是整个 API 响应的哈希。
 
-报告已发布时，即使 `archive_status=PENDING/FAILED` 或 failure 提示归档状态无法确认，`report_state` 仍为 `READY`。`/report` 不读取 ZIP。报告原始内容上限为 16 MiB；网站示例为 JSON 转义后的报告响应单独保留 `6 × 16 MiB + 64 KiB` 的传输上限，其他上游 JSON 响应仍为 16 MiB。
+报告已发布时，即使 `archive_status=PENDING/FAILED` 或 failure 提示归档状态无法确认，`report_state` 仍为 `READY`。读取会话报告不会读取 ZIP。报告原始内容上限为 16 MiB；网站示例为含报告的响应保留 `6 × 16 MiB + 64 KiB`，同时包含历史时再加 16 MiB。不含报告的 JSON 响应上限仍为 16 MiB。
 
-上面的前端示例会合并并发读取，并在报告显示成功后缓存本会话结果。因此刷新时读取的报告不会因历史 `result.available` 回放再次下载；读取或渲染失败不会写入成功缓存。归档状态仍由事件或 `/status` 更新。
+上面的前端示例会合并并发读取，并在报告显示成功后按 run_id 缓存结果。因此刷新时读取的报告不会因历史 `result.available` 回放再次下载；读取或渲染失败不会写入成功缓存。归档状态仍由会话事件或 `include=none` 更新，下载列表用 `include=artifacts` 更新。
 
-### 原始产物下载与旧客户端
+### 会话内的下载信息
 
-`result.available` 只是产物已正式发布的通知，不是报告全文。新网站优先调用原生 `/report`；已有客户端仍可按会话 `case_id` 查询 Case 和产物，核对产物 ID、种类、来源 Job、大小和 SHA-256，再下载原始文件。`ArtifactView` 提供下载描述符；来源 Job 位于 Case 的 `artifacts[].created_by_job_id`，需与 `final_result.proposed_by_job_id`、`unresolved_result.source_job_id` 或 Generic 结果来源一致。
+`result.available` 是报告已发布的通知。会话 `artifacts` 给出已核验产物的 ID、种类、类型、字节数、SHA-256、来源 Job 和下载入口；`created_by_job_id` 与同一会话响应的 `source_job_id` 一致。网站直接显示这些下载项，不再请求 Case 或单独产物列表。
 
 专有报告是唯一的 `USER_RESULT` / `diagnosis-result.json`。下载必须是 HTTP 200，不允许重定向；真实字节数、SHA-256 和 Content-Type 必须与权威产物描述一致。响应可以省略 `Content-Length` 和 `X-Content-SHA256`，但存在时也必须核对，不能用缺省响应头跳过实际字节校验。报告要求 `schema_version=3`、`format_id=problem-locator-diagnosis-v3`，保留完整字段，不从 `methods_result`、SSE 阶段消息或 stdout 重建结论。
 
@@ -454,15 +557,15 @@ events.onmessage = (message) => {
 | `UNRESOLVED` | `INCONCLUSIVE` JSON 和审计包；`root_cause=null`，没有结果 ZIP |
 | `FAILED` / `CANCELLED` / `INTERRUPTED` | 展示 failure 或状态，不伪造报告 |
 
-展示顺序：定位结论、问题描述、关键发现、确认/候选/排除因素、完成条件、服务端验证及证据、时间相关性、证据缺口、限制、处置建议与安全说明。缺失必需字段属于协议错误；`null` 或空数组按其真实含义显示，不自动补写根因。通用诊断沿用 Generic 合同；Markdown 也应先校验字节数和 SHA-256，再用关闭原始 HTML 的渲染器展示。
+展示顺序：定位结论、问题描述、关键发现、确认/候选/排除因素、完成条件、服务端验证及证据、时间相关性、证据缺口、限制、处置建议与安全说明。缺失必需字段属于协议错误；`null` 或空数组按其真实含义显示，不自动补写根因。会话中的 `result` 已由原生服务按原始产物字节校验，前端直接渲染，不必重复下载，也不要对重新序列化的 JSON 计算产物哈希。通用诊断沿用 Generic 合同；Markdown 渲染器应关闭原始 HTML。
 
 `archive_status=PENDING`：JSON 立即可展示，继续等 `archive.updated`。`READY`：按用户请求下载 `USER_RESULT_ARCHIVE` / `result.zip`。`FAILED`：归档失败，但已经交付的报告仍有效。`NOT_REQUIRED`：没有待生成的结果 ZIP，审计包是否可下载以产物列表为准。
 
-下载 ZIP 前显示：“该文件包含原始目标日志，可能含有业务信息。请确认后下载。”审计包也仅按用户请求下载。ZIP 代理使用唯一临时文件，完整校验后再发给浏览器，成功和失败都清理临时文件，不把全部日志 ZIP 缓存在内存中。报告在 16 MiB 上限内使用有界内存，按实际字节数和 SHA-256 校验完成后才解析或展示。
+下载 ZIP 前显示：“该文件包含原始目标日志，可能含有业务信息。请确认后下载。”审计包也仅按用户请求下载。ZIP 代理使用唯一临时文件，完整校验后再发给浏览器，成功和失败都清理临时文件，不把全部日志 ZIP 缓存在内存中。独立下载报告文件时，网站代理在 16 MiB 上限内使用有界内存，按实际字节数和 SHA-256 校验完成后才交付原文件。
 
 ## 5. 可运行的 TypeScript 网站后端
 
-仓库的 `examples/website-agent/server.ts` 使用 Node.js 24 内置 TypeScript 支持和标准库，无需安装 npm 包。它实现登录/归属回调、同源会话接口、SSE 转发、上传转发、JSON 中文展示结构，以及经校验的报告下载。网站可直接集成其中逻辑，或把它作为后端服务接入现有反向代理。
+仓库的 `examples/website-agent/server.ts` 使用 Node.js 24 内置 TypeScript 支持和标准库，无需安装 npm 包；`Access` 类型和启动入口在此文件，唯一业务实现在 `server.mjs`。它实现登录回调和服务端归属校验、同源会话接口、SSE 转发、上传转发、统一会话视图，以及经校验的文件下载。网站可直接集成其中逻辑，或把它作为后端服务接入现有反向代理。
 
 ```powershell
 $env:XIAODAO_BASE_URL = 'http://xiaodao.internal:8000'
@@ -470,20 +573,21 @@ $env:WEBSITE_AUTH_MODULE = 'D:\website\xiaodao-access.mjs'
 node examples/website-agent/server.ts
 ```
 
-Linux 启动命令、五个授权回调及反向代理要求见 [示例 README](../examples/website-agent/README.md)。示例固定监听 `127.0.0.1`，不是可以直接暴露给所有浏览器的完整网站。
+Linux 启动命令、认证回调及反向代理要求见 [示例 README](../examples/website-agent/README.md)。示例固定监听 `127.0.0.1`，不是可以直接暴露给所有浏览器的完整网站。
 
-未配置 `WEBSITE_AUTH_MODULE` 时，服务仍可启动，但业务请求全部返回 `401`。不要为了联调删掉授权检查。认证模块导出 `access`，按 `server.ts` 中的 `Access` 类型实现五个异步回调：验证网站登录态、查询会话归属、持久保存会话归属、查询附件归属、持久保存附件归属。Cookie 认证还需接入网站既有 CSRF 和 Origin 校验；不得相信客户端自行传入的用户名或 user ID。
+未配置 `WEBSITE_AUTH_MODULE` 时，服务仍可启动，但业务请求全部返回 `401`。不要为了联调删掉授权检查。认证模块导出 `access`，只需实现 `authenticate(request)`：验证网站登录态，返回稳定的 `{id}`，未登录时返回 `null`。BFF 从已认证 ID 和固定的 `WEBSITE_OWNER_NAMESPACE` 派生 `owner_key`，归属由原生服务唯一保存；不再维护第二份会话或附件归属库。Cookie 认证还需接入网站既有 CSRF 和 Origin 校验；不得相信客户端自行传入的用户名或 user ID。
 
-示例网站路径使用 `/api/agent`，不是 xiaodao 上游的 `/api/v1/agent`。`/status` 和 `/report` 均有原生服务接口；网站负责授权转发，JSON 报告额外附上中文展示分区。路径如下：
+网站示例前缀是 `/api/agent`，xiaodao 上游前缀是 `/api/v1/agent`。两者的会话和附件操作一致；网站负责授权、受控错误和同源下载地址，不再额外生成中文 sections。
 
 | 网站示例路径 | 用途 |
 | --- | --- |
-| `GET /api/agent/conversations/{id}/status` | 授权后转发原生轻量状态，不读取完整历史 |
-| `GET /api/agent/conversations/{id}/report` | 一次调用原生报告接口；保留三态及原报告，JSON 另加中文 sections |
-| `GET /api/agent/conversations/{id}/artifacts` | 授权后返回产物，下载 URL 改为网站同源路径 |
-| `GET /api/agent/conversations/{id}/artifacts/{artifact_id}/content` | 授权并校验后下载报告 |
+| `GET /api/agent/conversations/{id}` | 一次返回完整会话，支持与上游相同的 include 参数 |
+| `POST /api/agent/attachments` | 预约上传；JSON 必须带 conversation_id，先检查该会话归属 |
+| `GET /api/agent/conversations/{id}/files/{artifact_id}/content` | 从会话核验文件身份后下载 |
 | 上一下载路径加 `?download=archive&acknowledge_raw_logs=true` | 用户确认原始日志提示后下载结果 ZIP |
 | 上一下载路径加 `?download=audit` | 用户主动下载审计包 |
+
+文件下载仍流式传输，与会话 JSON 分开；下载入口由会话提供，属于会话能力。旧独立读取路径和旧 SDK 方法不再提供。
 
 示例只向配置的 `XIAODAO_BASE_URL` 发请求。核验会话归属、Case ID、Artifact ID 和来源 Job 后，使用固定 API 路径重建内部下载地址；响应中的 `download_url` 不参与寻址，不能指定主机、路径或重定向目标。网站的内部 upstream 可以与服务端 `PUBLIC_BASE_URL` 不同，配置的路径前缀会保留，浏览器始终使用网站同源接口。
 
@@ -497,7 +601,7 @@ node --test examples/website-agent/server.test.mjs
 
 ## 6. 服务配置与升级
 
-本次 `8.1.0` 使用 `v11-contract-r2`，会话快照增加 `failure`，SSE 事件仍为 `schema_version=1`，事件形状不变。已有 `8.0.0` / `v11-contract-r1` 数据必须按[副本升级说明](data-upgrade-v11-r2.md)显式升级后，才能交给新版本；保留原数据和历史报告，不要直接修改合同标记或把旧目录交给新版本。
+当前产品数据合同仍是 `8.2.0` / `v11-contract-r2`。本轮网站会话读取改为 `schema_version=3`，旧查询入口删除；网站前后端需同步升级。报告 schema 3 不变；Agent 存储升级为 2、会话详情为 3、公开事件为 2。旧事件的原始字节不改，读取时投影到 v2。已有 r1 或 r2 数据必须提供 `--ownership-map`，按[副本升级说明](data-upgrade-v11-r2.md)显式升级后，才能交给新版本；保留原数据和历史报告，不要直接修改合同标记或把旧目录交给新版本。
 
 历史兼容说明：早期 `8.0.0` 预览版曾把命名事件改成 data-only 帧，那次 SSE 调整本身没有改变 V11 数据合同。仍使用旧版 `event:` 监听器的网站须改用 `onmessage`，从 JSON 读取 `type` 和 `sequence`，不再依赖 `lastEventId` 或服务端 `retry:`。这段历史说明不代表本次 8.1 升级无需处理数据合同。
 
@@ -509,25 +613,12 @@ node --test examples/website-agent/server.test.mjs
 
 ## 7. 状态与报告响应字段
 
-以下列出新增读取接口及其报告正文用到的字段。`ConversationStatusView` 不包含消息和附件历史；需要恢复完整聊天记录时仍读取原会话接口。`ConversationReportView` 在三种正常状态下都返回 HTTP 200，`failure` 可以为 null。`READY` 时也可能带有归档异常，此时报告仍可展示。
+统一会话顶层字段见第 2 节。以下 `ConversationReportView` 是 `data.result` 的固定结构，不是独立接口。三种正常报告状态都返回 HTTP 200，`failure` 可为 null；READY 时可能附带归档异常，报告仍可展示。
 
 `report` 沿用正式 `UserResultPayloadV3` 或历史 `GenericResult`，不生成另一份结论。下表仅补充前文尚未说明的字段；`GenericResult` 和已有报告字段继续使用前文合同。报告包含的证据、规则和时间信息都是已发布内容，读取接口不会重新审核或调用模型。
 
 | 模型 | 字段 | 含义 |
 | --- | --- | --- |
-| `ConversationStatusView` | `archive_status` | 归档状态：NOT_REQUIRED 无需归档，PENDING 后台生成中，READY 可下载，FAILED 生成失败。归档失败不影响已交付的 JSON。 |
-| `ConversationStatusView` | `case_id` | 关联 Case 的 UUID；尚未建案时为 null。 |
-| `ConversationStatusView` | `case_status` | 关联 Case 的最新状态；未创建 Case 时为 null。 |
-| `ConversationStatusView` | `conversation_id` | 一次定位会话的规范 UUID；网站后端负责校验归属。 |
-| `ConversationStatusView` | `created_at` | 创建时间，使用 UTC RFC 3339，精确到毫秒。 |
-| `ConversationStatusView` | `current_questions` | 当前等待用户回答的追问；不得据此推断定位结论。 |
-| `ConversationStatusView` | `failure` | 受控失败原因或进程内交付异常；没有已知异常时为 null。 |
-| `ConversationStatusView` | `job_id` | 当前活动任务 UUID；没有活动任务时为 null。 |
-| `ConversationStatusView` | `last_event_id` | 快照包含的最新事件序号；后续订阅使用 Last-Event-ID。 |
-| `ConversationStatusView` | `report_state` | 报告可用状态：PENDING 等待诊断或补充，READY 已发布，UNAVAILABLE 已结束但无报告。 |
-| `ConversationStatusView` | `schema_version` | 轻量状态响应版本，固定为 1。 |
-| `ConversationStatusView` | `status` | 会话状态：INTAKE、WAITING_INPUT、RUNNING、COMPLETED、FAILED 或 INTERRUPTED；报告先于归档就绪时仍可能为 RUNNING。 |
-| `ConversationStatusView` | `updated_at` | 会话最近一次更新的 UTC 时间。 |
 | `ConversationReportView` | `archive_status` | 归档状态：NOT_REQUIRED 无需归档，PENDING 后台生成中，READY 可下载，FAILED 生成失败。归档失败不影响已交付的 JSON。 |
 | `ConversationReportView` | `artifact` | 正式报告对应的唯一公开产物；历史通用结果或报告未就绪时为 null。 |
 | `ConversationReportView` | `case_id` | 关联 Case 的 UUID；尚未建案时为 null。 |
@@ -551,6 +642,19 @@ node --test examples/website-agent/server.test.mjs
 | `PublicArtifactData` | `resource_kind` | 资源类型；公开报告产物固定为 FILE。 |
 | `PublicArtifactData` | `sha256` | 产物原始字节的 SHA-256，以 64 位小写十六进制表示。 |
 | `PublicArtifactData` | `size` | 产物原始字节数。 |
+| `ConversationDownloadArtifact` | `artifact_id` | 当前会话中不可变公开产物的 UUID。 |
+| `ConversationDownloadArtifact` | `kind` | USER_RESULT、GENERIC_REPORT、USER_RESULT_ARCHIVE 或 AUDIT_BUNDLE。 |
+| `ConversationDownloadArtifact` | `name` | 文件名；结果日志包名为 result.zip。 |
+| `ConversationDownloadArtifact` | `content_type` | 原始文件的媒体类型，须与产物种类一致。 |
+| `ConversationDownloadArtifact` | `resource_kind` | 固定为 FILE。 |
+| `ConversationDownloadArtifact` | `size` | 文件实际字节数；下载时据此核对内容。 |
+| `ConversationDownloadArtifact` | `sha256` | 原始文件的 64 位小写 SHA-256；不是会话响应哈希。 |
+| `ConversationDownloadArtifact` | `created_by_job_id` | 来源任务，与当前会话响应的 source_job_id 一致。 |
+| `ConversationDownloadArtifact` | `created_at` | 文件发布的 UTC 时间。 |
+| `ConversationDownloadArtifact` | `downloadable` | 固定为 true；会话仅提供可下载的正式产物。 |
+| `ConversationDownloadArtifact` | `download_url` | 已核验标识构成的文件入口；网站后端重写为授权后的同源 URL。 |
+| `AgentProgressData` | `stage` | 当前最新的公开执行阶段，例如 ROUTE、LOGPARSE、DIAGNOSE、REVIEW、ARCHIVE 或 INTAKE。 |
+| `AgentProgressData` | `message` | 与 stage 对应的固定中文进度说明，不包含模型内部推理。 |
 | `UserResultPayloadV3` | `candidate_factors` | 尚未确认为原因的候选因素。 |
 | `UserResultPayloadV3` | `causal_factors` | 报告保留的致因因素。 |
 | `UserResultPayloadV3` | `evidence_gaps` | 未解决的证据缺口。 |

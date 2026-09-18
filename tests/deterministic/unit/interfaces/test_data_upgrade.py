@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from problem_locator.agent.store import AgentStore
+from problem_locator.agent.models import AgentStoreError
 from problem_locator.contracts import ApplicationPortError, ArtifactKind, StateFile, canonical_json_bytes
 from problem_locator.entrypoints import data_upgrade as upgrade
 from problem_locator.storage.platform import FileInstanceLock
@@ -49,8 +50,42 @@ def _all_files(root):
 
 
 def _rows(db):
-    tables = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
-    return {table: list(db.execute(f'SELECT * FROM "{table}" ORDER BY rowid')) for table in tables}
+    tables = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        if row[0] in upgrade._CORE_TABLES | upgrade._AGENT_TABLES]
+    lengths = {"agent_conversations": 7, "agent_messages": 6, "agent_events": 4, "agent_dispatches": 6}
+    return {table: [tuple(row[:lengths.get(table, len(row))]) for row in db.execute(f'SELECT * FROM "{table}" ORDER BY rowid')
+        if not (table == "metadata" and row[0] == "agent_storage_version")] for table in tables}
+
+
+def _legacy_agent_schema(db):
+    """Build actual old Agent v1 fixtures, never downgrade a production root."""
+    keep = {"agent_messages_conversation", "agent_events_progress", "agent_dispatches_conversation_status"}
+    for name, sql in db.execute("SELECT name,sql FROM sqlite_master WHERE type='index'").fetchall():
+        if sql is not None and name.startswith("agent_") and name not in keep:
+            db.execute(f'DROP INDEX "{name}"')
+    for table in upgrade._AGENT_V2_TABLES:
+        db.execute(f'DROP TABLE IF EXISTS "{table}"')
+    lengths = {"agent_conversations": 7, "agent_messages": 6, "agent_events": 4, "agent_dispatches": 6}
+    for table, length in lengths.items():
+        columns = [row[1] for row in db.execute(f'PRAGMA table_info("{table}")')]
+        for column in reversed(columns[length:]):
+            db.execute(f'ALTER TABLE "{table}" DROP COLUMN "{column}"')
+    for table, columns in {"agent_conversations": ("body",), "agent_messages": ("body", "receipt"), "agent_events": ("body",)}.items():
+        for column in columns:
+            for rowid, raw in db.execute(f'SELECT rowid,"{column}" FROM "{table}"').fetchall():
+                value = json.loads(raw)
+                for key in ("run_id", "ordinal", "stop_requested"):
+                    value.pop(key, None)
+                if value.get("status") == "CANCELLED":
+                    value["status"] = "FAILED"
+                if table == "agent_events" and isinstance(value.get("data"), dict):
+                    value["schema_version"] = 1
+                    value["data"].pop("run_id", None)
+                    if value["data"].get("status") == "CANCELLED" and value.get("type") == "conversation.completed":
+                        value["data"]["status"] = "FAILED"
+                db.execute(f'UPDATE "{table}" SET "{column}"=? WHERE rowid=?', (json.dumps(value, ensure_ascii=False), rowid))
+    db.execute("DELETE FROM metadata WHERE key='agent_storage_version'")
+    db.execute("UPDATE agent_conversations SET status='FAILED' WHERE status='CANCELLED'")
 
 
 @pytest.fixture
@@ -109,10 +144,12 @@ def legacy_root(tmp_path):
     db = sqlite3.connect(root / "completed.sqlite3", isolation_level=None)
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA wal_autocheckpoint=0")
+    _legacy_agent_schema(db)
     state["contract_revision"] = SOURCE_REVISION
     db.execute("UPDATE completed_cases SET snapshot=? WHERE case_id=?", (canonical_json_bytes(state), CASE_ID))
     marker = json.loads((root / "data-format.json").read_bytes())
     marker["contract_revision"] = SOURCE_REVISION
+    marker.pop("agent_storage_version", None)
     (root / "data-format.json").write_bytes(canonical_json_bytes(marker))
     yield root, db, conversation, attachment.attachment_id, resource_key
     db.close()
@@ -133,6 +170,94 @@ def test_plan_only_never_opens_source_sqlite_or_creates_target(legacy_root, tmp_
     assert result["database_and_resource_validation"] == "PENDING_EXECUTE"
     assert not target.exists() and not list(tmp_path.glob(".planned.upgrade-*"))
     assert _all_files(source) == before
+
+
+def test_current_r2_agent_v1_upgrade_preserves_snapshot_and_imports_explicit_owner(legacy_root, tmp_path, migration_host):
+    source, db, conversation, _, _ = legacy_root
+    native_create_key = db.execute("SELECT request_id FROM agent_conversations WHERE conversation_id=?", (conversation,)).fetchone()[0]
+    raw = json.loads(db.execute("SELECT snapshot FROM completed_cases").fetchone()[0])
+    raw["contract_revision"] = "v11-contract-r2"
+    original = json.dumps(raw, ensure_ascii=False, indent=2).encode("utf-8")
+    db.execute("UPDATE completed_cases SET snapshot=?", (original,))
+    (source / "data-format.json").write_bytes(upgrade._marker("v11-contract-r2"))
+    old_receipt = b'{"previous_upgrade":"keep bytes"}\r\n'
+    (source / "data-upgrade.receipt.json").write_bytes(old_receipt)
+    ownership = tmp_path / "owners.json"
+    ownership.write_text(json.dumps({conversation: "a" * 64}), encoding="utf-8")
+    workspace_id = "90000000-0000-0000-0000-000000000001"
+    runtime = source / "tmp" / "workspaces" / workspace_id / "runtime"
+    runtime.mkdir(parents=True)
+    content = b'{"historical":"intake"}'
+    for name in ("intake-response-original.txt", "intake-response-effective.json"):
+        (runtime / name).write_bytes(content)
+    (runtime / "intake-response-extraction.json").write_text(json.dumps({"conversation_id": conversation,
+        "diagnostic_id": workspace_id, "phase": "INTAKE", "raw_size_bytes": len(content),
+        "effective_size_bytes": len(content), "raw_sha256": hashlib.sha256(content).hexdigest(),
+        "effective_sha256": hashlib.sha256(content).hexdigest()}), encoding="utf-8")
+    unknown_workspace = "90000000-0000-0000-0000-000000000002"
+    unverified = source / "tmp" / "workspaces" / unknown_workspace / "runtime"
+    unverified.mkdir(parents=True)
+    (unverified / "intake-response-original.txt").write_bytes(content)
+    (unverified / "intake-response-effective.json").write_bytes(content)
+    (unverified / "intake-response-extraction.json").write_text(json.dumps({"conversation_id": conversation,
+        "diagnostic_id": unknown_workspace, "phase": "INTAKE", "raw_size_bytes": len(content),
+        "effective_size_bytes": len(content), "raw_sha256": "0" * 64,
+        "effective_sha256": hashlib.sha256(content).hexdigest()}), encoding="utf-8")
+    before = _all_files(source)
+    target = tmp_path / "agent-v2"
+    result = upgrade.upgrade_data_root(source, target, execute=True, ownership_map=ownership)
+    assert result["source_revision"] == "v11-contract-r2"
+    assert result["target_agent_storage_version"] == 2
+    assert result["linked_legacy_intake_workspaces"] == 1
+    assert (result["assigned_conversations"], result["unassigned_conversations"]) == (1, 0)
+    assert result["ownership_map_sha256"] == hashlib.sha256(ownership.read_bytes()).hexdigest()
+    assert "a" * 64 not in json.dumps(result)
+    assert _all_files(source) == before
+    assert (target / "data-upgrade.receipt.json").read_bytes() == old_receipt
+    assert (target / unverified.relative_to(source) / "intake-response-original.txt").read_bytes() == content
+    with sqlite3.connect(target / "completed.sqlite3") as copied:
+        assert copied.execute("SELECT snapshot FROM completed_cases").fetchone()[0] == original
+        assert copied.execute("SELECT owner_key,current_run_id FROM agent_conversations").fetchone() == ("a" * 64, conversation)
+        assert copied.execute("SELECT value FROM metadata WHERE key='agent_storage_version'").fetchone()[0] == "2"
+        assert json.loads(copied.execute("SELECT body FROM agent_conversation_runs").fetchone()[0])["legacy_workspace_ids"] == [workspace_id]
+        assert copied.execute("SELECT request_id FROM agent_conversations WHERE conversation_id=?", (conversation,)).fetchone()[0] == native_create_key
+    reopened = _open(target)
+    try:
+        reader = AgentStore(reopened, runtime_epoch="migrated-create-replay")
+        replay = reader.create_conversation(native_create_key, owner_key="a" * 64)
+        assert replay.conversation_id == replay.run_id == conversation
+        assert reader.create_conversation(native_create_key, owner_key="b" * 64).conversation_id != conversation
+        reader.request_delete(conversation, owner_key="a" * 64)
+        with pytest.raises(AgentStoreError) as deleting:
+            reader.create_conversation(native_create_key, owner_key="a" * 64)
+        assert deleting.value.status_code == 404
+        # The metadata cleanup acknowledgement must retain every create alias.
+        reader.finish_cleanup(conversation)
+        with pytest.raises(AgentStoreError) as deleted:
+            reader.create_conversation(native_create_key, owner_key="a" * 64)
+        assert deleted.value.status_code == 404
+    finally:
+        reopened.close()
+    assert _all_files(source) == before
+    assert json.loads((target / "data-format.json").read_bytes())["agent_storage_version"] == 2
+
+
+@pytest.mark.parametrize("mapping", ["duplicate", "bad-owner", "unknown-conversation"])
+def test_invalid_owner_mapping_never_changes_source(legacy_root, tmp_path, migration_host, mapping):
+    source, _, conversation, _, _ = legacy_root
+    ownership = tmp_path / "owners.json"
+    if mapping == "duplicate":
+        raw = '{"' + conversation + '":"' + "a" * 64 + '","' + conversation + '":"' + "b" * 64 + '"}'
+    else:
+        raw = json.dumps({conversation if mapping == "bad-owner" else ARTIFACT_ID:
+            "user-alice" if mapping == "bad-owner" else "a" * 64})
+    ownership.write_text(raw, encoding="utf-8")
+    before = _all_files(source)
+    target = tmp_path / "bad-owner"
+    with pytest.raises(upgrade.DataUpgradeError) as caught:
+        upgrade.upgrade_data_root(source, target, execute=True, ownership_map=ownership)
+    assert caught.value.code == "OWNERSHIP_INVALID"
+    assert _all_files(source) == before and not target.exists()
 
 
 def test_upgrade_preserves_wal_history_and_artifacts_and_only_maps_allowed_fields(legacy_root, tmp_path, migration_host, monkeypatch):
@@ -159,6 +284,7 @@ def test_upgrade_preserves_wal_history_and_artifacts_and_only_maps_allowed_field
     assert not (target / "data-format.json.tmp").exists()
     with real_connect(target / "completed.sqlite3") as db:
         after = _rows(db)
+        assert db.execute("SELECT owner_key,current_run_id FROM agent_conversations").fetchone() == (None, conversation)
     for table in rows.keys() - {"completed_cases", "agent_attachments"}:
         assert after[table] == rows[table]
     old_snapshot, new_snapshot = json.loads(rows["completed_cases"][0][1]), json.loads(after["completed_cases"][0][1])
@@ -197,11 +323,13 @@ def test_normal_restart_interrupted_history_preserves_orphan_case_and_job_ids(tm
         after_restart.recover()
         assert after_restart.get_conversation(cid).status == "INTERRUPTED"
         assert recovered._db.execute("SELECT count(*) FROM completed_cases").fetchone()[0] == 0
+        _legacy_agent_schema(recovered._db)
         before_rows = _rows(recovered._db)
     finally:
         recovered.close()
     marker = json.loads((source / "data-format.json").read_bytes())
     marker["contract_revision"] = SOURCE_REVISION
+    marker.pop("agent_storage_version", None)
     (source / "data-format.json").write_bytes(canonical_json_bytes(marker))
     before_files = _all_files(source)
     upgrade.upgrade_data_root(source, target, execute=True)
@@ -254,10 +382,12 @@ def test_completed_report_ready_archive_and_website_history_survive_upgrade(tmp_
             else:
                 payload["plan"]["logs"][0]["sha256"] = "0" * 64
             db.execute("UPDATE archive_tasks SET payload=?", (canonical_json_bytes(payload),))
+        _legacy_agent_schema(db)
         db.commit()
         before_rows = _rows(db)
     marker = json.loads((source / "data-format.json").read_bytes())
     marker["contract_revision"] = SOURCE_REVISION
+    marker.pop("agent_storage_version", None)
     (source / "data-format.json").write_bytes(canonical_json_bytes(marker))
     before_files = _all_files(source)
     target = source.with_name("archived-upgraded")
@@ -371,11 +501,13 @@ def test_idle_and_closed_history_is_retained_without_reactivating_work(tmp_path,
         if attachment is not None:
             assert recovered.get_attachment(attachment.attachment_id).status == (
                 "UPLOADING" if history == "uploading" else "RESERVED")
+        _legacy_agent_schema(restarted._db)
         before_rows = _rows(restarted._db)
     finally:
         restarted.close()
     marker = json.loads((source / "data-format.json").read_bytes())
     marker["contract_revision"] = SOURCE_REVISION
+    marker.pop("agent_storage_version", None)
     (source / "data-format.json").write_bytes(canonical_json_bytes(marker))
     before_files = _all_files(source)
     upgrade.upgrade_data_root(source, target, execute=True)

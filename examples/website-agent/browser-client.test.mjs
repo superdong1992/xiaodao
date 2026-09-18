@@ -53,20 +53,23 @@ test("browser methods use website paths, unchanged request bodies and unwrapped 
   const metadata = { request_id: "reserve-original", name: "logs.zip", content_type: "application/zip",
     declared_size: payload.length, declared_sha256: sha256 };
   const signal = new AbortController().signal;
-  assert.deepEqual(await client.createConversation("create-original"), { accepted: 1 });
-  assert.deepEqual(await client.sendMessage(conversationId, message), { accepted: 2 });
-  assert.deepEqual(await client.getConversation(conversationId, { signal }), { accepted: 3 });
-  assert.deepEqual(await client.getStatus(conversationId, { signal }), { accepted: 4 });
-  assert.deepEqual(await client.getReport(conversationId, { signal }), { accepted: 5 });
-  assert.deepEqual(await client.prepareAttachment(conversationId, metadata), { accepted: 6 });
+  assert.deepEqual(await client.conversations.create("create-original"), { accepted: 1 });
+  assert.deepEqual(await client.conversations.send(conversationId, message), { accepted: 2 });
+  assert.deepEqual(await client.conversations.get(conversationId, { signal }), { accepted: 3 });
+  assert.deepEqual(await client.conversations.get(conversationId, { include: [], signal }), { accepted: 4 });
+  assert.deepEqual(await client.conversations.get(conversationId, { include: ["report", "artifacts"], signal }), { accepted: 5 });
+  assert.deepEqual(await client.attachments.prepare(conversationId, metadata), { accepted: 6 });
   assert.deepEqual(calls.map(({ path, init }) => [path, init.method]), [
     ["/api/agent/conversations", "POST"], [`${prefix}/messages`, "POST"],
-    [prefix, "GET"], [`${prefix}/status`, "GET"], [`${prefix}/report`, "GET"],
-    [`${prefix}/attachments`, "POST"],
+    [prefix, "GET"], [`${prefix}?include=none`, "GET"], [`${prefix}?include=report,artifacts`, "GET"],
+    ["/api/agent/attachments", "POST"],
   ]);
   assert.deepEqual(JSON.parse(calls[0].init.body), { request_id: "create-original" });
   assert.deepEqual(JSON.parse(calls[1].init.body), message);
-  assert.deepEqual(JSON.parse(calls[5].init.body), metadata);
+  assert.deepEqual(JSON.parse(calls[5].init.body), { ...metadata, conversation_id: conversationId });
+  assert.deepEqual(Object.keys(client).sort(), ["attachments", "conversations"]);
+  assert.deepEqual(Object.keys(client.conversations).sort(), ["create", "delete", "eventsUrl", "get", "list", "rename", "send", "stop"]);
+  assert.deepEqual(Object.keys(client.attachments).sort(), ["prepare", "upload"]);
   for (const { init } of calls) {
     assert.equal(init.credentials, "same-origin");
     assert.equal(init.redirect, "error");
@@ -74,7 +77,7 @@ test("browser methods use website paths, unchanged request bodies and unwrapped 
     if (init.method === "POST") assert.equal(init.headers.get("Content-Type"), "application/json");
     else { assert.equal(init.body, undefined); assert.equal(init.signal, signal); }
   }
-  assert.equal(client.eventsUrl(conversationId), `${prefix}/events`);
+  assert.equal(client.conversations.eventsUrl(conversationId), `${prefix}/events`);
   assert.equal(calls.length, 6, "只生成 events URL，不自动建立订阅或轮询。");
 });
 
@@ -84,11 +87,47 @@ test("browser client supports a same-origin path prefix and refuses network base
     paths.push(path);
     return envelope({ report_state: "PENDING" });
   } });
-  await client.getReport(conversationId);
-  assert.deepEqual(paths, [`/website/api/agent/conversations/${conversationId}/report`]);
-  assert.equal(client.eventsUrl(conversationId), `/website/api/agent/conversations/${conversationId}/events`);
+  await client.conversations.get(conversationId, { include: ["report"] });
+  assert.deepEqual(paths, [`/website/api/agent/conversations/${conversationId}?include=report`]);
+  assert.equal(client.conversations.eventsUrl(conversationId), `/website/api/agent/conversations/${conversationId}/events`);
   for (const basePath of ["https://outside.example/api", "//outside.example/api", "/api?token=x", "/api#part", "/../api"]) {
     assert.throws(() => createAgentClient({ basePath }), TypeError);
+  }
+});
+
+test("browser get rejects malformed includes before sending a request", () => {
+  const client = createAgentClient({ fetchImpl: async () => assert.fail("非法 include 不能发起请求。") });
+  for (const include of [null, "report", ["report", "report"], ["none"], ["unknown"]]) {
+    assert.throws(() => client.conversations.get(conversationId, { include }), TypeError);
+  }
+});
+
+test("browser management and history keep cursors and stop request identities unchanged", async () => {
+  const calls = [];
+  const client = createAgentClient({ headers: { "X-Agent-Owner-Key": "browser-supplied" }, fetchImpl: async (path, init) => {
+    calls.push({ path, init }); assert.equal(init.headers.has("X-Agent-Owner-Key"), false);
+    return envelope({ request: calls.length });
+  } });
+  await client.conversations.list();
+  await client.conversations.list({ cursor: "opaque+/=", limit: 20 });
+  await client.conversations.rename(conversationId, "新的标题");
+  await client.conversations.stop(conversationId, { request_id: "stop-original", run_id: otherId });
+  await client.conversations.stop(conversationId, { request_id: "stop-original", run_id: otherId });
+  await client.conversations.delete(conversationId);
+  await client.conversations.get(conversationId, { include: ["history", "report"], run_id: otherId,
+    history_before: "opaque+/=", history_limit: 100 });
+  assert.deepEqual(calls.map(({ path, init }) => [path, init.method]), [
+    ["/api/agent/conversations", "GET"], ["/api/agent/conversations?cursor=opaque%2B%2F%3D&limit=20", "GET"],
+    [prefix, "PATCH"], [prefix + "/stop", "POST"], [prefix + "/stop", "POST"], [prefix, "DELETE"],
+    [prefix + `?include=history,report&run_id=${otherId}&history_before=opaque%2B%2F%3D&history_limit=100`, "GET"],
+  ]);
+  assert.deepEqual(JSON.parse(calls[2].init.body), { title: "新的标题" });
+  assert.deepEqual(JSON.parse(calls[3].init.body), { request_id: "stop-original", run_id: otherId });
+  assert.equal(calls[3].init.body, calls[4].init.body);
+  assert.equal(calls[5].init.body, undefined);
+  for (const limit of [0, 101, "20", 1.5]) {
+    assert.throws(() => client.conversations.list({ limit }), TypeError);
+    assert.throws(() => client.conversations.get(conversationId, { history_limit: limit }), TypeError);
   }
 });
 
@@ -104,8 +143,10 @@ for (const data of [
 ]) {
   test(`browser client preserves report state and content: ${data.report_state}/${data.report?.status ?? data.format}`, async () => {
     let calls = 0;
-    const client = createAgentClient({ fetchImpl: async () => { calls++; return envelope(data); } });
-    assert.deepEqual(await client.getReport(conversationId), data);
+    const detail = { schema_version: 3, conversation_id: conversationId, report_state: data.report_state,
+      included: ["report"], history: null, attachments: null, result: data, artifacts: null };
+    const client = createAgentClient({ fetchImpl: async () => { calls++; return envelope(detail); } });
+    assert.deepEqual(await client.conversations.get(conversationId, { include: ["report"] }), detail);
     assert.equal(calls, 1);
   });
 }
@@ -118,7 +159,7 @@ test("browser client retains controlled server error details without resubmittin
     calls++;
     return new Response(JSON.stringify({ ok: false, data: null, error }), { status: 503 });
   } });
-  await assert.rejects(client.sendMessage(conversationId, { request_id: "keep-me", text: "问题" }), (caught) => {
+  await assert.rejects(client.conversations.send(conversationId, { request_id: "keep-me", text: "问题" }), (caught) => {
     assert.ok(caught instanceof AgentApiError);
     assert.equal(caught.status, 503);
     for (const key of ["code", "message", "details", "retryable"]) assert.deepEqual(caught[key], error[key]);
@@ -138,7 +179,7 @@ test("browser client rejects invalid or non-JSON responses and network failures 
   for (const scenario of cases) {
     let calls = 0;
     const client = createAgentClient({ fetchImpl: async () => { calls++; return scenario.respond(); } });
-    await assert.rejects(client.createConversation("fixed-create-id"), (error) => {
+    await assert.rejects(client.conversations.create("fixed-create-id"), (error) => {
       assert.ok(error instanceof AgentApiError);
       assert.equal(error.code, scenario.code);
       assert.equal(error.status, scenario.status);
@@ -160,7 +201,7 @@ test("browser client preserves explicit cancellation", async () => {
     assert.equal(init.signal, controller.signal);
     throw cancelled;
   } });
-  await assert.rejects(client.getStatus(conversationId, { signal: controller.signal }), (error) => error === cancelled);
+  await assert.rejects(client.conversations.get(conversationId, { signal: controller.signal }), (error) => error === cancelled);
   assert.equal(calls, 1);
 });
 
@@ -176,7 +217,7 @@ test("browser client preserves cancellation while reading the JSON response body
     assert.equal(init.signal, controller.signal);
     return new Response(body, { headers: { "Content-Type": "application/json" } });
   } });
-  const pending = client.getReport(conversationId, { signal: controller.signal });
+  const pending = client.conversations.get(conversationId, { signal: controller.signal });
   queueMicrotask(() => controller.abort());
   await assert.rejects(pending, (error) => error === cancelled);
   assert.equal(calls, 1);
@@ -188,8 +229,8 @@ test("explicit creation retry retains the browser request ID instead of the name
     received.push(JSON.parse(init.body));
     return envelope({ conversation_id: conversationId, request_id: "server-user-scoped-hash", schema_version: 1 });
   } });
-  const first = await client.createConversation("browser-original-id");
-  const second = await client.createConversation("browser-original-id");
+  const first = await client.conversations.create("browser-original-id");
+  const second = await client.conversations.create("browser-original-id");
   assert.equal(first.request_id, "server-user-scoped-hash");
   assert.deepEqual(second, first);
   assert.deepEqual(received, [{ request_id: "browser-original-id" }, { request_id: "browser-original-id" }]);
@@ -204,11 +245,11 @@ test("CSRF headers are refreshed on every request and protocol headers override 
     sent.push(init.headers);
     return envelope({ accepted: true });
   } });
-  await client.createConversation("csrf-create");
+  await client.conversations.create("csrf-create");
   token = "csrf-2";
-  await client.getStatus(conversationId);
+  await client.conversations.get(conversationId);
   token = "csrf-3";
-  await client.uploadAttachment(preparedUpload(), noReadBlob());
+  await client.attachments.upload(preparedUpload(), noReadBlob());
   assert.deepEqual(sent.map((headers) => headers.get("X-CSRF-Token")), ["csrf-1", "csrf-2", "csrf-3"]);
   assert.equal(sent[0].get("Content-Type"), "application/json");
   assert.equal(sent[2].get("Content-Type"), "application/zip");
@@ -226,7 +267,7 @@ test("upload sends the original Blob once without reading it or addressing the d
   for (const url of ["https://outside.example/steal", "//outside.example/steal", "/admin/delete", "javascript:alert(1)"]) {
     const prepared = preparedUpload();
     prepared.upload.url = url;
-    const result = await client.uploadAttachment(prepared, file);
+    const result = await client.attachments.upload(prepared, file);
     assert.equal(result.status, "READY");
   }
   assert.equal(calls.length, 4);
@@ -258,17 +299,17 @@ for (const [name, mutate] of Object.entries(invalidUploads)) {
     const client = createAgentClient({ fetchImpl: async () => assert.fail("无效预约不能发起上传。") });
     const prepared = preparedUpload();
     mutate(prepared);
-    await assert.rejects(client.uploadAttachment(prepared, noReadBlob()), TypeError);
+    await assert.rejects(client.attachments.upload(prepared, noReadBlob()), TypeError);
   });
 }
 
 test("upload rejects non-Blob bodies and incomplete descriptors without reading a file", async () => {
   const client = createAgentClient({ fetchImpl: async () => assert.fail("无效上传不能发起请求。") });
   for (const body of [null, "raw text", { size: payload.length }, new Uint8Array(payload)]) {
-    await assert.rejects(client.uploadAttachment(preparedUpload(), body), TypeError);
+    await assert.rejects(client.attachments.upload(preparedUpload(), body), TypeError);
   }
   for (const prepared of [undefined, null, {}, { attachment: preparedUpload().attachment }]) {
-    await assert.rejects(client.uploadAttachment(prepared, noReadBlob()), TypeError);
+    await assert.rejects(client.attachments.upload(prepared, noReadBlob()), TypeError);
   }
 });
 
@@ -304,9 +345,9 @@ test("browser client and real website backend complete create, prepare, upload, 
         assert.deepEqual(JSON.parse(init.body), { request_id: expected });
         return envelope({ conversation_id: conversationId, request_id: expected, schema_version: 1 });
       }
-      if (pathname === `/internal/api/v1/agent/conversations/${conversationId}/attachments`) {
+      if (pathname === "/internal/api/v1/agent/attachments") {
         assert.deepEqual(JSON.parse(init.body), { request_id: "reserve-original", name: "logs.zip",
-          content_type: "application/zip", declared_size: payload.length, declared_sha256: sha256 });
+          conversation_id: conversationId, content_type: "application/zip", declared_size: payload.length, declared_sha256: sha256 });
         return envelope({ ...prepared, upload: { ...prepared.upload, url: "https://outside.example/unused" } });
       }
       if (pathname === `/internal/api/v1/agent/attachments/${attachmentId}/content`) {
@@ -324,7 +365,13 @@ test("browser client and real website backend complete create, prepare, upload, 
         assert.deepEqual(JSON.parse(init.body), { request_id: "journey-message", text: "请定位这个问题。", attachment_ids: [attachmentId] });
         return envelope({ conversation_id: conversationId, message_id: otherId, request_id: "journey-message", event_id: 3, status: "ACCEPTED" });
       }
-      if (pathname === `/internal/api/v1/agent/conversations/${conversationId}/report`) return envelope(result);
+      if (pathname === `/internal/api/v1/agent/conversations/${conversationId}`) {
+        assert.equal(new URL(url).search, "?include=report");
+        return envelope({ schema_version: 3, conversation_id: conversationId, case_id: result.case_id,
+          selected_run_id: otherId, current_run: { run_id: otherId }, capabilities: { can_send: true },
+          source_job_id: result.source_job_id, case_status: result.case_status, report_state: "READY",
+          included: ["report"], result, history: null, attachments: null, artifacts: null, failure: null });
+      }
       assert.fail(`unexpected upstream call: ${pathname}`);
     },
   });
@@ -335,22 +382,23 @@ test("browser client and real website backend complete create, prepare, upload, 
   const client = createAgentClient({ headers: () => ({ "X-CSRF-Token": token }),
     fetchImpl: (path, init) => fetch(new URL(path, origin), init) });
   try {
-    const created = await client.createConversation("journey-create");
+    const created = await client.conversations.create("journey-create");
     assert.equal(created.conversation_id, conversationId);
     assert.notEqual(created.request_id, "journey-create");
     token = "reserve-csrf";
-    const reservation = await client.prepareAttachment(created.conversation_id, { request_id: "reserve-original",
+    const reservation = await client.attachments.prepare(created.conversation_id, { request_id: "reserve-original",
       name: "logs.zip", content_type: "application/zip", declared_size: payload.length, declared_sha256: sha256 });
     assert.equal(reservation.upload.url, `/api/agent/attachments/${attachmentId}/content`);
     token = "upload-csrf";
-    const uploaded = await client.uploadAttachment(reservation, new Blob([payload]));
+    const uploaded = await client.attachments.upload(reservation, new Blob([payload]));
     assert.equal(uploaded.status, "READY");
     token = "message-csrf";
-    const receipt = await client.sendMessage(created.conversation_id, { request_id: "journey-message",
+    const receipt = await client.conversations.send(created.conversation_id, { request_id: "journey-message",
       text: "请定位这个问题。", attachment_ids: [uploaded.attachment_id] });
     assert.equal(receipt.status, "ACCEPTED");
     token = "report-csrf";
-    assert.deepEqual(await client.getReport(created.conversation_id), result);
+    const detail = await client.conversations.get(created.conversation_id, { include: ["report"] });
+    assert.deepEqual(detail.result, result);
     assert.equal(upstreamCalls.length, 5);
     assert.deepEqual(receivedTokens, ["create-csrf", "reserve-csrf", "upload-csrf", "message-csrf", "report-csrf"]);
   } finally {

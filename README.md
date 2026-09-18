@@ -1,10 +1,12 @@
-# Problem Locator 8.1 预览版
+# Problem Locator 8.2 预览版
 
 ## 内部网站 Agent 接入
 
-网站后端可以直接提交用户原话和日志附件，无需生成 `problem_spec`。Agent 会话接口负责追问、补充和定位，SSE 返回可回放的阶段消息；原生 `/api/v1/agent/conversations/{conversation_id}/report` 一次返回正式报告，`/status` 提供不含聊天历史的轻量状态。原有 Case 产物接口继续支持文件下载。一次会话对应一次定位，关闭页面不会停止任务。
+已有网站升级到 8.2，请先看[前端必改清单与开发 Prompt](docs/website-agent-upgrade-8.2.md)，按旧接口替换、轮次状态、历史和 SSE 逐项适配。
 
-部署后先看 [网站 Agent 快速接入与联调清单](docs/website-agent-quickstart.md)，再查 [完整 API 参考](docs/website-agent-api.md) 和 [TypeScript 后端示例](examples/website-agent/README.md)。在线接口说明位于服务的 `/docs`，机器可读合同位于 `/openapi.json`。网站后端必须负责登录、会话归属校验和下载转发；部署方限制 xiaodao 的可达来源。八条 Agent 路由不改变原有 REST 路径和七个 MCP 工具。
+网站后端可以直接提交用户原话和日志附件，无需生成 `problem_spec`。网站只需会话和附件两类 API：会话统一返回状态、追问、历史、报告和下载信息，`include=none` 可轻量更新。同一会话可先后发起多次独立诊断；支持历史列表、改名、停止和删除。停止只结束当前轮次，旧报告保留；删除立即撤销访问，后台安全清理。关闭页面不会停止任务。
+
+部署后先看 [网站 Agent 快速接入与联调清单](docs/website-agent-quickstart.md)，再查 [完整 API 参考](docs/website-agent-api.md) 和 [TypeScript 后端示例](examples/website-agent/README.md)。在线接口说明位于服务的 `/docs`，机器可读合同位于 `/openapi.json`。网站后端负责登录、派生稳定的 `owner_key` 和下载转发；原生服务统一检查会话归属。部署方限制 xiaodao 的可达来源，浏览器不得直接指定归属。详情升级为 v3，事件升级为 v2，网站与服务端需一起升级。底层独立 Case 和七个 MCP 工具保留。
 
 ## Methods V1 专有定位报告
 
@@ -12,10 +14,10 @@
 
 | 合同或资产 | 当前版本 |
 | --- | --- |
-| Problem Locator package | `8.1.0` |
+| Problem Locator package | `8.2.0` |
 | State / Job / Outcome schema | `11` |
 | S00 contract revision | `v11-contract-r2` |
-| Agent conversation / event / INTAKE | `1` / `1` / `1.0.0` |
+| Agent conversation detail / storage / event | `3` / `2` / `2` |
 | Methods package | `SKILL.md` + `methods.json@1` + `references/*.md` |
 | Product registration | `registration-template.json@1` |
 | Methods evaluation protocol | `Methods V1` |
@@ -24,7 +26,7 @@
 | Specialist / Reviewer profile | `8.0.0` / `7.0.0` |
 | Router / Diagnose / Review tool bundle | `3.0.0` / `4.0.0` / `3.0.0` |
 
-State、Job 和权威 Outcome 使用 V11。8.0 的 `v11-contract-r1` 数据可按[离线升级说明](docs/data-upgrade-v11-r2.md)复制并校验后升级到 r2，保留历史会话和报告；不自动改写源目录。新安装使用空 `DATA_ROOT`，首次启动会写入 `data-format.json` 和 `completed.sqlite3`。V1–V10 旧目录原样保留，不迁移、不删除、不兼容读取。活动 Case 只保存在内存，服务退出后不自动恢复；Agent 会话历史独立持久化，重启后未完成会话标记中断，需另建任务。已交付的报告、资源索引和待归档任务继续恢复。
+State、Job 和权威 Outcome 使用 V11。8.0 / 8.1 数据须按[离线升级说明](docs/data-upgrade-v11-r2.md)复制并校验后切换到 8.2；网站历史归属从旧归属库显式导入，未知归属不会自动分配。源目录和历史报告字节保持不变，新目录标记阻止旧服务误用。新安装使用空 `DATA_ROOT`，首次启动会写入 `data-format.json` 和 `completed.sqlite3`。V1–V10 旧目录原样保留，不迁移、不删除、不兼容读取。活动 Case 只保存在内存，服务退出后不自动续办；未完成诊断标记中断，用户可在原会话明确发起新一轮。已交付的报告和待归档任务继续保留。
 
 本仓库将故障定位能力分为四层：
 
@@ -73,7 +75,7 @@ Release 或物理局域网部署验收。
 
 Problem Locator 是一个单实例故障诊断服务。它接收结构化问题，收集事实与附件，执行固定版本的路由和诊断任务；Reviewer 默认关闭。专有定位以服务端验证后的 `diagnosis-result.json` 为用户报告，并按需提供含原始目标日志的 `result.zip`。Generic V2 终态继续发布 Markdown 结果。
 
-Problem Locator 8.1 的活动 Case、Job 和核心命令幂等记录保存在内存中，每个 Case 有独立锁和 revision。会话、消息、派发记录和公共事件存入 SQLite，继续使用 SQLite WAL + FULL 同步。终态结果与报告可用事件使用同一事务，归档状态与归档事件也使用同一事务；提交后才通知客户端。阶段事件不会增加 Case revision。历史 Case 按需读取，不在每次写操作中复制全库或重新读取历史附件。
+Problem Locator 8.2 的活动 Case、Job 和核心命令幂等记录保存在内存中，每个 Case 有独立锁和 revision。会话、轮次、消息、派发记录和公共事件存入 SQLite，继续使用 SQLite WAL + FULL 同步。终态结果与报告可用事件使用同一事务，归档状态与归档事件也使用同一事务；提交后才通知客户端。阶段事件不会增加 Case revision。历史 Case 按需读取，不在每次写操作中复制全库或重新读取历史附件。
 
 ## 环境要求与安装
 

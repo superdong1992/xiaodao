@@ -13,6 +13,7 @@ const example = read("examples/website-agent/README.md");
 const scripts = [...guide.matchAll(/^```javascript\n([\s\S]*?)^```/gm)];
 assert.equal(scripts.length, 1, "the API guide must expose one executable browser subscription example");
 const subscriptionSource = scripts[0][1];
+const runId = "50000000-0000-0000-0000-000000000001";
 const conversationId = "10000000-0000-4000-8000-000000000001";
 
 function deferred() {
@@ -23,13 +24,18 @@ function deferred() {
 }
 
 function reportResponse(ok = true, data = {}) {
-  return { ok, json: async () => ({ ok, data: { conversation_id: conversationId,
-    report_state: "READY", report: "verified fixture", ...data } }) };
+  const result = { conversation_id: conversationId, report_state: "READY", report: "verified fixture", ...data };
+  return { ok, json: async () => ({ ok, data: { schema_version: 3, selected_run_id: runId, current_run: { run_id: runId }, conversation_id: result.conversation_id,
+    report_state: result.report_state, included: ["report"], result } }) };
 }
 
 function snapshotResponse(data = {}, ok = true) {
-  return { ok, json: async () => ({ ok, data: { schema_version: 1, conversation_id: conversationId,
-    status: "RUNNING", case_status: null, failure: null, messages: [], attachments: [], current_questions: [], ...data } }) };
+  const ready = ["RESOLVED", "PARTIALLY_RESOLVED", "UNRESOLVED"].includes(data.case_status);
+  const report_state = ready ? "READY" : "PENDING";
+  return { ok, json: async () => ({ ok, data: { schema_version: 3, selected_run_id: runId, current_run: { run_id: runId }, conversation_id: conversationId,
+    status: "RUNNING", case_status: null, failure: null, history: [], attachments: [], current_questions: [], last_event_id: 0,
+    included: ["history", "report", "artifacts"], report_state,
+    result: { conversation_id: conversationId, report_state, report: ready ? "verified fixture" : null }, ...data } }) };
 }
 
 function browser({ fetchReport = async () => reportResponse(), renderReport = async () => {},
@@ -54,7 +60,7 @@ function browser({ fetchReport = async () => reportResponse(), renderReport = as
     renderConversationAsText: async (data) => { snapshots.push(data); },
     renderFailureAsText: async (data) => { await renderFailure(data); failures.push(data); trace.push("failure-rendered"); },
     showEventRetry: (error) => { retries.push(error.message); trace.push("retry"); },
-    fetch: (url) => { requests.push(url); return url.endsWith("/report") ? fetchReport(url) : fetchSnapshot(url); },
+    fetch: (url) => { requests.push(url); return url.includes("?include=report") ? fetchReport(url) : fetchSnapshot(url); },
   });
   vm.runInContext(subscriptionSource, context, { filename: "website-agent-api.md", timeout: 1000 });
   assert.deepEqual(urls, [`/api/agent/conversations/${conversationId}/events`]);
@@ -80,11 +86,11 @@ function browser({ fetchReport = async () => reportResponse(), renderReport = as
     get pending() { return vm.runInContext("pending", context); },
     get stopped() { return vm.runInContext("stopped", context); },
     emit(type, sequence, overrides = {}, frame = {}) {
-      const event = { schema_version: 1, conversation_id: conversationId, type, sequence, data: {}, ...overrides };
+      const event = { schema_version: 2, run_id: runId, conversation_id: conversationId, type, sequence, data: {}, ...overrides };
       emitWire(`data: ${frame.data ?? JSON.stringify(event)}\n\n`);
     },
     drain() { return vm.runInContext("queue", context); },
-    loadReport() { return vm.runInContext("loadReport()", context); },
+    loadReport(selectedRun = null) { return vm.runInContext(selectedRun === null ? "loadReport()" : `loadReport(null, ${JSON.stringify(selectedRun)})`, context); },
   };
 }
 
@@ -100,7 +106,7 @@ test("documented wire frames dispatch through onmessage and ignore connection an
   for (const line of wire.trim().split("\n")) {
     if (line && !line.startsWith(":")) {
       assert.ok(line.startsWith("data: "));
-      assert.equal(JSON.parse(line.slice(6)).schema_version, 1);
+      assert.equal(JSON.parse(line.slice(6)).schema_version, 2);
     }
   }
   const page = browser();
@@ -120,7 +126,7 @@ test("documented onmessage dispatches every supported business type from JSON", 
   types.forEach((type, index) => page.emit(type, index + 1));
   await page.drain();
   assert.deepEqual(page.trace.filter((item) => /^\d+:/.test(item)), types.map((type, index) => `${index + 1}:${type}`));
-  assert.equal(page.requests.filter((url) => url.endsWith("/report")).length, 1);
+  assert.equal(page.requests.filter((url) => url.includes("?include=report")).length, 1);
   assert.equal(page.cursor, types.length);
   assert.equal(page.stopped, true);
   assert.deepEqual(page.retries, []);
@@ -140,7 +146,7 @@ test("documented SSE waits for the verified report before advancing or closing",
   download.resolve(reportResponse());
   await page.drain();
   assert.deepEqual(page.trace, ["1:result.available", "report-rendered", "2:conversation.completed", "closed"]);
-  assert.deepEqual(page.requests, [`/api/agent/conversations/${conversationId}`, `/api/agent/conversations/${conversationId}/report`]);
+  assert.deepEqual(page.requests, [`/api/agent/conversations/${conversationId}`, `/api/agent/conversations/${conversationId}?include=report&run_id=${runId}`]);
   assert.equal(page.cursor, 2);
   assert.equal(page.pending, 0);
   assert.deepEqual(page.retries, []);
@@ -197,7 +203,7 @@ test("documented SSE deduplicates queued and replayed report events", async () =
   page.emit("conversation.completed", 3);
   await page.drain();
   assert.deepEqual(page.trace, ["1:result.available", "report-rendered", "2:agent.progress", "3:conversation.completed", "closed"]);
-  assert.equal(page.requests.filter((url) => url.endsWith("/report")).length, 1);
+  assert.equal(page.requests.filter((url) => url.includes("?include=report")).length, 1);
   assert.equal(page.cursor, 3);
 });
 
@@ -290,7 +296,7 @@ test("documented archive uncertainty on refresh renders failure and loads JSON b
   await page.drain();
   assert.deepEqual(page.trace, ["failure-rendered", "report-rendered"]);
   assert.deepEqual(page.failures, [archiveFailure]);
-  assert.deepEqual(page.requests, [`/api/agent/conversations/${conversationId}`, `/api/agent/conversations/${conversationId}/report`]);
+  assert.deepEqual(page.requests, [`/api/agent/conversations/${conversationId}`]);
   assert.equal(page.cursor, 0);
   assert.equal(page.stopped, false);
 });
@@ -312,7 +318,7 @@ test("refresh followed by historical result event fetches and renders the immuta
   page.emit("archive.updated", 9);
   page.emit("conversation.completed", 10);
   await page.drain();
-  assert.equal(page.requests.filter((url) => url.endsWith("/report")).length, 1);
+  assert.equal(page.requests.filter((url) => url.includes("?include=report")).length, 0);
   assert.equal(page.trace.filter((item) => item === "report-rendered").length, 1);
   assert.equal(page.cursor, 10);
   assert.deepEqual(page.retries, []);
@@ -329,8 +335,47 @@ test("concurrent report readers share one request and successful rendering", asy
   assert.equal(await first, true);
   assert.equal(await second, true);
   assert.equal(await page.loadReport(), true);
-  assert.equal(page.requests.filter((url) => url.endsWith("/report")).length, 1);
+  assert.equal(page.requests.filter((url) => url.includes("?include=report")).length, 1);
   assert.equal(page.trace.filter((item) => item === "report-rendered").length, 1);
+});
+
+test("historical events do not reread snapshots or reports until a card is explicitly opened", async () => {
+  const newerRun = "60000000-0000-0000-0000-000000000001";
+  const page = browser({ fetchSnapshot: async () => snapshotResponse({ current_run: { run_id: newerRun },
+    selected_run_id: newerRun, case_status: "RESOLVED", last_event_id: 10 }), fetchReport: async () => reportResponse() });
+  await page.drain();
+  page.emit("run.started", 1);
+  page.emit("result.available", 2);
+  page.emit("agent.failed", 3);
+  page.emit("conversation.interrupted", 4);
+  page.emit("conversation.completed", 5);
+  await page.drain();
+  assert.equal(page.stopped, false);
+  assert.equal(page.trace.filter((item) => item === "report-rendered").length, 1);
+  assert.equal(page.requests.length, 1);
+  assert.equal(await page.loadReport(runId), true);
+  assert.equal(await page.loadReport(runId), true);
+  assert.equal(page.trace.filter((item) => item === "report-rendered").length, 2);
+  assert.equal(page.requests.filter((url) => url.includes(`run_id=${runId}`)).length, 1);
+  page.emit("conversation.completed", 11, { run_id: newerRun });
+  await page.drain();
+  assert.equal(page.stopped, true); assert.equal(page.cursor, 11);
+});
+
+test("a newly started run after the restored snapshot refreshes the current run once", async () => {
+  const newerRun = "60000000-0000-0000-0000-000000000001";
+  let reads = 0;
+  const page = browser({ fetchSnapshot: async () => ++reads === 1
+    ? snapshotResponse({ last_event_id: 10 })
+    : snapshotResponse({ last_event_id: 11, current_run: { run_id: newerRun }, selected_run_id: newerRun }) });
+  await page.drain();
+  page.emit("run.started", 11, { run_id: newerRun });
+  page.emit("conversation.completed", 12); // 旧轮归档迟到。
+  await page.drain();
+  assert.equal(reads, 2);
+  assert.equal(page.stopped, false);
+  assert.equal(page.cursor, 12);
+  assert.deepEqual(page.retries, []);
 });
 
 for (const state of ["PENDING", "UNAVAILABLE"]) {
@@ -354,7 +399,7 @@ test("report rendering failure is not cached as success", async () => {
   await page.drain();
   await assert.rejects(page.loadReport(), /render failed/);
   assert.equal(await page.loadReport(), true);
-  assert.equal(page.requests.filter((url) => url.endsWith("/report")).length, 2);
+  assert.equal(page.requests.filter((url) => url.includes("?include=report")).length, 2);
 });
 
 test("report response for another conversation is rejected before rendering", async () => {
@@ -369,7 +414,7 @@ for (const [name, overrides, frame] of [
   ["unsupported event type", { type: "private.reasoning" }],
   ["missing event type", { type: undefined }],
   ["non-string event type", { type: ["agent.progress"] }],
-  ["wrong schema", { schema_version: 2 }],
+  ["wrong schema", { schema_version: 1 }],
   ["string schema", { schema_version: "1" }],
   ["zero sequence", { sequence: 0 }],
   ["fractional sequence", { sequence: 1.5 }],
@@ -391,7 +436,7 @@ for (const [name, overrides, frame] of [
   });
 }
 
-test("website guidance separates unchanged SSE v1 from the required 8.1 r2 data upgrade", () => {
+test("website guidance describes SSE v2 and explicit owned-storage upgrade", () => {
   for (const [name, content] of [["API reference", guide], ["quickstart", quickstart], ["backend README", example]]) {
     for (const term of ["onmessage", "sequence", "type", "Last-Event-ID", "fetch", "conversation.completed"])
       assert.ok(content.includes(term), `${name} is missing ${term}`);
@@ -399,7 +444,7 @@ test("website guidance separates unchanged SSE v1 from the required 8.1 r2 data 
     assert.match(content, /(?:重连|回放)[\s\S]*历史/);
     assert.match(content, /(?:处理成功|成功后才推进游标)/);
     assert.match(content, /8\.0\.0.*预览版/);
-    assert.match(content, /8\.1\.0/);
+    assert.match(content, /8\.2\.0/);
     assert.match(content, /v11-contract-r2/);
     assert.match(content, /(?:显式.*升级|必须.*副本升级)/);
     assert.ok(content.includes("data-upgrade-v11-r2.md"));
@@ -413,7 +458,7 @@ test("website guidance separates unchanged SSE v1 from the required 8.1 r2 data 
 
 test("quickstart identifies the deployed contract and separates preflight from model acceptance", () => {
   const openapi = JSON.parse(read("schemas/v2/web-api.openapi.snapshot.json"));
-  assert.equal(openapi.info.version, "8.1.0");
+  assert.equal(openapi.info.version, "8.2.0");
   assert.ok(quickstart.includes(`\`${openapi.info.version}\``));
   assert.match(quickstart, /V11/);
   const preflight = quickstart.split("## 2.")[1].split("## 3.")[0];
@@ -433,7 +478,7 @@ test("example setup documents the actual authorization callbacks and safe deploy
   const implementation = read("examples/website-agent/server.ts");
   const access = implementation.match(/export type Access = \{([\s\S]*?)\n\};/)[1];
   const names = [...access.matchAll(/^\s+(\w+)\([^\n]*\): Promise</gm)].map((match) => match[1]);
-  assert.equal(names.length, 5);
+  assert.equal(names.length, 1);
   for (const name of names) assert.ok(example.includes(`\`${name}(`), `missing callback guidance: ${name}`);
   for (const setting of ["WEBSITE_AUTH_MODULE", "XIAODAO_BASE_URL", "PUBLIC_BASE_URL", "PORT"]) assert.ok(example.includes(setting));
   assert.match(example, /Node\.js 24\+/);
@@ -461,4 +506,16 @@ test("website onboarding entry points and relative documentation links resolve",
       assert.ok(fs.existsSync(path.resolve(ROOT, path.dirname(filename), link)), `broken link: ${filename} -> ${link}`);
     }
   }
+});
+
+test("website API exposes only conversation and attachment concepts with explicit partial reads", () => {
+  for (const content of [guide, quickstart, example]) {
+    assert.match(content, /schema_version=3/);
+    assert.match(content, /included/);
+    assert.match(content, /include=none|include: \[\]/);
+    assert.match(content, /(?:未加载|未请求).*null/);
+  }
+  assert.match(guide, /旧.*\/status.*\/report.*已删除/);
+  assert.match(subscriptionSource, /snapshot\.report_state === "READY"\) await loadReport\(snapshot\)/);
+  assert.doesNotMatch(subscriptionSource, /conversations\/\$\{conversationId\}\/(?:status|report)/);
 });

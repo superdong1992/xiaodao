@@ -23,6 +23,7 @@ from .paths import validate_data_root
 DATA_FORMAT_MARKER_BYTES = (
     json.dumps(
         {
+            "agent_storage_version": 2,
             "contract_revision": CONTRACT_REVISION,
             "format_id": "problem-locator-data-v11",
             "schema_version": 11,

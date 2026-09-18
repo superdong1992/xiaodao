@@ -104,6 +104,9 @@ class ApplicationService:
     def get_report(self, case_id: str):
         return self.queries.get_report(case_id)
 
+    def read_conversation_delivery(self, case_id: str, snapshot, *, report: bool, artifacts: bool):
+        return self.queries.read_conversation_delivery(case_id, snapshot, report=report, artifacts=artifacts)
+
     def open_artifact(
         self,
         case_id: str,

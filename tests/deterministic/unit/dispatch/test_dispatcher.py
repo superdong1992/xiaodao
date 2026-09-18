@@ -7,6 +7,7 @@ import threading
 from problem_locator.contracts import (
     Dispatcher,
     ErrorCode,
+    JobType,
     FixtureManifest,
     JOB_OUTCOME_SUBMISSION_PARK_ERROR_CODES,
     JOB_OUTCOME_SUBMISSION_RETRY_ERROR_CODES,
@@ -112,6 +113,52 @@ def test_pending_cancel_removes_only_the_queue_signal() -> None:
     assert dispatcher.wait_until_idle(1.0)
     assert worker.calls == []
     assert dispatcher.shutdown(1.0)
+
+
+def test_deleted_case_fences_queued_and_late_dispatch_without_affecting_other_cases():
+    worker = _RecordingWorker()
+    cases = {JOB_IDS[0]: "deleted", JOB_IDS[1]: "retained", JOB_IDS[2]: "deleted"}
+    dispatcher = InProcessDispatcher(worker, job_identity=lambda job: (cases[job], JobType.DIAGNOSE))
+    dispatcher.start()
+    try:
+        assert dispatcher.submit(JOB_IDS[0]).accepted
+        assert dispatcher.submit(JOB_IDS[1]).accepted
+        assert not dispatcher.cases_idle(["deleted"])
+        dispatcher.cancel_cases(["deleted"])
+        assert dispatcher.cases_idle(["deleted"])
+        assert not dispatcher.submit(JOB_IDS[2]).accepted
+        dispatcher.enable_claiming()
+        assert dispatcher.wait_until_idle(2)
+        assert worker.calls == [JOB_IDS[1]]
+    finally:
+        assert dispatcher.shutdown(2)
+
+
+def test_deleted_case_does_not_become_idle_until_cancelled_worker_returns():
+    entered, released = threading.Event(), threading.Event()
+    signals = []
+
+    class Worker(_RecordingWorker):
+        def execute_one(self, job_id, cancellation):
+            signals.append(cancellation)
+            entered.set()
+            assert released.wait(2)
+
+    dispatcher = InProcessDispatcher(Worker())
+    dispatcher.start()
+    try:
+        dispatcher.submit(JOB_IDS[0])
+        dispatcher.enable_claiming()
+        assert entered.wait(2)
+        dispatcher.cancel_cases([JOB_IDS[0]])
+        assert signals[0].is_cancelled()
+        assert not dispatcher.cases_idle([JOB_IDS[0]])
+        released.set()
+        assert dispatcher.wait_until_idle(2)
+        assert dispatcher.cases_idle([JOB_IDS[0]])
+    finally:
+        released.set()
+        assert dispatcher.shutdown(2)
 
 
 def test_shutdown_rejects_new_dispatch_without_rolling_back_business_state() -> None:

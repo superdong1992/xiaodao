@@ -599,7 +599,7 @@ test("active runtime support is explicit and the historical harness closure is g
     "prepare_claude_settings.py",
     "prepare_nonroot_settings.py", "prepare_release_case.py", "relay_service_journey.py",
     "server_dfx_probe.py", "service-supervisor.sh", "stop-service.sh", "test_service_launcher.py",
-    "verify-source-snapshot.mjs",
+    "verify-source-snapshot.mjs", "website_backend.mjs",
   ];
   const sourceNames = runtimeSupportSourceNames(SUPPORT_ROOT);
   assert.deepEqual(sourceNames, expected.sort());

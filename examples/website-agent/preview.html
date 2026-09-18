@@ -17,13 +17,27 @@
     </header>
     <nav id="scenarios" class="preview__scenarios" aria-label="报告场景"></nav>
     <p id="scenario-note" class="preview__note"></p>
+    <section id="management" aria-label="会话管理演示">
+      <h2 id="conversation-title"></h2>
+      <div class="preview__scenarios">
+        <button id="rename" type="button">重命名</button>
+        <button id="stop" type="button">停止当前轮</button>
+        <button id="delete" type="button">删除会话</button>
+      </div>
+      <h3>历史记录</h3>
+      <button id="older" type="button">加载更早记录</button>
+      <ol id="history"></ol>
+      <label for="new-problem">新一轮问题</label>
+      <textarea id="new-problem" rows="3">请使用新的日志重新定位付款请求超时问题。</textarea>
+      <button id="rediagnose" type="button">开始新一轮</button>
+    </section>
     <section id="report" aria-label="诊断报告"></section>
     <details class="preview__contract">
-      <summary>查看这个场景的完整 API 响应</summary>
-      <p>直接 fetch 读取 body.data；browser-client.js 已解包，返回值可以直接传给 renderReport。</p>
+      <summary>查看这个场景的完整会话响应</summary>
+      <p>会话同时返回状态、追问和报告。browser-client.js 已解包 data，将 conversation.result 传给 renderReport。</p>
       <pre id="response"></pre>
     </details>
-    <footer>接入自己的页面：复制 report-view.js 和 report-view.css；用实际 report API 的 data 替换样例。</footer>
+    <footer>接入自己的页面：复制 report-view.js 和 report-view.css；用实际会话响应的 result 替换报告样例。</footer>
   </main>
 </body>
 </html>

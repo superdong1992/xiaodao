@@ -20,12 +20,15 @@ const BUSINESS_OPERATIONS = [
 ];
 const SERVICE_OPERATIONS = ["GET /live", "GET /ready"];
 const AGENT_OPERATIONS = [
+  "GET /api/v1/agent/conversations",
+  "PATCH /api/v1/agent/conversations/{conversation_id}",
+  "DELETE /api/v1/agent/conversations/{conversation_id}",
+  "POST /api/v1/agent/conversations/{conversation_id}/stop",
+  "GET /api/v1/agent/conversations/{conversation_id}/files/{artifact_id}/content",
   "GET /api/v1/agent/conversations/{conversation_id}",
   "GET /api/v1/agent/conversations/{conversation_id}/events",
-  "GET /api/v1/agent/conversations/{conversation_id}/report",
-  "GET /api/v1/agent/conversations/{conversation_id}/status",
+  "POST /api/v1/agent/attachments",
   "POST /api/v1/agent/conversations",
-  "POST /api/v1/agent/conversations/{conversation_id}/attachments",
   "POST /api/v1/agent/conversations/{conversation_id}/messages",
   "PUT /api/v1/agent/attachments/{attachment_id}/content",
 ];
@@ -148,9 +151,9 @@ test("the guide documents exactly the public OpenAPI operations and browser help
   );
   assert.deepEqual(contractOperations.filter((item) => item.includes(" /api/v1/") && !item.includes("/agent/")), BUSINESS_OPERATIONS);
   const agentGuide = fs.readFileSync(AGENT_GUIDE_PATH, "utf8");
-  const agentOperations = [...agentGuide.matchAll(/^\| `(GET|POST|PUT) (\/api\/v1\/agent\/[^`]+)` \|/gm)]
+  const agentOperations = [...agentGuide.matchAll(/^\| (?:会话|附件) \| `(GET|POST|PUT|PATCH|DELETE) (\/api\/v1\/agent\/[^`]+)` \|/gm)]
     .map((match) => `${match[1]} ${match[2]}`).sort();
-  assert.deepEqual(agentOperations, AGENT_OPERATIONS);
+  assert.deepEqual(agentOperations, [...AGENT_OPERATIONS].sort());
 });
 
 test("the guide tables cover every published field, Case state, and public error code", () => {

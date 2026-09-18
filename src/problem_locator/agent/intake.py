@@ -550,10 +550,14 @@ class ClaudeIntakeEngine:
             raise IntakeError("INTAKE_EXECUTION_FAILED", "问题整理记录未能保存，请稍后重新提交。") from None
         log_event("agent.intake.model_json_extracted", **receipt)
 
-    def intake(self, request: IntakeInput, *, cancellation: CancellationSignal | None = None) -> IntakeDecision:
+    def intake(self, request: IntakeInput, *, cancellation: CancellationSignal | None = None,
+               workspace_id: str | None = None) -> IntakeDecision:
         prompt = build_intake_prompt(request, frozen_assets=self._prompt_assets)
         # UUID directory names preserve the existing workspace retention convention.
-        workspace = self._workspace_root / str(uuid.uuid4())
+        identity = str(uuid.uuid4()) if workspace_id is None else workspace_id
+        if not isinstance(identity, str) or str(uuid.UUID(identity)) != identity:
+            raise ValueError("INTAKE workspace must have a canonical UUID")
+        workspace = self._workspace_root / identity
         workspace.mkdir(parents=True, exist_ok=False, mode=0o700)
         for name in ("inputs", "runtime", "output"):
             (workspace / name).mkdir(mode=0o700)

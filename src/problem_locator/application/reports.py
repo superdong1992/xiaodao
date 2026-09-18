@@ -16,6 +16,44 @@ from .projection import project_artifact_summary
 
 MAX_REPORT_BYTES = 16 * 1024 * 1024
 _RESULT_STATUSES = {CaseStatus.RESOLVED, CaseStatus.PARTIALLY_RESOLVED, CaseStatus.UNRESOLVED}
+_PUBLIC_DELIVERY_KINDS = {ArtifactKind.USER_RESULT, ArtifactKind.GENERIC_REPORT,
+    ArtifactKind.USER_RESULT_ARCHIVE, ArtifactKind.AUDIT_BUNDLE}
+
+
+def result_source_job_id(case: Case) -> str | None:
+    if case.status not in _RESULT_STATUSES:
+        return None
+    generic = case.generic_result_v2 or case.generic_result
+    if generic is not None:
+        return generic.source_job_id
+    if case.status is CaseStatus.UNRESOLVED and case.unresolved_result is not None:
+        return case.unresolved_result.source_job_id
+    if case.final_result is not None:
+        return case.final_result.proposed_by_job_id
+    raise_port_error(ErrorCode.STATE_CORRUPT, "任务结果缺少来源任务记录。")
+
+
+def published_artifacts(aggregate: CaseAggregate) -> list[ArtifactSummary]:
+    """Project downloadable delivery metadata without opening resource bytes."""
+    case = aggregate.case
+    source_job_id = result_source_job_id(case)
+    result = []
+    for artifact in aggregate.artifacts.values():
+        if artifact.kind not in _PUBLIC_DELIVERY_KINDS:
+            continue
+        try:
+            summary = project_artifact_summary(case, artifact)
+        except (ValueError, TypeError):
+            raise_port_error(ErrorCode.STATE_CORRUPT, "会话产物信息与任务记录不一致。")
+        if not summary.downloadable:
+            continue
+        if (source_job_id is None or summary.created_by_job_id != source_job_id
+                or summary.resource_kind is not ResourceKind.FILE):
+            raise_port_error(ErrorCode.STATE_CORRUPT, "会话产物与结果来源任务不一致。")
+        result.append(summary)
+    if len({item.artifact_id for item in result}) != len(result):
+        raise_port_error(ErrorCode.STATE_CORRUPT, "会话产物标识重复。")
+    return sorted(result, key=lambda item: (item.created_at, item.artifact_id))
 
 
 @dataclass(frozen=True, slots=True)

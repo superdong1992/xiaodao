@@ -540,6 +540,19 @@ def test_engine_uses_a_fresh_workspace_for_each_call(tmp_path: Path):
     assert backend.calls[0]["workspace_root"] != backend.calls[1]["workspace_root"]
 
 
+def test_engine_uses_registered_workspace_and_rejects_unsafe_or_replayed_path(tmp_path: Path):
+    backend = _Backend(_decision().model_dump_json())
+    engine = ClaudeIntakeEngine("not-launched", workspace_root=tmp_path, backend=backend)
+    identity = "00000000-0000-0000-0000-000000000077"
+    engine.intake(_request(), workspace_id=identity)
+    assert backend.calls[0]["workspace_root"] == tmp_path / identity
+    with pytest.raises(FileExistsError):
+        engine.intake(_request(), workspace_id=identity)
+    with pytest.raises(ValueError):
+        engine.intake(_request(), workspace_id="../elsewhere")
+    assert len(backend.calls) == 1
+
+
 def test_engine_freezes_profile_and_output_contract_at_startup(tmp_path: Path, monkeypatch):
     assets = tmp_path / "assets"
     assets.mkdir()

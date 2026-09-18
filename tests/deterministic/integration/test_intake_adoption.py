@@ -8,7 +8,7 @@ import pytest
 
 from problem_locator.agent.intake import IntakeDecision, IntakeValue
 from problem_locator.contracts import ReviewPolicy, SubmitSupplement
-from tests.deterministic.integration.test_website_agent import website, _post, _preupload
+from tests.deterministic.integration.test_website_agent import OWNER_KEY, website, _post, _preupload
 from tests.deterministic.journey.test_rpc_timeout import PARAMETER_GROUP_A
 
 
@@ -18,7 +18,7 @@ def _text(values):
 
 def _start(website, values, *, logs=True):
     stack, store, engine, service, client = website
-    conversation = service.create_conversation("first-inputs").conversation_id
+    conversation = service.create_conversation("first-inputs", owner_key=OWNER_KEY).conversation_id
     prefix = f"/api/v1/agent/conversations/{conversation}"
     attachments = [_preupload(client, prefix)] if logs else []
     message = {"request_id": "first", "text": _text(values), "attachment_ids": attachments}

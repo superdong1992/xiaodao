@@ -134,6 +134,12 @@ class SchedulerService:
     def cancel(self, job_id: str) -> CancelReceipt:
         return self._dispatcher.cancel(job_id)
 
+    def cancel_cases(self, case_ids):
+        self._dispatcher.cancel_cases(case_ids)
+
+    def cases_idle(self, case_ids):
+        return self._dispatcher.cases_idle(case_ids)
+
     def shutdown(self, timeout_seconds: float) -> bool:
         if timeout_seconds < 0:
             raise ValueError("timeout_seconds must be non-negative")

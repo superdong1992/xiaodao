@@ -115,6 +115,18 @@ def test_mismatched_data_format_marker_is_never_rewritten(tmp_path, marker):
     assert not (tmp_path / "completed.sqlite3").exists()
 
 
+@pytest.mark.parametrize("revision", ["v11-contract-r1", "v11-contract-r2"])
+def test_old_agent_storage_marker_requires_explicit_copy_upgrade(tmp_path, revision):
+    marker = canonical_json_bytes({"contract_revision": revision, "format_id": "problem-locator-data-v11",
+        "schema_version": 11, "state_schema_version": 11})
+    (tmp_path / "data-format.json").write_bytes(marker)
+    with pytest.raises(ApplicationPortError) as caught:
+        _open(tmp_path)
+    assert caught.value.error.code is ErrorCode.STATE_SCHEMA_UNSUPPORTED
+    assert (tmp_path / "data-format.json").read_bytes() == marker
+    assert not (tmp_path / "completed.sqlite3").exists()
+
+
 def test_v10_database_directory_is_rejected_without_touching_any_bytes(tmp_path):
     marker = canonical_json_bytes({"contract_revision": "v10-contract-r1",
         "format_id": "problem-locator-data-v10", "schema_version": 10, "state_schema_version": 10})

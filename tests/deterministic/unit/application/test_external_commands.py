@@ -50,6 +50,7 @@ from problem_locator.contracts import (
     canonical_json_sha256,
 )
 from problem_locator.journey import configure_journey
+from problem_locator.domain import DomainCoordinator
 from tests.deterministic.contracts.fakes import (
     DeterministicIdGenerator,
     FakeAssetCatalog,
@@ -2233,3 +2234,29 @@ def test_cancel_rejects_plan_that_does_not_cancel_the_active_job() -> None:
     assert guard.acquire_calls == 0
     assert notifier.notify_calls == []
     assert dispatcher.cancel_calls == []
+
+
+@pytest.mark.parametrize("waiting_attachment", [False, True], ids=["WAITING_INPUT", "WAITING_ATTACHMENT"])
+def test_cancel_waiting_case_accepts_real_domain_plan_without_rewriting_completed_job(waiting_attachment):
+    state = _waiting_attachment_state([]) if waiting_attachment else _waiting_state()
+    before = state.cases[CASE_ID]
+    assert before.case.active_job_id is None
+    handler, repository, guard, _, dispatcher, notifier, _, _ = _handler(state, DomainCoordinator())
+    command = CancelCase(idempotency_key="cancel-waiting", case_id=CASE_ID,
+        expected_case_revision=before.case.case_revision)
+
+    response = handler.execute(command)
+
+    after = repository.read_snapshot().cases[CASE_ID]
+    assert response.business_receipt.status == "CANCELLED"
+    assert after.case.status is CaseStatus.CANCELLED and after.case.active_job_id is None
+    assert after.case.case_revision == before.case.case_revision + 1
+    assert after.case.diagnosis_state == before.case.diagnosis_state
+    assert after.jobs == before.jobs
+    assert after.outcomes == before.outcomes
+    assert dispatcher.cancel_calls == dispatcher.submit_calls == []
+    assert guard.acquire_calls == guard.release_calls == 1
+    assert len(notifier.notify_calls) == 1
+    replay = handler.execute(command)
+    assert replay.business_receipt == response.business_receipt
+    assert len(repository.commit_calls) == 1

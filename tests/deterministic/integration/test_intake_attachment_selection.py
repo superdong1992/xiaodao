@@ -18,7 +18,8 @@ _SELECT_ONE = "当前仅支持一份日志归档，请合并后上传，或重�
 
 def _upload_another(client, prefix):
     data = ARCHIVE.read_bytes()
-    prepared = _post(client, prefix + "/attachments", {"request_id": "logs:2", "name": "other-logs.zip",
+    prepared = _post(client, "/api/v1/agent/attachments", {"conversation_id": prefix.rsplit("/", 1)[-1],
+        "request_id": "logs:2", "name": "other-logs.zip",
         "content_type": "application/zip", "declared_size": len(data), "declared_sha256": hashlib.sha256(data).hexdigest()})
     upload = prepared["upload"]
     response = client.put(upload["url"], content=data,

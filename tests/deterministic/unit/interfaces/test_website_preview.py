@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import subprocess
 
-from problem_locator.agent.models import ConversationReportView
+from problem_locator.interfaces.agent_http import ConversationDetailResponse
 
 
 def test_offline_report_preview_samples_follow_the_actual_response_contract():
@@ -19,4 +19,4 @@ def test_offline_report_preview_samples_follow_the_actual_response_contract():
     for sample in samples:
         envelope = sample["response"]
         assert envelope["ok"] is True and envelope["error"] is None
-        ConversationReportView.model_validate_json(json.dumps(envelope["data"]))
+        ConversationDetailResponse.model_validate_json(json.dumps(envelope["data"]))

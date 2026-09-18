@@ -11,7 +11,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 
-from problem_locator.agent.models import AgentEvent, AgentStoreError, ConversationReportView
+from problem_locator.agent.models import AgentEvent, AgentStoreError, ConversationDetail, ConversationReportView
 from problem_locator.interfaces import agent_http
 from problem_locator.interfaces.error_mapping import error_envelope, validation_error_from
 from fastapi.responses import JSONResponse
@@ -19,6 +19,8 @@ from fastapi.responses import JSONResponse
 
 CONVERSATION = "10000000-0000-0000-0000-000000000001"
 ATTACHMENT = "20000000-0000-0000-0000-000000000001"
+OWNER = "a" * 64
+RUN = "50000000-0000-0000-0000-000000000001"
 CASE = "30000000-0000-0000-0000-000000000001"
 JOB = "40000000-0000-0000-0000-000000000001"
 WHEN = "2026-09-07T08:00:00.000Z"
@@ -26,6 +28,27 @@ BASE = "/api/v1/agent"
 VIEW = f"{BASE}/conversations/{CONVERSATION}"
 PAYLOAD = b"test archive bytes"
 DIGEST = hashlib.sha256(PAYLOAD).hexdigest()
+INCLUDES = ("history", "report", "artifacts")
+
+
+def conversation_detail(result, include=INCLUDES, *, last_event_id=0):
+    ready = result["report_state"] == "READY"
+    artifact = result.get("artifact")
+    return dict(
+        schema_version=3, conversation_id=CONVERSATION, title="测试会话", selected_run_id=RUN,
+        current_run=dict(run_id=RUN, ordinal=1, status="INTAKE", report_state="PENDING", created_at=WHEN, updated_at=WHEN),
+        capabilities=dict(can_send=True, can_stop=True, can_rediagnose=False, can_rename=True, can_delete=True),
+        status="COMPLETED" if ready else "FAILED" if result["report_state"] == "UNAVAILABLE" else "INTAKE",
+        case_id=result.get("case_id"), job_id=result.get("source_job_id"),
+        case_status=result.get("case_status"), case_revision=result.get("case_revision"),
+        source_job_id=result.get("source_job_id"), archive_status=result.get("archive_status", "NOT_REQUIRED"),
+        current_questions=[], failure=result.get("failure"), progress=None, report_state=result["report_state"],
+        included=list(include), history=[] if "history" in include else None,
+        attachments=[] if "history" in include else None,
+        result=result if "report" in include else None,
+        artifacts=([{**artifact, "download_url": None}] if artifact else []) if "artifacts" in include else None,
+        last_event_id=last_event_id, created_at=WHEN, updated_at=WHEN,
+    )
 
 
 def event(sequence, kind="agent.progress"):
@@ -33,7 +56,7 @@ def event(sequence, kind="agent.progress"):
     if kind == "archive.updated":
         data = {"status": "READY", "artifacts": []}
     return AgentEvent(
-        sequence=sequence, conversation_id=CONVERSATION, case_id=CASE,
+        schema_version=2, run_id=RUN, sequence=sequence, conversation_id=CONVERSATION, case_id=CASE,
         type=kind, created_at=WHEN, data=data,
     )
 
@@ -44,6 +67,7 @@ class FakeAgent:
         self.calls = []
         self.thread_ids = []
         self.closed = True
+        self.report = dict(schema_version=1, conversation_id=CONVERSATION, report_state="PENDING")
         self.attachment = dict(
             attachment_id=ATTACHMENT, conversation_id=CONVERSATION,
             request_id="upload-1", name="logs.zip", content_type="application/zip",
@@ -58,27 +82,14 @@ class FakeAgent:
 
     def get_conversation(self, **kwargs):
         self.calls.append(("get", kwargs))
-        return dict(
-            schema_version=1, conversation_id=CONVERSATION, status="INTAKE", case_id=None,
-            job_id=None, case_status=None, archive_status="NOT_REQUIRED", current_questions=[],
-            messages=[], attachments=[], last_event_id=len(self.events), created_at=WHEN, updated_at=WHEN,
-        )
+        return conversation_detail(self.report, kwargs["include"], last_event_id=len(self.events))
 
     def send_message(self, **kwargs):
         self.calls.append(("send", kwargs))
         return dict(conversation_id=CONVERSATION, message_id=ATTACHMENT,
                     request_id=kwargs["request_id"], event_id=1, status="ACCEPTED")
 
-    def get_status(self, **kwargs):
-        self.calls.append(("status", kwargs))
-        return dict(schema_version=1, conversation_id=CONVERSATION, status="INTAKE",
-                    report_state="PENDING", created_at=WHEN, updated_at=WHEN)
-
-    def get_report(self, **kwargs):
-        self.calls.append(("report", kwargs))
-        return dict(schema_version=1, conversation_id=CONVERSATION, report_state="PENDING")
-
-    def list_events(self, conversation_id, after_sequence, limit):
+    def list_events(self, conversation_id, after_sequence, limit, owner_key=None):
         self.calls.append(("events", (conversation_id, after_sequence, limit)))
         if after_sequence > len(self.events):
             raise AgentStoreError("EVENT_CURSOR_INVALID", "事件游标超出会话历史。", 400)
@@ -110,35 +121,44 @@ def app_for(service):
 
 
 def run_request(service, method, path, **kwargs):
+    supplied = kwargs.get("headers", {})
+    kwargs["headers"] = [("X-Agent-Owner-Key", OWNER), *supplied] if isinstance(supplied, list) else {"X-Agent-Owner-Key": OWNER, **supplied}
     async def scenario():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_for(service)),
-                                     base_url="http://local") as client:
+                                     base_url="http://local", headers={"X-Agent-Owner-Key": OWNER}) as client:
             return await client.request(method, path, **kwargs)
     return asyncio.run(scenario())
 
 
-def test_all_eight_routes_are_present_without_runtime_and_have_typed_contracts():
+def test_only_six_conversation_and_attachment_routes_have_typed_contracts():
     schema = app_for(None).openapi()
-    assert len(schema["paths"]) == 8
+    assert set(schema["paths"]) == {
+        f"{BASE}/conversations", f"{BASE}/conversations/{{conversation_id}}",
+        f"{BASE}/conversations/{{conversation_id}}/messages", f"{BASE}/conversations/{{conversation_id}}/events",
+        f"{BASE}/attachments", f"{BASE}/attachments/{{attachment_id}}/content",
+        f"{BASE}/conversations/{{conversation_id}}/stop",
+        f"{BASE}/conversations/{{conversation_id}}/files/{{artifact_id}}/content",
+    }
     response = schema["paths"][f"{BASE}/conversations/{{conversation_id}}/events"]["get"]["responses"]["200"]
     assert set(response["content"]) == {"text/event-stream"}
     assert response["content"]["text/event-stream"]["schema"]["$ref"].endswith("/AgentEvent")
     assert "AgentEvent" in schema["components"]["schemas"]
     assert "AgentErrorEnvelope" in schema["components"]["schemas"]
-    for endpoint, model in (("status", "ConversationStatusView"), ("report", "ConversationReportView")):
-        route = schema["paths"][f"{BASE}/conversations/{{conversation_id}}/{endpoint}"]["get"]
-        assert route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
-            f"/SuccessEnvelope_{model}_")
+    route = schema["paths"][f"{BASE}/conversations/{{conversation_id}}"]["get"]
+    assert route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/SuccessEnvelope_ConversationDetailResponse_")
+    assert next(item for item in route["parameters"] if item["name"] == "include")["in"] == "query"
+    assert "conversation_id" in schema["components"]["schemas"]["PrepareAgentAttachmentBody"]["required"]
 
 
 @pytest.mark.parametrize("method,path,kwargs", [
     ("POST", f"{BASE}/conversations", {"json": {"request_id": "create-1"}}),
     ("GET", VIEW, {}),
-    ("GET", f"{VIEW}/status", {}),
-    ("GET", f"{VIEW}/report", {}),
+    ("GET", f"{VIEW}?include=none", {}),
+    ("GET", f"{VIEW}?include=report", {}),
     ("GET", f"{VIEW}/events", {}),
     ("POST", f"{VIEW}/messages", {"json": {"request_id": "m-1", "text": "日志超时"}}),
-    ("POST", f"{VIEW}/attachments", {"json": dict(request_id="a-1", name="logs.zip", content_type="application/zip", declared_size=1, declared_sha256=DIGEST)}),
+    ("POST", f"{BASE}/attachments", {"json": dict(conversation_id=CONVERSATION, request_id="a-1", name="logs.zip", content_type="application/zip", declared_size=1, declared_sha256=DIGEST)}),
     ("PUT", f"{BASE}/attachments/{ATTACHMENT}/content", {"content": b"x", "headers": {
         "Idempotency-Key": ATTACHMENT, "Content-Type": "application/zip", "X-Content-SHA256": DIGEST}}),
 ])
@@ -186,8 +206,7 @@ def test_message_validation_rejects_bad_input_before_dispatch(body):
 
 @pytest.mark.parametrize("path", [
     f"{BASE}/conversations/NOT-A-UUID", VIEW + "?unknown=1", VIEW + "/events?after=1",
-    VIEW + "/status?unknown=1", VIEW + "/report?case_id=" + CASE,
-    f"{BASE}/conversations/NOT-A-UUID/status", f"{BASE}/conversations/NOT-A-UUID/report",
+    VIEW + "?include=report&case_id=" + CASE,
 ])
 def test_path_and_unknown_query_rejected(path):
     fake = FakeAgent()
@@ -195,30 +214,66 @@ def test_path_and_unknown_query_rejected(path):
     assert not fake.calls
 
 
-def test_lightweight_status_delegates_without_loading_history():
+@pytest.mark.parametrize("method,suffix", [("GET", "/status"), ("GET", "/report"), ("POST", "/attachments")])
+def test_removed_aliases_are_not_dispatched(method, suffix):
     fake = FakeAgent()
-    response = run_request(fake, "GET", VIEW + "/status")
+    assert run_request(fake, method, VIEW + suffix).status_code == 404
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize("query", [
+    "include=", "include=unknown", "include=none,report", "include=history,history",
+    "include=report,", "include=,report", "include=Report", "include=%20history",
+    "include=report&include=artifacts", "include=none&unknown=1",
+])
+def test_invalid_include_is_rejected_before_reading_any_state(query):
+    fake = FakeAgent()
+    response = run_request(fake, "GET", VIEW + "?" + query)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert not fake.calls
+
+
+@pytest.mark.parametrize("query,expected", [
+    ("", INCLUDES), ("?include=none", ()), ("?include=history", ("history",)),
+    ("?include=report", ("report",)), ("?include=artifacts", ("artifacts",)),
+    ("?include=artifacts,history", ("history", "artifacts")),
+    ("?include=artifacts,report,history", INCLUDES),
+])
+def test_include_selection_is_explicit_and_canonical(query, expected):
+    fake = FakeAgent()
+    response = run_request(fake, "GET", VIEW + query)
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["schema_version"] == 3 and data["included"] == list(expected)
+    assert (data["history"] is not None) == ("history" in expected)
+    assert (data["attachments"] is not None) == ("history" in expected)
+    assert (data["result"] is not None) == ("report" in expected)
+    assert (data["artifacts"] is not None) == ("artifacts" in expected)
+    assert fake.calls == [("get", {"conversation_id": CONVERSATION, "include": expected, "owner_key": OWNER, "run_id": None, "history_before": None, "history_limit": 50})]
+
+
+def test_lightweight_conversation_delegates_without_loading_history_or_report():
+    fake = FakeAgent()
+    response = run_request(fake, "GET", VIEW + "?include=none")
     assert response.status_code == 200
     data = response.json()["data"]
     assert data["report_state"] == "PENDING"
     assert data["failure"] is None
-    assert "messages" not in data and "attachments" not in data
-    assert fake.calls == [("status", {"conversation_id": CONVERSATION})]
+    assert all(data[key] is None for key in ("history", "attachments", "result", "artifacts"))
+    assert fake.calls == [("get", {"conversation_id": CONVERSATION, "include": (), "owner_key": OWNER, "run_id": None, "history_before": None, "history_limit": 50})]
 
 
 @pytest.mark.parametrize("state", ["PENDING", "UNAVAILABLE"])
 def test_report_waiting_and_unavailable_are_successful_read_states(state):
-    class ReportAgent(FakeAgent):
-        def get_report(self, **kwargs):
-            return {**super().get_report(**kwargs), "report_state": state}
-
-    fake = ReportAgent()
-    response = run_request(fake, "GET", VIEW + "/report")
+    fake = FakeAgent()
+    fake.report["report_state"] = state
+    response = run_request(fake, "GET", VIEW + "?include=report")
     assert response.status_code == 200
-    data = response.json()["data"]
+    data = response.json()["data"]["result"]
     assert data["report_state"] == state
     assert all(data[key] is None for key in ("format", "report", "markdown", "artifact", "source_job_id"))
-    assert fake.calls == [("report", {"conversation_id": CONVERSATION})]
+    assert fake.calls == [("get", {"conversation_id": CONVERSATION, "include": ("report",), "owner_key": OWNER, "run_id": None, "history_before": None, "history_limit": 50})]
 
 
 def ready_report(format="problem-locator-diagnosis-v3", status="COMPLETED"):
@@ -259,16 +314,12 @@ def test_ready_report_formats_do_not_wait_for_archive(format, status, archive):
     expected = ready_report(format, status)
     expected["archive_status"] = archive
 
-    class ReportAgent(FakeAgent):
-        def get_report(self, **kwargs):
-            self.calls.append(("report", kwargs))
-            return expected
-
-    fake = ReportAgent()
-    response = run_request(fake, "GET", VIEW + "/report")
+    fake = FakeAgent()
+    fake.report = expected
+    response = run_request(fake, "GET", VIEW + "?include=report")
     assert response.status_code == 200
-    assert response.json()["data"] == expected
-    assert fake.calls == [("report", {"conversation_id": CONVERSATION})]
+    assert response.json()["data"]["result"] == expected
+    assert fake.calls == [("get", {"conversation_id": CONVERSATION, "include": ("report",), "owner_key": OWNER, "run_id": None, "history_before": None, "history_limit": 50})]
 
 
 @pytest.mark.parametrize("change", [
@@ -282,10 +333,10 @@ def test_report_rejects_inconsistent_result_structure(change):
 
 
 def test_report_http_does_not_revalidate_already_typed_payload(monkeypatch):
-    parsed = ConversationReportView.model_validate_json(json.dumps(ready_report()))
+    parsed = ConversationDetail.model_validate_json(json.dumps(conversation_detail(ready_report())))
 
     class ReportAgent(FakeAgent):
-        def get_report(self, **kwargs):
+        def get_conversation(self, **kwargs):
             return parsed
 
     def forbidden(*args, **kwargs):
@@ -293,22 +344,60 @@ def test_report_http_does_not_revalidate_already_typed_payload(monkeypatch):
 
     monkeypatch.setattr(ConversationReportView, "model_validate", forbidden)
     monkeypatch.setattr(ConversationReportView, "model_validate_json", forbidden)
-    response = run_request(ReportAgent(), "GET", VIEW + "/report")
+    monkeypatch.setattr(ConversationDetail, "model_validate", forbidden)
+    monkeypatch.setattr(ConversationDetail, "model_validate_json", forbidden)
+    response = run_request(ReportAgent(), "GET", VIEW)
     assert response.status_code == 200
-    assert response.json()["data"]["report"]["status"] == "COMPLETED"
+    assert response.json()["data"]["result"]["report"]["status"] == "COMPLETED"
+    assert response.json()["data"]["artifacts"][0]["download_url"] == (
+        f"http://xiaodao.internal/prefix{VIEW}/files/{ATTACHMENT}/content?run_id={RUN}")
 
 
-@pytest.mark.parametrize("endpoint", ["status", "report"])
-def test_read_endpoints_preserve_controlled_operational_error(endpoint):
+@pytest.mark.parametrize("include", ["none", "report", "artifacts", "history,report,artifacts"])
+def test_conversation_projections_preserve_controlled_operational_error(include):
     class UncertainAgent(FakeAgent):
-        def get_status(self, **kwargs):
+        def get_conversation(self, **kwargs):
             raise AgentStoreError("DISPATCH_REJECTED", "最终状态暂时无法确认。", 503,
                                   details=[{"field": "persistence", "actual": "UNKNOWN"}])
-        get_report = get_status
 
-    response = run_request(UncertainAgent(), "GET", VIEW + "/" + endpoint)
+    response = run_request(UncertainAgent(), "GET", VIEW + "?include=" + include)
     assert response.status_code == 503
     assert response.json()["error"]["details"] == [{"field": "persistence", "actual": "UNKNOWN"}]
+
+
+def test_artifact_links_come_from_configured_base_and_validated_ids():
+    class RedirectingAgent(FakeAgent):
+        def get_conversation(self, **kwargs):
+            value = conversation_detail(ready_report(), kwargs["include"])
+            value["artifacts"][0]["download_url"] = "https://evil.example/private?token=secret"
+            return value
+
+    response = run_request(RedirectingAgent(), "GET", VIEW + "?include=artifacts")
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["result"] is None
+    assert data["case_revision"] == 8 and data["source_job_id"] == JOB
+    assert data["artifacts"][0]["download_url"] == (
+        f"http://xiaodao.internal/prefix{VIEW}/files/{ATTACHMENT}/content?run_id={RUN}")
+    assert "evil.example" not in response.text and "secret" not in response.text
+
+
+@pytest.mark.parametrize("mutation", ["identity", "projection", "nested-report"])
+def test_invalid_dictionary_response_is_not_published(mutation):
+    class BrokenAgent(FakeAgent):
+        def get_conversation(self, **kwargs):
+            value = conversation_detail(ready_report(), kwargs["include"])
+            if mutation == "identity":
+                value["conversation_id"] = ATTACHMENT
+            elif mutation == "projection":
+                value["included"] = []
+            else:
+                value["result"]["report"] = {}
+            return value
+
+    response = run_request(BrokenAgent(), "GET", VIEW)
+    assert response.status_code == 500
+    assert response.json()["ok"] is False and response.json()["data"] is None
 
 
 @pytest.mark.parametrize("cursor", ["-1", "01", "1.0", " 1", "+1", "9223372036854775808"])
@@ -381,7 +470,7 @@ def test_sse_establishes_empty_live_stream_before_waiting_for_events(monkeypatch
         scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.0"},
                  "http_version": "1.1", "method": "GET", "scheme": "http",
                  "path": VIEW + "/events", "raw_path": (VIEW + "/events").encode(),
-                 "root_path": "", "query_string": b"", "headers": [],
+                 "root_path": "", "query_string": b"", "headers": [(b"x-agent-owner-key", OWNER.encode())],
                  "client": ("127.0.0.1", 12345), "server": ("127.0.0.1", 8000)}
         await asyncio.wait_for(app_for(fake)(scope, receive, send), timeout=2)
         assert sent[0]["type"] == "http.response.start" and sent[0]["status"] == 200
@@ -394,8 +483,8 @@ def test_sse_establishes_empty_live_stream_before_waiting_for_events(monkeypatch
 
 def test_largest_valid_escaped_message_remains_replayable():
     accepted = AgentEvent(
-        sequence=1, conversation_id=CONVERSATION, type="message.accepted", created_at=WHEN,
-        data={"message_id": ATTACHMENT, "request_id": "\x01" * 65536,
+        schema_version=2, run_id=RUN, sequence=1, conversation_id=CONVERSATION, type="message.accepted", created_at=WHEN,
+        data={"run_id": RUN, "message_id": ATTACHMENT, "request_id": "\x01" * 65536,
               "text": "\x01" * 65536, "attachment_ids": [], "status": "QUEUED",
               "created_at": WHEN, "notice": None},
     )
@@ -409,8 +498,8 @@ def test_largest_valid_escaped_message_remains_replayable():
 def test_sse_escapes_user_line_breaks_without_injecting_frames():
     original_text = "中文🙂\r\ndata: fake\n\nevent: result.available\n\"quoted\""
     accepted = AgentEvent(
-        sequence=1, conversation_id=CONVERSATION, type="message.accepted", created_at=WHEN,
-        data={"message_id": ATTACHMENT, "request_id": "line-breaks",
+        schema_version=2, run_id=RUN, sequence=1, conversation_id=CONVERSATION, type="message.accepted", created_at=WHEN,
+        data={"run_id": RUN, "message_id": ATTACHMENT, "request_id": "line-breaks",
               "text": original_text, "attachment_ids": [], "status": "QUEUED",
               "created_at": WHEN, "notice": None},
     )
@@ -438,7 +527,7 @@ def test_sse_cannot_mix_other_conversation_events():
 
 def test_sse_heartbeat_and_live_archive_completion(monkeypatch):
     class Live(FakeAgent):
-        def list_events(self, conversation_id, after_sequence, limit):
+        def list_events(self, conversation_id, after_sequence, limit, owner_key=None):
             result = super().list_events(conversation_id, after_sequence, limit)
             if len(self.calls) == 3:
                 self.events = [event(1, "archive.updated")]
@@ -497,11 +586,12 @@ def test_multiple_subscribers_receive_same_durable_events():
 
 def test_prepare_provides_raw_upload_descriptor_and_upload_uses_bounded_stream():
     fake = FakeAgent()
-    response = run_request(fake, "POST", VIEW + "/attachments", json=dict(
-        request_id="a-1", name="logs.zip", content_type="application/zip",
+    response = run_request(fake, "POST", BASE + "/attachments", json=dict(
+        conversation_id=CONVERSATION, request_id="a-1", name="logs.zip", content_type="application/zip",
         declared_size=len(PAYLOAD), declared_sha256=DIGEST,
     ))
     upload = response.json()["data"]["upload"]
+    assert fake.calls[0][1]["conversation_id"] == CONVERSATION
     assert upload["url"] == f"http://xiaodao.internal/prefix{BASE}/attachments/{ATTACHMENT}/content"
     assert upload["expected_content_length"] == len(PAYLOAD)
     assert upload["expires_at"] is None
@@ -512,6 +602,17 @@ def test_prepare_provides_raw_upload_descriptor_and_upload_uses_bounded_stream()
     assert stream.closed
     assert max(stream.read_requests) <= 1024 * 1024
     assert fake.thread_ids[-1] != threading.get_ident()
+
+
+@pytest.mark.parametrize("conversation", [None, "not-a-uuid"])
+def test_attachment_reservation_requires_explicit_valid_conversation(conversation):
+    fake = FakeAgent()
+    body = dict(request_id="a-1", name="logs.zip", content_type="application/zip",
+                declared_size=len(PAYLOAD), declared_sha256=DIGEST)
+    if conversation is not None:
+        body["conversation_id"] = conversation
+    response = run_request(fake, "POST", BASE + "/attachments", json=body)
+    assert response.status_code == 400 and not fake.calls
 
 
 @pytest.mark.parametrize("header,value", [
@@ -534,3 +635,72 @@ def test_unexpected_exception_does_not_leak_internal_paths_or_secrets():
     assert response.status_code == 500
     assert "top-secret" not in response.text
     assert "/srv" not in response.text
+
+
+@pytest.mark.parametrize("headers", [{}, {"X-Agent-Owner-Key": ""}, {"X-Agent-Owner-Key": "A" * 64},
+    [("X-Agent-Owner-Key", OWNER), ("X-Agent-Owner-Key", OWNER)]])
+def test_trusted_owner_header_is_required_before_any_state_access(headers):
+    async def scenario():
+        fake = FakeAgent()
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_for(fake)), base_url="http://local") as client:
+            response = await client.get(VIEW, headers=headers)
+        assert response.status_code == 400 and not fake.calls
+    asyncio.run(scenario())
+
+
+def test_management_routes_preserve_owners_cursors_and_frozen_stop_identity():
+    fake = FakeAgent()
+    summary = dict(conversation_id=CONVERSATION, title="修改后的标题", created_at=WHEN, updated_at=WHEN,
+                   current_run=conversation_detail(fake.report)["current_run"],
+                   capabilities=conversation_detail(fake.report)["capabilities"])
+
+    def directory(**kwargs):
+        fake.calls.append(("list", kwargs))
+        return dict(items=[summary], next_cursor="opaque-next")
+
+    def rename(**kwargs):
+        fake.calls.append(("rename", kwargs))
+        return summary
+
+    def stop(**kwargs):
+        fake.calls.append(("stop", kwargs))
+        return dict(conversation_id=CONVERSATION, run_id=RUN, request_id=kwargs["request_id"], status="CANCELLING")
+
+    def delete(**kwargs):
+        fake.calls.append(("delete", kwargs))
+        return dict(conversation_id=CONVERSATION, status="DELETED")
+
+    fake.list_conversations, fake.rename_conversation = directory, rename
+    fake.stop_conversation, fake.delete_conversation = stop, delete
+    assert run_request(fake, "GET", BASE + "/conversations").json()["data"]["next_cursor"] == "opaque-next"
+    assert fake.calls[-1] == ("list", dict(owner_key=OWNER, cursor=None, limit=20))
+    assert run_request(fake, "GET", BASE + "/conversations?cursor=opaque%2Bcursor&limit=100").status_code == 200
+    assert fake.calls[-1][1]["cursor"] == "opaque+cursor"
+    assert run_request(fake, "PATCH", VIEW, json={"title": summary["title"]}).status_code == 200
+    assert fake.calls[-1] == ("rename", dict(owner_key=OWNER, conversation_id=CONVERSATION, title=summary["title"]))
+    assert run_request(fake, "POST", VIEW + "/stop", json={"request_id": "stop-original", "run_id": RUN}).json()["data"]["status"] == "CANCELLING"
+    assert fake.calls[-1] == ("stop", dict(owner_key=OWNER, conversation_id=CONVERSATION, request_id="stop-original", run_id=RUN))
+    assert run_request(fake, "DELETE", VIEW).json()["data"]["status"] == "DELETED"
+
+
+@pytest.mark.parametrize("query", ["limit=0", "limit=101", "limit=01", "limit=-1", "limit=x", "limit=2&limit=3", "cursor=", "owner_key=x"])
+def test_directory_rejects_invalid_paging_before_state_read(query):
+    fake = FakeAgent()
+    assert run_request(fake, "GET", BASE + "/conversations?" + query).status_code == 400
+    assert fake.calls == []
+
+
+def test_history_and_report_run_selectors_forward_without_extra_reads():
+    fake = FakeAgent()
+    response = run_request(fake, "GET", VIEW + "?include=history,report&run_id=" + RUN + "&history_before=opaque%2Bbefore&history_limit=100")
+    assert response.status_code == 200, response.text
+    assert fake.calls == [("get", dict(conversation_id=CONVERSATION, owner_key=OWNER,
+        include=("history", "report"), run_id=RUN, history_before="opaque+before", history_limit=100))]
+
+
+@pytest.mark.parametrize("suffix", ["?run_id=bad", "?history_limit=0", "?history_limit=101", "?history_before=",
+    "?history_before=a&history_before=b", "?history_limit=01"])
+def test_invalid_history_selector_does_not_read_state(suffix):
+    fake = FakeAgent()
+    assert run_request(fake, "GET", VIEW + suffix).status_code == 400
+    assert not fake.calls

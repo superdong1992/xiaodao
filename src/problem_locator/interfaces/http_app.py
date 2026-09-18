@@ -437,6 +437,10 @@ _SUCCESS_EXAMPLES: dict[str, dict[str, Any]] = {
 # enrich only the REST OpenAPI projection and therefore cannot change the
 # persisted or command/query schemas.
 _REST_FIELD_DESCRIPTIONS = {
+    "included": "实际加载的会话内容，按 history、report、artifacts 的固定顺序返回；空数组表示仅有轻量状态。",
+    "progress": "最近一条公开阶段及固定进度文案；尚无阶段事件时为 null。",
+    "stage": "公开诊断阶段；进度文案按该阶段固定映射，不包含模型内部推理。",
+    "result": "会话的正式报告视图；未请求 report 时为 null，等待和结束无报告时保留对应业务状态。",
     "report_state": "报告可用状态：PENDING 等待诊断或补充，READY 已发布，UNAVAILABLE 已结束但无报告。",
     "format": "报告格式；报告未就绪时为 null。",
     "report": "完整的正式结构化报告或历史通用诊断结果；Markdown 格式或报告未就绪时为 null。",
@@ -667,9 +671,7 @@ _REST_FIELD_DESCRIPTIONS = {
 _SUCCESS_RESPONSE_DESCRIPTIONS = {
     "create_agent_conversation": "会话已持久创建；相同 request_id 返回同一回执。",
     "send_agent_message": "消息及接收事件已原子持久化；后续整理与定位异步执行。",
-    "get_agent_conversation": "返回会话历史、追问、附件状态和最新事件游标。",
-    "get_agent_conversation_status": "返回轻量状态、当前追问、报告可用状态、受控失败原因和最新事件游标。",
-    "get_agent_conversation_report": "返回 PENDING、READY 或 UNAVAILABLE；READY 包含完整正式报告，归档状态独立返回。",
+    "get_agent_conversation": "返回会话状态、进度、追问、受控失败原因和游标，并按 include 加载历史、正式报告及下载入口；未加载字段为 null。",
     "subscribe_agent_events": "基础 SSE：每条业务帧只有一行 data: AgentEvent JSON 和一个空行，不发送 event/id/retry。前端用 onmessage 接收，按 JSON type 分派、sequence 去重；精准续传需显式设置 Last-Event-ID，原生 EventSource 自动重连会回放历史。首次发送 connected 注释，每 15 秒发送注释心跳；断线不停止任务。",
     "prepare_agent_attachment": "返回稳定的会话附件预约、上传地址和必需请求头。",
     "upload_agent_attachment": "原始字节的大小与 SHA-256 已验证，附件可供消息引用。",
@@ -687,9 +689,18 @@ _SUCCESS_RESPONSE_DESCRIPTIONS = {
 _REST_MODEL_FIELD_DESCRIPTIONS = {
     "EventObservationAudit": {"event_id": "诊断规则中被观测事件的稳定名称；不是 SSE 事件序号。"},
     "DerivedValueAudit": {"value": "派生结果的文本或整数值；未确定时为 null。"},
-    "ConversationStatusView": {
+    "ConversationDetailResponse": {
         "failure": "受控失败原因或进程内交付异常；没有已知异常时为 null。",
         "updated_at": "会话最近一次更新的 UTC 时间。",
+        "schema_version": "会话详情合同版本，固定为 3。",
+        "case_revision": "报告或产物所用权威 Case 快照版本；轻量状态未读取 Case 时可为 null。",
+        "source_job_id": "已发布结果所属 Job；供报告及下载产物核对来源，未加载来源或尚无结果时为 null。",
+        "history": "请求 history 时返回跨轮的用户消息、追问和结果摘要；未请求时为 null。",
+        "attachments": "请求 history 时返回会话附件及上传状态；未请求时为 null。",
+        "artifacts": "请求 artifacts 时返回已核验归属和来源任务的下载元数据；未请求时为 null。",
+    },
+    "ConversationDownloadArtifact": {
+        "download_url": "基于配置地址、已核验 Case 和产物标识构造的下载地址；网站后端会改写为已授权的同源地址。",
     },
     "ConversationReportView": {
         "failure": "受控结束原因或归档交付异常；归档异常不影响 READY 报告。",
@@ -697,7 +708,40 @@ _REST_MODEL_FIELD_DESCRIPTIONS = {
     },
 }
 
+_REST_FIELD_DESCRIPTIONS.update({
+    "run_id": "独立诊断轮次的 UUID；同一会话可包含多轮。",
+    "selected_run_id": "本次状态、报告和文件所属的轮次 UUID。",
+    "title": "用户可编辑的会话标题，1 到 80 个字符。",
+    "current_run": "当前诊断轮次；读取历史报告时仍保持当前轮。",
+    "ordinal": "会话内从 1 开始的轮次序号。",
+    "capabilities": "当前可用操作，由服务端状态决定。",
+    "can_send": "当前是否可发送消息。",
+    "can_stop": "当前是否可请求停止诊断。",
+    "can_rediagnose": "当前轮结束后是否可发送新问题开始下一轮。",
+    "can_rename": "当前是否可修改标题。",
+    "can_delete": "当前是否可删除会话。",
+    "history": "按时间排序的跨轮展示记录；未请求时为 null。",
+    "questions": "需要用户回答的公开追问列表；其他历史记录类型为 null。",
+    "history_next_cursor": "读取更早历史时原样传给 history_before；没有更早记录时为 null。",
+    "next_cursor": "下一页目录的不透明游标；没有下一页时为 null。",
+    "items": "当前页的会话摘要列表。",
+    "id": "历史展示记录的稳定标识，供页面去重和更新。",
+    "cursor": "原样传回目录响应中的 next_cursor。",
+    "limit": "目录分页条数，默认 20，最大 100。",
+    "history_before": "原样传回 history_next_cursor，读取该位置之前的历史。",
+    "history_limit": "历史分页条数，默认 50，最大 100。",
+})
+_SUCCESS_RESPONSE_DESCRIPTIONS.update({
+    "list_agent_conversations": "返回当前归属键的会话目录和下一页游标。",
+    "rename_agent_conversation": "标题已持久保存，返回更新后的会话摘要。",
+    "stop_agent_conversation": "返回指定轮次的停止收据；CANCELLING 表示仍在等待后台安全退出。",
+    "delete_agent_conversation": "会话已对新请求隐藏；DELETING 表示后台仍在清理文件。",
+    "download_agent_file": "返回属于已授权会话及指定轮次的不可变文件字节。",
+})
+
 _REQUEST_BODY_DESCRIPTIONS = {
+    "rename_agent_conversation": "新的会话标题，1 到 80 个字符；赋值操作可安全重复。",
+    "stop_agent_conversation": "稳定 request_id 和目标 run_id；重试不能改为停止另一轮。",
     "create_agent_conversation": "稳定 request_id；相同内容重试不创建新会话。",
     "send_agent_message": "用户原话和已上传附件 ID 至少一项非空；无需生成结构化问题或命名事实。",
     "prepare_agent_attachment": "声明会话归属、原始文件名、类型、字节数及 SHA-256。",
@@ -1086,7 +1130,7 @@ def create_http_app(
         CORSMiddleware,
         allow_origins=["*"],
         allow_credentials=False,
-        allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=[
             "Content-Type",
             "Idempotency-Key",
@@ -1099,12 +1143,61 @@ def create_http_app(
             "X-Problem-Locator-Correlation-ID",
         ],
     )
-    # Add diagnostics last so it wraps CORS-generated OPTIONS responses too.
+    from .agent_http import register_agent_routes, _owner_key, _failure
+    from problem_locator.agent.models import AgentStoreError
+    from urllib.parse import parse_qs
+
+    register_agent_routes(app, agent_service, public_base_url, query_port)
+
+    class AgentCaseAccessMiddleware:
+        """Protect Agent-owned data on Core routes, including the entire stream lifetime."""
+
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            path = scope.get("path", "")
+            if scope["type"] != "http" or agent_service is None or scope.get("method") == "OPTIONS":
+                return await self.app(scope, receive, send)
+            parts = path.split("/")
+            case_id = None
+            attachment_id = None
+            if len(parts) >= 5 and parts[1:4] == ["api", "v1", "cases"]:
+                case_id = parts[4]
+            elif len(parts) == 6 and parts[1:4] == ["api", "v1", "artifacts"] and parts[5] == "content":
+                values = parse_qs(scope.get("query_string", b"").decode("ascii", errors="replace")).get("case_id", [])
+                case_id = values[0] if len(values) == 1 else None
+            elif len(parts) == 6 and parts[1:4] == ["api", "v1", "attachments"] and parts[5] == "content":
+                attachment_id = parts[4]
+            if case_id is None and attachment_id is None:
+                return await self.app(scope, receive, send)
+            lease = None
+            try:
+                # Malformed IDs remain the owning route's validation concern.
+                identity = _OPAQUE_ID.validate_python(case_id or attachment_id)
+            except (ValueError, TypeError):
+                return await self.app(scope, receive, send)
+            try:
+                owner_key = _owner_key(Request(scope), required=False)
+                function = agent_service.authorize_case if case_id else agent_service.authorize_attachment
+                conversation_id = await _port_call(lambda: function(identity, owner_key=owner_key))
+                if conversation_id is not None:
+                    lease = agent_service.operation_lease(conversation_id, owner_key=owner_key)
+                    await _port_call(lease.__enter__, dispose_cancelled_result=lambda _: lease.__exit__(None, None, None))
+            except ValueError:
+                return await _failure("VALIDATION_ERROR", "归属请求头无效。", 400)(scope, receive, send)
+            except AgentStoreError as exc:
+                return await _failure(exc.code, exc.message, exc.status_code, details=exc.details,
+                                      retryable=exc.retryable)(scope, receive, send)
+            try:
+                return await self.app(scope, receive, send)
+            finally:
+                if lease is not None:
+                    lease.__exit__(None, None, None)
+
+    app.add_middleware(AgentCaseAccessMiddleware)
+    # Include ownership denials and CORS responses in HTTP diagnostics.
     app.add_middleware(HttpDiagnosticsMiddleware)
-
-    from .agent_http import register_agent_routes
-
-    register_agent_routes(app, agent_service, public_base_url)
 
     @app.get("/openapi.json", include_in_schema=False)
     async def openapi_document() -> Response:

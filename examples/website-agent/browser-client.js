@@ -24,6 +24,7 @@ export function createAgentClient({ basePath = "/api/agent", fetchImpl = globalT
     for (const [key, value] of new Headers(requestHeaders)) combined.set(key, value);
     // 浏览器根据 Blob/File 计算真实长度，不允许代码设置这个请求头。
     combined.delete("Content-Length");
+    combined.delete("X-Agent-Owner-Key");
     let response;
     try {
       response = await fetchImpl(path, { method, body, headers: combined, signal,
@@ -56,34 +57,66 @@ export function createAgentClient({ basePath = "/api/agent", fetchImpl = globalT
 
   const post = (path, body) => request(path, { method: "POST", body: JSON.stringify(body),
     requestHeaders: { "Content-Type": "application/json" } });
+  const pageSize = (value) => {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > 100))
+      throw new TypeError("分页条数必须是 1 到 100 的整数。");
+  };
+  const withQuery = (path, query) => `${path}${query.size ? `?${query.toString().replaceAll("%2C", ",")}` : ""}`;
 
   return {
-    createConversation: (requestId) => post(`${base}/conversations`, { request_id: requestId }),
-    sendMessage: (id, message) => post(`${conversationPath(id)}/messages`, message),
-    getConversation: (id, options) => request(conversationPath(id), options),
-    getStatus: (id, options) => request(`${conversationPath(id)}/status`, options),
-    getReport: (id, options) => request(`${conversationPath(id)}/report`, options),
-    prepareAttachment: (id, metadata) => post(`${conversationPath(id)}/attachments`, metadata),
-    eventsUrl: (id) => `${conversationPath(id)}/events`,
+    conversations: {
+      create: (requestId) => post(`${base}/conversations`, { request_id: requestId }),
+      send: (id, message) => post(`${conversationPath(id)}/messages`, message),
+      list({ cursor, limit, signal } = {}) {
+        pageSize(limit);
+        const query = new URLSearchParams();
+        if (cursor !== undefined) query.set("cursor", cursor);
+        if (limit !== undefined) query.set("limit", limit);
+        return request(withQuery(`${base}/conversations`, query), { signal });
+      },
+      rename: (id, title) => request(conversationPath(id), { method: "PATCH", body: JSON.stringify({ title }),
+        requestHeaders: { "Content-Type": "application/json" } }),
+      stop: (id, { request_id, run_id }) => post(`${conversationPath(id)}/stop`, { request_id, run_id }),
+      delete: (id) => request(conversationPath(id), { method: "DELETE" }),
+      get(id, { include, run_id, history_before, history_limit, signal } = {}) {
+        const query = new URLSearchParams();
+        if (include !== undefined) {
+          if (!Array.isArray(include) || new Set(include).size !== include.length ||
+              include.some((item) => !["history", "report", "artifacts"].includes(item))) {
+            throw new TypeError("include 必须是不重复的 history、report、artifacts 数组；空数组仅查询状态。");
+          }
+          query.set("include", include.length ? include.join(",") : "none");
+        }
+        pageSize(history_limit);
+        if (run_id !== undefined) query.set("run_id", run_id);
+        if (history_before !== undefined) query.set("history_before", history_before);
+        if (history_limit !== undefined) query.set("history_limit", history_limit);
+        return request(withQuery(conversationPath(id), query), { signal });
+      },
+      eventsUrl: (id) => `${conversationPath(id)}/events`,
+    },
+    attachments: {
+      prepare: (id, metadata) => post(`${base}/attachments`, { ...metadata, conversation_id: id }),
 
-    /** prepared 是 prepareAttachment 的返回值。哈希在预约前计算一次，上传不再读取整份文件。 */
-    async uploadAttachment(prepared, file) {
-      const { attachment, upload } = prepared ?? {};
-      const uploadHeaders = new Headers(upload?.required_headers);
-      if (!attachment || !upload || upload.method !== "PUT" ||
-          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(attachment.attachment_id) ||
-          upload.attachment_id !== attachment.attachment_id || !(file instanceof Blob) ||
-          file.size < 1 || file.size !== upload.expected_content_length || file.size !== attachment.size ||
-          uploadHeaders.get("Idempotency-Key") !== attachment.attachment_id ||
-          uploadHeaders.get("Content-Type") !== attachment.content_type ||
-          !/^[0-9a-f]{64}$/.test(attachment.sha256) ||
-          uploadHeaders.get("X-Content-SHA256") !== attachment.sha256) {
-        throw new TypeError("上传文件与预约不一致，请使用预约时的原始文件。");
-      }
-      // 固定走本站路径，描述符中的 URL 不用于跨域寻址。
-      return request(`${base}/attachments/${encodeURIComponent(attachment.attachment_id)}/content`, {
-        method: "PUT", body: file, requestHeaders: uploadHeaders,
-      });
+      /** prepared 是 attachments.prepare 的返回值；上传不重新读取或计算文件哈希。 */
+      async upload(prepared, file) {
+        const { attachment, upload } = prepared ?? {};
+        const uploadHeaders = new Headers(upload?.required_headers);
+        if (!attachment || !upload || upload.method !== "PUT" ||
+            !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(attachment.attachment_id) ||
+            upload.attachment_id !== attachment.attachment_id || !(file instanceof Blob) ||
+            file.size < 1 || file.size !== upload.expected_content_length || file.size !== attachment.size ||
+            uploadHeaders.get("Idempotency-Key") !== attachment.attachment_id ||
+            uploadHeaders.get("Content-Type") !== attachment.content_type ||
+            !/^[0-9a-f]{64}$/.test(attachment.sha256) ||
+            uploadHeaders.get("X-Content-SHA256") !== attachment.sha256) {
+          throw new TypeError("上传文件与预约不一致，请使用预约时的原始文件。");
+        }
+        // 固定走本站路径，描述符中的 URL 不用于跨域寻址。
+        return request(`${base}/attachments/${encodeURIComponent(attachment.attachment_id)}/content`, {
+          method: "PUT", body: file, requestHeaders: uploadHeaders,
+        });
+      },
     },
   };
 }

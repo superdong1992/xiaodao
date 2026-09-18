@@ -9,18 +9,18 @@ import sqlite3
 import json
 import threading
 import weakref
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext, ExitStack
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from problem_locator.contracts import (
     CONTRACT_REVISION, SCHEMA_VERSION, ApplicationError, ApplicationPortError,
     Artifact, ArtifactKind, CaseAggregate, CaseStatus, Clock, CommitReceipt, ERROR_SPECS,
     ErrorCode, ExecutionRecordStore, IdGenerator, Job, JobStatus, StateExportObjectCounts,
-    StateFile, StateMutation, ValidationIssue, ValidationReport, canonical_json_bytes,
+    StateFile, StateMutation, ValidationIssue, ValidationReport, canonical_json_bytes, OpaqueId,
 )
 from .atomic import FileSync, Replacer, read_stable_file_bytes
 from .coordination import StorageCoordinationLock
@@ -29,6 +29,7 @@ from .platform import PlatformFileSync
 
 _TERMINAL = frozenset({CaseStatus.RESOLVED, CaseStatus.PARTIALLY_RESOLVED,
                       CaseStatus.UNRESOLVED, CaseStatus.FAILED, CaseStatus.CANCELLED})
+_OPAQUE_ID = TypeAdapter(OpaqueId)
 
 def _port_error(code: ErrorCode, message: str) -> ApplicationPortError:
     return ApplicationPortError(ApplicationError(code=code, message=message,
@@ -73,7 +74,7 @@ class CaseStateRepository:
             self._layout.initialize_v2_data_root(self._file_sync)
         except UnsupportedDataFormatError as exc:
             raise _port_error(ErrorCode.STATE_SCHEMA_UNSUPPORTED,
-                '数据目录格式不受支持。请保留原目录；v11-contract-r1 数据需先用 '
+                '数据目录格式不受支持。请保留原目录；旧版 r1/r2 会话数据需先用 '
                 'problem-locator-data-upgrade 显式复制升级。') from exc
         try:
             self._db = sqlite3.connect(self._layout.data_root / 'completed.sqlite3',
@@ -118,6 +119,21 @@ class CaseStateRepository:
         """Serialize access to the connection shared with durable adapters."""
         with self._database_lock:
             yield self._db
+
+    def read_case_snapshot_with(self, case_id: str | None, capture: Callable):
+        """Capture related SQL rows and one Case using the normal Case→DB lock order.
+
+        The callback only reads the supplied connection. Callers must finish all
+        resource reads after this method returns and releases both locks.
+        """
+        with self._lock_for(case_id) if case_id is not None else nullcontext():
+            with self._database_lock:
+                related = capture(self._db)
+            # The Case lock keeps its state aligned with the captured SQL
+            # projection. Decode/copy outside the shared database lock.
+            state = None if case_id is None else self._load_case(case_id)
+            snapshot = None if case_id is None else _clone(self._base if state is None else state)
+        return related, snapshot
 
     @contextmanager
     def database_transaction(self):
@@ -403,7 +419,13 @@ class CaseStateRepository:
 
     def claim_archive_task(self):
         with self._database_lock:
-            row = self._db.execute("SELECT case_id, payload FROM archive_tasks WHERE status='PENDING' ORDER BY rowid LIMIT 1").fetchone()
+            agent_filter = ""
+            if self._has_agent_runs():
+                agent_filter = (" AND NOT EXISTS (SELECT 1 FROM agent_conversation_runs r "
+                    "JOIN agent_conversations c ON c.conversation_id=r.conversation_id "
+                    "WHERE r.case_id=archive_tasks.case_id AND c.deleted_at IS NOT NULL)")
+            row = self._db.execute("SELECT case_id, payload FROM archive_tasks WHERE status='PENDING'"
+                + agent_filter + " ORDER BY rowid LIMIT 1").fetchone()
             if row is None:
                 return None
             self._db.execute("UPDATE archive_tasks SET status='RUNNING' WHERE case_id=?", (row[0],))
@@ -412,6 +434,114 @@ class CaseStateRepository:
     def requeue_archive_task(self, case_id: str) -> None:
         with self._database_lock:
             self._db.execute("UPDATE archive_tasks SET status='PENDING' WHERE case_id=? AND status='RUNNING'", (case_id,))
+
+    def cancel_archive_tasks(self, case_ids) -> None:
+        selected = tuple(_OPAQUE_ID.validate_python(value) for value in case_ids)
+        with self.database_transaction() as db:
+            db.executemany("UPDATE archive_tasks SET status='CANCELLED' WHERE case_id=? "
+                "AND status IN ('PENDING','RUNNING')", ((value,) for value in selected))
+
+    def is_agent_case_deleted(self, case_id: str) -> bool:
+        """A missing Agent extension never changes ordinary Case/MCP behavior."""
+        with self._database_lock:
+            if not self._has_agent_runs():
+                return False
+            return self._db.execute("SELECT 1 FROM agent_conversation_runs r "
+                "JOIN agent_conversations c ON c.conversation_id=r.conversation_id "
+                "WHERE r.case_id=? AND c.deleted_at IS NOT NULL", (case_id,)).fetchone() is not None
+
+    def _has_agent_runs(self) -> bool:
+        return self._db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='agent_conversation_runs'").fetchone() is not None
+
+    @contextmanager
+    def archive_publication(self, case_id: str):
+        """Serialize the short publication with the durable Agent tombstone.
+
+        Case-before-database ordering matches normal commits. The shared DB lock
+        also protects Agent deletion, so a successful delete cannot be followed
+        by an archive publication that checked an earlier state.
+        """
+        with self._lock_for(case_id), self._database_lock:
+            if self.is_agent_case_deleted(case_id):
+                raise InterruptedError("archive belongs to a deleted conversation")
+            yield
+
+    @staticmethod
+    def _require_deleted_case_owner(db, conversation_id, case_ids):
+        row = db.execute("SELECT deleted_at FROM agent_conversations WHERE conversation_id=?",
+            (conversation_id,)).fetchone()
+        if row is None or row[0] is None:
+            raise ValueError("cleanup requires a durably deleted Agent conversation")
+        owned = {row[0] for row in db.execute("SELECT case_id FROM agent_conversation_runs "
+            "WHERE conversation_id=? AND case_id IS NOT NULL", (conversation_id,))}
+        if not set(case_ids).issubset(owned):
+            raise ValueError("cleanup Case does not belong to the deleted conversation")
+
+    def prepare_agent_case_cleanup(self, conversation_id, case_ids):
+        """Freeze exact Case-owned paths without reading any resource payload."""
+        conversation_id = _OPAQUE_ID.validate_python(conversation_id)
+        selected = tuple(sorted({_OPAQUE_ID.validate_python(value) for value in case_ids}))
+        paths, jobs = set(), set()
+        with ExitStack() as locks:
+            for case_id in selected:
+                locks.enter_context(self._lock_for(case_id))
+            with self._database_lock:
+                self._require_deleted_case_owner(self._db, conversation_id, selected)
+            for case_id in selected:
+                paths.add(f"resources/cases/{case_id}")
+                state = self._load_case(case_id)
+                if state is None:
+                    continue
+                aggregate = state.cases[case_id]
+                jobs.update(aggregate.jobs)
+                paths.update(f"tmp/uploads/{value}" for value in aggregate.attachments)
+        for job_id in jobs:
+            paths.update((f"jobs/{job_id}", f"tmp/workspaces/{job_id}", f"tmp/proposals/{job_id}"))
+        return {"case_ids": list(selected), "job_ids": sorted(jobs), "paths": sorted(paths)}
+
+    def agent_cases_cleanup_ready(self, conversation_id, case_ids) -> bool:
+        """Cancellation signals alone never authorize destroying active state."""
+        conversation_id = _OPAQUE_ID.validate_python(conversation_id)
+        selected = tuple(sorted({_OPAQUE_ID.validate_python(value) for value in case_ids}))
+        with ExitStack() as locks:
+            for case_id in selected:
+                locks.enter_context(self._lock_for(case_id))
+            with self._database_lock:
+                self._require_deleted_case_owner(self._db, conversation_id, selected)
+            for case_id in selected:
+                state = self._load_case(case_id)
+                if state is not None:
+                    case = state.cases[case_id].case
+                    if case.status not in _TERMINAL or case.active_job_id is not None:
+                        return False
+        return True
+
+    def purge_agent_cases(self, conversation_id, case_ids) -> None:
+        """Purge only explicit Agent deletions after worker/reader leases drain.
+
+        A durable cleanup manifest must precede this transaction. Run ownership
+        rows stay present until the cleaner has finished all filesystem work.
+        """
+        conversation_id = _OPAQUE_ID.validate_python(conversation_id)
+        selected = tuple(sorted({_OPAQUE_ID.validate_python(value) for value in case_ids}))
+        with ExitStack() as locks:
+            for case_id in selected:
+                locks.enter_context(self._lock_for(case_id))
+            if not self.agent_cases_cleanup_ready(conversation_id, selected):
+                raise ValueError("active Cases cannot be purged before durable cancellation")
+            with self.database_transaction() as db:
+                self._require_deleted_case_owner(db, conversation_id, selected)
+                for case_id in selected:
+                    for table in ("completed_cases", "object_index", "request_index", "resource_index", "archive_tasks"):
+                        db.execute(f"DELETE FROM {table} WHERE case_id=?", (case_id,))
+            with self._index_lock:
+                for case_id in selected:
+                    self._live.pop(case_id, None)
+                for index in (self._objects, self._requests):
+                    for key, owner in tuple(index.items()):
+                        if owner in selected:
+                            index.pop(key, None)
 
     def validate_all(self) -> ValidationReport:
         state = self.read_snapshot()

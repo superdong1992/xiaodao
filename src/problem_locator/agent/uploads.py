@@ -72,9 +72,11 @@ class ConversationUploads:
         )
 
     @staticmethod
-    def _consume(content: BinaryIO, size: int, sha256: str, destination=None) -> None:
+    def _consume(content: BinaryIO, size: int, sha256: str, destination=None, check_active=None) -> None:
         digest, observed = hashlib.sha256(), 0
         while True:
+            if check_active is not None:
+                check_active()
             chunk = content.read(min(_CHUNK, size - observed + 1))
             if not isinstance(chunk, bytes):
                 raise AgentStoreError("VALIDATION_ERROR", "附件上传内容必须是原始字节。")
@@ -92,7 +94,7 @@ class ConversationUploads:
             raise AgentStoreError("RESOURCE_HASH_MISMATCH", "附件 SHA-256 校验失败。", 422)
 
     @contextmanager
-    def _verified_source(self, record):
+    def _verified_source(self, record, check_cancelled=None):
         path = self._directory(record.attachment_id) / "payload"
         before = require_ordinary_file(path)
         if before.st_nlink != 1:
@@ -102,7 +104,7 @@ class ConversationUploads:
             opened = os.fstat(source.fileno())
             if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
                 raise AgentStoreError("RESOURCE_INVALID", "附件文件身份发生变化。", 422)
-            self._consume(source, record.size, record.sha256)
+            self._consume(source, record.size, record.sha256, check_active=check_cancelled)
             source.seek(0)
             yield source
             after = os.fstat(source.fileno())
@@ -128,28 +130,25 @@ class ConversationUploads:
         started = False
         try:
             record = self.store.get_attachment(attachment_id)
+            check_active = lambda: self.store.require_owner(record.conversation_id, None)
+            check_active()
             if record.status in {"READY", "IMPORTED"}:
-                self._consume(content, record.size, record.sha256)
+                self._consume(content, record.size, record.sha256, check_active=check_active)
                 return record
-            view = self.store.get_conversation(record.conversation_id)
-            if view.status in {"COMPLETED", "FAILED", "INTERRUPTED"} or view.case_status in {
-                "RESOLVED", "PARTIALLY_RESOLVED", "UNRESOLVED", "FAILED", "CANCELLED",
-            }:
-                raise AgentStoreError("CONVERSATION_CLOSED", "本次定位已结束，请新建任务。", 409)
             self.store.set_attachment_status(attachment_id, "UPLOADING")
             started = True
             directory = self._directory(attachment_id)
             final = directory / "payload"
             # A crash after file publication may leave a valid file before READY.
             if final.exists() or final.is_symlink():
-                self._consume(content, record.size, record.sha256)
+                self._consume(content, record.size, record.sha256, check_active=check_active)
                 with self._verified_source(record):
                     pass
             else:
                 temporary = directory / ("upload-" + uuid.uuid4().hex)
                 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
                 with os.fdopen(os.open(temporary, flags, 0o600), "wb") as sink:
-                    self._consume(content, record.size, record.sha256, sink)
+                    self._consume(content, record.size, record.sha256, sink, check_active)
                     sink.flush()
                     self._sync.sync_file(sink)
                     metadata = require_ordinary_file(temporary)
@@ -159,6 +158,7 @@ class ConversationUploads:
                 os.rename(temporary, final)
                 temporary = None
                 self._sync.sync_directory(directory)
+            check_active()
             finalize_read_only_file(final, self._sync)
             return self.store.complete_attachment(attachment_id, storage_path=str(final))
         except Exception:
@@ -179,28 +179,37 @@ class ConversationUploads:
                     pass
             lock.release()
 
-    def import_into_case(self, conversation_id, case_id, attachment_id, execute_command):
+    def import_into_case(self, conversation_id, case_id, attachment_id, execute_command, *,
+                         run_id=None, check_cancelled=None):
+        if check_cancelled is not None:
+            check_cancelled()
+        run_id = run_id or self.store.get_run(conversation_id)["run_id"]
         record = self.store.get_attachment(attachment_id)
         if record.conversation_id != conversation_id:
             raise AgentStoreError("ATTACHMENT_CONVERSATION_MISMATCH", "附件不属于当前会话。", 409)
-        if record.status == "IMPORTED":
-            return record.case_attachment_id
-        if record.status != "READY":
+        previous = self.store.get_attachment_import(attachment_id, run_id)
+        if previous is not None:
+            return previous
+        if record.status not in {"READY", "IMPORTED"}:
             raise AgentStoreError("ATTACHMENT_NOT_READY", "附件尚未上传完成。", 409)
         view = self.application.get_case(case_id).case_view
         prepared = execute_command(
             conversation_id, "prepare-" + attachment_id,
-            PrepareAttachment(idempotency_key="agent-prepare-" + attachment_id,
+            PrepareAttachment(idempotency_key="agent-prepare-" + run_id + "-" + attachment_id,
                 case_id=case_id, expected_case_revision=view.case_revision,
                 name=record.name, content_type=record.content_type,
                 declared_size=record.size, declared_sha256=record.sha256),
         )
         target_id = prepared.business_receipt.primary_resource_id
-        with self._verified_source(record) as source:
+        with self._verified_source(record, check_cancelled) as source:
+            if check_cancelled is not None:
+                check_cancelled()
             response = self.application.execute(UploadAttachmentContent(
                 idempotency_key=target_id, attachment_id=target_id,
                 expected_content_type=record.content_type, expected_size=record.size,
                 expected_sha256=record.sha256, byte_stream=_BorrowedStream(source),
             ))
-        self.store.bind_attachment(attachment_id, target_id)
+        if check_cancelled is not None:
+            check_cancelled()
+        self.store.bind_attachment(attachment_id, target_id, run_id=run_id)
         return response.business_receipt.primary_resource_id

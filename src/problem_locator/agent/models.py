@@ -1,4 +1,4 @@
-"""Version 1 website Agent contracts, independent of core Job permissions."""
+"""Website Agent contracts: conversation detail v3 and run-aware events v2."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -16,11 +16,11 @@ PUBLIC_PROGRESS_MESSAGES = {
     "REPORTING": "正在生成定位报告",
 }
 
-ConversationStatus = Literal["INTAKE", "WAITING_INPUT", "RUNNING", "COMPLETED", "FAILED", "INTERRUPTED"]
+ConversationStatus = Literal["INTAKE", "WAITING_INPUT", "RUNNING", "CANCELLING", "CANCELLED", "COMPLETED", "FAILED", "INTERRUPTED"]
 MessageStatus = Literal["QUEUED", "PROCESSING", "APPLIED", "UNUSED"]
 EventType = Literal["message.accepted", "message.updated", "assistant.question", "agent.progress",
                     "case.updated", "result.available", "archive.updated", "agent.failed",
-                    "conversation.interrupted", "conversation.completed", "attachment.updated"]
+                    "conversation.interrupted", "conversation.completed", "attachment.updated", "run.started", "run.stopping"]
 
 
 class AgentModel(BaseModel):
@@ -67,12 +67,14 @@ class MessageReceipt(AgentModel):
     request_id: str
     event_id: int
     status: Literal["ACCEPTED"] = "ACCEPTED"
+    run_id: OpaqueId | None = None
 
 
 class ConversationReceipt(AgentModel):
     conversation_id: str
     request_id: str
     schema_version: Literal[1] = 1
+    run_id: OpaqueId | None = None
 
 
 class AgentMessage(AgentModel):
@@ -83,6 +85,7 @@ class AgentMessage(AgentModel):
     status: MessageStatus
     created_at: str
     notice: str | None = None
+    run_id: OpaqueId | None = None
 
 
 class AgentAttachment(AgentModel):
@@ -117,6 +120,7 @@ class ConversationView(AgentModel):
     last_event_id: int = 0
     created_at: str
     updated_at: str
+    run_id: OpaqueId | None = None
 
 
 class ConversationStatusView(AgentModel):
@@ -135,6 +139,82 @@ class ConversationStatusView(AgentModel):
     last_event_id: int = 0
     created_at: str
     updated_at: str
+    run_id: OpaqueId | None = None
+
+
+class ConversationRun(AgentModel):
+    run_id: OpaqueId
+    ordinal: int = Field(ge=1)
+    status: ConversationStatus
+    case_id: OpaqueId | None = None
+    job_id: OpaqueId | None = None
+    case_status: str | None = None
+    archive_status: Literal["NOT_REQUIRED", "PENDING", "READY", "FAILED"] = "NOT_REQUIRED"
+    report_state: Literal["PENDING", "READY", "UNAVAILABLE"]
+    created_at: str
+    updated_at: str
+
+
+class ConversationCapabilities(AgentModel):
+    can_send: bool
+    can_stop: bool
+    can_rediagnose: bool
+    can_rename: bool
+    can_delete: bool
+
+
+class ConversationResultSummary(AgentModel):
+    status: Literal["COMPLETED", "FAILED", "INTERRUPTED", "CANCELLED"]
+    case_id: OpaqueId | None = None
+    case_status: str | None = None
+    report_state: Literal["READY", "UNAVAILABLE"]
+    source_job_id: OpaqueId | None = None
+    failure: AgentPublicFailure | None = None
+
+
+class ConversationHistoryEntry(AgentModel):
+    id: str
+    run_id: OpaqueId
+    type: Literal["user.message", "assistant.question", "diagnosis.result"]
+    created_at: str
+    message: AgentMessage | None = None
+    questions: list[str] | None = None
+    result: ConversationResultSummary | None = None
+
+    @model_validator(mode="after")
+    def entry_shape(self):
+        field = {"user.message": "message", "assistant.question": "questions", "diagnosis.result": "result"}[self.type]
+        if getattr(self, field) is None or any(getattr(self, other) is not None for other in {"message", "questions", "result"} - {field}):
+            raise ValueError("历史条目的内容必须与类型一致。")
+        if self.message is not None and self.message.run_id != self.run_id:
+            raise ValueError("历史消息必须属于对应诊断。")
+        return self
+
+
+class ConversationSummary(AgentModel):
+    conversation_id: OpaqueId
+    title: str
+    current_run: ConversationRun
+    capabilities: ConversationCapabilities
+    created_at: str
+    updated_at: str
+
+
+class ConversationList(AgentModel):
+    items: list[ConversationSummary]
+    next_cursor: str | None = None
+
+
+class StopReceipt(AgentModel):
+    conversation_id: OpaqueId
+    run_id: OpaqueId
+    request_id: str
+    status: Literal["CANCELLING", "CANCELLED", "ALREADY_FINISHED"]
+
+
+class DeleteReceipt(AgentModel):
+    conversation_id: OpaqueId
+    status: Literal["DELETING", "DELETED"]
 
 
 class MessageUpdatedData(AgentModel):
@@ -241,6 +321,64 @@ class ConversationReportView(AgentModel):
         return self
 
 
+class ConversationArtifact(PublicArtifactData):
+    """应用返回产物身份；HTTP 入口补充实际下载地址。"""
+
+    download_url: str | None = None
+
+
+class ConversationDetail(ConversationStatusView):
+    """一个会话读取入口；未请求的内容为 null，不代表内容为空。"""
+
+    schema_version: Literal[3] = 3
+    title: str = "新诊断"
+    current_run: ConversationRun | None = None
+    capabilities: ConversationCapabilities | None = None
+    selected_run_id: OpaqueId | None = None
+    history: list[ConversationHistoryEntry] | None = None
+    history_next_cursor: str | None = None
+    case_revision: int | None = Field(default=None, ge=1)
+    source_job_id: OpaqueId | None = None
+    progress: AgentProgressData | None = None
+    included: list[Literal["history", "report", "artifacts"]] = Field(default_factory=list)
+    attachments: list[AgentAttachment] | None = None
+    result: ConversationReportView | None = None
+    artifacts: list[ConversationArtifact] | None = None
+
+    @property
+    def messages(self):
+        return None if self.history is None else [item.message for item in self.history if item.type == "user.message"]
+
+    @model_validator(mode="after")
+    def included_content(self):
+        if len(self.included) != len(set(self.included)):
+            raise ValueError("会话内容选项不能重复。")
+        if ("history" in self.included) != (self.history is not None and self.attachments is not None):
+            raise ValueError("消息和附件历史必须与请求的内容选项一致。")
+        if "history" not in self.included and (self.history is not None or self.attachments is not None):
+            raise ValueError("未请求历史时不能返回部分历史。")
+        if ("report" in self.included) != (self.result is not None):
+            raise ValueError("报告结果必须与请求的内容选项一致。")
+        if ("artifacts" in self.included) != (self.artifacts is not None):
+            raise ValueError("产物列表必须与请求的内容选项一致。")
+        if self.result is not None and (
+                self.result.conversation_id != self.conversation_id
+                or self.result.case_id != self.case_id
+                or self.result.case_revision != self.case_revision
+                or self.result.report_state != self.report_state
+                or self.result.source_job_id != self.source_job_id
+                or self.result.case_status != self.case_status
+                or self.result.archive_status != self.archive_status):
+            raise ValueError("报告必须与当前会话的任务快照一致。")
+        if self.artifacts is not None:
+            identities = [artifact.artifact_id for artifact in self.artifacts]
+            if len(identities) != len(set(identities)) or any(
+                    self.source_job_id is None or artifact.created_by_job_id != self.source_job_id
+                    for artifact in self.artifacts):
+                raise ValueError("会话产物必须唯一且属于当前结果任务。")
+        return self
+
+
 class ResultAvailableData(AgentModel):
     status: Literal["RESOLVED", "PARTIALLY_RESOLVED", "UNRESOLVED"]
     artifacts: Annotated[list[PublicArtifactData], Field(max_length=1)]
@@ -284,7 +422,15 @@ class ConversationInterruptedData(AgentModel):
 
 
 class ConversationCompletedData(AgentModel):
-    status: Literal["COMPLETED", "FAILED", "INTERRUPTED"]
+    status: Literal["COMPLETED", "FAILED", "INTERRUPTED", "CANCELLED"]
+
+
+class RunStartedData(AgentModel):
+    ordinal: int = Field(ge=1)
+
+
+class RunStoppingData(AgentModel):
+    status: Literal["CANCELLING"] = "CANCELLING"
 
 
 EVENT_PAYLOAD_MODELS: dict[str, type[AgentModel]] = {
@@ -299,6 +445,8 @@ EVENT_PAYLOAD_MODELS: dict[str, type[AgentModel]] = {
     "conversation.interrupted": ConversationInterruptedData,
     "conversation.completed": ConversationCompletedData,
     "attachment.updated": AgentAttachment,
+    "run.started": RunStartedData,
+    "run.stopping": RunStoppingData,
 }
 
 
@@ -326,11 +474,12 @@ def _inline_payload_schema(model):
 
 
 class AgentEvent(AgentModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     sequence: int = Field(ge=1)
     conversation_id: str
     case_id: str | None = None
     job_id: str | None = None
+    run_id: OpaqueId
     type: EventType
     created_at: str
     data: dict[str, JsonValue]
@@ -353,9 +502,12 @@ class AgentEvent(AgentModel):
     @model_validator(mode="after")
     def validate_public_data(self):
         model = self.payload_models[self.type]
-        if set(self.data) != set(model.model_fields):
+        expected = set(model.model_fields)
+        if set(self.data) != expected:
             raise ValueError("公共事件包含未定义的字段。")
         model.model_validate(self.data)
+        if self.type == "message.accepted" and self.data["run_id"] != self.run_id:
+            raise ValueError("事件消息必须属于对应诊断。")
         return self
 
 

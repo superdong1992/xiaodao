@@ -1,4 +1,4 @@
-/** Render report API envelope.data. No requests, HTML parsing, or model calls. */
+/** Render conversation.result. No requests, HTML parsing, or model calls. */
 const REPORT_STATUS = { COMPLETED: "已完成", PARTIAL: "部分结果", INCONCLUSIVE: "尚无定论" };
 const CRITERION_STATUS = { SATISFIED: "已满足", PARTIALLY_SATISFIED: "部分满足", UNSATISFIED: "未满足", UNKNOWN: "尚未确认" };
 const TIME_STATUS = { RELEVANT: "时间相关", NOT_RELEVANT: "时间不相关", UNKNOWN: "时间关系尚未确认" };

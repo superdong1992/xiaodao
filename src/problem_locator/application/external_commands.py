@@ -1253,7 +1253,9 @@ class ExternalCommandHandler:
         if (
             plan.target_case_status is not CaseStatus.CANCELLED
             or plan.next_job_spec is not None
-            or not plan.clear_active_job
+            # Waiting Cases have no active Job to clear. Their cancellation
+            # still commits a terminal Case without rewriting completed Jobs.
+            or (active_job_id is not None and not plan.clear_active_job)
             or not cls._delta_is_empty(plan.accepted_state_delta)
             or plan.selected_skill_update is not None
             or plan.case_failure_update is not None

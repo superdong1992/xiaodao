@@ -4,6 +4,22 @@ import fs from "node:fs";
 import test from "node:test";
 import { runWebsiteStep, parseSseFrame, validateWebsiteEvidence, websiteUserDescription } from "../lib/website-agent.mjs";
 
+test("website upload reservation uses the attachment abstraction with an explicit owning conversation", async () => {
+  const archive = { name: "logs.zip", content_type: "application/zip", size: 12, sha256: "a".repeat(64) };
+  let calls = 0;
+  const evidence = await runWebsiteStep({ phase: "prepare", public_base_url: "http://localhost",
+    conversation_id: "conversation", request_id: "stable-upload", archive }, async (url, options) => {
+    calls++;
+    assert.equal(url, "http://localhost/api/v1/agent/attachments");
+    assert.equal(options.method, "POST");
+    assert.deepEqual(JSON.parse(options.body), { conversation_id: "conversation", request_id: "stable-upload",
+      name: archive.name, content_type: archive.content_type, declared_size: archive.size, declared_sha256: archive.sha256 });
+    return Response.json({ ok: true, data: { attachment: { attachment_id: "attachment" } }, error: null });
+  });
+  assert.equal(calls, 1);
+  assert.equal(evidence.prepared.attachment.attachment_id, "attachment");
+});
+
 const conversationId = "conversation-1", caseId = "case-1";
 const driver = { problem: { raw_problem_text: "订单超时，请定位。", statement: "订单超时", expected_behavior: "正常响应", actual_behavior: "等待超时", scope: "一个订单" }, initial_user_fact_names: ["order_id"], initial_user_fact_values: ["ORDER-123"] };
 const requirements = [{ status: "OPEN", kind: "INPUT", name: "order_id", prompt: "请提供订单 ID。" }];
@@ -12,10 +28,33 @@ const initialCase = { case_id: caseId, status: "WAITING_INPUT", raw_problem_text
     expected_behavior: "用户未单独说明；以 raw_problem_text 为准。", scope: "仅定位 raw_problem_text 所述问题。",
     goals: ["定位问题原因并给出结论。"], non_goals: [], constraints: [], completion_criteria: ["给出基于证据的结论；证据不足时明确说明。"] },
   user_facts: [], pending_requirements: requirements };
-const event = (sequence, type, data = {}, withCase = false) => ({ schema_version: 1, sequence, conversation_id: conversationId, case_id: withCase ? caseId : null, job_id: null, type, created_at: "2026-09-07T00:00:00Z", data });
+const event = (sequence, type, data = {}, withCase = false) => ({ schema_version: 2, run_id: "50000000-0000-0000-0000-000000000001", sequence, conversation_id: conversationId, case_id: withCase ? caseId : null, job_id: null, type, created_at: "2026-09-07T00:00:00Z", data });
 const frame = (value) => `data: ${JSON.stringify(value)}\n\n`;
 const json = (data) => Response.json({ ok: true, data, error: null }, { headers: { "x-problem-locator-correlation-id": "test-correlation" } });
 const sse = (events) => new Response(": connected\n\n: heartbeat\n\n" + events.map(frame).join(""), { headers: { "Content-Type": "text/event-stream" } });
+const diagnosisReport = JSON.parse(fs.readFileSync(new URL("../../../tests/fixtures/contracts/positive/user-result.json", import.meta.url), "utf8"));
+function conversationDetail(updates = {}) {
+  const view = { schema_version: 3, selected_run_id: "50000000-0000-0000-0000-000000000001", current_run: { run_id: "50000000-0000-0000-0000-000000000001" }, capabilities: {}, history_next_cursor: null, conversation_id: conversationId, case_id: caseId,
+    case_revision: 2, source_job_id: null, job_id: null, status: "RUNNING", case_status: "RUNNING",
+    archive_status: "NOT_REQUIRED", report_state: "PENDING", progress: null, failure: null,
+    current_questions: [], last_event_id: 2, created_at: "2026-09-07T00:00:00Z", updated_at: "2026-09-07T00:00:00Z",
+    included: ["history", "report", "artifacts"], history: [], attachments: [], artifacts: [], ...updates };
+  const result = { schema_version: 1, format: null, report: null, markdown: null, artifact: null };
+  for (const name of ["conversation_id", "case_id", "case_revision", "case_status", "archive_status", "report_state", "source_job_id", "failure"]) result[name] = view[name];
+  return { ...view, result: { ...result, ...updates.result } };
+}
+function completedDetail() {
+  const report = structuredClone(diagnosisReport);
+  const artifact = { artifact_id: "report-1", kind: "USER_RESULT", name: "diagnosis-result.json",
+    content_type: "application/json", resource_kind: "FILE", size: Buffer.byteLength(JSON.stringify(report)),
+    sha256: createHash("sha256").update(JSON.stringify(report)).digest("hex"), created_by_job_id: "diagnose-job",
+    created_at: "2026-09-07T00:00:00Z", downloadable: true };
+  const archive = { ...artifact, artifact_id: "archive-1", kind: "USER_RESULT_ARCHIVE", name: "logs.zip", content_type: "application/zip" };
+  return conversationDetail({ status: "COMPLETED", case_status: "RESOLVED", archive_status: "READY",
+    case_revision: 10, last_event_id: 10, report_state: "READY", source_job_id: "diagnose-job",
+    artifacts: [artifact, archive].map((item) => ({ ...item, download_url: `http://localhost/api/v1/agent/conversations/${conversationId}/files/${item.artifact_id}/content?run_id=50000000-0000-0000-0000-000000000001` })),
+    result: { format: "problem-locator-diagnosis-v3", report, artifact } });
+}
 
 async function route({ beforeCaseQuestion = false, caseOverride = {} } = {}) {
   const calls = []; let streams = 0;
@@ -35,7 +74,8 @@ async function route({ beforeCaseQuestion = false, caseOverride = {} } = {}) {
       return json({ conversation_id: conversationId, message_id: "msg", request_id: body.request_id, event_id: streams, status: "ACCEPTED" });
     }
     if (url.includes("/cases/")) return json({ case_view: { ...initialCase, ...caseOverride } });
-    return json({ conversation_id: conversationId, case_id: caseId, case_status: streams === 1 ? "WAITING_INPUT" : "WAITING_ATTACHMENT", status: "WAITING_INPUT", current_questions: [requirements[0].prompt] });
+    return json(conversationDetail({ case_status: streams === 1 ? "WAITING_INPUT" : "WAITING_ATTACHMENT",
+      status: "WAITING_INPUT", current_questions: [requirements[0].prompt], last_event_id: streams === 1 ? 3 : 6 }));
   };
   const evidence = await runWebsiteStep({ phase: "route", public_base_url: "http://localhost", request_id: "route", driver }, fetcher);
   return { evidence, calls };
@@ -106,7 +146,7 @@ test("website stream handles UTF-8, escaped newlines and frame separators split 
       assert.equal(options.headers["Last-Event-ID"], "0");
       return new Response(body, { headers: { "Content-Type": "text/event-stream; charset=utf-8" } });
     }
-    return json({ conversation_id: conversationId, case_id: caseId, status: "RUNNING" });
+    return json(conversationDetail());
   });
   assert.deepEqual(evidence.events, expected);
   assert.equal(evidence.records[0].raw_sse, wire);
@@ -136,14 +176,14 @@ test("website evidence detects changed network bytes and omitted or reordered ob
 });
 
 const finalEvents = [event(6, "case.updated", { status: "REVIEWING", case_revision: 8 }, true), event(7, "result.available", { status: "RESOLVED", artifacts: [{ kind: "USER_RESULT" }], result_field: "final_result" }, true), event(8, "archive.updated", { status: "PENDING", artifacts: [] }, true), event(9, "archive.updated", { status: "READY", artifacts: [{ kind: "USER_RESULT_ARCHIVE" }] }, true), event(10, "conversation.completed", { status: "COMPLETED" }, true)];
-async function diagnosisOrRestart(phase = "diagnose", replayEvents = finalEvents.slice(-2)) {
+async function diagnosisOrRestart(phase = "diagnose", replayEvents = finalEvents.slice(-2), view = completedDetail()) {
   const input = { phase, public_base_url: "http://localhost", request_id: phase, conversation_id: conversationId, case_id: caseId, cursor: phase === "diagnose" ? 5 : 8, attachment_id: "log-1", expected_events: finalEvents.slice(-2) };
   const fetcher = async (url, options) => {
     if (url.endsWith("/events")) return sse(phase === "diagnose" ? finalEvents : replayEvents);
     if (url.endsWith("/messages")) { assert.deepEqual(JSON.parse(options.body).attachment_ids, ["log-1"]); assert.match(JSON.parse(options.body).text, /日志/); return json({ status: "ACCEPTED" }); }
     if (url.endsWith("/artifacts")) return json({ artifacts: [] });
     if (url.includes("/cases/")) return json({ case_view: { case_id: caseId, status: "RESOLVED" } });
-    return json({ conversation_id: conversationId, case_id: caseId, status: "COMPLETED", archive_status: "READY" });
+    return json(view);
   };
   return runWebsiteStep(input, fetcher);
 }
@@ -160,6 +200,42 @@ test("diagnosis submits logs by message and proves REVIEWING then JSON before de
   stream.raw_sse = ": heartbeat\n\n" + missingPending.events.map(frame).join("");
   stream.sha256 = createHash("sha256").update(stream.raw_sse).digest("hex");
   assert.throws(() => validateWebsiteEvidence(missingPending), /PUBLICATION_ORDER/);
+});
+
+test("website completion requires the unified report and download identities, not only legacy Case audit responses", async () => {
+  const oldView = { conversation_id: conversationId, case_id: caseId, status: "COMPLETED", archive_status: "READY" };
+  await assert.rejects(() => diagnosisOrRestart("diagnose", finalEvents.slice(-2), oldView), /CONVERSATION_CONTRACT/);
+  for (const mutate of [
+    (view) => { view.result = null; },
+    (view) => { view.result.report = null; },
+    (view) => { view.result.source_job_id = "another-job"; },
+    (view) => { view.artifacts[0].created_by_job_id = "another-job"; },
+    (view) => { view.artifacts[0].download_url = "http://localhost/api/v1/artifacts/report-1/content?case_id=another-case"; },
+    (view) => { view.artifacts[0].sha256 = "a".repeat(64); },
+  ]) {
+    const view = completedDetail(); mutate(view);
+    await assert.rejects(() => diagnosisOrRestart("diagnose", finalEvents.slice(-2), view), /CONVERSATION_(RESULT|ARTIFACT|DOWNLOAD)/);
+  }
+  const pending = conversationDetail({ status: "COMPLETED", archive_status: "READY" });
+  await assert.rejects(() => diagnosisOrRestart("diagnose", finalEvents.slice(-2), pending), /FINAL_STATE_INVALID/);
+});
+
+test("website evidence binds current and initial conversation bodies to their exact GET network responses", async () => {
+  const { evidence: routeEvidence } = await route();
+  const initial = JSON.parse(JSON.stringify(routeEvidence));
+  initial.initial_view.current_questions = ["另一条追问。"];
+  assert.throws(() => validateWebsiteEvidence(initial), /EVIDENCE_CONVERSATION_SOURCE/);
+  const terminal = JSON.parse(JSON.stringify(await diagnosisOrRestart()));
+  assert.equal(validateWebsiteEvidence(terminal), true);
+  const changed = structuredClone(terminal);
+  changed.view.result.report.problem_statement = "被替换的问题。";
+  assert.throws(() => validateWebsiteEvidence(changed), /EVIDENCE_CONVERSATION_SOURCE/);
+  const foreignPath = structuredClone(terminal);
+  foreignPath.records.find((record) => record.path === `/api/v1/agent/conversations/${conversationId}`).path = "/api/v1/agent/conversations/another";
+  assert.throws(() => validateWebsiteEvidence(foreignPath), /EVIDENCE_CONVERSATION_SOURCE/);
+  const incomplete = structuredClone(terminal);
+  incomplete.view.result = null;
+  assert.throws(() => validateWebsiteEvidence(incomplete), /CONVERSATION_RESULT_IDENTITY/);
 });
 
 test("restart replays immutable completed conversation events with Last-Event-ID", async () => {

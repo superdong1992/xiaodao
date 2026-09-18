@@ -44,9 +44,11 @@ class QuarantineMover:
         return (
             len(parts) == 3 and parts[:2] == ("tmp", "uploads")
             or len(parts) == 4 and parts[:2] == ("tmp", "proposals")
+            or len(parts) == 3 and parts[:2] == ("tmp", "proposals")
             or len(parts) == 3 and parts[:2] == ("tmp", "workspaces")
             or len(parts) == 3 and parts[:2] == ("tmp", "state")
             or len(parts) == 6 and parts[:2] == ("resources", "cases")
+            or len(parts) == 3 and parts[:2] in {("resources", "cases"), ("resources", "conversations")}
             or len(parts) == 2 and parts[0] == "jobs"
         )
 

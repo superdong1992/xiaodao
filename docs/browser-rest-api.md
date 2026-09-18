@@ -11,10 +11,10 @@
 - 向部署方取得服务基址，例如 `https://locator.example`。下文记为 `baseUrl`，末尾是否带 `/` 均可。
 - 先请求 `GET /live` 和 `GET /ready`。只有 `/ready` 成功时才开始业务操作。
 - 运行时机器合同是 `GET /openapi.json`；仓库内可离线使用的同一合同是 [`schemas/v2/web-api.openapi.snapshot.json`](../schemas/v2/web-api.openapi.snapshot.json)。交互查看入口是 `GET /docs`。
-- 服务没有登录、Cookie、令牌、Case 所有权或租户隔离。它只适合部署在受控网络；知道 ID 的调用方可能读取对应资源。
+- Core 独立 Case 沿用受控网络访问方式；Agent 创建的 Case、附件和产物必须携带可信网站后端派生的 `X-Agent-Owner-Key`，服务统一核对归属。归属键不是登录凭据，服务只能开放给可信后端。
 - 首版没有 Case 列表、恢复、取消接口。前端必须持久保存创建响应中的 `case_id`，并把 `INTERRUPTED` 视为只能查询的状态。
 
-底层 Case 与运维入口如下；八个会话入口及其独立合同见上述 Agent 指南。网站读取报告优先使用原生 `/api/v1/agent/conversations/{conversation_id}/report`，定时检查状态使用 `/status`；下列底层路径继续兼容：
+底层 Case 与运维入口如下；网站只接入会话与附件两个抽象，会话管理路由及会话 schema 3 见上述指南。报告、状态和下载信息统一从会话读取；下列底层路径用于已有 Case 集成和文件传输，网站无需额外查询：
 
 | 方法与路径 | 用途 | 响应类型 |
 | --- | --- | --- |
@@ -36,7 +36,7 @@
 
 - JSON 请求使用 `Content-Type: application/json`。模型严格校验类型、拒绝未知字段、拒绝未注明可空的 `null`，也不会把字符串自动转换为数字或布尔值。
 - 数组顺序保留；标为唯一的数组不得重复。查询参数不得重复，也不得出现端点未声明的名称。
-- CORS 允许任意来源、`GET`、`POST`、`PUT`、`OPTIONS`，但不允许凭据。不要设置 `credentials: "include"`。
+- CORS 允许任意来源、`GET`、`POST`、`PUT`、`PATCH`、`DELETE`、`OPTIONS`，但不允许凭据。不要设置 `credentials: "include"`。
 - 每个 HTTP 响应都有 `X-Problem-Locator-Correlation-ID`。发生错误时把它连同请求时间、方法和路径交给服务运维；它不是业务 ID，也不能用于重试。
 - 所有 JSON 和二进制业务响应成功时均为 HTTP `200`。有限等待超时仍为 `200`，由响应字段表示。
 

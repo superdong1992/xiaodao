@@ -40,7 +40,7 @@ def _artifact_data():
 def _event_payloads():
     return {
         "message.accepted": {"message_id": JOB_ID, "request_id": "message:1", "text": "问题描述",
-            "attachment_ids": [], "status": "QUEUED", "created_at": "2026-07-31T00:00:00.000Z", "notice": None},
+            "attachment_ids": [], "status": "QUEUED", "created_at": "2026-07-31T00:00:00.000Z", "notice": None, "run_id": CASE_ID},
         "message.updated": {"message_id": JOB_ID, "status": "APPLIED", "notice": None},
         "assistant.question": {"questions": ["请提供问题时间。"]},
         "agent.progress": {"stage": "VERIFYING", "message": "正在核对证据"},
@@ -50,6 +50,8 @@ def _event_payloads():
         "agent.failed": {"code": "AGENT_EXECUTION_FAILED", "message": "本次定位未能完成，请重新发起任务。"},
         "conversation.interrupted": {"code": "AGENT_INTERRUPTED", "message": "服务已重启，本次任务已中断，请重新发起。"},
         "conversation.completed": {"status": "COMPLETED"},
+        "run.started": {"ordinal": 2},
+        "run.stopping": {"status": "CANCELLING"},
         "attachment.updated": {"attachment_id": JOB_ID, "conversation_id": CASE_ID, "request_id": "attachment:1",
             "name": "logs.zip", "content_type": "application/zip", "size": 1, "sha256": "b" * 64,
             "status": "READY", "created_at": "2026-07-31T00:00:00.000Z", "case_attachment_id": None},
@@ -60,7 +62,7 @@ def _event_payloads():
 def test_every_public_event_data_has_strict_payload_validation_and_schema(kind):
     import jsonschema
     payload = _event_payloads()[kind]
-    event = {"sequence": 1, "conversation_id": CASE_ID, "type": kind,
+    event = {"sequence": 1, "conversation_id": CASE_ID, "run_id": CASE_ID, "type": kind,
              "created_at": "2026-07-31T00:00:00.000Z", "data": payload}
     schema = AgentEvent.model_json_schema()
     jsonschema.Draft202012Validator.check_schema(schema)
@@ -91,7 +93,7 @@ def test_report_event_rejects_coerced_or_internal_nested_artifact_metadata(field
     payload = _event_payloads()["result.available"]
     payload["artifacts"][0][field] = value
     with pytest.raises(ValidationError):
-        AgentEvent(sequence=1, conversation_id=CASE_ID, type="result.available", created_at="now", data=payload)
+        AgentEvent(sequence=1, conversation_id=CASE_ID, run_id=CASE_ID, type="result.available", created_at="now", data=payload)
 
 
 def test_event_semantic_values_cannot_override_safe_failure_or_progress_text():
@@ -103,7 +105,7 @@ def test_event_semantic_values_cannot_override_safe_failure_or_progress_text():
         payload = _event_payloads()[kind]
         payload[field] = invalid
         with pytest.raises(ValidationError):
-            AgentEvent(sequence=1, conversation_id=CASE_ID, type=kind, created_at="now", data=payload)
+            AgentEvent(sequence=1, conversation_id=CASE_ID, run_id=CASE_ID, type=kind, created_at="now", data=payload)
 
 
 def test_create_and_message_retries_return_exact_receipt_even_after_close(store):
@@ -116,8 +118,9 @@ def test_create_and_message_retries_return_exact_receipt_even_after_close(store)
     assert store.submit_message(conversation, "message:1", "支付请求超时") == accepted
     with pytest.raises(AgentStoreError, match="内容不能更改"):
         store.submit_message(conversation, "message:1", "另一问题")
-    with pytest.raises(AgentStoreError, match="另建任务"):
-        store.submit_message(conversation, "message:2", "新问题")
+    restarted = store.submit_message(conversation, "message:2", "新问题")
+    assert restarted.run_id != accepted.run_id
+    assert store.submit_message(conversation, "message:1", "支付请求超时") == accepted
 
 
 def test_concurrent_retries_publish_one_message_and_monotonic_events(store):
@@ -405,7 +408,7 @@ def test_progress_is_allowlisted_deduplicated_and_does_not_change_case_revision(
     with pytest.raises(ValueError):
         store.append_event(conversation, "agent.progress", {"stage": "VERIFYING", "message": "secret path"}, dedupe_key="secret")
     with pytest.raises(ValidationError):
-        AgentEvent(sequence=1, conversation_id=conversation, type="case.updated", created_at="now",
+        AgentEvent(sequence=1, conversation_id=conversation, run_id=conversation, type="case.updated", created_at="now",
                    data={"status": "RUNNING", "case_revision": 1, "storage_key": "secret"})
 
 
@@ -537,7 +540,7 @@ def test_safe_failure_never_exposes_internal_failure_and_marks_queued_unused(sto
     _populate(store.repository)
     _finish(store.repository)
     view = store.get_conversation(conversation)
-    assert view.status == "FAILED"
+    assert view.status == "CANCELLED"
     assert view.messages[0].status == "UNUSED"
     assert store.list_events(conversation)[-1].type == "conversation.completed"
     store.fail_conversation(conversation, code="secret-token")
@@ -605,7 +608,7 @@ def test_restart_keeps_durably_completed_case_failure_and_never_reopens_dispatch
     try:
         second = AgentStore(reopened, runtime_epoch="epoch-two")
         second.recover()
-        assert second.get_conversation(conversation).status == "FAILED"
+        assert second.get_conversation(conversation).status == "CANCELLED"
         assert second.list_events(conversation) == before
         assert not any(event.type == "conversation.interrupted" for event in before)
     finally:
@@ -677,16 +680,18 @@ def test_report_is_published_before_archive_and_completion_waits(store, monkeypa
     assert {message.status for message in store.get_conversation(conversation).messages} == {"UNUSED"}
     assert "result.available" in [event.type for event in store.list_events(conversation)]
     assert "conversation.completed" not in [event.type for event in store.list_events(conversation)]
-    with pytest.raises(AgentStoreError, match="另建任务"):
-        store.submit_message(conversation, "too-late", "已交付报告后的追问")
+    original_run = store.get_run(conversation)["run_id"]
+    next_message = store.submit_message(conversation, "next-diagnosis", "再次诊断时明确提供的新问题")
+    assert next_message.run_id != original_run
     ready = pending.model_copy(update={"case": pending_case.model_copy(update={"case_revision": 3, "archive_status": archive_outcome})})
     with store.repository.database_transaction() as db:
-        store._project_case(db, store._load(db, conversation), ready)
-        store._project_case(db, store._load(db, conversation), ready)
+        store._project_case(db, store._load(db, conversation, run_id=original_run), ready)
+        store._project_case(db, store._load(db, conversation, run_id=original_run), ready)
     events = store.list_events(conversation)
     assert len([event for event in events if event.type == "result.available"]) == 1
     assert len([event for event in events if event.type == "conversation.completed"]) == 1
-    assert store.get_conversation(conversation).status == "COMPLETED"
+    assert store.get_conversation(conversation, run_id=original_run).status == "COMPLETED"
+    assert store.get_conversation(conversation).status == "INTAKE"
     assert events[-1].type == "conversation.completed"
 
 
@@ -735,18 +740,23 @@ def test_restart_pending_archive_preserves_report_and_completes_only_after_archi
         report_event = next(event for event in first.list_events(conversation) if event.type == "result.available")
         initial_bytes = canonical_json_bytes(snapshot)
         assert first.get_conversation(conversation).archive_status == "PENDING"
+        original_run = first.get_run(conversation)["run_id"]
+        next_message = first.submit_message(conversation, "next-run", "旧报告归档期间发起的新诊断")
+        assert next_message.run_id != original_run
         stack.repository.close()
         stack.repository = CaseStateRepository(stack.data_root, stack.coordination_lock, stack.clock, stack.ids)
         second = AgentStore(stack.repository, runtime_epoch="epoch-two")
         second.recover()
         assert canonical_json_bytes(stack.repository.read_snapshot(case_id)) == initial_bytes
-        assert second.get_conversation(conversation).status == "RUNNING"
-        assert not any(event.type in {"conversation.interrupted", "conversation.completed"} for event in second.list_events(conversation))
+        assert second.get_conversation(conversation, run_id=original_run).status == "RUNNING"
+        assert second.get_conversation(conversation).status == "INTERRUPTED"
+        assert not any(event.type in {"conversation.interrupted", "conversation.completed"} for event in second.list_events(conversation) if event.run_id == original_run)
         assert next(event for event in second.list_events(conversation) if event.type == "result.available") == report_event
         archive = ArchiveService(stack.repository, stack.resources, stack.publication_guard, InMemoryStateChangeNotifier(), stack.clock)
         assert archive.run_once()
-        assert second.get_conversation(conversation).status == "COMPLETED"
-        assert second.get_conversation(conversation).archive_status == "READY"
+        assert second.get_conversation(conversation, run_id=original_run).status == "COMPLETED"
+        assert second.get_conversation(conversation, run_id=original_run).archive_status == "READY"
+        assert second.get_conversation(conversation).status == "INTERRUPTED"
         assert len([event for event in second.list_events(conversation) if event.type == "result.available"]) == 1
     finally:
         stack.shutdown()

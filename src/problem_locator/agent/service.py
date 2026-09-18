@@ -2,42 +2,39 @@
 from __future__ import annotations
 
 import threading
+import inspect
+import time
+import uuid
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
 from problem_locator.contracts import (
     ApplicationPortError, ApplicationResponse, CancellationReason, CreateCase,
-    PrepareAttachment, SubmitSupplement,
+    PrepareAttachment, SubmitSupplement, CancelCase,
 )
 from problem_locator.contracts.models import ProblemSpecInput
 from problem_locator.diagnostics import log_event
+from problem_locator.application.reports import result_source_job_id
+from problem_locator.dispatch.cancellation import CancellationController
 
 from .intake import (
     ClaudeIntakeEngine, IntakeAttachment, IntakeDecision, IntakeInput, IntakeMessage,
     IntakeRequirement, IntakeValue, build_initial_problem_spec, validate_intake_decision,
     intake_processing_receipt,
 )
-from .models import AgentPublicFailure, AgentStoreError, ConversationReportView, PublicArtifactData
+from .models import (AgentPublicFailure, AgentStoreError, ConversationReportView, PublicArtifactData,
+                     ConversationDetail, ConversationArtifact)
 from .failures import exception_code, exception_details
 from .uploads import ConversationUploads
+from .usage import ConversationUsageGuard
 
-_CLOSED = {"COMPLETED", "FAILED", "INTERRUPTED"}
+_CLOSED = {"COMPLETED", "FAILED", "INTERRUPTED", "CANCELLED"}
 _CASE_DONE = {"RESOLVED", "PARTIALLY_RESOLVED", "UNRESOLVED", "FAILED", "CANCELLED", "INTERRUPTED"}
 _COMMANDS = {item.__name__: item for item in (CreateCase, PrepareAttachment, SubmitSupplement)}
 
 
-class _IntakeShutdown:
-    def __init__(self, event):
-        self.event = event
-
-    @property
-    def reason(self):
-        return CancellationReason.SERVICE_SHUTDOWN if self.event.is_set() else None
-
-    def is_cancelled(self):
-        return self.event.is_set()
-
-    def wait(self, timeout_seconds):
-        return self.event.wait(timeout_seconds)
+class _RunStopped(Exception):
+    """Control flow only: user cancellation is never a diagnosis failure."""
 
 
 class AgentConversationService:
@@ -46,12 +43,27 @@ class AgentConversationService:
     def __init__(self, store, application, intake_engine, layout):
         self.store, self.application, self.intake_engine = store, application, intake_engine
         self.uploads = ConversationUploads(store, application, layout)
+        self.usage_guard = ConversationUsageGuard()
+        self.cleanup = None
+        self.dispatcher = None
+        self._run_lock = threading.Lock()
+        self._active_runs = {}
+        self._local = threading.local()
+        intake = getattr(intake_engine, "intake", None)
+        self._intake_accepts_cancellation = intake is not None and "cancellation" in inspect.signature(intake).parameters
         self._stop, self._wake = threading.Event(), threading.Event()
+        self._control_wake = threading.Event()
+        self._control_processing = threading.Lock()
         self._processing, self._lifecycle = threading.Lock(), threading.Lock()
         self._thread = None
+        self._control_thread = None
         self._failure = None
         self._phase = "AGENT"
-        store.on_change = lambda _conversation_id: self._wake.set()
+        store.on_change = self._changed
+
+    def _changed(self, _conversation_id):
+        self._wake.set()
+        self._control_wake.set()
 
     def start(self, runtime_epoch=None):
         with self._lifecycle:
@@ -61,15 +73,24 @@ class AgentConversationService:
                 self.store.runtime_epoch = runtime_epoch
             self.store.recover()
             self._thread = threading.Thread(target=self._run, name="agent-intake", daemon=True)
+            self._control_thread = threading.Thread(target=self._run_control, name="agent-management", daemon=True)
             self._thread.start()
+            self._control_thread.start()
 
     def shutdown(self, timeout_seconds=30):
         self._stop.set()
         self._wake.set()
-        if self._thread is not None:
-            self._thread.join(max(0.0, timeout_seconds))
-            return not self._thread.is_alive()
-        return True
+        self._control_wake.set()
+        if self.cleanup is not None:
+            self.cleanup.shutdown(0)
+        with self._run_lock:
+            for signal in self._active_runs.values():
+                signal.cancel(CancellationReason.SERVICE_SHUTDOWN)
+        deadline = time.monotonic() + timeout_seconds
+        for thread in (self._thread, self._control_thread):
+            if thread is not None:
+                thread.join(max(0.0, deadline - time.monotonic()))
+        return all(thread is None or not thread.is_alive() for thread in (self._thread, self._control_thread))
 
     def _available(self):
         if self._stop.is_set() or self._failure is not None:
@@ -78,17 +99,123 @@ class AgentConversationService:
         if operational is not None:
             operational.require_accepting()
 
-    def create_conversation(self, request_id):
+    def create_conversation(self, request_id, *, owner_key=None):
         self._available()
-        return self.store.create_conversation(request_id)
+        return self.store.create_conversation(request_id, owner_key=owner_key)
 
-    def send_message(self, conversation_id, request_id, text="", attachment_ids=None):
+    @contextmanager
+    def operation_lease(self, conversation_id, *, owner_key=None):
+        with self.usage_guard.acquire(conversation_id):
+            self.store.require_owner(conversation_id, owner_key)
+            yield
+
+    def send_message(self, conversation_id, request_id, text="", attachment_ids=None, *, owner_key=None):
         self._available()
-        return self.store.submit_message(conversation_id, request_id, text or "", attachment_ids or [])
+        with self.operation_lease(conversation_id, owner_key=owner_key):
+            return self.store.submit_message(conversation_id, request_id, text or "", attachment_ids or [])
 
-    def get_conversation(self, conversation_id):
-        view = self.store.get_conversation(conversation_id)
-        return self._read_failure(view)
+    def list_conversations(self, owner_key, *, cursor=None, limit=20):
+        return self.store.list_conversations(owner_key, cursor=cursor, limit=limit)
+
+    def authorize_case(self, case_id, owner_key=None):
+        conversation_id = self.store.conversation_for_case(case_id)
+        if conversation_id is not None:
+            if owner_key is None:
+                raise AgentStoreError("AGENT_CONVERSATION_NOT_FOUND", "会话不存在或已删除。", 404)
+            self.store.require_owner(conversation_id, owner_key)
+        return conversation_id
+
+    def authorize_attachment(self, attachment_id, owner_key=None):
+        snapshot = self.store.repository.read_snapshot(attachment_id=attachment_id)
+        for case_id in snapshot.cases:
+            return self.authorize_case(case_id, owner_key)
+        return None
+
+    def rename_conversation(self, conversation_id, title, *, owner_key=None):
+        with self.operation_lease(conversation_id, owner_key=owner_key):
+            return self.store.rename_conversation(conversation_id, title)
+
+    def stop_conversation(self, conversation_id, request_id, run_id, *, owner_key=None):
+        # Do not take _processing or require admission: this must stay usable
+        # while INTAKE is blocked or dispatch has paused new work.
+        with self.operation_lease(conversation_id, owner_key=owner_key):
+            receipt = self.store.request_stop(conversation_id, request_id, run_id)
+            self._signal_run(conversation_id, run_id)
+        self._control_wake.set()
+        return receipt
+
+    def delete_conversation(self, conversation_id, *, owner_key=None):
+        # Store performs authorization even for the minimal deletion receipt.
+        receipt = self.store.request_delete(conversation_id, owner_key=owner_key)
+        with self._run_lock:
+            for (cid, _run_id), signal in self._active_runs.items():
+                if cid == conversation_id:
+                    signal.cancel(CancellationReason.USER_CANCEL)
+        self._control_wake.set()
+        return receipt
+
+    def get_conversation(self, conversation_id, include=("history", "report", "artifacts"), *,
+                         run_id=None, history_before=None, history_limit=50, owner_key=None) -> ConversationDetail:
+        with self.operation_lease(conversation_id, owner_key=owner_key):
+            result = self._conversation_detail(conversation_id, include, run_id=run_id,
+                history_before=history_before, history_limit=history_limit)
+            self.store.require_owner(conversation_id, owner_key)
+            return result
+
+    def _conversation_detail(self, conversation_id, include, *, run_id, history_before, history_limit):
+        choices = ("history", "report", "artifacts")
+        if (not isinstance(include, (tuple, list)) or any(item not in choices for item in include)
+                or len(include) != len(set(include))):
+            raise AgentStoreError("VALIDATION_ERROR", "会话内容选项无效或重复。", 400)
+        included = [item for item in choices if item in include]
+        needs_case = "report" in included or "artifacts" in included
+        try:
+            captured = self.store.read_conversation(conversation_id,
+                history="history" in included, case_snapshot=needs_case, run_id=run_id,
+                history_before=history_before, history_limit=history_limit)
+        except ApplicationPortError:
+            # Preserve the delivery-uncertainty classification when even the
+            # authoritative snapshot cannot be read. No model work is retried.
+            with self.store.run_scope(conversation_id, run_id) if run_id is not None else nullcontext():
+                view = self.store.get_status(conversation_id)
+            operational = getattr(self.application, "operational_state", None)
+            error = None if operational is None or view.case_id is None else operational.error_for_case(
+                view.case_id, None, include_archive_faults=False)
+            if error is not None:
+                raise ApplicationPortError(error) from None
+            raise
+        view = captured.view
+        case = published = artifacts = None
+        if needs_case and view.case_id is not None:
+            try:
+                case, published, artifacts = self.application.read_conversation_delivery(
+                    view.case_id, captured.snapshot, report="report" in included, artifacts="artifacts" in included)
+            except ApplicationPortError as error:
+                if not (error.error.code.value == "CASE_NOT_FOUND" and view.status in _CLOSED
+                        and view.report_state == "UNAVAILABLE"):
+                    raise
+        view = self._read_failure(view, case=case)
+        values = view.model_dump(mode="python")
+        values.update(schema_version=3, included=included, progress=captured.progress,
+            history=captured.history, history_next_cursor=captured.history_next_cursor,
+            attachments=captured.attachments, title=captured.title,
+            current_run=captured.current_run, capabilities=captured.capabilities,
+            selected_run_id=captured.selected_run_id)
+        if case is not None:
+            source = result_source_job_id(case)
+            values.update(case_revision=case.case_revision, case_status=case.status.value,
+                archive_status=case.archive_status, source_job_id=source,
+                report_state="READY" if source is not None else "UNAVAILABLE" if (
+                    view.status in _CLOSED or case.status.value in _CASE_DONE) else "PENDING")
+        if "report" in included:
+            result = self._report_view(view, published)
+            values.update(result=result, case_revision=result.case_revision, case_status=result.case_status,
+                archive_status=result.archive_status, source_job_id=result.source_job_id,
+                report_state=result.report_state, failure=result.failure)
+        if "artifacts" in included:
+            values["artifacts"] = [ConversationArtifact.model_validate(item.model_dump(mode="json"))
+                for item in artifacts or []]
+        return ConversationDetail(**values)
 
     def get_status(self, conversation_id):
         return self._read_failure(self.store.get_status(conversation_id))
@@ -97,7 +224,7 @@ class AgentConversationService:
         operational = getattr(self.application, "operational_state", None)
         if (operational is not None and view.case_id is None and view.status not in _CLOSED
                 and not operational.accepting and operational.latest_error is not None
-                and self.store.has_pending_messages(view.conversation_id)):
+                and self.store.has_pending_messages(view.conversation_id, run_id=view.run_id)):
             # This accepted message has no Case whose delivery can be queried.
             # Reveal the pause, never identifiers from the task that stopped us.
             raise AgentStoreError("DISPATCH_REJECTED", "服务异常，已接收的任务暂时无法继续。", 503,
@@ -126,22 +253,9 @@ class AgentConversationService:
                 raise ApplicationPortError(error)
         return view
 
-    def get_report(self, conversation_id):
-        view = self.store.get_status(conversation_id)
-        result = None
-        if view.case_id is not None:
-            try:
-                result = self.application.get_report(view.case_id)
-            except ApplicationPortError as error:
-                # Closed, report-less conversations survive a missing volatile
-                # Case after recovery. Never hide a lost published report.
-                if not (error.error.code.value == "CASE_NOT_FOUND" and view.status in _CLOSED
-                        and view.report_state == "UNAVAILABLE"):
-                    raise
-        # The already-read authoritative Case also resolves delivery uncertainty;
-        # never issue a second Case query for this report request.
-        view = self._read_failure(view, case=None if result is None else result.case)
-        values = dict(conversation_id=conversation_id, case_id=view.case_id,
+    @staticmethod
+    def _report_view(view, result):
+        values = dict(conversation_id=view.conversation_id, case_id=view.case_id,
             report_state=view.report_state, case_status=view.case_status,
             archive_status=view.archive_status, failure=view.failure)
         if result is not None:
@@ -164,24 +278,100 @@ class AgentConversationService:
                         details.append({"field": "reason_code", "actual": case.failure.reason_code.value})
                     values["failure"] = AgentPublicFailure(code=case.failure.code.value,
                         message="本次定位未能完成，请重新发起任务。", details=details)
-                elif case.status.value in {"CANCELLED", "INTERRUPTED"}:
+                elif case.status.value == "INTERRUPTED":
                     values["failure"] = AgentPublicFailure(code="AGENT_INTERRUPTED",
                         message="本次任务已结束，未生成诊断报告。")
         return ConversationReportView(**values)
 
-    def list_events(self, conversation_id, after_sequence=0, limit=100):
-        events = self.store.list_events(conversation_id, after=after_sequence, limit=limit)
-        view = self.get_status(conversation_id)
-        delivered = events[-1].sequence if events else after_sequence
-        return {"events": events, "stream_closed": view.status in _CLOSED and delivered >= view.last_event_id}
+    def list_events(self, conversation_id, after_sequence=0, limit=100, *, owner_key=None):
+        with self.operation_lease(conversation_id, owner_key=owner_key):
+            events = self.store.list_events(conversation_id, after=after_sequence, limit=limit)
+            view = self.get_status(conversation_id)
+            delivered = events[-1].sequence if events else after_sequence
+            return {"events": events, "stream_closed": view.status in _CLOSED and delivered >= view.last_event_id}
 
-    def prepare_attachment(self, conversation_id, request_id, name, content_type, declared_size, declared_sha256):
+    def prepare_attachment(self, conversation_id, request_id, name, content_type, declared_size, declared_sha256, *, owner_key=None):
         self._available()
-        return self.uploads.prepare(conversation_id, request_id, name, content_type, declared_size, declared_sha256)
+        with self.operation_lease(conversation_id, owner_key=owner_key):
+            return self.uploads.prepare(conversation_id, request_id, name, content_type, declared_size, declared_sha256)
 
-    def upload_attachment(self, attachment_id, request_id, content_type, content_length, content_sha256, content):
+    def upload_attachment(self, attachment_id, request_id, content_type, content_length, content_sha256, content, *, owner_key=None):
         self._available()
-        return self.uploads.upload(attachment_id, request_id, content_type, content_length, content_sha256, content)
+        record = self.store.get_attachment(attachment_id)
+        with self.operation_lease(record.conversation_id, owner_key=owner_key):
+            return self.uploads.upload(attachment_id, request_id, content_type, content_length, content_sha256, content)
+
+    def _signal_run(self, conversation_id, run_id):
+        with self._run_lock:
+            signal = self._active_runs.get((conversation_id, run_id))
+            if signal is not None:
+                signal.cancel(CancellationReason.USER_CANCEL)
+
+    def _check_run(self):
+        current = getattr(self._local, "run", None)
+        if self._stop.is_set():
+            raise _RunStopped()
+        if current is not None and self.store.stop_requested(*current):
+            raise _RunStopped()
+
+    def _run_control(self):
+        while not self._stop.is_set():
+            self._control_wake.clear()
+            try:
+                self.control_once()
+            except Exception as error:
+                # Intent remains durable; do not lose the management thread
+                # after a transient database error or invent a completed stop.
+                log_event("agent.management.pending", error_type=type(error).__name__)
+            self._control_wake.wait(0.5)
+
+    def control_once(self):
+        """Management retries durable intents, never model execution."""
+        if self._stop.is_set() or not self._control_processing.acquire(blocking=False):
+            return False
+        progressed = False
+        try:
+            for pending in self.store.pending_stops():
+                cid, run_id = pending["conversation_id"], pending["run_id"]
+                self._signal_run(cid, run_id)
+                try:
+                    progressed = self._settle_stop(cid, run_id) or progressed
+                except Exception as error:
+                    # Keep the durable intent in CANCELLING. A failed commit
+                    # must not be projected as a completed user cancellation.
+                    log_event("agent.stop.pending", conversation_id=cid, run_id=run_id,
+                        error_type=type(error).__name__)
+            if self.cleanup is not None:
+                try:
+                    progressed = bool(self.cleanup.run_once()) or progressed
+                except Exception as error:
+                    log_event("agent.cleanup.pending", error_type=type(error).__name__)
+            return progressed
+        finally:
+            self._control_processing.release()
+
+    def _settle_stop(self, conversation_id, run_id):
+        body = self.store.get_run(conversation_id, run_id, deleted=True)
+        case_id = body.get("case_id")
+        if case_id is not None:
+            # Internal snapshot remains readable after the public tombstone.
+            snapshot = self.store.repository.read_snapshot(case_id)
+            aggregate = snapshot.cases.get(case_id)
+            if aggregate is not None and aggregate.case.status.value not in _CASE_DONE:
+                self.application.execute(CancelCase(idempotency_key="agent-stop-" + run_id,
+                    case_id=case_id, expected_case_revision=aggregate.case.case_revision))
+            if self.dispatcher is not None and not self.dispatcher.cases_idle({case_id}):
+                return False
+        with self._run_lock:
+            if (conversation_id, run_id) in self._active_runs:
+                return False
+        # A CreateCase call remains registered as active until its response or
+        # exception has returned. Re-read so a just-committed Case cannot orphan.
+        latest = self.store.get_run(conversation_id, run_id, deleted=True)
+        if latest.get("case_id") != case_id:
+            return False
+        self.store.finish_stop(conversation_id, run_id)
+        return True
 
     def _run(self):
         while not self._stop.is_set():
@@ -207,27 +397,66 @@ class AgentConversationService:
                     break
                 try:
                     self._phase = "AGENT"
-                    progressed = self._advance(selected) or progressed
+                    progressed = self._advance_guarded(selected) or progressed
                 except Exception as error:
                     if operational is not None and not operational.accepting:
                         # The operational latch reports uncertain delivery over HTTP.
                         # Do not invent a durable failure or replay a queued command.
                         break
-                    if not self._stop.is_set():
-                        # Public failures never contain raw model, filesystem or tool output.
-                        self.store.fail_conversation(selected, exception_code(error), phase=self._phase,
-                            source_details=exception_details(error))
-                    progressed = True
+                    # Scoped execution records its failure before leaving the
+                    # frozen run. Errors here are storage/control failures.
+                    raise error
             return progressed
         finally:
             self._processing.release()
+
+    def _advance_guarded(self, conversation_id):
+        try:
+            with self.usage_guard.acquire(conversation_id):
+                body = self.store.get_run(conversation_id)
+                run_id = body["run_id"]
+                signal = CancellationController()
+                with self._run_lock:
+                    self._active_runs[(conversation_id, run_id)] = signal
+                self._local.run = (conversation_id, run_id)
+                self._local.signal = signal
+                try:
+                    with self.store.run_scope(conversation_id, run_id):
+                        try:
+                            self._check_run()
+                            return self._advance(conversation_id)
+                        except _RunStopped:
+                            return False
+                        except Exception as error:
+                            # A deleted/stopped run rejects late writes. These
+                            # exceptions must never overwrite its cancellation.
+                            if self._stop.is_set() or self.store.stop_requested(conversation_id, run_id):
+                                return False
+                            operational = getattr(self.application, "operational_state", None)
+                            if operational is not None and not operational.accepting:
+                                return False
+                            self.store.fail_conversation(conversation_id, exception_code(error), phase=self._phase,
+                                source_details=exception_details(error))
+                            return True
+                finally:
+                    self._local.run = None
+                    self._local.signal = None
+                    with self._run_lock:
+                        self._active_runs.pop((conversation_id, run_id), None)
+                    self._control_wake.set()
+        except AgentStoreError as error:
+            if error.status_code == 404:
+                return False
+            raise
 
     def _execute_command(self, conversation_id, label, command, *, message_id=None):
         """Freeze the full command before dispatch, including its initial revision."""
         previous_phase = self._phase
         self._phase = {CreateCase: "CREATE_CASE", PrepareAttachment: "PREPARE_ATTACHMENT",
             SubmitSupplement: "SUBMIT_SUPPLEMENT"}[type(command)]
-        dispatch_id = conversation_id + ":" + label
+        self._check_run()
+        run_id = self.store.get_run(conversation_id)["run_id"]
+        dispatch_id = run_id + ":" + label
         existing = self.store.get_dispatch(conversation_id, dispatch_id)
         if existing is not None:
             if existing["epoch"] != self.store.runtime_epoch and existing["status"] != "COMPLETED":
@@ -243,12 +472,13 @@ class AgentConversationService:
         if message_id is not None:
             self.store.begin_adoption(conversation_id, message_id, dispatch_id)
         try:
+            self._check_run()
             response = self.application.execute(command)
         except Exception:
             if message_id is not None:
                 self.store.finish_adoption(conversation_id, message_id, accepted=False)
             raise
-        if message_id is not None:
+        if message_id is not None and not self.store.stop_requested(conversation_id, run_id):
             self.store.finish_adoption(conversation_id, message_id, accepted=True)
         if not response.dispatch_pending:
             self.store.complete_dispatch(dispatch_id, response.model_dump(mode="json"))
@@ -257,6 +487,7 @@ class AgentConversationService:
 
     def _retry_pending_commands(self, conversation_id):
         for pending in self.store.pending_dispatches(conversation_id):
+            self._check_run()
             payload = pending["payload"]
             if payload["operation"] not in _COMMANDS:
                 continue
@@ -269,6 +500,8 @@ class AgentConversationService:
                 self.store.complete_dispatch(pending["dispatch_id"], response.model_dump(mode="json"))
 
     def _advance(self, conversation_id):
+        self._check_run()
+        run_id = self.store.get_run(conversation_id)["run_id"]
         self._phase = "CASE_QUERY"
         intake_state = self.store.get_intake_state(conversation_id)
         if not intake_state["pending"] and not intake_state["pending_commands"]:
@@ -329,9 +562,10 @@ class AgentConversationService:
             # let the Case produce requirements before extracting any facts.
             spec = build_initial_problem_spec(message.text)
             self.store.update_intake(conversation_id, draft, [], "RUNNING")
-            self.store.expect_case(conversation_id, "agent-create-" + conversation_id)
+            create_key = "agent-create-" + run_id
+            self.store.expect_case(conversation_id, create_key)
             self._execute_command(conversation_id, "create", CreateCase(
-                idempotency_key="agent-create-" + conversation_id,
+                idempotency_key=create_key,
                 raw_problem_text=message.text, problem_spec=spec,
                 initial_user_facts=[], wait_seconds=0,
             ), message_id=message.message_id)
@@ -340,7 +574,7 @@ class AgentConversationService:
         attachments, attachment_ids, attachment_notice = self._attachment_selection(
             view, case_view, selected_attachment_ids)
         request = self._intake_input(view, prefix, draft, case_view, attachments)
-        operation_id = conversation_id + ":intake:" + message.message_id
+        operation_id = run_id + ":intake:" + message.message_id
         prior = self.store.get_dispatch(conversation_id, operation_id)
         if prior is not None:
             if prior["status"] != "COMPLETED":
@@ -356,8 +590,9 @@ class AgentConversationService:
                 decision = decision.model_copy(update={"action": "NEED_CLARIFICATION"})
             decision = validate_intake_decision(decision, request)
         else:
+            workspace_id = str(uuid.uuid5(uuid.UUID(run_id), "intake:" + message.message_id))
             self.store.record_dispatch(conversation_id, operation_id,
-                {"operation": "INTAKE", "input": request.model_dump(mode="json")})
+                {"operation": "INTAKE", "input": request.model_dump(mode="json"), "workspace_id": workspace_id})
             self.store.append_progress(conversation_id, "INTAKE", dedupe_key="intake:" + message.message_id)
             open_inputs = any(item.kind == "INPUT" for item in request.requirements)
             if (not message.text.strip() and not (uncovered_text and open_inputs)) or (
@@ -369,17 +604,22 @@ class AgentConversationService:
                     message="已核对补充要求。",
                     problem_fields=[], user_facts=[])
             elif isinstance(self.intake_engine, ClaudeIntakeEngine):
-                decision = self.intake_engine.intake(request, cancellation=_IntakeShutdown(self._stop))
+                self._check_run()
+                decision = self.intake_engine.intake(request, cancellation=self._local.signal, workspace_id=workspace_id)
+            elif self._intake_accepts_cancellation:
+                self._check_run()
+                decision = self.intake_engine.intake(request, cancellation=self._local.signal)
             else:
+                self._check_run()
                 decision = self.intake_engine.intake(request)
+            self._check_run()
             decision = validate_intake_decision(decision, request)
             self.store.complete_dispatch(operation_id, decision.model_dump(mode="json"))
             receipt = intake_processing_receipt(decision)
             if receipt is not None:
                 log_event("agent.intake.inputs_processed", conversation_id=conversation_id,
                     case_id=view.case_id, operation_id=operation_id, **receipt)
-        if self._stop.is_set():
-            return False
+        self._check_run()
         if decision.action == "NEW_CASE_REQUIRED":
             if message.status != "APPLIED":
                 self.store.set_message_status(conversation_id, message.message_id, "UNUSED", decision.message)
@@ -456,8 +696,11 @@ class AgentConversationService:
         return attachments, [item.attachment_id for item in records], None
 
     def _supplement(self, conversation_id, case_view, inputs, attachment_ids, label, *, message_id=None):
+        self._check_run()
+        run_id = self.store.get_run(conversation_id)["run_id"]
         self._phase = "IMPORT_ATTACHMENT"
-        targets = [self.uploads.import_into_case(conversation_id, case_view.case_id, item, self._execute_command)
+        targets = [self.uploads.import_into_case(conversation_id, case_view.case_id, item, self._execute_command,
+            run_id=run_id, check_cancelled=self._check_run)
             for item in attachment_ids]
         if not inputs and not targets:
             self._phase = "SUBMIT_SUPPLEMENT"
@@ -465,7 +708,7 @@ class AgentConversationService:
         self._phase = "CASE_QUERY"
         latest = self.application.get_case(case_view.case_id).case_view
         self._execute_command(conversation_id, label, SubmitSupplement(
-            idempotency_key="agent-supplement-" + conversation_id + "-" + label,
+            idempotency_key="agent-supplement-" + run_id + "-" + label,
             case_id=latest.case_id, expected_case_revision=latest.case_revision,
             inputs=inputs, attachment_ids=targets, wait_seconds=0,
         ), message_id=message_id)

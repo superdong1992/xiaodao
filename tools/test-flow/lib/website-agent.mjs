@@ -2,11 +2,95 @@
 // attachment metadata; no Case construction or domain command shortcut exists.
 import crypto from "node:crypto";
 import { pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
+import { WEBSITE_TEST_OWNER } from "./website-identity.mjs";
 
 const HASH = /^[a-f0-9]{64}$/;
-const EVENT_FIELDS = ["schema_version", "sequence", "conversation_id", "case_id", "job_id", "type", "created_at", "data"].sort();
+const EVENT_FIELDS = ["schema_version", "run_id", "sequence", "conversation_id", "case_id", "job_id", "type", "created_at", "data"].sort();
 const sha = (value) => crypto.createHash("sha256").update(value).digest("hex");
 function check(value, code) { if (!value) throw new Error(code); }
+
+function checkConversationDetail(view, conversationId) {
+  check(view?.schema_version === 3 && view.conversation_id === conversationId
+    && ["INTAKE", "WAITING_INPUT", "RUNNING", "COMPLETED", "FAILED", "INTERRUPTED"].includes(view.status)
+    && ["NOT_REQUIRED", "PENDING", "READY", "FAILED"].includes(view.archive_status)
+    && isDeepStrictEqual(view.included, ["history", "report", "artifacts"])
+    && Array.isArray(view.history) && Array.isArray(view.attachments) && Array.isArray(view.artifacts)
+    && Array.isArray(view.current_questions) && Number.isSafeInteger(view.last_event_id) && view.last_event_id >= 0
+    && (view.progress === null || (typeof view.progress?.stage === "string" && typeof view.progress.message === "string"))
+    && (view.failure === null || (typeof view.failure?.code === "string" && typeof view.failure.message === "string"
+      && Array.isArray(view.failure.details) && view.failure.retryable === false)), "WEBSITE_CONVERSATION_CONTRACT");
+  const result = view.result;
+  check(result?.schema_version === 1 && ["PENDING", "READY", "UNAVAILABLE"].includes(view.report_state)
+    && ["conversation_id", "case_id", "case_revision", "case_status", "archive_status", "report_state", "source_job_id", "failure"]
+      .every((name) => Object.hasOwn(view, name) && Object.hasOwn(result, name) && isDeepStrictEqual(view[name], result[name])),
+  "WEBSITE_CONVERSATION_RESULT_IDENTITY");
+  if (view.report_state !== "READY") {
+    check(view.source_job_id === null && view.artifacts.length === 0
+      && ["format", "report", "markdown", "artifact"].every((name) => result[name] === null),
+    "WEBSITE_CONVERSATION_RESULT_SHAPE");
+    return view;
+  }
+  check(typeof view.case_id === "string" && view.case_id.length > 0
+    && Number.isSafeInteger(view.case_revision) && view.case_revision > 0
+    && typeof view.source_job_id === "string" && view.source_job_id.length > 0,
+  "WEBSITE_CONVERSATION_RESULT_IDENTITY");
+  const types = { USER_RESULT: "application/json", USER_RESULT_ARCHIVE: "application/zip",
+    GENERIC_REPORT: "text/markdown", AUDIT_BUNDLE: "application/zip" };
+  check(new Set(view.artifacts.map((item) => item?.artifact_id)).size === view.artifacts.length,
+    "WEBSITE_CONVERSATION_ARTIFACT_IDENTITY");
+  for (const artifact of view.artifacts) {
+    check(typeof artifact?.artifact_id === "string" && artifact.artifact_id.length > 0
+      && Object.hasOwn(types, artifact.kind) && artifact.content_type === types[artifact.kind]
+      && artifact.resource_kind === "FILE" && artifact.downloadable === true
+      && artifact.created_by_job_id === view.source_job_id && HASH.test(artifact.sha256)
+      && Number.isSafeInteger(artifact.size) && artifact.size >= 0 && typeof artifact.download_url === "string",
+    "WEBSITE_CONVERSATION_ARTIFACT_IDENTITY");
+    let url;
+    try { url = new URL(artifact.download_url); } catch { check(false, "WEBSITE_CONVERSATION_DOWNLOAD_URL"); }
+    check(["http:", "https:"].includes(url.protocol) && !url.username && !url.password && !url.hash
+      && url.pathname.endsWith(`/api/v1/agent/conversations/${conversationId}/files/${encodeURIComponent(artifact.artifact_id)}/content`)
+      && [...url.searchParams].length === 1 && url.searchParams.get("run_id") === view.selected_run_id,
+    "WEBSITE_CONVERSATION_DOWNLOAD_URL");
+  }
+  if (result.format === "problem-locator-diagnosis-v3") {
+    const report = result.report;
+    check(report?.schema_version === 3 && report.format_id === result.format
+      && report.status === { RESOLVED: "COMPLETED", PARTIALLY_RESOLVED: "PARTIAL", UNRESOLVED: "INCONCLUSIVE" }[view.case_status]
+      && typeof report.problem_statement === "string" && report.problem_statement.length > 0
+      && (report.root_cause === null || typeof report.root_cause === "string")
+      && ["findings", "causal_factors", "candidate_factors", "excluded_factors", "supporting_evidence_bindings", "verification_rules",
+        "completion_criteria_mapping", "evidence_gaps", "recommendations", "limitations", "safety_notes"].every((name) => Array.isArray(report[name]))
+      && typeof report.time_relevance === "object" && report.time_relevance !== null
+      && result.markdown === null && result.artifact?.kind === "USER_RESULT", "WEBSITE_CONVERSATION_RESULT_SHAPE");
+  } else if (result.format === "markdown") {
+    check(result.report === null && typeof result.markdown === "string" && result.markdown.length > 0
+      && result.artifact?.kind === "GENERIC_REPORT", "WEBSITE_CONVERSATION_RESULT_SHAPE");
+  } else if (result.format === "generic-v1") {
+    check(result.report?.source_job_id === view.source_job_id && result.report.status === view.case_status
+      && typeof result.report.conclusion === "string" && typeof result.report.root_cause_analysis === "string"
+      && result.markdown === null && result.artifact === null, "WEBSITE_CONVERSATION_RESULT_SHAPE");
+  } else check(false, "WEBSITE_CONVERSATION_RESULT_SHAPE");
+  if (result.artifact !== null) {
+    const artifact = view.artifacts.find((item) => item.artifact_id === result.artifact.artifact_id);
+    check(artifact && ["artifact_id", "kind", "name", "content_type", "resource_kind", "size", "sha256",
+      "created_by_job_id", "created_at", "downloadable"].every((name) => artifact[name] === result.artifact[name]),
+    "WEBSITE_CONVERSATION_ARTIFACT_IDENTITY");
+  }
+  return view;
+}
+
+function checkCompletedConversation(view) {
+  check(view.status === "COMPLETED" && view.archive_status === "READY" && view.report_state === "READY"
+    && view.result?.report_state === "READY", "WEBSITE_FINAL_STATE_INVALID");
+}
+
+function checkConversationEvidence(evidence, view) {
+  checkConversationDetail(view, evidence.conversation_id);
+  check(evidence.records.some((record) => record.method === "GET"
+    && record.path === `/api/v1/agent/conversations/${evidence.conversation_id}`
+    && isDeepStrictEqual(record.response?.data, view)), "WEBSITE_EVIDENCE_CONVERSATION_SOURCE");
+}
 
 export function websiteUserDescription(driver, requirements) {
   const names = requirements.filter((item) => item.status === "OPEN" && item.kind === "INPUT").map((item) => item.name);
@@ -37,7 +121,7 @@ export function parseSseFrame(frame, conversationId, after) {
   check(lines.length === 1 && lines[0].startsWith("data: "), "WEBSITE_SSE_FRAME_FORMAT");
   const event = JSON.parse(lines[0].slice("data: ".length));
   check(JSON.stringify(Object.keys(event).sort()) === JSON.stringify(EVENT_FIELDS), "WEBSITE_SSE_FIELDS");
-  check(event.schema_version === 1 && event.conversation_id === conversationId && event.sequence === after + 1
+  check(event.schema_version === 2 && typeof event.run_id === "string" && event.conversation_id === conversationId && event.sequence === after + 1
     && typeof event.type === "string", "WEBSITE_SSE_SEQUENCE");
   check(event.type !== "agent.failed" && event.type !== "conversation.interrupted", "WEBSITE_AGENT_FAILED");
   if (event.type === "agent.progress") check(typeof event.data.message === "string" && /[\u3400-\u9fff]/u.test(event.data.message), "WEBSITE_PROGRESS_CHINESE");
@@ -48,8 +132,9 @@ export async function runWebsiteStep(input, fetchImpl = fetch) {
   const records = [], events = [];
   const base = input.public_base_url.replace(/\/$/, "");
   let conversationId = input.conversation_id ?? null;
+  const ownerKey = WEBSITE_TEST_OWNER;
   const request = async (method, route, body = undefined) => {
-    const response = await fetchImpl(base + route, { method, headers: body ? { "Content-Type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(30_000) });
+    const response = await fetchImpl(base + route, { method, headers: { "X-Agent-Owner-Key": ownerKey, ...(body ? { "Content-Type": "application/json" } : {}) }, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(30_000) });
     const value = await response.json();
     records.push({ method, path: route, request: body ?? null, status: response.status, response: value,
       correlation_id: response.headers.get("x-problem-locator-correlation-id") });
@@ -62,7 +147,7 @@ export async function runWebsiteStep(input, fetchImpl = fetch) {
     const path = `/api/v1/agent/conversations/${conversationId}/events`;
     let text = "", raw = "", count = 0;
     try {
-      const response = await fetchImpl(base + path, { headers: { "Last-Event-ID": String(cursor) }, signal: controller.signal });
+      const response = await fetchImpl(base + path, { headers: { "Last-Event-ID": String(cursor), "X-Agent-Owner-Key": ownerKey }, signal: controller.signal });
       check(response.ok && response.headers.get("content-type")?.startsWith("text/event-stream"), "WEBSITE_SSE_UNAVAILABLE");
       const reader = response.body.getReader();
       const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -92,6 +177,8 @@ export async function runWebsiteStep(input, fetchImpl = fetch) {
   };
   const cursor = () => events.at(-1)?.sequence ?? input.cursor ?? 0;
   const message = (suffix, text, attachment_ids = []) => request("POST", `/api/v1/agent/conversations/${conversationId}/messages`, { request_id: input.request_id + suffix, text, attachment_ids });
+  const conversation = async () => checkConversationDetail(
+    await request("GET", `/api/v1/agent/conversations/${conversationId}`), conversationId);
   if (input.phase === "route") {
     const created = await request("POST", "/api/v1/agent/conversations", { request_id: input.request_id });
     conversationId = created.conversation_id;
@@ -100,20 +187,22 @@ export async function runWebsiteStep(input, fetchImpl = fetch) {
     const raw = input.driver.problem.raw_problem_text ?? input.driver.problem.statement;
     await observe(0, () => message("-initial", raw), (event) => event?.type === "assistant.question");
     check(events.at(-1).case_id, "WEBSITE_QUESTION_BEFORE_CASE");
-    const initial_view = await request("GET", `/api/v1/agent/conversations/${conversationId}`);
+    const initial_view = await conversation();
+    // Case reads below inspect the frozen route/defaults and fixture requirements;
+    // product state, report and download delivery use the conversation response.
     const initial_case_response = await request("GET", `/api/v1/cases/${initial_view.case_id}`);
     const questions = checkInitialCase(initial_view, initial_case_response.case_view, raw);
     check(JSON.stringify(events.at(-1).data.questions) === JSON.stringify(questions), "WEBSITE_REQUIREMENT_PROMPTS_CHANGED");
     const complete = websiteUserDescription(input.driver, initial_case_response.case_view.pending_requirements);
     await observe(cursor(), () => message("-details", complete), (event) => event?.type === "case.updated" && ["WAITING_INPUT", "WAITING_ATTACHMENT"].includes(event.data.status));
-    const view = await request("GET", `/api/v1/agent/conversations/${conversationId}`);
+    const view = await conversation();
     check(view.case_id === initial_view.case_id && view.case_status === "WAITING_ATTACHMENT", "WEBSITE_REQUIRED_FACTS_NOT_EXTRACTED");
     const case_response = await request("GET", `/api/v1/cases/${view.case_id}`);
     return { schema_version: 1, phase: input.phase, conversation_id: conversationId, initial_view, initial_case_response, view, case_response, events, records };
   }
   if (input.phase === "prepare") {
-    const prepared = await request("POST", `/api/v1/agent/conversations/${conversationId}/attachments`, {
-      request_id: input.request_id, name: input.archive.name, content_type: input.archive.content_type,
+    const prepared = await request("POST", "/api/v1/agent/attachments", {
+      conversation_id: conversationId, request_id: input.request_id, name: input.archive.name, content_type: input.archive.content_type,
       declared_size: input.archive.size, declared_sha256: input.archive.sha256,
     });
     return { schema_version: 1, phase: input.phase, conversation_id: conversationId, prepared, events, records };
@@ -131,11 +220,13 @@ export async function runWebsiteStep(input, fetchImpl = fetch) {
     await observe(input.cursor, null, (event) => event?.sequence === expected.at(-1).sequence);
     check(JSON.stringify(events) === JSON.stringify(expected), "WEBSITE_RESTART_EVENTS_CHANGED");
   } else throw new Error("WEBSITE_PHASE_UNKNOWN");
-  const view = await request("GET", `/api/v1/agent/conversations/${conversationId}`);
+  const view = await conversation();
   check(view.conversation_id === conversationId && view.case_id === input.case_id, "WEBSITE_CASE_IDENTITY_CHANGED");
-  if (["diagnose", "restart"].includes(input.phase)) check(view.status === "COMPLETED" && view.archive_status === "READY", "WEBSITE_FINAL_STATE_INVALID");
+  if (["diagnose", "restart"].includes(input.phase)) checkCompletedConversation(view);
   const result = { schema_version: 1, phase: input.phase, conversation_id: conversationId, view, events, records };
   if (["diagnose", "restart"].includes(input.phase)) {
+    // Retain independent core snapshots for the existing diagnosis/restart
+    // audit; they cannot substitute for the unified delivery checked above.
     result.case_response = await request("GET", `/api/v1/cases/${view.case_id}`);
     result.artifacts_response = await request("GET", `/api/v1/cases/${view.case_id}/artifacts`);
   }
@@ -163,7 +254,10 @@ export function validateWebsiteEvidence(evidence, expected = {}) {
   check(JSON.stringify(evidence.events) === JSON.stringify(replayed), "WEBSITE_EVIDENCE_EVENT_SOURCE");
   check(evidence.records.filter((record) => !Object.hasOwn(record, "raw_sse")).every((record) => record.status === 200
     && record.response?.ok === true && record.response.error === null), "WEBSITE_EVIDENCE_HTTP_STATUS");
+  if (["route", "upload", "diagnose", "restart"].includes(evidence.phase)) checkConversationEvidence(evidence, evidence.view);
+  if (["diagnose", "restart"].includes(evidence.phase)) checkCompletedConversation(evidence.view);
   if (evidence.phase === "route") {
+    checkConversationEvidence(evidence, evidence.initial_view);
     const creates = evidence.records.filter((record) => record.method === "POST" && record.path === "/api/v1/agent/conversations");
     const messages = evidence.records.filter((record) => record.method === "POST" && record.path.endsWith("/messages"));
     check(creates.length === 2 && messages.length === 2 && messages.every((record) => Object.keys(record.request).sort().join(",") === "attachment_ids,request_id,text"), "WEBSITE_EVIDENCE_RAW_INPUT");

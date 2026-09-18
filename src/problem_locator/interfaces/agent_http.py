@@ -16,11 +16,14 @@ from problem_locator.agent.models import (
     AgentAttachment,
     AgentEvent,
     AgentStoreError,
+    ConversationDetail,
     ConversationReceipt,
-    ConversationReportView,
-    ConversationStatusView,
-    ConversationView,
+    ConversationList,
+    ConversationSummary,
+    StopReceipt,
+    DeleteReceipt,
     MessageReceipt,
+    PublicArtifactData,
 )
 from problem_locator.contracts.errors import ApplicationPortError
 from problem_locator.contracts.limits import MAX_ATTACHMENT_BYTES
@@ -40,6 +43,12 @@ _EVENT_BATCH_SIZE = 20
 _EVENT_POLL_SECONDS = 0.5
 _HEARTBEAT_SECONDS = 15.0
 _MAX_EVENT_BYTES = 1024 * 1024
+_CONVERSATION_INCLUDES = ("history", "report", "artifacts")
+_OWNER = re.compile(r"[0-9a-f]{64}\Z")
+_UUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\Z")
+_OWNER_PARAMETER = {"name": "X-Agent-Owner-Key", "in": "header", "required": True,
+                    "schema": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "description": "可信网站后端从已认证身份派生的稳定归属键；禁止采用浏览器自报值。"}
 
 
 class _AgentHttpModel(BaseModel):
@@ -48,6 +57,15 @@ class _AgentHttpModel(BaseModel):
 
 class CreateConversationBody(_AgentHttpModel):
     request_id: NonEmptyText = Field(description="同一次创建重试时保持不变。")
+
+
+class RenameConversationBody(_AgentHttpModel):
+    title: str = Field(min_length=1, max_length=80, pattern=r"\S")
+
+
+class StopConversationBody(_AgentHttpModel):
+    request_id: NonEmptyText
+    run_id: OpaqueId
 
 
 class SendMessageBody(_AgentHttpModel):
@@ -65,6 +83,7 @@ class SendMessageBody(_AgentHttpModel):
 
 
 class PrepareAgentAttachmentBody(_AgentHttpModel):
+    conversation_id: OpaqueId
     request_id: NonEmptyText
     name: NonEmptyText
     content_type: Literal["application/zip", "application/gzip", "application/x-tar"]
@@ -75,6 +94,14 @@ class PrepareAgentAttachmentBody(_AgentHttpModel):
 class PreparedAgentAttachment(_AgentHttpModel):
     attachment: AgentAttachment
     upload: WebUploadDescriptor
+
+
+class ConversationDownloadArtifact(PublicArtifactData):
+    download_url: NonEmptyText
+
+
+class ConversationDetailResponse(ConversationDetail):
+    artifacts: list[ConversationDownloadArtifact] | None = None
 
 
 class AgentHttpError(_AgentHttpModel):
@@ -115,6 +142,45 @@ def _no_query(request: Request) -> None:
         raise ValueError("此接口不接受查询参数。")
 
 
+def _owner_key(request: Request, *, required: bool = True) -> str | None:
+    values = request.headers.getlist("x-agent-owner-key")
+    if not values and not required:
+        return None
+    if len(values) != 1 or _OWNER.fullmatch(values[0]) is None:
+        raise ValueError("X-Agent-Owner-Key 必须是可信后端提供的稳定归属键。")
+    return values[0]
+
+
+def _query(request: Request, allowed: set[str]) -> dict[str, str]:
+    items = list(request.query_params.multi_items())
+    if len(items) != len({key for key, _ in items}) or any(key not in allowed or not value for key, value in items):
+        raise ValueError("查询参数无效或重复。")
+    return dict(items)
+
+
+def _limit(value: str | None, default: int) -> int:
+    if value is None:
+        return default
+    if not re.fullmatch(r"[1-9][0-9]{0,2}", value) or int(value) > 100:
+        raise ValueError("分页条数必须是 1 到 100 的整数。")
+    return int(value)
+
+
+def _conversation_include(request: Request) -> tuple[str, ...]:
+    _query(request, {"include", "run_id", "history_before", "history_limit"})
+    values = request.query_params.getlist("include")
+    if not values:
+        return _CONVERSATION_INCLUDES
+    if len(values) != 1:
+        raise ValueError("include 只能指定一次。")
+    if values[0] == "none":
+        return ()
+    selected = values[0].split(",")
+    if len(selected) != len(set(selected)) or any(item not in _CONVERSATION_INCLUDES for item in selected):
+        raise ValueError("include 必须是 none 或不重复的 history、report、artifacts 组合。")
+    return tuple(item for item in _CONVERSATION_INCLUDES if item in selected)
+
+
 def _event_cursor(request: Request) -> int:
     _no_query(request)
     headers = request.headers.getlist("last-event-id")
@@ -141,7 +207,7 @@ def _checked_batch(raw: Any, conversation_id: str, cursor: int) -> AgentEventBat
 
 async def _events(
     request: Request, service: Any, conversation_id: str, cursor: int,
-    first: AgentEventBatch,
+    first: AgentEventBatch, owner_key: str | None = None,
 ) -> AsyncIterator[bytes]:
     """Read one bounded durable batch at a time; disconnect never cancels a Job."""
     loop = asyncio.get_running_loop()
@@ -173,6 +239,7 @@ async def _events(
             raw = await asyncio.to_thread(
                 service.list_events, conversation_id, after_sequence=cursor,
                 limit=_EVENT_BATCH_SIZE,
+                owner_key=owner_key,
             )
             batch = _checked_batch(raw, conversation_id, cursor)
     except Exception:
@@ -181,7 +248,7 @@ async def _events(
         _LOGGER.exception("Agent SSE stream failed after response start")
 
 
-def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: str) -> None:
+def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: str, query_port: Any | None = None) -> None:
     """Register all Agent routes even when its service is not configured."""
     # HTTP helpers are imported at registration time to avoid the composition
     # module's import cycle. Upload cancellation follows the established port.
@@ -199,7 +266,20 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
 
     async def respond(function: str, request: Request, **kwargs: Any) -> JSONResponse:
         try:
-            _no_query(request)
+            kwargs["owner_key"] = _owner_key(request)
+            if function == "get_conversation":
+                kwargs["include"] = _conversation_include(request)
+                query = request.query_params
+                run_id = query.get("run_id")
+                if run_id is not None and _UUID.fullmatch(run_id) is None:
+                    raise ValueError("轮次标识无效。")
+                kwargs.update(run_id=run_id, history_before=query.get("history_before"),
+                              history_limit=_limit(query.get("history_limit"), 50))
+            elif function == "list_conversations":
+                query = _query(request, {"cursor", "limit"})
+                kwargs.update(cursor=query.get("cursor"), limit=_limit(query.get("limit"), 20))
+            else:
+                _no_query(request)
         except ValueError:
             return _invalid()
         try:
@@ -207,16 +287,34 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
             result_model = {
                 "create_conversation": ConversationReceipt,
                 "send_message": MessageReceipt,
-                "get_conversation": ConversationView,
-                "get_status": ConversationStatusView,
-                "get_report": ConversationReportView,
+                "get_conversation": ConversationDetail,
                 "prepare_attachment": AgentAttachment,
+                "list_conversations": ConversationList,
+                "rename_conversation": ConversationSummary,
+                "stop_conversation": StopReceipt,
+                "delete_conversation": DeleteReceipt,
             }[function]
-            if function == "get_report":
-                # A service report was already validated. Avoid serializing and
-                # parsing its full contents again merely to produce an envelope.
+            if function == "get_conversation":
+                # The shared service already validated nested report content.
+                # Dictionary adapters still pass through the complete contract.
                 if not isinstance(result, result_model):
                     result = result_model.model_validate_json(canonical_json_bytes(model_json(result)))
+                if result.conversation_id != kwargs["conversation_id"] or tuple(result.included) != kwargs["include"]:
+                    raise RuntimeError("Conversation response identity or projection does not match the request")
+                artifacts = result.artifacts
+                if artifacts:
+                    if result.case_id is None:
+                        raise RuntimeError("Downloadable artifacts require an owning Case")
+                    artifacts = [ConversationDownloadArtifact(
+                        **artifact.model_dump(exclude={"download_url"}),
+                        download_url=append_public_path(
+                            public_base_url, f"{_PREFIX}/conversations/{result.conversation_id}/files/{artifact.artifact_id}/content",
+                        ) + f"?run_id={result.selected_run_id}",
+                    ) for artifact in artifacts]
+                # All source fields and the newly built descriptors are typed;
+                # preserve the already-validated report model by reference.
+                values = {name: getattr(result, name) for name in ConversationDetail.model_fields}
+                result = ConversationDetailResponse.model_construct(**{**values, "artifacts": artifacts})
             else:
                 result = result_model.model_validate(model_json(result))
             return JSONResponse(success_envelope(result))
@@ -238,6 +336,38 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
     async def create_conversation(body: CreateConversationBody, request: Request) -> JSONResponse:
         return await respond("create_conversation", request, request_id=body.request_id)
 
+    @app.get(f"{_PREFIX}/conversations", tags=["Agent"],
+             response_model=SuccessEnvelope[ConversationList], responses=errors,
+             summary="读取当前用户的会话目录", operation_id="list_agent_conversations",
+             description="按归属键分页读取会话摘要；默认 20 条、最多 100 条，不加载历史或报告。",
+             openapi_extra={"parameters": [
+                 {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100}},
+                 {"name": "cursor", "in": "query", "schema": {"type": "string"}, "description": "原样传回 next_cursor。"},
+             ]})
+    async def list_conversations(request: Request) -> JSONResponse:
+        return await respond("list_conversations", request)
+
+    @app.patch(f"{_PREFIX}/conversations/{{conversation_id}}", tags=["Agent"],
+               response_model=SuccessEnvelope[ConversationSummary], responses=errors,
+               summary="修改会话标题", operation_id="rename_agent_conversation",
+               description="持久保存标题并返回会话摘要；同一标题赋值可重复。")
+    async def rename_conversation(conversation_id: Annotated[OpaqueId, Path()], body: RenameConversationBody, request: Request):
+        return await respond("rename_conversation", request, conversation_id=conversation_id, title=body.title)
+
+    @app.post(f"{_PREFIX}/conversations/{{conversation_id}}/stop", tags=["Agent"],
+              response_model=SuccessEnvelope[StopReceipt], responses=errors,
+              summary="停止指定诊断轮次", operation_id="stop_agent_conversation",
+              description="request_id 与 run_id 共同冻结停止目标；CANCELLING 表示等待后台安全退出。")
+    async def stop_conversation(conversation_id: Annotated[OpaqueId, Path()], body: StopConversationBody, request: Request):
+        return await respond("stop_conversation", request, conversation_id=conversation_id, **body.model_dump())
+
+    @app.delete(f"{_PREFIX}/conversations/{{conversation_id}}", tags=["Agent"],
+                response_model=SuccessEnvelope[DeleteReceipt], responses=errors,
+                summary="删除会话及其诊断数据", operation_id="delete_agent_conversation",
+                description="按会话 ID 幂等删除；先对新请求隐藏，等待活跃资源使用结束后清理文件。")
+    async def delete_conversation(conversation_id: Annotated[OpaqueId, Path()], request: Request):
+        return await respond("delete_conversation", request, conversation_id=conversation_id)
+
     @app.post(
         f"{_PREFIX}/conversations/{{conversation_id}}/messages", tags=["Agent"],
         response_model=SuccessEnvelope[MessageReceipt], responses=errors,
@@ -255,40 +385,25 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
 
     @app.get(
         f"{_PREFIX}/conversations/{{conversation_id}}", tags=["Agent"],
-        response_model=SuccessEnvelope[ConversationView], responses=errors,
-        summary="读取会话、追问和附件状态",
-        description="只读返回持久历史和最新游标，不启动或重新运行后台任务。",
+        response_model=SuccessEnvelope[ConversationDetailResponse], responses=errors,
+        summary="读取会话、报告和下载入口",
+        description=("默认返回消息和附件历史、正式报告及产物下载入口；include=none 只读轻量状态。"
+                     "可按需选择 history、report、artifacts，未加载的字段为 null。"
+                     "读取不运行模型，报告就绪后即可展示，无需等待归档。"),
         operation_id="get_agent_conversation",
+        openapi_extra={"parameters": [{
+            "name": "include", "in": "query", "required": False,
+            "schema": {"type": "string", "default": "history,report,artifacts"},
+            "description": "none 或以逗号分隔、不重复的 history、report、artifacts；不得重复指定参数。",
+        }, *[{"name": name, "in": "query", "required": False, "schema": schema}
+             for name, schema in (("run_id", {"type": "string", "format": "uuid"}),
+                                  ("history_before", {"type": "string"}),
+                                  ("history_limit", {"type": "integer", "default": 50, "minimum": 1, "maximum": 100}))]]},
     )
     async def get_conversation(
         conversation_id: Annotated[OpaqueId, Path()], request: Request,
     ) -> JSONResponse:
         return await respond("get_conversation", request, conversation_id=conversation_id)
-
-    @app.get(
-        f"{_PREFIX}/conversations/{{conversation_id}}/status", tags=["Agent"],
-        response_model=SuccessEnvelope[ConversationStatusView], responses=errors,
-        summary="读取会话轻量状态",
-        description="返回追问、失败原因、报告可用状态及事件游标；不加载消息正文或附件历史。",
-        operation_id="get_agent_conversation_status",
-    )
-    async def get_status(
-        conversation_id: Annotated[OpaqueId, Path()], request: Request,
-    ) -> JSONResponse:
-        return await respond("get_status", request, conversation_id=conversation_id)
-
-    @app.get(
-        f"{_PREFIX}/conversations/{{conversation_id}}/report", tags=["Agent"],
-        response_model=SuccessEnvelope[ConversationReportView], responses=errors,
-        summary="读取会话正式诊断报告",
-        description=("PENDING 表示等待诊断或补充，READY 返回完整报告，UNAVAILABLE 表示已结束但无报告。"
-                     "三种状态均返回 HTTP 200；读取不运行模型或重新审核证据，归档失败不影响已发布报告。"),
-        operation_id="get_agent_conversation_report",
-    )
-    async def get_report(
-        conversation_id: Annotated[OpaqueId, Path()], request: Request,
-    ) -> JSONResponse:
-        return await respond("get_report", request, conversation_id=conversation_id)
 
     @app.get(
         f"{_PREFIX}/conversations/{{conversation_id}}/events", tags=["Agent"],
@@ -323,12 +438,14 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
     ) -> JSONResponse | StreamingResponse:
         try:
             cursor = _event_cursor(request)
+            owner_key = _owner_key(request)
         except ValueError:
             return _invalid()
         try:
             first = _checked_batch(await call(
                 "list_events", conversation_id=conversation_id,
                 after_sequence=cursor, limit=_EVENT_BATCH_SIZE,
+                owner_key=owner_key,
             ), conversation_id, cursor)
         except AgentStoreError as exc:
             return _failure(exc.code, exc.message, exc.status_code, details=exc.details, retryable=exc.retryable)
@@ -338,24 +455,22 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
             _LOGGER.exception("Agent SSE initial read failed")
             return _failure("STATE_CORRUPT", "暂时无法读取会话事件，请稍后重试。", 503)
         return _SseResponse(
-            _events(request, service, conversation_id, cursor, first),
+            _events(request, service, conversation_id, cursor, first, owner_key),
             headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
         )
 
     @app.post(
-        f"{_PREFIX}/conversations/{{conversation_id}}/attachments", tags=["Agent"],
+        f"{_PREFIX}/attachments", tags=["Agent"],
         response_model=SuccessEnvelope[PreparedAgentAttachment], responses=errors,
         summary="预约会话日志附件上传",
         description="在关联 Case 创建前后均可预约日志，收到 READY 后再在消息中引用附件 ID。",
         operation_id="prepare_agent_attachment",
     )
     async def prepare_attachment(
-        conversation_id: Annotated[OpaqueId, Path()], body: PrepareAgentAttachmentBody,
-        request: Request,
+        body: PrepareAgentAttachmentBody, request: Request,
     ) -> JSONResponse:
         result = await respond(
-            "prepare_attachment", request, conversation_id=conversation_id,
-            **body.model_dump(),
+            "prepare_attachment", request, **body.model_dump(),
         )
         if result.status_code != 200:
             return result
@@ -402,6 +517,7 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
     ) -> JSONResponse:
         try:
             _no_query(request)
+            owner_key = _owner_key(request)
             headers = parse_upload_headers(request, attachment_id)
             if headers.content_length < 1:
                 raise ValueError("附件不能为空。")
@@ -415,6 +531,7 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
                 attachment_id=attachment_id, request_id=headers.idempotency_key,
                 content_type=headers.content_type, content_length=headers.content_length,
                 content_sha256=headers.content_sha256, content=stream,
+                owner_key=owner_key,
             ), on_cancel=stream.abort)
             result = AgentAttachment.model_validate(model_json(result))
             return JSONResponse(success_envelope(result))
@@ -427,6 +544,79 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
             return _failure("UPLOAD_INCOMPLETE", "上传未完成，请使用相同附件标识重试。", 409, retryable=True)
         finally:
             await stream.aclose()
+
+    @app.get(f"{_PREFIX}/conversations/{{conversation_id}}/files/{{artifact_id}}/content", tags=["Agent"],
+             response_class=StreamingResponse, response_model=None, responses=errors,
+             operation_id="download_agent_file", summary="下载指定会话轮次的文件",
+             description="校验归属及轮次中的产物身份后传输不可变字节；资源使用租约保持到传输结束。",
+             openapi_extra={"parameters": [{"name": "run_id", "in": "query", "required": False,
+                                            "schema": {"type": "string", "format": "uuid"}}]})
+    async def download_file(conversation_id: Annotated[OpaqueId, Path()], artifact_id: Annotated[OpaqueId, Path()],
+                            request: Request):
+        from .http_app import _ClosingStreamingResponse
+        from .http_streaming import iterate_binary_stream
+
+        try:
+            owner_key = _owner_key(request)
+            query = _query(request, {"run_id"})
+            run_id = query.get("run_id")
+            if run_id is not None and _UUID.fullmatch(run_id) is None:
+                raise ValueError("轮次标识无效。")
+        except ValueError:
+            return _invalid()
+        if service is None or query_port is None:
+            return _failure("AGENT_UNAVAILABLE", "Agent 服务尚未配置。", 503)
+
+        def open_owned():
+            lease = service.operation_lease(conversation_id, owner_key=owner_key)
+            lease.__enter__()
+            try:
+                detail = service.get_conversation(conversation_id, include=("artifacts",),
+                                                  run_id=run_id, owner_key=owner_key)
+                artifact = next((item for item in detail.artifacts or [] if item.artifact_id == artifact_id), None)
+                if artifact is None or detail.case_id is None:
+                    raise AgentStoreError("ARTIFACT_NOT_FOUND", "产物不存在。", 404)
+                opened = query_port.open_artifact(detail.case_id, artifact_id)
+            except BaseException:
+                lease.__exit__(None, None, None)
+                raise
+
+            class LeasedStream:
+                closed = False
+
+                def read(self, size=-1):
+                    return opened.stream.read(size)
+
+                def close(self):
+                    if not self.closed:
+                        self.closed = True
+                        try:
+                            opened.stream.close()
+                        finally:
+                            lease.__exit__(None, None, None)
+
+            return opened.artifact, LeasedStream()
+
+        try:
+            artifact, stream = await _port_call(open_owned, dispose_cancelled_result=lambda item: item[1].close())
+            return _ClosingStreamingResponse(stream, iterate_binary_stream(stream), media_type=None, headers={
+                "Content-Type": artifact.content_type, "Content-Length": str(artifact.size),
+                "X-Content-SHA256": artifact.sha256, "Cache-Control": "no-store",
+            })
+        except AgentStoreError as exc:
+            return _failure(exc.code, exc.message, exc.status_code, details=exc.details, retryable=exc.retryable)
+        except ApplicationPortError as exc:
+            return JSONResponse(error_envelope(exc.error), status_code=http_status_for(exc.error))
+        except Exception:
+            _LOGGER.exception("Agent file download failed")
+            return _failure("STATE_CORRUPT", "暂时无法读取诊断文件。", 503)
+
+    # Keep the trust boundary visible in generated OpenAPI on every Agent route.
+    for route in app.routes:
+        if getattr(route, "path", "").startswith(_PREFIX + "/"):
+            extra = dict(getattr(route, "openapi_extra", None) or {})
+            extra["parameters"] = [*(extra.get("parameters") or []), _OWNER_PARAMETER]
+            route.openapi_extra = extra
 
 
 __all__ = ["register_agent_routes"]

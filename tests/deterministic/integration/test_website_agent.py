@@ -23,6 +23,8 @@ from tests.deterministic.journey.test_rpc_timeout import (
 from tests.deterministic.unit.interfaces.fakes import FakeStateAdmin
 from tests.deterministic.unit.interfaces.helpers import readiness
 
+OWNER_KEY = "a" * 64
+
 
 class ScriptedIntake:
     def __init__(self):
@@ -62,11 +64,12 @@ def website(tmp_path):
     store = AgentStore(stack.repository, stack.clock, stack.ids, runtime_epoch="website-epoch")
     engine = ScriptedIntake()
     service = AgentConversationService(store, stack.application, engine, stack.layout)
+    service.dispatcher = stack.scheduler
     stack.runtime._public_progress = store.append_case_progress
     app = create_http_app(command_port=stack.application, query_port=stack.application,
         state_admin=FakeStateAdmin(readiness=readiness()), public_base_url="http://testserver", agent_service=service)
     stack.start()
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Agent-Owner-Key": OWNER_KEY}) as client:
         yield stack, store, engine, service, client
     assert service.shutdown(2)
     stack.shutdown()
@@ -80,7 +83,8 @@ def _post(client, path, data):
 
 def _preupload(client, prefix):
     data = ARCHIVE.read_bytes()
-    prepared = _post(client, prefix + "/attachments", {"request_id": "logs:1", "name": "logs.zip",
+    prepared = _post(client, "/api/v1/agent/attachments", {
+        "conversation_id": prefix.rsplit("/", 1)[-1], "request_id": "logs:1", "name": "logs.zip",
         "content_type": "application/zip", "declared_size": len(data), "declared_sha256": hashlib.sha256(data).hexdigest()})
     upload = prepared["upload"]
     uploaded = client.put(upload["url"], content=data,
@@ -121,7 +125,7 @@ def test_first_problem_creates_case_before_one_requirement_aware_intake(website,
         return execute(command)
 
     monkeypatch.setattr(type(stack.application), "execute", lambda self, command: recorded(command))
-    conversation = service.create_conversation("case-first").conversation_id
+    conversation = service.create_conversation("case-first", owner_key=OWNER_KEY).conversation_id
     prefix = f"/api/v1/agent/conversations/{conversation}"
     message = {"request_id": "first", "text": original}
     receipt = _post(client, prefix + "/messages", message)
@@ -162,7 +166,7 @@ def test_first_problem_creates_case_before_one_requirement_aware_intake(website,
 
 def test_attachment_only_message_waits_only_for_description_and_is_imported_after_case_exists(website):
     stack, store, engine, service, client = website
-    conversation = service.create_conversation("attachment-first").conversation_id
+    conversation = service.create_conversation("attachment-first", owner_key=OWNER_KEY).conversation_id
     prefix = f"/api/v1/agent/conversations/{conversation}"
     attachment_id = _preupload(client, prefix)
     message = {"request_id": "logs-only", "text": None, "attachment_ids": [attachment_id]}
@@ -255,7 +259,8 @@ def test_raw_conversation_preupload_sse_and_final_report(website, review):
     assert len(stack.repository.read_case(view.case_id).attachments) == 1
     assert len(engine.calls) == 1
     assert _post(client, prefix + "/messages", message) == accepted
-    assert client.post(prefix + "/messages", json={"request_id": "later", "text": "新问题"}).status_code == 409
+    # A completed report allows a new explicit diagnostic run, including while
+    # the old run's archive is still pending. That race has its own regression.
     artifacts = client.get(f"/api/v1/cases/{view.case_id}/artifacts").json()["data"]["artifacts"]
     report = next(item for item in artifacts if item["kind"] == "USER_RESULT")
     downloaded = client.get(report["download_url"])
@@ -286,14 +291,15 @@ def test_restart_retains_history_and_requires_explicit_new_task(website):
     assert service.get_conversation(conversation).status == "INTERRUPTED"
     assert len(engine.calls) == original_calls
     assert [item.model_dump() for item in store.list_events(conversation)[:len(first_events)]] == first_events
-    assert client.post(prefix + "/messages", json={"request_id": "new", "text": "继续"}).status_code == 409
-    assert not service.run_once(conversation)
+    new = client.post(prefix + "/messages", json={"request_id": "new", "text": "继续"})
+    assert new.status_code == 200
+    assert new.json()["data"]["run_id"] != store.list_events(conversation)[0].run_id
 
 
 @pytest.mark.parametrize("unrelated_runtime_fault", [False, True])
 def test_restart_history_and_sse_survive_missing_volatile_case_with_operational_state(website, unrelated_runtime_fault):
     stack, store, engine, service, client = website
-    conversation = service.create_conversation("lost-volatile-case").conversation_id
+    conversation = service.create_conversation("lost-volatile-case", owner_key=OWNER_KEY).conversation_id
     service.send_message(conversation, "received", "重启前已接收的问题")
     missing_case = str(uuid.uuid4())
     store.bind_case(conversation, missing_case)
@@ -363,7 +369,7 @@ def test_non_pass_review_publishes_only_inconclusive_report_and_audit(website, m
 
 def test_invalid_upload_can_retry_without_adopting_different_bytes(website):
     _, store, _, service, client = website
-    conversation = service.create_conversation("uploads").conversation_id
+    conversation = service.create_conversation("uploads", owner_key=OWNER_KEY).conversation_id
     payload = b"synthetic archive bytes"
     attachment = service.prepare_attachment(conversation, "upload", "logs.zip", "application/zip",
         len(payload), hashlib.sha256(payload).hexdigest())
@@ -379,7 +385,7 @@ def test_invalid_upload_can_retry_without_adopting_different_bytes(website):
 
 def test_long_multi_round_history_keeps_complete_first_message_as_case_text(website):
     stack, _, engine, service, client = website
-    conversation = service.create_conversation("long-history").conversation_id
+    conversation = service.create_conversation("long-history", owner_key=OWNER_KEY).conversation_id
     first = "RPC timeout\n" + "x" * 33000
     second = "补充说明\n" + "y" * 33000
     service.send_message(conversation, "first", first)
@@ -401,7 +407,7 @@ def test_long_multi_round_history_keeps_complete_first_message_as_case_text(webs
 
 def test_rejected_case_command_never_claims_the_message_was_adopted(website, monkeypatch):
     stack, store, _, service, _ = website
-    conversation = service.create_conversation("failed-command").conversation_id
+    conversation = service.create_conversation("failed-command", owner_key=OWNER_KEY).conversation_id
     service.send_message(conversation, "create", "RPC timeout RPC completes payment-to-inventory RPC synthetic-order-0001")
     execute = stack.application.execute
 
@@ -445,7 +451,6 @@ def test_invalid_intake_ends_once_with_durable_safe_snapshot_diagnostics(website
     uuid.UUID(details["diagnostic_id"])
     assert len(calls) == 1 and not service.run_once(conversation)
     assert _post(client, prefix + "/messages", message) == receipt
-    assert client.post(prefix + "/messages", json={"request_id": "again", "text": "更正"}).status_code == 409
     store.runtime_epoch = "later-runtime"
     store.recover()
     assert client.get(prefix).json()["data"]["failure"] == failure
@@ -456,11 +461,15 @@ def test_invalid_intake_ends_once_with_durable_safe_snapshot_diagnostics(website
     assert frames[-1]["type"] == "conversation.completed"
     assert "SECRET" not in json.dumps(first) + events.text
     assert "/srv/private" not in json.dumps(first) + events.text
+    new = client.post(prefix + "/messages", json={"request_id": "again", "text": "更正"})
+    assert new.status_code == 200 and new.json()["data"]["run_id"] != first["current_run"]["run_id"]
+    historical = client.get(prefix, params={"run_id": first["current_run"]["run_id"]})
+    assert historical.json()["data"]["failure"] == failure
 
 
 def test_typed_command_error_keeps_only_safe_field_location_in_failure(website, monkeypatch):
     stack, store, _, service, client = website
-    conversation = service.create_conversation("typed-location").conversation_id
+    conversation = service.create_conversation("typed-location", owner_key=OWNER_KEY).conversation_id
     service.send_message(conversation, "message", "待定位的问题")
 
     def rejected(self, command):
@@ -505,9 +514,9 @@ def test_agent_admission_rejects_before_acceptance_and_does_not_finalize_unknown
 
 def test_accepted_message_before_case_returns_safe_pause_when_another_task_halts_dispatch(website):
     stack, store, engine, service, client = website
-    conversation = service.create_conversation("accepted-before-fatal").conversation_id
-    empty = service.create_conversation("empty-history").conversation_id
-    closed = service.create_conversation("closed-history").conversation_id
+    conversation = service.create_conversation("accepted-before-fatal", owner_key=OWNER_KEY).conversation_id
+    empty = service.create_conversation("empty-history", owner_key=OWNER_KEY).conversation_id
+    closed = service.create_conversation("closed-history", owner_key=OWNER_KEY).conversation_id
     store.fail_conversation(closed)
     prefix = f"/api/v1/agent/conversations/{conversation}"
     receipt = _post(client, prefix + "/messages", {"request_id": "accepted", "text": "已经接收但尚未创建任务的问题"})

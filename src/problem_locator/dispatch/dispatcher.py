@@ -39,6 +39,7 @@ class InProcessDispatcher:
         self._running: dict[str, tuple[str, CancellationController]] = {}
         self._active_cases: set[str] = set()
         self._finishing: set[str] = set()
+        self._deleted_cases: set[str] = set()
         self._accepting = True
         self._claiming_enabled = False
         self._stop_requested = False
@@ -73,6 +74,26 @@ class InProcessDispatcher:
             item = self._running.get(job_id)
             return None if item is None else item[0]
 
+    def cases_idle(self, case_ids) -> bool:
+        selected = set(case_ids)
+        with self._condition:
+            return not selected.intersection(self._active_cases) and not any(
+                item[0] in selected for item in self._queued.values())
+
+    def cancel_cases(self, case_ids) -> None:
+        """Fence late queue notifications for explicitly deleted Agent Cases."""
+        selected = set(case_ids)
+        with self._condition:
+            self._deleted_cases.update(selected)
+            for job_id, item in tuple(self._queued.items()):
+                if item[0] in selected:
+                    self._queued.pop(job_id)
+                    self._queues[item[1]].remove(job_id)
+            for job_id, (case_id, cancellation) in self._running.items():
+                if case_id in selected and job_id not in self._finishing:
+                    cancellation.cancel(CancellationReason.USER_CANCEL)
+            self._condition.notify_all()
+
     def start(self) -> None:
         with self._condition:
             if self._threads:
@@ -103,6 +124,8 @@ class InProcessDispatcher:
         with self._condition:
             if job_id in self._queued or job_id in self._running:
                 return DispatchReceipt(job_id=job_id, accepted=False, duplicate=True)
+            if case_id in self._deleted_cases:
+                return DispatchReceipt(job_id=job_id, accepted=False, duplicate=False)
             if not self._accepting or not self._operational.accepting:
                 if self._has_persisted_identity and status in {None, JobStatus.PENDING}:
                     # An in-flight command/Outcome may commit a new Job after

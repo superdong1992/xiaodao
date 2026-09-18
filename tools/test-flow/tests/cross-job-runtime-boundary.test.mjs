@@ -1203,6 +1203,23 @@ test("native CrossJob server inspect is exact and rejects state, image, label, s
   }
 });
 
+test("server BFF has its own exact loopback binding without opening extra host interfaces", () => {
+  const value = nativeServerInspection();
+  value.state.website_port = 43129;
+  for (const ports of [value.server.HostConfig.PortBindings, value.server.NetworkSettings.Ports]) {
+    ports["8001/tcp"] = [{ HostIp: "127.0.0.1", HostPort: "43129" }];
+  }
+  assert.equal(validServerRuntimeInspection(value), true);
+  for (const mutate of [
+    (changed) => { changed.server.HostConfig.PortBindings["8001/tcp"][0].HostIp = "0.0.0.0"; },
+    (changed) => { changed.server.NetworkSettings.Ports["8001/tcp"][0].HostPort = "43130"; },
+    (changed) => { delete changed.server.HostConfig.PortBindings["8001/tcp"]; },
+    (changed) => { changed.state.website_port = changed.state.port; },
+  ]) {
+    const changed = clone(value); mutate(changed); assert.equal(validServerRuntimeInspection(changed), false);
+  }
+});
+
 function nativePassBoundary() {
   const runId = "run-native-runtime-boundary";
   const serverImageId = `sha256:${"a".repeat(64)}`;

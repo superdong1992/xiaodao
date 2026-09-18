@@ -1,4 +1,4 @@
-"""Native report/status endpoints cross real Agent, query, publication and SSE paths."""
+"""Conversation projections cross real Agent, query, publication and SSE paths."""
 from __future__ import annotations
 
 import hashlib
@@ -11,7 +11,7 @@ import pytest
 from problem_locator.contracts import ErrorCode, ReviewPolicy, canonical_json_bytes
 from problem_locator.operational import OperationalState
 from tests.deterministic.integration.test_website_agent import (
-    PARAMETER_GROUP_A, _converse_to_waiting, _post, website,
+    PARAMETER_GROUP_A, OWNER_KEY, _converse_to_waiting, _post, website,
 )
 from tests.deterministic.unit.application.test_reports import generic_report
 
@@ -23,12 +23,19 @@ def _get(client, path):
     return response.json()["data"]
 
 
+def _report(client, prefix):
+    detail = _get(client, prefix + "?include=report")
+    assert detail["schema_version"] == 3 and detail["included"] == ["report"]
+    assert detail["history"] is detail["attachments"] is detail["artifacts"] is None
+    return detail["result"]
+
+
 def _finish_diagnosis(website):
     stack, store, engine, service, client = website
     conversation, prefix, _ = _converse_to_waiting(website)
-    before = _get(client, prefix + "/report")
+    before = _report(client, prefix)
     assert before["report_state"] == "PENDING" and before["report"] is None
-    assert _get(client, prefix + "/status")["report_state"] == "PENDING"
+    assert _get(client, prefix + "?include=none")["report_state"] == "PENDING"
     _post(client, prefix + "/messages", {"request_id": "answer",
         "text": "\n".join(f"{key}={value}" for key, value in PARAMETER_GROUP_A.items())})
     assert service.run_once(conversation)
@@ -60,7 +67,10 @@ def test_native_report_reads_all_published_diagnosis_results_and_same_raw_artifa
 
         monkeypatch.setattr(backend, "execute", reject_review)
     conversation, prefix = _finish_diagnosis(website)
-    result = _get(client, prefix + "/report")
+    detail = _get(client, prefix)
+    assert detail["schema_version"] == 3 and detail["included"] == ["history", "report", "artifacts"]
+    assert detail["history"] and detail["attachments"]
+    result = detail["result"]
     assert result["report_state"] == "READY"
     assert result["format"] == "problem-locator-diagnosis-v3"
     assert result["report"]["status"] == result_status and result["markdown"] is None
@@ -70,10 +80,15 @@ def test_native_report_reads_all_published_diagnosis_results_and_same_raw_artifa
     artifact = result["artifact"]
     assert artifact["created_by_job_id"] == result["source_job_id"]
     assert "storage_key" not in artifact and "download_url" not in artifact
-    raw = client.get(f'/api/v1/artifacts/{artifact["artifact_id"]}/content', params={"case_id": result["case_id"]})
+    descriptor = next(item for item in detail["artifacts"] if item["artifact_id"] == artifact["artifact_id"])
+    assert descriptor["download_url"].startswith(
+        f'http://testserver/api/v1/agent/conversations/{conversation}/files/{artifact["artifact_id"]}/content')
+    assert descriptor["created_by_job_id"] == detail["source_job_id"] == result["source_job_id"]
+    assert detail["case_revision"] == result["case_revision"]
+    raw = client.get(descriptor["download_url"])
     assert raw.status_code == 200 and raw.json() == result["report"]
     assert len(raw.content) == artifact["size"] and hashlib.sha256(raw.content).hexdigest() == artifact["sha256"]
-    assert _get(client, prefix + "/status")["report_state"] == "READY"
+    assert _get(client, prefix + "?include=none")["report_state"] == "READY"
     if result_status != "INCONCLUSIVE":
         assert result["archive_status"] == "PENDING"
         assert stack.archive.run_once()
@@ -82,26 +97,26 @@ def test_native_report_reads_all_published_diagnosis_results_and_same_raw_artifa
     frames = [json.loads(frame[6:]) for frame in replay.content.split(b"\n\n") if frame.startswith(b"data: ")]
     assert any(item["type"] == "result.available" for item in frames)
     assert frames[-1]["type"] == "conversation.completed"
-    assert _get(client, prefix + "/report")["report"] == result["report"]
+    assert _report(client, prefix)["report"] == result["report"]
     assert len(engine.calls) == 1
 
 
 def test_pending_and_failed_conversation_are_business_states_not_http_errors(website):
     stack, store, engine, service, client = website
-    conversation = service.create_conversation("report-state").conversation_id
+    conversation = service.create_conversation("report-state", owner_key=OWNER_KEY).conversation_id
     prefix = f"/api/v1/agent/conversations/{conversation}"
-    for suffix in ("/report", "/status"):
+    for suffix in ("?include=report", "?include=none"):
         data = _get(client, prefix + suffix)
         assert data["report_state"] == "PENDING" and data["case_id"] is None
-        assert "messages" not in data and "attachments" not in data
+        assert data["history"] is None and data["attachments"] is None
     store.fail_conversation(conversation, "INTAKE_EXECUTION_FAILED", phase="INTAKE")
-    for suffix in ("/report", "/status"):
+    for suffix in ("?include=report", "?include=none"):
         data = _get(client, prefix + suffix)
         assert data["report_state"] == "UNAVAILABLE"
         assert data["failure"]["code"] == "INTAKE_EXECUTION_FAILED"
         assert data["failure"]["retryable"] is False
     assert engine.calls == []
-    for suffix in ("/report", "/status"):
+    for suffix in ("?include=report", "?include=none"):
         response = client.get(f"/api/v1/agent/conversations/{uuid.uuid4()}{suffix}")
         assert response.status_code == 404 and response.json()["ok"] is False
 
@@ -110,7 +125,7 @@ def test_pending_and_failed_conversation_are_business_states_not_http_errors(web
 def test_archive_delays_and_failures_keep_native_report_readable(website, monkeypatch, archive_state):
     stack, store, engine, service, client = website
     conversation, prefix = _finish_diagnosis(website)
-    original = _get(client, prefix + "/report")
+    original = _report(client, prefix)
     if archive_state == "FAILED":
         def fail_archive(*args, **kwargs):
             raise OSError("private disk path must not become a public message")
@@ -133,14 +148,14 @@ def test_archive_delays_and_failures_keep_native_report_readable(website, monkey
     persisted = store.get_conversation(conversation)
     events = store.list_events(conversation, limit=500)
     snapshot_calls = []
-    read_snapshot = stack.repository.read_snapshot
+    read_snapshot = stack.repository._load_case
 
     def record_snapshot(*args, **kwargs):
         snapshot_calls.append((args, kwargs))
         return read_snapshot(*args, **kwargs)
 
-    monkeypatch.setattr(stack.repository, "read_snapshot", record_snapshot)
-    result = _get(client, prefix + "/report")
+    monkeypatch.setattr(stack.repository, "_load_case", record_snapshot)
+    result = _report(client, prefix)
     assert len(snapshot_calls) == 1
     assert result["report_state"] == "READY" and result["report"] == original["report"]
     assert result["artifact"] == original["artifact"]
@@ -154,7 +169,7 @@ def test_archive_delays_and_failures_keep_native_report_readable(website, monkey
     assert store.get_conversation(conversation) == persisted and store.list_events(conversation, limit=500) == events
 
 
-def test_status_report_and_sse_are_read_only_and_never_load_message_or_attachment_history(website, monkeypatch):
+def test_lightweight_report_and_sse_are_read_only_and_never_load_message_or_attachment_history(website, monkeypatch):
     stack, store, engine, service, client = website
     conversation, prefix = _finish_diagnosis(website)
     assert stack.archive.run_once()
@@ -163,7 +178,7 @@ def test_status_report_and_sse_are_read_only_and_never_load_message_or_attachmen
     model_record = stack.data_root.parent / "agent.jsonl"
     model_bytes = model_record.read_bytes()
     snapshot_calls, statements = [], []
-    read_snapshot = stack.repository.read_snapshot
+    read_snapshot = stack.repository._load_case
 
     def record_snapshot(*args, **kwargs):
         snapshot_calls.append((args, kwargs))
@@ -173,7 +188,7 @@ def test_status_report_and_sse_are_read_only_and_never_load_message_or_attachmen
         raise AssertionError("只读状态、报告及 SSE 不得加载历史、写入或启动模型。")
 
     with monkeypatch.context() as patch:
-        patch.setattr(stack.repository, "read_snapshot", record_snapshot)
+        patch.setattr(stack.repository, "_load_case", record_snapshot)
         patch.setattr(stack.repository, "database_transaction", forbidden)
         patch.setattr(stack.repository, "commit", forbidden)
         patch.setattr(store, "get_conversation", forbidden)
@@ -183,12 +198,12 @@ def test_status_report_and_sse_are_read_only_and_never_load_message_or_attachmen
         with stack.repository.database_read() as db:
             db.set_trace_callback(statements.append)
         try:
-            status = _get(client, prefix + "/status")
+            status = _get(client, prefix + "?include=none")
             assert status["last_event_id"] == before.last_event_id
-            assert "messages" not in status and "attachments" not in status
+            assert status["history"] is None and status["attachments"] is None
             assert snapshot_calls == []
-            report = _get(client, prefix + "/report")
-            assert _get(client, prefix + "/report") == report
+            report = _report(client, prefix)
+            assert _report(client, prefix) == report
             assert len(snapshot_calls) == 2
             replay = client.get(prefix + "/events")
             assert replay.status_code == 200 and "conversation.completed" in replay.text
@@ -201,11 +216,54 @@ def test_status_report_and_sse_are_read_only_and_never_load_message_or_attachmen
     assert model_record.read_bytes() == model_bytes and store.get_conversation(conversation) == before
 
 
+def test_full_conversation_reuses_one_case_snapshot_and_artifacts_only_does_not_open_report(website, monkeypatch):
+    stack, store, engine, service, client = website
+    conversation, prefix = _finish_diagnosis(website)
+    assert stack.archive.run_once()
+    model_bytes = (stack.data_root.parent / "agent.jsonl").read_bytes()
+    snapshot_calls, opened = [], []
+    read_snapshot = stack.repository._load_case
+    open_read = stack.resources.open_read
+
+    def record_snapshot(*args, **kwargs):
+        snapshot_calls.append((args, kwargs))
+        return read_snapshot(*args, **kwargs)
+
+    def record_open(resource):
+        opened.append(resource)
+        return open_read(resource)
+
+    monkeypatch.setattr(stack.repository, "_load_case", record_snapshot)
+    monkeypatch.setattr(stack.resources, "open_read", record_open)
+    full = _get(client, prefix)
+    assert len(snapshot_calls) == 1 and len(opened) == 1
+    assert full["history"] and full["attachments"] and full["result"]["report_state"] == "READY"
+    assert full["result"]["case_revision"] == full["case_revision"]
+    assert full["result"]["source_job_id"] == full["source_job_id"]
+    assert {item["kind"] for item in full["artifacts"]} >= {"USER_RESULT", "USER_RESULT_ARCHIVE"}
+    assert all(item["created_by_job_id"] == full["source_job_id"] for item in full["artifacts"])
+    snapshot_calls.clear()
+    opened.clear()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("只读产物元数据不得打开报告、归档或加载消息历史。")
+
+    monkeypatch.setattr(stack.resources, "open_read", forbidden)
+    monkeypatch.setattr(store, "get_conversation", forbidden)
+    metadata = _get(client, prefix + "?include=artifacts")
+    assert len(snapshot_calls) == 1
+    assert metadata["result"] is metadata["history"] is metadata["attachments"] is None
+    assert metadata["source_job_id"] == full["source_job_id"]
+    assert metadata["case_revision"] == full["case_revision"]
+    assert metadata["artifacts"] == full["artifacts"]
+    assert (stack.data_root.parent / "agent.jsonl").read_bytes() == model_bytes
+
+
 @pytest.mark.parametrize("version", [1, 2])
 def test_native_report_projects_historical_generic_versions_without_rewriting_artifacts(website, monkeypatch, version):
     stack, store, engine, service, client = website
     aggregate, resources, generic = generic_report(version)
-    conversation = service.create_conversation(f"generic-history-{version}").conversation_id
+    conversation = service.create_conversation(f"generic-history-{version}", owner_key=OWNER_KEY).conversation_id
     store.bind_case(conversation, aggregate.case.case_id)
     # Historical snapshots enter through the same repository port as restored
     # SQLite data; no model execution or special HTTP-only report fixture.
@@ -217,10 +275,10 @@ def test_native_report_projects_historical_generic_versions_without_rewriting_ar
         calls.append(case_id)
         return snapshot
 
-    monkeypatch.setattr(stack.repository, "read_snapshot", read_snapshot)
+    monkeypatch.setattr(stack.repository, "_load_case", read_snapshot)
     monkeypatch.setattr(stack.application.queries, "_resource_store", resources)
     prefix = f"/api/v1/agent/conversations/{conversation}"
-    data = _get(client, prefix + "/report")
+    data = _report(client, prefix)
     assert calls == [aggregate.case.case_id] and data["report_state"] == "READY"
     assert data["source_job_id"] == generic.source_job_id
     if version == 1:
@@ -242,7 +300,7 @@ def test_native_report_preserves_delivery_uncertainty_until_authoritative_result
         error_code=ErrorCode.STATE_WRITE_FAILED)
     service.application = replace(stack.application, operational_state=operational)
     stack.application.queries._operational = operational
-    for suffix in ("/status", "/report"):
+    for suffix in ("?include=none", "?include=report"):
         response = client.get(prefix + suffix)
         assert response.status_code == 503, response.text
         assert response.json()["error"]["code"] == "DISPATCH_REJECTED"
@@ -253,7 +311,7 @@ def test_native_report_preserves_delivery_uncertainty_until_authoritative_result
 
 def test_interrupted_history_without_volatile_case_returns_unavailable_and_original_failure(website):
     stack, store, engine, service, client = website
-    conversation = service.create_conversation("interrupted-history").conversation_id
+    conversation = service.create_conversation("interrupted-history", owner_key=OWNER_KEY).conversation_id
     service.send_message(conversation, "accepted-before-restart", "重启前接收的问题。")
     missing_case = str(uuid.uuid4())
     store.bind_case(conversation, missing_case)
@@ -262,11 +320,11 @@ def test_interrupted_history_without_volatile_case_returns_unavailable_and_origi
     before = store.get_conversation(conversation)
     assert before.status == "INTERRUPTED" and before.failure is not None
     prefix = f"/api/v1/agent/conversations/{conversation}"
-    for suffix in ("/status", "/report"):
+    for suffix in ("?include=none", "?include=report"):
         result = _get(client, prefix + suffix)
         assert result["report_state"] == "UNAVAILABLE" and result["case_id"] == missing_case
         assert result["failure"] == before.failure.model_dump(mode="json")
-    assert _get(client, prefix + "/report")["report"] is None
+    assert _report(client, prefix)["report"] is None
     assert store.get_conversation(conversation) == before and engine.calls == []
 
 
@@ -274,9 +332,9 @@ def test_missing_case_cannot_hide_corruption_of_an_already_ready_report(website,
     stack, store, engine, service, client = website
     conversation, prefix = _finish_diagnosis(website)
     assert stack.archive.run_once()
-    assert _get(client, prefix + "/status")["report_state"] == "READY"
+    assert _get(client, prefix + "?include=none")["report_state"] == "READY"
     from problem_locator.contracts import StateFile
-    monkeypatch.setattr(stack.repository, "read_snapshot", lambda *args, **kwargs: StateFile.model_construct(cases={}))
-    response = client.get(prefix + "/report")
+    monkeypatch.setattr(stack.repository, "_load_case", lambda *args, **kwargs: StateFile.model_construct(cases={}))
+    response = client.get(prefix + "?include=report")
     assert response.status_code == 404 and response.json()["error"]["code"] == "CASE_NOT_FOUND"
     assert store.get_status(conversation).report_state == "READY"

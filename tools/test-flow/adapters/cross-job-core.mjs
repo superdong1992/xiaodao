@@ -39,7 +39,8 @@ import {
   readServerMcpCorrespondence,
   EventWriter,
 } from "../lib/events.mjs";
-import { runWebsiteStep, validateWebsiteEvidence } from "../lib/website-agent.mjs";
+import { validateWebsiteEvidence } from "../lib/website-agent.mjs";
+import { websiteUploadPage, websiteResolvedPage } from "../lib/website-browser.mjs";
 import { recoverStageAuditProgress } from "../lib/evidence.mjs";
 import {
   discoverReleaseCaseRoot,
@@ -451,15 +452,18 @@ function dockerSocketMounted(mounts) {
     .some((entry) => typeof entry === "string" && path.posix.basename(entry.replaceAll("\\", "/")) === "docker.sock"));
 }
 
-function exactLoopbackPortBinding(value, port) {
+function exactLoopbackPortBinding(value, port, websitePort = null) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  if (canonicalJson(Object.keys(value).sort()) !== canonicalJson(["8000/tcp"])) return false;
-  const bindings = value["8000/tcp"];
-  return Array.isArray(bindings)
+  const expected = { "8000/tcp": port, ...(websitePort === null ? {} : { "8001/tcp": websitePort }) };
+  if (canonicalJson(Object.keys(value).sort()) !== canonicalJson(Object.keys(expected).sort())) return false;
+  return Object.entries(expected).every(([key, expectedPort]) => {
+    const bindings = value[key];
+    return Array.isArray(bindings)
     && bindings.length === 1
     && canonicalJson(Object.keys(bindings[0] ?? {}).sort()) === canonicalJson(["HostIp", "HostPort"])
     && bindings[0].HostIp === "127.0.0.1"
-    && bindings[0].HostPort === String(port);
+    && bindings[0].HostPort === String(expectedPort);
+  });
 }
 
 export function validServerRuntimeInspection({
@@ -509,8 +513,10 @@ export function validServerRuntimeInspection({
     && state.client_image_id === null
     && state.runtime_images?.client_image_id === null
     && state.selected_client_runtime_observed === null
-    && exactLoopbackPortBinding(hostPortBindings, state.port)
-    && exactLoopbackPortBinding(publishedPorts, state.port);
+    && (state.website_port === undefined || Number.isSafeInteger(state.website_port)
+      && state.website_port > 0 && state.website_port <= 65535 && state.website_port !== state.port)
+    && exactLoopbackPortBinding(hostPortBindings, state.port, state.website_port ?? null)
+    && exactLoopbackPortBinding(publishedPorts, state.port, state.website_port ?? null);
 }
 
 function currentReleaseRuntimeIdentity(configuration) {
@@ -2050,6 +2056,7 @@ export function validatePhaseThree(audit, state, releaseCase) {
 }
 
 async function verifyResolvedWebApi(configuration, state, summary, stageRoot) {
+  if (state.conversation_id) return verifyResolvedWebsite(configuration, state, summary, stageRoot);
   const expectedArtifacts = [summary.public_artifact, summary.public_result_archive];
   const page = `<!doctype html><html><head><meta charset="utf-8"><title>PENDING</title></head><body><script>
 const configuration = ${scriptJson({
@@ -2165,7 +2172,15 @@ export function validateRestart(audit, state, releaseCase) {
 }
 
 async function downloadArtifacts(configuration, state, stageRoot, completionCriteria) {
+  if (state.conversation_id) await ensureWebsiteBackend(configuration, state);
   for (const [label, artifact] of [["diagnosis-result", state.public_artifact], ["result-archive", state.public_result_archive]]) {
+    const url = state.conversation_id
+      ? new URL(`/api/agent/conversations/${state.conversation_id}/files/${artifact.artifact_id}/content?run_id=${state.website_run_id}`, state.website_base_url)
+      : new URL(artifact.download_url);
+    if (state.conversation_id && artifact.kind === "USER_RESULT_ARCHIVE") {
+      url.searchParams.set("download", "archive"); url.searchParams.set("acknowledge_raw_logs", "true");
+    }
+    const headers = state.conversation_id ? { Authorization: `Bearer ${state.website_session}` } : {};
     const startedAtUtc = new Date().toISOString();
     const started = process.hrtime.bigint();
     let httpStatus;
@@ -2181,13 +2196,14 @@ async function downloadArtifacts(configuration, state, stageRoot, completionCrit
         "curl", "--noproxy", "*", "--fail", "--silent", "--show-error", "--max-time", "60",
         "--output", containerTarget,
         "--write-out", "%{http_code}",
-        "--", artifact.download_url,
+        ...Object.entries(headers).flatMap(([key, value]) => ["--header", `${key}: ${value}`]),
+        "--", url.href,
       ]), { forward: false });
       httpStatus = Number(transfer.stdout.trim());
       requireCondition(transfer.status === 0 && fs.existsSync(target), `RESTART_DOWNLOAD_${label.toUpperCase().replaceAll("-", "_")}`, "FAIL", "PRODUCT");
       bytes = fs.readFileSync(target);
     } else {
-      const response = await fetch(artifact.download_url, { signal: AbortSignal.timeout(60_000) });
+      const response = await fetch(url, { headers, signal: AbortSignal.timeout(60_000) });
       httpStatus = response.status;
       bytes = Buffer.from(await response.arrayBuffer());
     }
@@ -2553,7 +2569,8 @@ async function createContainer(configuration, state, containerName, mode, stageI
   if (register) appendResource(configuration.resourceRegistry, configuration.attemptRoot, "container", containerName, configuration.resourceLabel);
   const networkArguments = configuration.topology === DUAL_LINUX_TOPOLOGY
     ? ["--network", state.network, "--network-alias", "problem-locator-server"]
-    : ["--network", "bridge", "--publish", `127.0.0.1:${state.port}:8000/tcp`];
+    : ["--network", "bridge", "--publish", `127.0.0.1:${state.port}:8000/tcp`,
+      "--publish", `127.0.0.1:${state.website_port}:8001/tcp`];
   await docker(configuration.dockerContext, [
     "run", "--detach", "--init",
     "--name", containerName,
@@ -2692,6 +2709,8 @@ async function createFreshEnvironment(configuration, stageRoot, runtimeIdentity)
   const runId = path.basename(configuration.attemptRoot);
   const dualLinuxContainers = configuration.topology === DUAL_LINUX_TOPOLOGY;
   const port = dualLinuxContainers ? null : await availablePort();
+  let websitePort = dualLinuxContainers ? null : await availablePort();
+  while (!dualLinuxContainers && websitePort === port) websitePort = await availablePort();
   const imageInspect = await docker(configuration.dockerContext, ["image", "inspect", configuration.baseImage], { forward: false });
   const imageMetadata = JSON.parse(imageInspect.stdout)[0];
   requireCondition(imageMetadata?.Os === "linux" && imageMetadata?.Architecture === "amd64" && typeof imageMetadata?.Id === "string", "RELEASE_IMAGE_IDENTITY_INVALID", "BLOCKED", "INFRA");
@@ -2727,6 +2746,10 @@ async function createFreshEnvironment(configuration, stageRoot, runtimeIdentity)
     active_container: null,
     current_instance: null,
     port,
+    website_port: websitePort,
+    website_base_url: dualLinuxContainers ? "http://problem-locator-server:8001" : `http://127.0.0.1:${websitePort}`,
+    website_session: crypto.randomBytes(32).toString("hex"),
+    website_started_container: null,
     public_base_url: dualLinuxContainers ? "http://problem-locator-server:8000" : `http://127.0.0.1:${port}`,
     image_id: imageMetadata.Id,
     client_image_id: clientImageMetadata?.Id ?? null,
@@ -3138,15 +3161,77 @@ async function auditIntakeUsage(configuration, state) {
   return receipt.invocations;
 }
 
+async function ensureWebsiteBackend(configuration, state) {
+  if (state.website_started_container === state.active_container) return;
+  requireCondition(/^[a-f0-9]{64}$/.test(state.website_session ?? "") && state.archive?.name
+    && path.basename(state.archive.name) === state.archive.name, "WEBSITE_BACKEND_CONFIGURATION_INVALID");
+  const options = { upstream: "http://127.0.0.1:8000", sessionToken: state.website_session,
+    pagesRoot: "/evidence/stages", fixturePath: `/evidence/${state.archive.name}`, port: 8001 };
+  await docker(configuration.dockerContext, ["exec", "--detach", state.active_container, "sh", "-eu", "-c",
+    'exec /usr/bin/node /source/xiaodao/tools/test-flow/runtime-support/website_backend.mjs "$1" > "$2" 2>&1',
+    "test-flow-website", JSON.stringify(options), `/evidence/stages/${configuration.stage}/website-backend.log`]);
+  const probe = await run("docker", dockerArgs(configuration.dockerContext, ["exec", state.active_container,
+    "/opt/venvs/xiaodao/bin/python", "-I", "-c", `import time, urllib.request
+for attempt in range(60):
+    try:
+        with urllib.request.urlopen('http://127.0.0.1:8001/__testflow/ready', timeout=1) as response:
+            if response.status == 200 and response.read() == b'ready': raise SystemExit(0)
+    except Exception: pass
+    time.sleep(0.1)
+raise SystemExit(1)`]), { forward: false });
+  requireCondition(probe.status === 0, "WEBSITE_BACKEND_START_FAILED", "FAIL", "HARNESS");
+  state.website_started_container = state.active_container;
+  atomicState(configuration.statePath, state);
+}
+
+async function runWebsiteChromePage(configuration, state, label, page) {
+  await ensureWebsiteBackend(configuration, state);
+  writeTextNew(path.join(configuration.stageRoot, `website-${label}.html`), page);
+  const url = `${state.website_base_url}/__testflow/page/${configuration.stage}/${label}?session=${state.website_session}`;
+  // 客户端静态入口只负责打开 Linux Server 上的页面，不转发任何 API。
+  const launcher = `<!doctype html><html><head><title>PENDING</title></head><body><script>location.replace(${scriptJson(url)});</script></body></html>`;
+  const result = await runChromePage(configuration, state, label, launcher);
+  return { ...result, browserOrigin: new URL(state.website_base_url).origin };
+}
+
+async function verifyResolvedWebsite(configuration, state, summary, stageRoot) {
+  const expectedArtifacts = [summary.public_artifact, summary.public_result_archive];
+  const { browserOrigin, chrome, failBrowser, result } = await runWebsiteChromePage(configuration, state,
+    "resolved-api", websiteResolvedPage(state.conversation_id, state.website_run_id));
+  if (result.ok !== true) failBrowser?.("CHROME_WEBSITE_READ_FAILED");
+  const detail = result.detail?.data;
+  requireCondition(result.ok === true && result.status === 200 && result.detail.ok === true
+    && detail?.conversation_id === state.conversation_id && detail.selected_run_id === state.website_run_id
+    && detail.case_id === state.case_id && detail.case_revision === summary.resolved_case_revision
+    && detail.report_state === "READY" && detail.result?.report_state === "READY",
+  "CHROME_WEBSITE_RESULT_INVALID", "FAIL", "CONTRACT");
+  requireCondition(Array.isArray(detail.artifacts) && detail.artifacts.length === expectedArtifacts.length
+    && result.downloads?.length === expectedArtifacts.length, "CHROME_ARTIFACT_LIST_INVALID", "FAIL", "CONTRACT");
+  for (const expected of expectedArtifacts) {
+    const listed = detail.artifacts.find((item) => item.artifact_id === expected.artifact_id);
+    const download = result.downloads.find((item) => item.artifact_id === expected.artifact_id);
+    requireCondition(listed?.size === expected.size && listed.sha256 === expected.sha256
+      && listed.download_url === `/api/agent/conversations/${state.conversation_id}/files/${expected.artifact_id}/content?run_id=${state.website_run_id}`,
+    "CHROME_ARTIFACT_VIEW_MISMATCH", "FAIL", "CONTRACT");
+    requireCondition(download?.status === 200 && download.size === expected.size && download.sha256 === expected.sha256
+      && download.header_sha256 === expected.sha256 && download.header_length === String(expected.size),
+    "CHROME_ARTIFACT_DOWNLOAD_MISMATCH", "FAIL", "CONTRACT");
+  }
+  const receipt = { schema_version: 1, status: "PASS", browser: chrome, origin: browserOrigin,
+    target_origin: browserOrigin, cross_origin: false, operations: ["get_agent_conversation", "download_agent_file"],
+    supplement_replays: 0, artifacts_verified: expectedArtifacts.length, correlation_header_exposed: false,
+    content_headers_exposed: true, authorization: "server-session", backend: "examples/website-agent/server.mjs" };
+  writeNew(path.join(stageRoot, "chrome-resolved-api.json"), receipt);
+  return receipt;
+}
+
 async function websiteStep(configuration, state, phase, extra = {}) {
-  const input = { phase, public_base_url: state.public_base_url, request_id: `${state.run_id}-website-${phase}`,
+  const input = { phase, public_base_url: "http://127.0.0.1:8000", request_id: `${state.run_id}-website-${phase}`,
     conversation_id: state.conversation_id, case_id: state.case_id, cursor: state.website_cursor ?? 0, ...extra };
-  let evidence;
-  if (configuration.topology === DUAL_LINUX_TOPOLOGY) {
-    const execution = await docker(configuration.dockerContext, ["exec", state.client_container, "/usr/bin/node",
-      "/workspace/tools/test-flow/lib/website-agent.mjs", JSON.stringify(input)], { forward: false, forwardStderr: true });
-    evidence = JSON.parse(execution.stdout);
-  } else evidence = await runWebsiteStep(input);
+  // 原生查询 oracle 只在 Server 运行；浏览器和 Client 不接触 owner_key。
+  const execution = await docker(configuration.dockerContext, ["exec", state.active_container, "/usr/bin/node",
+    "/source/xiaodao/tools/test-flow/lib/website-agent.mjs", JSON.stringify(input)], { forward: false, forwardStderr: true });
+  const evidence = JSON.parse(execution.stdout);
   validateWebsiteEvidence(evidence, { conversation_id: state.conversation_id });
   writeNew(path.join(configuration.stageRoot, `website-${phase}.json`), evidence);
   if (phase !== "prepare") {
@@ -3160,6 +3245,7 @@ async function websiteStep(configuration, state, phase, extra = {}) {
   }
   if (phase !== "restart") {
     state.conversation_id = evidence.conversation_id;
+    if (evidence.view?.selected_run_id) state.website_run_id = evidence.view.selected_run_id;
     state.website_cursor = evidence.events.at(-1)?.sequence ?? state.website_cursor;
     state.website_events = [...(state.website_events ?? []), ...evidence.events];
   }
@@ -3179,11 +3265,7 @@ async function uploadWebsiteAttachment(configuration, state) {
   requireCondition(descriptor.url === `${state.public_base_url}/api/v1/agent/attachments/${attachmentId}/content`, "WEBSITE_UPLOAD_URL_INVALID");
   const bytes = fs.readFileSync(path.join(configuration.attemptRoot, "payload", state.archive.name));
   requireCondition(bytes.length === state.archive.size && sha256Bytes(bytes) === state.archive.sha256, "WEBSITE_ARCHIVE_FIXTURE_INVALID");
-  const page = `<!doctype html><html><head><title>PENDING</title></head><body><script>
-const descriptor=${scriptJson(descriptor)};
-(async()=>{const bytes=await(await fetch('/fixture')).arrayBuffer();const response=await fetch(descriptor.url,{method:'PUT',headers:descriptor.required_headers,body:bytes});const data=await response.json();document.documentElement.dataset.result=btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify({ok:response.ok,status:response.status,data}))));document.title='DONE';})().catch(()=>{document.documentElement.dataset.result=btoa(JSON.stringify({ok:false}));document.title='FAILED';});
-</script></body></html>`;
-  const browser = await runChromePage(configuration, state, "upload", page, bytes);
+  const browser = await runWebsiteChromePage(configuration, state, "upload", websiteUploadPage(attachmentId, descriptor.required_headers));
   if (!(browser.result.ok === true && browser.result.data?.ok === true)) browser.failBrowser?.("CHROME_UPLOAD_RESPONSE_INVALID");
   requireCondition(browser.result.ok === true && browser.result.data?.ok === true, "WEBSITE_CHROME_UPLOAD_FAILED", "FAIL", "BROWSER");
   const browserUpload = { schema_version: 1, status: "PASS", browser: browser.chrome, attachment_id: attachmentId,

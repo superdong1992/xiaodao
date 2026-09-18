@@ -18,11 +18,11 @@ test("copied report example passes unwrapped data directly and preserves the rep
   const document = { querySelector: (selector) => selector === "#diagnosis-report" ? report : error };
   const data = { report_state: "READY", report: { status: "PARTIAL" } };
   let rendered = 0;
-  await execute(() => ({ getReport: async () => data }), (container, value) => {
+  await execute(() => ({ conversations: { get: async () => ({ result: data }) } }), (container, value) => {
     assert.equal(container, report); assert.equal(value, data); rendered++;
   }, document);
   assert.equal(rendered, 1);
-  await execute(() => ({ getReport: async () => { throw new Error("报告暂时无法读取"); } }), () => {
+  await execute(() => ({ conversations: { get: async () => { throw new Error("报告暂时无法读取"); } } }), () => {
     assert.fail("a failed response must not render");
   }, document);
   assert.equal(report.textContent, "已有报告");
@@ -31,18 +31,18 @@ test("copied report example passes unwrapped data directly and preserves the rep
 
 test("copied create/send example retains original logical IDs after lost create and message responses", async () => {
   const created = [], messages = [];
-  const client = {
-    createConversation: async (requestId) => {
+  const client = { conversations: {
+    create: async (requestId) => {
       created.push(requestId);
       if (created.length === 1) throw new Error("lost create response");
       return { conversation_id: "conversation", request_id: "server-namespaced-id" };
     },
-    sendMessage: async (conversation, message) => {
+    send: async (conversation, message) => {
       messages.push({ conversation, message: structuredClone(message) });
       if (messages.length === 1) throw new Error("lost message response");
       return { status: "ACCEPTED" };
     },
-  };
+  } };
   const execute = new AsyncFunction("client", "crypto", "problemText", `${creation}\nreturn submitProblem;`);
   const submit = await execute(client, ids(), "只提交用户原话。");
   await assert.rejects(submit(), /lost create/);
@@ -86,18 +86,19 @@ test("copied upload retry reuses the hash, reservation, Blob and attachment-only
   const prepared = { attachment: { attachment_id: "attachment" }, upload: {} };
   let hashes = 0, reservations = 0, uploads = 0;
   const messages = [];
-  const client = {
-    prepareAttachment: async () => { reservations++; return prepared; },
-    uploadAttachment: async (reservation, body) => {
+  const client = { attachments: {
+    prepare: async () => { reservations++; return prepared; },
+    upload: async (reservation, body) => {
       assert.equal(reservation, prepared); assert.equal(body, file); uploads++;
       return { attachment_id: "attachment", status: "READY" };
     },
-    sendMessage: async (conversation, message) => {
+  }, conversations: {
+    send: async (conversation, message) => {
       assert.equal(conversation, "conversation"); messages.push(structuredClone(message));
       if (messages.length === 1) throw new Error("lost attachment message response");
       return { status: "ACCEPTED" };
     },
-  };
+  } };
   const { submitLogs } = await executeUpload(client, ids(), file, "conversation", {
     sha256: async () => { hashes++; return "a".repeat(64); },
   });

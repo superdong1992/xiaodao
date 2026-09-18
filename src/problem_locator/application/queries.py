@@ -29,7 +29,7 @@ from problem_locator.contracts.ports import (
 from problem_locator.operational import OperationalState
 
 from .errors import raise_port_error
-from .reports import PublishedReport, read_published_report
+from .reports import PublishedReport, read_published_report, published_artifacts
 from .projection import (
     project_artifact_summaries,
     project_artifact_summary,
@@ -78,6 +78,11 @@ class ApplicationQueryService:
             if error is not None:
                 raise ApplicationPortError(error) from None
             raise
+        return self.check_snapshot(case_id, snapshot)
+
+    def check_snapshot(self, case_id: str, snapshot: StateFile) -> StateFile:
+        """Check an already captured Case without taking another repository read."""
+        self._require_visible(case_id)
         aggregate = snapshot.cases.get(case_id)
         if aggregate is not None and self._operational is not None:
             for job in aggregate.jobs.values():
@@ -88,6 +93,21 @@ class ApplicationQueryService:
             if error is not None:
                 raise ApplicationPortError(error)
         return snapshot
+
+    def _require_visible(self, case_id):
+        deleted = getattr(self._repository, "is_agent_case_deleted", None)
+        if deleted is not None and deleted(case_id):
+            raise_port_error(ErrorCode.CASE_NOT_FOUND, "定位任务不存在或已删除。")
+
+    def read_conversation_delivery(self, case_id: str, snapshot: StateFile, *, report: bool, artifacts: bool):
+        aggregate = self.check_snapshot(case_id, snapshot).cases.get(case_id)
+        if aggregate is None:
+            raise_port_error(ErrorCode.CASE_NOT_FOUND, "定位任务不存在。")
+        # All metadata and the selected report refer to this same immutable
+        # capture. Resource IO happens here, after the capture locks are gone.
+        result = read_published_report(aggregate, self._resource_store) if report else None
+        items = published_artifacts(aggregate) if artifacts else None
+        return aggregate.case, result, items
 
     def get_case(
         self,
@@ -195,7 +215,7 @@ class ApplicationQueryService:
             )
         case_id = query.case_id
         include_internal = query.include_internal
-
+        self._require_visible(case_id)
         snapshot = self._repository.read_snapshot(case_id)
         aggregate = snapshot.cases.get(case_id)
         if aggregate is None:
@@ -225,7 +245,7 @@ class ApplicationQueryService:
             )
         case_id = query.case_id
         artifact_id = query.artifact_id
-
+        self._require_visible(case_id)
         snapshot = self._repository.read_snapshot(case_id)
         aggregate = snapshot.cases.get(case_id)
         if aggregate is None:

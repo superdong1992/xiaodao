@@ -40,7 +40,26 @@ export function previewSamples() {
         size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"),
         created_by_job_id: id(3), created_at: now, downloadable: true }, ...options };
   }
-  const sample = (label, note, data) => ({ label, note, response: { ok: true, data, error: null } });
+  const sample = (label, note, result) => ({ label, note, response: { ok: true, error: null,
+    data: { schema_version: 3, conversation_id: result.conversation_id,
+      status: result.report_state === "UNAVAILABLE" ? "FAILED" :
+        result.report_state === "PENDING" || result.archive_status === "PENDING" ? "RUNNING" : "COMPLETED",
+      case_id: result.case_id, job_id: null, case_status: result.case_status,
+      case_revision: result.case_revision, source_job_id: result.source_job_id,
+      archive_status: result.archive_status, report_state: result.report_state,
+      current_questions: [], progress: null, failure: result.failure,
+      title: label, selected_run_id: id(6), run_id: id(6),
+      current_run: { run_id: id(6), ordinal: 1, status: result.report_state === "UNAVAILABLE" ? "FAILED" :
+        result.report_state === "PENDING" || result.archive_status === "PENDING" ? "RUNNING" : "COMPLETED",
+        case_id: result.case_id, job_id: null, case_status: result.case_status, archive_status: result.archive_status,
+        report_state: result.report_state, created_at: now, updated_at: now },
+      capabilities: { can_send: result.report_state !== "PENDING", can_stop: result.report_state === "PENDING",
+        can_rediagnose: result.report_state !== "PENDING", can_rename: true, can_delete: true },
+      history: [], history_next_cursor: null, attachments: [], last_event_id: 0, created_at: now, updated_at: now,
+      included: ["history", "report", "artifacts"], result,
+      artifacts: result.artifact ? [{ ...result.artifact,
+        download_url: `/api/agent/conversations/${result.conversation_id}/files/${result.artifact.artifact_id}/content?run_id=${id(6)}` }] : [],
+    } } });
   const partial = structuredClone(report);
   partial.status = "PARTIAL";
   partial.root_cause = null;
@@ -80,6 +99,8 @@ export function createPreviewServer() {
     ["/", ["preview.html", "text/html"]], ["/preview.js", ["preview.js", "text/javascript"]],
     ["/preview.css", ["preview.css", "text/css"]], ["/report-view.js", ["report-view.js", "text/javascript"]],
     ["/report-view.css", ["report-view.css", "text/css"]],
+    ["/browser-client.js", ["browser-client.js", "text/javascript"]],
+    ["/preview-model.js", ["preview-model.js", "text/javascript"]],
   ]);
   const samples = Buffer.from(JSON.stringify(previewSamples()));
   return createServer((request, response) => {

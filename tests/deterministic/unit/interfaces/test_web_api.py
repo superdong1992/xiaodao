@@ -415,12 +415,15 @@ def test_openapi_and_swagger_publish_the_browser_contract() -> None:
     expected_operations = {
         ("/live", "get"): "get_liveness",
         ("/api/v1/agent/conversations", "post"): "create_agent_conversation",
+        ("/api/v1/agent/conversations", "get"): "list_agent_conversations",
+        ("/api/v1/agent/conversations/{conversation_id}", "patch"): "rename_agent_conversation",
+        ("/api/v1/agent/conversations/{conversation_id}", "delete"): "delete_agent_conversation",
+        ("/api/v1/agent/conversations/{conversation_id}/stop", "post"): "stop_agent_conversation",
+        ("/api/v1/agent/conversations/{conversation_id}/files/{artifact_id}/content", "get"): "download_agent_file",
         ("/api/v1/agent/conversations/{conversation_id}", "get"): "get_agent_conversation",
-        ("/api/v1/agent/conversations/{conversation_id}/status", "get"): "get_agent_conversation_status",
-        ("/api/v1/agent/conversations/{conversation_id}/report", "get"): "get_agent_conversation_report",
         ("/api/v1/agent/conversations/{conversation_id}/messages", "post"): "send_agent_message",
         ("/api/v1/agent/conversations/{conversation_id}/events", "get"): "subscribe_agent_events",
-        ("/api/v1/agent/conversations/{conversation_id}/attachments", "post"): "prepare_agent_attachment",
+        ("/api/v1/agent/attachments", "post"): "prepare_agent_attachment",
         ("/api/v1/agent/attachments/{attachment_id}/content", "put"): "upload_agent_attachment",
         ("/ready", "get"): "get_readiness",
         ("/api/v1/cases", "post"): "create_case",
@@ -867,7 +870,7 @@ def test_agent_sse_errors_are_json_and_success_uses_versioned_event_payloads() -
     assert set(responses["200"]["content"]) == {"text/event-stream"}
     for status in ("400", "404", "409", "413", "422", "500", "503"):
         assert set(responses[status]["content"]) == {"application/json"}
-    assert len(schema["components"]["schemas"]["AgentEvent"]["oneOf"]) == 11
+    assert len(schema["components"]["schemas"]["AgentEvent"]["oneOf"]) == 13
 
 
 def test_wildcard_cors_allows_browser_preflight_without_credentials() -> None:

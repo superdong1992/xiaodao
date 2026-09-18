@@ -1273,6 +1273,11 @@ def _assemble(
         )
         archive = ArchiveService(repository, resource_store, publication_guard, notifier, clock,
             workers=settings.archive_workers, operational_state=operational_state)
+        from problem_locator.agent.cleanup import ConversationCleanupService
+        agent.dispatcher = scheduler
+        agent.cleanup = ConversationCleanupService(agent_store, repository,
+            QuarantineMover(layout, coordination_lock, file_sync, replacer), agent.usage_guard,
+            dispatcher=scheduler, archive=archive)
         return ServiceComposition(
             settings=settings,
             clock=clock,

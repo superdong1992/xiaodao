@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from problem_locator.agent.store import AgentStore
 from problem_locator.contracts import ArtifactKind, CaseStatus
 from problem_locator.dispatch.archive import ArchiveService
 from problem_locator.storage.state_repository import CaseStateRepository
@@ -212,3 +213,139 @@ def test_pending_or_interrupted_archive_resumes_after_database_reopen(pending, c
     assert archive.run_once()
     assert stack.repository.read_case(case_id).case.archive_status == 'READY'
     assert _report(stack, case_id)[1] == before
+
+
+def _agent_owner(stack, case_id):
+    store = AgentStore(stack.repository)
+    conversation_id = store.create_conversation("archive-conversation").conversation_id
+    store.bind_case(conversation_id, case_id)
+    return store, conversation_id
+
+
+def test_deleted_agent_archive_is_not_claimed_before_control_loop_runs(pending):
+    stack, case_id = pending
+    store, cid = _agent_owner(stack, case_id)
+    store.request_delete(cid)
+    assert stack.repository._db.execute("SELECT status FROM archive_tasks WHERE case_id=?", (case_id,)).fetchone()[0] == "CANCELLED"
+    # Even an old queued row restored as PENDING cannot bypass the authoritative
+    # conversation tombstone while in-memory control notifications are delayed.
+    stack.repository._db.execute("UPDATE archive_tasks SET status='PENDING' WHERE case_id=?", (case_id,))
+    assert not stack.archive.run_once()
+    assert stack.archive.cases_idle([case_id])
+    assert not any(artifact.kind is ArtifactKind.USER_RESULT_ARCHIVE
+        for artifact in stack.repository.read_case(case_id).artifacts.values())
+
+
+@pytest.mark.parametrize("generation_fails", [False, True])
+def test_deleted_running_archive_neither_publishes_nor_records_failure(pending, monkeypatch, generation_fails):
+    stack, case_id = pending
+    store, cid = _agent_owner(stack, case_id)
+    _, report_before = _report(stack, case_id)
+    original = stack.resources.stage_archive
+
+    def deleted_during_generation(*args, **kwargs):
+        if generation_fails:
+            store.request_delete(cid)
+            raise OSError("generation failed after deletion")
+        result = original(*args, **kwargs)
+        store.request_delete(cid)
+        return result
+
+    monkeypatch.setattr(stack.resources, "stage_archive", deleted_during_generation)
+    status_calls = []
+    monkeypatch.setattr(stack.archive, "_set_status", lambda *args: status_calls.append(args))
+    assert stack.archive.run_once()
+    assert status_calls == []
+    assert not stack.archive.operational_state.faults
+    assert stack.archive.cases_idle([case_id])
+    assert stack.repository._db.execute("SELECT status FROM archive_tasks WHERE case_id=?", (case_id,)).fetchone()[0] == "CANCELLED"
+    assert not any(item.kind is ArtifactKind.USER_RESULT_ARCHIVE
+        for item in stack.repository.read_case(case_id).artifacts.values())
+    assert _report(stack, case_id)[1] == report_before
+
+
+def test_ordinary_archive_shutdown_requeues_but_delete_cancellation_does_not(pending, monkeypatch):
+    stack, case_id = pending
+    original = stack.resources.stage_archive
+    stack.archive._stop.set()
+    assert stack.archive.run_once()
+    assert stack.repository._db.execute("SELECT status FROM archive_tasks WHERE case_id=?", (case_id,)).fetchone()[0] == "PENDING"
+    stack.archive._stop.clear()
+
+    def cancelled_generation(*args, **kwargs):
+        stack.archive.cancel_cases([case_id])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(stack.resources, "stage_archive", cancelled_generation)
+    assert stack.archive.run_once()
+    assert stack.repository._db.execute("SELECT status FROM archive_tasks WHERE case_id=?", (case_id,)).fetchone()[0] == "CANCELLED"
+    assert stack.repository.read_case(case_id).case.archive_status == "PENDING"
+    assert not stack.archive.operational_state.faults
+
+
+def test_delete_before_failed_archive_status_commit_does_not_pause_service(pending, monkeypatch):
+    stack, case_id = pending
+    store, cid = _agent_owner(stack, case_id)
+    original_status = stack.archive._set_status
+
+    def fail_generation(*args, **kwargs):
+        raise OSError("injected ZIP failure")
+
+    def delete_before_status(selected_case, status, artifact=None):
+        assert status == "FAILED"
+        store.request_delete(cid)
+        return original_status(selected_case, status, artifact)
+
+    monkeypatch.setattr(stack.resources, "stage_archive", fail_generation)
+    monkeypatch.setattr(stack.archive, "_set_status", delete_before_status)
+    assert stack.archive.run_once()
+    assert stack.archive.operational_state.accepting
+    assert not stack.archive.operational_state.faults
+    assert stack.repository._db.execute("SELECT status FROM archive_tasks WHERE case_id=?", (case_id,)).fetchone()[0] == "CANCELLED"
+    assert stack.repository.read_case(case_id).case.archive_status == "PENDING"
+    assert stack.archive.cases_idle([case_id])
+
+
+def test_delete_receipt_waits_for_already_started_archive_publication(pending, monkeypatch):
+    stack, case_id = pending
+    store, cid = _agent_owner(stack, case_id)
+    entered, release, deleted = threading.Event(), threading.Event(), threading.Event()
+    original = stack.resources.publish
+    errors = []
+
+    def paused_publication(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return original(*args, **kwargs)
+
+    def generate():
+        try:
+            stack.archive.run_once()
+        except BaseException as error:
+            errors.append(error)
+
+    def delete():
+        try:
+            store.request_delete(cid)
+            deleted.set()
+        except BaseException as error:
+            errors.append(error)
+
+    monkeypatch.setattr(stack.resources, "publish", paused_publication)
+    archive_thread = threading.Thread(target=generate)
+    delete_thread = threading.Thread(target=delete)
+    archive_thread.start()
+    try:
+        assert entered.wait(5)
+        delete_thread.start()
+        assert not deleted.wait(0.1)
+    finally:
+        release.set()
+        archive_thread.join(5)
+        if delete_thread.ident is not None:
+            delete_thread.join(5)
+    assert not archive_thread.is_alive() and not delete_thread.is_alive()
+    assert errors == [] and deleted.is_set()
+    assert stack.repository.is_agent_case_deleted(case_id)
+    assert stack.repository.read_case(case_id).case.archive_status == "READY"
+    assert not stack.archive.run_once()
