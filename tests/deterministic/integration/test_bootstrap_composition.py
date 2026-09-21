@@ -5,6 +5,7 @@ import re
 import sys
 import threading
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -82,6 +83,22 @@ def test_public_create_app_does_not_expose_the_test_skill_override(
             _settings(tmp_path / "data"),
             allow_test_skills=True,
         )
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_memory_worker_and_recall_follow_the_same_feature_flag(tmp_path, enabled):
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    app = create_app(replace(_settings(tmp_path / "data", skill_dir=skills),
+                             generic_memory_enabled=enabled))
+    graph = app.state.problem_locator_composition
+    assert graph.memory_worker is not None
+    assert graph.memory_worker._enabled is enabled
+    assert (graph.runtime._generic_locator_executor._experience_retriever is not None) is enabled
+    with TestClient(app) as client:
+        assert client.get("/ready").status_code == 200
+        assert graph.memory_worker._thread.is_alive()
+    assert not graph.memory_worker._thread.is_alive()
 
 
 def test_production_app_starts_with_empty_diagnosis_skill_catalog(

@@ -68,7 +68,7 @@ test("browser methods use website paths, unchanged request bodies and unwrapped 
   assert.deepEqual(JSON.parse(calls[1].init.body), message);
   assert.deepEqual(JSON.parse(calls[5].init.body), { ...metadata, conversation_id: conversationId });
   assert.deepEqual(Object.keys(client).sort(), ["attachments", "conversations"]);
-  assert.deepEqual(Object.keys(client.conversations).sort(), ["create", "delete", "eventsUrl", "get", "list", "rename", "send", "stop"]);
+  assert.deepEqual(Object.keys(client.conversations).sort(), ["create", "delete", "eventsUrl", "get", "getFeedback", "list", "rename", "send", "setFeedback", "stop"]);
   assert.deepEqual(Object.keys(client.attachments).sort(), ["prepare", "upload"]);
   for (const { init } of calls) {
     assert.equal(init.credentials, "same-origin");
@@ -407,4 +407,101 @@ test("browser client and real website backend complete create, prepare, upload, 
     server.closeAllConnections();
     await closed;
   }
+});
+
+
+function feedbackData(overrides = {}) {
+  return { schema_version: 1, conversation_id: conversationId, run_id: otherId,
+    can_rate: true, rating: null, updated_at: null, ...overrides };
+}
+
+test("feedback browser methods keep report identity, request ID, signal and current server vote", async () => {
+  const calls = [], signal = new AbortController().signal;
+  const client = createAgentClient({ headers: { "X-Agent-Owner-Key": "spoof", "X-CSRF-Token": "csrf" },
+    fetchImpl: async (path, init) => {
+      calls.push({ path, init });
+      return envelope(feedbackData(calls.length === 1 ? {} : {
+        rating: "DISLIKE", updated_at: "2026-09-21T10:00:00.123456+00:00",
+      }));
+    } });
+  assert.deepEqual(await client.conversations.getFeedback(conversationId, otherId, { signal }), feedbackData());
+  const vote = { request_id: "keep-feedback-id", rating: "LIKE" };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const response = await client.conversations.setFeedback(conversationId, otherId, vote);
+    assert.equal(response.rating, "DISLIKE", "旧请求的重放响应可包含服务端最新的点踩。");
+  }
+  assert.equal(calls.length, 3);
+  for (const { path, init } of calls) {
+    assert.equal(path, `${prefix}/runs/${otherId}/feedback`);
+    assert.equal(init.headers.has("X-Agent-Owner-Key"), false);
+    assert.equal(init.headers.get("X-CSRF-Token"), "csrf");
+  }
+  assert.equal(calls[0].init.method, "GET");
+  assert.equal(calls[0].init.body, undefined);
+  assert.equal(calls[0].init.signal, signal);
+  assert.equal(calls[1].init.method, "PUT");
+  assert.equal(calls[1].init.headers.get("Content-Type"), "application/json");
+  assert.deepEqual(JSON.parse(calls[1].init.body), vote);
+  assert.equal(calls[1].init.body, calls[2].init.body);
+});
+
+test("feedback rejects invalid request identities and fields before network IO", async () => {
+  const client = createAgentClient({ fetchImpl: async () => assert.fail("无效评价不能发起请求。") });
+  for (const id of [null, "../other", "ABCDEF00-0000-0000-0000-000000000001"]) {
+    await assert.rejects(client.conversations.getFeedback(id, otherId), TypeError);
+    await assert.rejects(client.conversations.getFeedback(conversationId, id), TypeError);
+  }
+  for (const vote of [null, {}, [], { request_id: "one", rating: "like" },
+    { request_id: " ", rating: "LIKE" }, { request_id: "字".repeat(129), rating: "LIKE" },
+    { request_id: "😀".repeat(129), rating: "LIKE" }, { request_id: 1, rating: "LIKE" },
+    { request_id: "one", rating: null }, { request_id: "one", rating: "LIKE", owner_key: "spoof" }]) {
+    await assert.rejects(client.conversations.setFeedback(conversationId, otherId, vote), TypeError);
+  }
+});
+
+test("feedback accepts the documented 128 Unicode character request ID limit", async () => {
+  let calls = 0;
+  const client = createAgentClient({ fetchImpl: async (_path, init) => {
+    calls++; assert.equal([...JSON.parse(init.body).request_id].length, 128);
+    return envelope(feedbackData());
+  } });
+  for (const unit of ["字", "😀"]) await client.conversations.setFeedback(conversationId, otherId, {
+    request_id: unit.repeat(128), rating: "LIKE",
+  });
+  assert.equal(calls, 2);
+});
+
+test("feedback validates both reads and writes instead of applying a different report response", async () => {
+  const invalid = [null, [], {}, ...[
+    { schema_version: 2 }, { conversation_id: otherId }, { run_id: conversationId },
+    { can_rate: "true" }, { rating: "like" }, { updated_at: "2026-09-21T10:00:00Z" },
+    { rating: "LIKE" }, { rating: "LIKE", updated_at: "yesterday" },
+    { rating: "LIKE", updated_at: "2026-09-21T10:00:00" }, { source_report: "private" },
+  ].map(feedbackData)];
+  const missing = feedbackData(); delete missing.can_rate; invalid.push(missing);
+  for (const result of invalid) {
+    const client = createAgentClient({ fetchImpl: async () => envelope(result) });
+    for (const invoke of [() => client.conversations.getFeedback(conversationId, otherId),
+      () => client.conversations.setFeedback(conversationId, otherId, { request_id: "vote", rating: "LIKE" })]) {
+      await assert.rejects(invoke(), (error) => error instanceof AgentApiError && error.code === "WEBSITE_INVALID_RESPONSE");
+    }
+  }
+});
+
+test("feedback read preserves unsupported state and cancellation; writes do not retry 429", async () => {
+  const unavailable = createAgentClient({ fetchImpl: async () => envelope(feedbackData({ can_rate: false })) });
+  assert.equal((await unavailable.conversations.getFeedback(conversationId, otherId)).can_rate, false);
+  const cancelled = new DOMException("评价读取已取消", "AbortError");
+  const client = createAgentClient({ fetchImpl: async () => { throw cancelled; } });
+  await assert.rejects(client.conversations.getFeedback(conversationId, otherId), (error) => error === cancelled);
+  let calls = 0;
+  const limited = createAgentClient({ fetchImpl: async () => {
+    calls++;
+    return new Response(JSON.stringify({ ok: false, data: null, error: {
+      code: "AGENT_FEEDBACK_LIMIT_EXCEEDED", message: "评价请求已达上限。", details: [], retryable: false,
+    } }), { status: 429 });
+  } });
+  await assert.rejects(limited.conversations.setFeedback(conversationId, otherId, { request_id: "vote", rating: "LIKE" }),
+    (error) => error.status === 429 && error.code === "AGENT_FEEDBACK_LIMIT_EXCEEDED");
+  assert.equal(calls, 1);
 });

@@ -626,6 +626,9 @@ class AgentStore:
             if head[0] is not None:
                 return DeleteReceipt(conversation_id=conversation_id, status=head[1])
             db.execute("UPDATE agent_conversations SET deleted_at=?,cleanup_status='DELETING' WHERE conversation_id=?", (self._now(), conversation_id))
+            memory_store = getattr(self, "memory_store", None)
+            if memory_store is not None:
+                memory_store.revoke_conversation(db, conversation_id)
             db.execute("UPDATE archive_tasks SET status='CANCELLED' WHERE status IN ('PENDING','RUNNING') "
                 "AND case_id IN (SELECT case_id FROM agent_conversation_runs WHERE conversation_id=?)", (conversation_id,))
             for run_id, in db.execute("SELECT run_id FROM agent_conversation_runs WHERE conversation_id=?", (conversation_id,)).fetchall():

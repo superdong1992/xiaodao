@@ -8,6 +8,8 @@
 
 部署后先看 [网站 Agent 快速接入与联调清单](docs/website-agent-quickstart.md)，再查 [完整 API 参考](docs/website-agent-api.md) 和 [TypeScript 后端示例](examples/website-agent/README.md)。在线接口说明位于服务的 `/docs`，机器可读合同位于 `/openapi.json`。网站后端负责登录、派生稳定的 `owner_key` 和下载转发；原生服务统一检查会话归属。部署方限制 xiaodao 的可达来源，浏览器不得直接指定归属。详情升级为 v3，事件升级为 v2，网站与服务端需一起升级。底层独立 Case 和七个 MCP 工具保留。
 
+通用定位可选开启“点赞 → 经验卡 → 后续诊断参考”闭环，默认关闭。网站负责赞踩按钮，小刀提供指定报告轮次的反馈接口和调用封装。接入、保留策略与验收要求见[通用定位经验库](docs/generic-feedback-memory.md)。
+
 ## Methods V1 专有定位报告
 
 当前冻结版本如下；这些版本共同定义本次预览版行为：
@@ -22,7 +24,7 @@
 | Product registration | `registration-template.json@1` |
 | Methods evaluation protocol | `Methods V1` |
 | ROUTE / DIAGNOSE / REVIEW output contract | `5.0.0` / `11.0.0` / `10.0.0` |
-| GENERIC output contract / profile | `2.0.0` / `2.0.0` |
+| GENERIC output contract / profile | `2.0.0` / `3.0.0` |
 | Specialist / Reviewer profile | `8.0.0` / `7.0.0` |
 | 默认 Skill 直出绑定 | `agent-profile/skill-direct` / `output-contract/skill-direct` |
 | Router / Diagnose / Review tool bundle | `3.0.0` / `4.0.0` / `3.0.0` |
@@ -98,6 +100,7 @@ uv lock --check
 | `PUBLIC_BASE_URL` | 是 | 无 | 对外提供服务的 HTTP(S) 根地址，不得包含查询参数或片段 |
 | `SKILL_DIR` | 是 | 无 | 外部受控的产品注册目录；每个子目录包含一个 `registration-template.json` 及其绑定的 Methods package。必须是实际绝对目录，但纯通用部署时可以为空；生产 catalog 拒绝任何 `TEST_ONLY` 注册。不得指向 Agent 的个人 Skill 目录 |
 | `GENERIC_SKILL_NAME` | 是 | 无 | Agent 环境中预装的通用定位 Skill 名称；仅允许标准小写连字符名称，启动时不实际调用检查安装 |
+| `GENERIC_MEMORY_ENABLED` | 否 | `false` | 开启通用 V2 报告赞踩、后台经验提炼和召回；启用前完成实际 Skill 与脱敏验收 |
 | `LOGPARSE_REPO` | 是 | 无 | 受控的 Logparse 源码目录；Git checkout 和源码压缩包解压目录均受支持，启动时按实际内容生成指纹 |
 | `LOGPARSE_CONFIG_PATH` | 是 | 无 | Logparse 工作区内的配置文件 |
 | `BIND_HOST` | 否 | `127.0.0.1` | Uvicorn 监听地址 |

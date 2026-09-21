@@ -130,7 +130,7 @@ def run_request(service, method, path, **kwargs):
     return asyncio.run(scenario())
 
 
-def test_only_six_conversation_and_attachment_routes_have_typed_contracts():
+def test_conversation_and_attachment_routes_have_typed_contracts():
     schema = app_for(None).openapi()
     assert set(schema["paths"]) == {
         f"{BASE}/conversations", f"{BASE}/conversations/{{conversation_id}}",
@@ -138,6 +138,7 @@ def test_only_six_conversation_and_attachment_routes_have_typed_contracts():
         f"{BASE}/attachments", f"{BASE}/attachments/{{attachment_id}}/content",
         f"{BASE}/conversations/{{conversation_id}}/stop",
         f"{BASE}/conversations/{{conversation_id}}/files/{{artifact_id}}/content",
+        f"{BASE}/conversations/{{conversation_id}}/runs/{{run_id}}/feedback",
     }
     response = schema["paths"][f"{BASE}/conversations/{{conversation_id}}/events"]["get"]["responses"]["200"]
     assert set(response["content"]) == {"text/event-stream"}

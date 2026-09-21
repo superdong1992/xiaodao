@@ -1,3 +1,3 @@
 # Generic locator context policy
 
-The Agent receives one minimal prompt. The only business payload is the Case raw problem text frozen into the GENERIC DIAGNOSE Job. Do not include the ProblemSpec projection, attachments, Evidence, Artifacts, prior Outcomes, or specialized diagnosis state.
+The Agent receives one minimal prompt. The problem payload is the Case raw problem text frozen into the GENERIC DIAGNOSE Job, passed unchanged. An optional, separate historical experience reference may contain one de-identified card, its identifier and hash, within 4096 UTF-8 bytes and the existing context budget. Preserve the complete problem and output contract; drop the whole optional reference when it does not fit. The execution context records the exact selected reference. Do not include the ProblemSpec projection, attachments, Evidence, Artifacts, prior Outcomes, or specialized diagnosis state.

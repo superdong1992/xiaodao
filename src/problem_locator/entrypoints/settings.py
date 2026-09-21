@@ -58,6 +58,7 @@ class Settings:
     logparse_concurrency: int = 1
     archive_workers: int = 1
     methods_evidence_validation: str = "off"
+    generic_memory_enabled: bool = False
 
     @classmethod
     def load(
@@ -182,6 +183,9 @@ class Settings:
         methods_evidence_validation = values.get("METHODS_EVIDENCE_VALIDATION", "off")
         if methods_evidence_validation not in {"off", "advisory", "strict"}:
             raise SettingsError("METHODS_EVIDENCE_VALIDATION 必须是 off、advisory 或 strict")
+        raw_memory_enabled = values.get("GENERIC_MEMORY_ENABLED", "false")
+        if raw_memory_enabled not in {"true", "false"}:
+            raise SettingsError("GENERIC_MEMORY_ENABLED 必须是 true 或 false")
 
         workers = {}
         for key, default in (("ROUTE_WORKERS", 1), ("DIAGNOSE_WORKERS", 2), ("LOGPARSE_CONCURRENCY", 1), ("ARCHIVE_WORKERS", 1)):
@@ -206,6 +210,7 @@ class Settings:
             dfx_log_dir=dfx_log_dir,
             specialized_reviewer_enabled=(raw_reviewer_enabled == "true" and methods_evidence_validation != "off"),
             methods_evidence_validation=methods_evidence_validation,
+            generic_memory_enabled=raw_memory_enabled == "true",
             route_claude_command=route_claude_command,
             diagnose_claude_command=diagnose_claude_command,
             intake_claude_command=intake_claude_command,

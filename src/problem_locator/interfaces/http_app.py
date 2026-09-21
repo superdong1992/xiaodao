@@ -122,6 +122,7 @@ _UUID_PATH_SCHEMA = {
 }
 _UUID_PARAMETER_NAMES = {
     "conversation_id",
+    "run_id",
     "case_id",
     "wait_for_job_id",
     "attachment_id",
@@ -288,6 +289,22 @@ _INSTANCE_LOCKED_EXAMPLE = {
     },
 }
 _ERROR_EXAMPLES_BY_OPERATION = {
+    "get_agent_feedback": {
+        "404": {"ok": False, "data": None, "error": {
+            "code": "AGENT_CONVERSATION_NOT_FOUND", "message": "会话不存在。",
+            "details": [], "retryable": False,
+        }},
+    },
+    "put_agent_feedback": {
+        "409": {"ok": False, "data": None, "error": {
+            "code": "AGENT_FEEDBACK_UNSUPPORTED", "message": "这份报告暂不支持反馈。",
+            "details": [], "retryable": False,
+        }},
+        "429": {"ok": False, "data": None, "error": {
+            "code": "AGENT_FEEDBACK_LIMIT_EXCEEDED", "message": "反馈记录已达到上限。",
+            "details": [], "retryable": False,
+        }},
+    },
     "get_readiness": {"503": _INSTANCE_LOCKED_EXAMPLE},
     "create_case": {
         "400": _VALIDATION_ERROR_EXAMPLE,
@@ -320,6 +337,14 @@ _ERROR_EXAMPLES_BY_OPERATION = {
 }
 
 _SUCCESS_EXAMPLES: dict[str, dict[str, Any]] = {
+    "get_agent_feedback": {"ok": True, "data": {
+        "schema_version": 1, "conversation_id": _CASE_ID_EXAMPLE, "run_id": _JOB_ID_EXAMPLE,
+        "can_rate": True, "rating": None, "updated_at": None,
+    }, "error": None},
+    "put_agent_feedback": {"ok": True, "data": {
+        "schema_version": 1, "conversation_id": _CASE_ID_EXAMPLE, "run_id": _JOB_ID_EXAMPLE,
+        "can_rate": True, "rating": "LIKE", "updated_at": _TIME_EXAMPLE,
+    }, "error": None},
     "get_liveness": {
         "ok": True,
         "data": {"status": "live"},
@@ -687,6 +712,17 @@ _SUCCESS_RESPONSE_DESCRIPTIONS = {
 }
 
 _REST_MODEL_FIELD_DESCRIPTIONS = {
+    "FeedbackRequest": {
+        "request_id": "本次评价的幂等标识，1 到 128 个 Unicode 字符，不能全为空白；重试保留原 ID 和内容，换票使用新 ID。",
+        "rating": "LIKE 表示有帮助，DISLIKE 表示没帮助；首版不支持取消评价。",
+    },
+    "FeedbackView": {
+        "schema_version": "反馈响应合同版本，固定为 1。",
+        "conversation_id": "已核验用户归属的会话 UUID，与请求路径一致。",
+        "run_id": "被评价报告所属的诊断轮次 UUID，与请求路径一致；历史报告不能替换成当前轮次。",
+        "updated_at": "最后一次投票变化的 UTC 时间，精确到毫秒；尚未评价时为 null。",
+        "rating": "当前保存的 LIKE 或 DISLIKE，尚未评价时为 null；旧请求重放也返回最新投票。",
+    },
     "EventObservationAudit": {"event_id": "诊断规则中被观测事件的稳定名称；不是 SSE 事件序号。"},
     "DerivedValueAudit": {"value": "派生结果的文本或整数值；未确定时为 null。"},
     "ConversationDetailResponse": {
@@ -709,6 +745,8 @@ _REST_MODEL_FIELD_DESCRIPTIONS = {
 }
 
 _REST_FIELD_DESCRIPTIONS.update({
+    "rating": "报告评价：LIKE 有帮助，DISLIKE 没帮助；尚未评价时为 null。",
+    "can_rate": "当前是否允许评价；只支持已交付的通用定位 V2 正式报告，功能关闭或报告不适用时为 false。",
     "run_id": "独立诊断轮次的 UUID；同一会话可包含多轮。",
     "selected_run_id": "本次状态、报告和文件所属的轮次 UUID。",
     "title": "用户可编辑的会话标题，1 到 80 个字符。",
@@ -732,6 +770,8 @@ _REST_FIELD_DESCRIPTIONS.update({
     "history_limit": "历史分页条数，默认 50，最大 100。",
 })
 _SUCCESS_RESPONSE_DESCRIPTIONS.update({
+    "get_agent_feedback": "返回指定报告的评价资格和当前投票，不运行模型；尚未评价时 rating 和 updated_at 均为 null。",
+    "put_agent_feedback": "评价已持久保存，返回当前投票；重复同票不累计，旧请求重放不会恢复旧投票。",
     "list_agent_conversations": "返回当前归属键的会话目录和下一页游标。",
     "rename_agent_conversation": "标题已持久保存，返回更新后的会话摘要。",
     "stop_agent_conversation": "返回指定轮次的停止收据；CANCELLING 表示仍在等待后台安全退出。",
@@ -740,6 +780,7 @@ _SUCCESS_RESPONSE_DESCRIPTIONS.update({
 })
 
 _REQUEST_BODY_DESCRIPTIONS = {
+    "put_agent_feedback": "只接受 request_id 和 rating。request_id 为 1 到 128 个 Unicode 字符；rating 为 LIKE 或 DISLIKE。重试保留 ID 与内容，换票使用新 ID。",
     "rename_agent_conversation": "新的会话标题，1 到 80 个字符；赋值操作可安全重复。",
     "stop_agent_conversation": "稳定 request_id 和目标 run_id；重试不能改为停止另一轮。",
     "create_agent_conversation": "稳定 request_id；相同内容重试不创建新会话。",
@@ -831,6 +872,10 @@ def _apply_rest_openapi_overlay(schema: dict[str, Any]) -> None:
     ]
 
     component_schemas = schema.setdefault("components", {}).setdefault("schemas", {})
+    component_schemas["FeedbackRequest"]["examples"] = [
+        {"request_id": "feedback-like-1", "rating": "LIKE"},
+        {"request_id": "feedback-dislike-2", "rating": "DISLIKE"},
+    ]
     for schema_name, component in component_schemas.items():
         component.setdefault(
             "description",
@@ -856,6 +901,11 @@ def _apply_rest_openapi_overlay(schema: dict[str, Any]) -> None:
             if method not in {"get", "post", "put", "patch", "delete"}:
                 continue
             operation_id = operation["operationId"]
+            if operation_id in {"get_agent_feedback", "put_agent_feedback"}:
+                operation["description"] += " 不接受查询参数；GET 不接受请求体。归属由可信网站后端的 X-Agent-Owner-Key 确定。"
+                operation["responses"]["404"]["description"] = "会话或轮次不存在、已删除，或不属于当前用户。"
+                operation["responses"]["409"]["description"] = "报告不支持评价，或相同 request_id 的目标、内容发生变化。"
+                operation["responses"]["429"]["description"] = "反馈存储配额已满；不自动重试。"
             operation["responses"]["200"]["description"] = (
                 _SUCCESS_RESPONSE_DESCRIPTIONS[operation_id]
             )

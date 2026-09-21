@@ -116,7 +116,9 @@ const PUBLIC_CODES = new Set([
     "AGENT_RUN_CHANGED",
     "AGENT_DELETE_REQUIRED",
     "AGENT_CONVERSATION_DELETED",
-    "AGENT_CANCELLING"
+    "AGENT_CANCELLING",
+    "AGENT_FEEDBACK_UNSUPPORTED",
+    "AGENT_FEEDBACK_LIMIT_EXCEEDED"
 ]);
 const PUBLIC_PHASES = new Set([
     "AGENT",
@@ -198,6 +200,8 @@ function safeError(value, terminal = false) {
         AGENT_CONVERSATION_CLOSED: "本轮诊断已结束，可以发送新问题开始下一轮。",
         AGENT_CONVERSATION_NOT_FOUND: "会话不存在或已删除。",
         AGENT_RUN_NOT_FOUND: "诊断轮次不存在。",
+        AGENT_FEEDBACK_UNSUPPORTED: "这份报告暂不支持评价。",
+        AGENT_FEEDBACK_LIMIT_EXCEEDED: "评价请求已达上限，请联系管理员。",
         AGENT_RUN_CHANGED: "诊断轮次已变化，请刷新后重试。",
         AGENT_DELETE_REQUIRED: "会话正在删除，请稍后查看目录。",
         AGENT_CANCELLING: "正在停止本轮诊断，请稍后再发送。",
@@ -320,6 +324,19 @@ function validateResult(result, conversation) {
     } else throw new HttpError(502, "定位报告格式不符合约定。");
     if (result.failure) result.failure = safeError(result.failure, true);
 }
+function validateFeedback(result, conversationId, runId) {
+    const keys = ["schema_version", "conversation_id", "run_id", "can_rate", "rating", "updated_at"];
+    if (!result || typeof result !== "object" || Array.isArray(result) ||
+        Object.keys(result).length !== keys.length || keys.some((key) => !Object.hasOwn(result, key)) ||
+        result.schema_version !== 1 || result.conversation_id !== conversationId || result.run_id !== runId ||
+        typeof result.can_rate !== "boolean" || ![null, "LIKE", "DISLIKE"].includes(result.rating) ||
+        (result.rating === null ? result.updated_at !== null : typeof result.updated_at !== "string" ||
+            !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(result.updated_at) ||
+            !Number.isFinite(Date.parse(result.updated_at)))) {
+        throw new HttpError(502, "定位服务返回的评价与报告不一致或格式无效。");
+    }
+    return result;
+}
 /** @param {{upstream: string, access?: Access, ownerNamespace?: string, fetchImpl?: typeof fetch}} options */
 export function createAgentBackend(options) {
     const access = options.access ?? denyAccess;
@@ -355,6 +372,7 @@ export function createAgentBackend(options) {
                 409,
                 413,
                 422,
+                429,
                 500,
                 503,
                 504
@@ -497,7 +515,33 @@ export function createAgentBackend(options) {
             const reservation = url.pathname === "/api/agent/attachments";
             const matched = url.pathname.match(/^\/api\/agent\/conversations\/([^/]+)(?:\/(messages|events|stop)|\/files\/([^/]+)\/content)?$/);
             const uploadMatch = url.pathname.match(/^\/api\/agent\/attachments\/([^/]+)\/content$/);
+            const feedbackMatch = url.pathname.match(/^\/api\/agent\/conversations\/([^/]+)\/runs\/([^/]+)\/feedback$/);
             const method = request.method ?? "GET";
+            if (feedbackMatch && ["GET", "PUT"].includes(method)) {
+                const [, conversationId, runId] = feedbackMatch;
+                if (!UUID.test(conversationId) || !UUID.test(runId)) throw new HttpError(400, "会话或轮次标识无效。", "VALIDATION_ERROR");
+                if (url.search) throw new HttpError(400, "此接口不接受查询参数。", "VALIDATION_ERROR");
+                let body;
+                if (method === "PUT") {
+                    const input = await jsonBody(request);
+                    if (Object.keys(input).length !== 2 || typeof input.request_id !== "string" ||
+                        !input.request_id.trim() || [...input.request_id].length > 128 ||
+                        !["LIKE", "DISLIKE"].includes(input.rating)) {
+                        throw new HttpError(400, "评价只接受 request_id 和 rating；request_id 为 1 到 128 个字符，rating 为 LIKE 或 DISLIKE。", "VALIDATION_ERROR");
+                    }
+                    body = { request_id: input.request_id, rating: input.rating };
+                } else if (request.headers["transfer-encoding"] !== undefined ||
+                    request.headers["content-length"] !== undefined && request.headers["content-length"] !== "0") {
+                    throw new HttpError(400, "读取评价不接受请求体。", "VALIDATION_ERROR");
+                }
+                const result = await api(ownerKey, `/api/v1/agent/conversations/${conversationId}/runs/${runId}/feedback`, {
+                    method,
+                    headers: body ? { "Content-Type": "application/json" } : undefined,
+                    body: body ? JSON.stringify(body) : undefined
+                }, MAX_JSON_BYTES);
+                json(response, 200, { ok: true, data: validateFeedback(result, conversationId, runId), error: null });
+                return;
+            }
             if (creation && method === "GET") {
                 validateQuery(url, [
                     "cursor",

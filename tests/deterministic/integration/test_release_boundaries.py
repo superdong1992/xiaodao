@@ -16,6 +16,7 @@ EXPECTED_ENV_KEYS = {
     "DATA_ROOT",
     "DFX_LOG_LEVEL",
     "GENERIC_SKILL_NAME",
+    "GENERIC_MEMORY_ENABLED",
     "DFX_LOG_DIR",
     "SPECIALIZED_REVIEWER_ENABLED",
     "METHODS_EVIDENCE_VALIDATION",
@@ -99,6 +100,7 @@ def test_env_example_contains_only_the_public_settings() -> None:
 
     assert set(assignments) == EXPECTED_ENV_KEYS
     assert assignments["METHODS_EVIDENCE_VALIDATION"] == "off"
+    assert assignments["GENERIC_MEMORY_ENABLED"] == "false"
     forbidden_fragments = (
         "JOB_CONCURRENCY",
         "_LIMIT_",

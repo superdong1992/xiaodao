@@ -25,6 +25,7 @@ from problem_locator.agent.models import (
     MessageReceipt,
     PublicArtifactData,
 )
+from problem_locator.memory.models import FeedbackRequest, FeedbackView
 from problem_locator.contracts.errors import ApplicationPortError
 from problem_locator.contracts.limits import MAX_ATTACHMENT_BYTES
 from problem_locator.contracts.models import NonEmptyText, OpaqueId, Sha256
@@ -256,7 +257,7 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
 
     errors = {
         status: {"model": AgentErrorEnvelope}
-        for status in (400, 404, 409, 413, 422, 500, 503)
+        for status in (400, 404, 409, 413, 422, 429, 500, 503)
     }
 
     async def call(function: str, **kwargs: Any) -> Any:
@@ -293,6 +294,8 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
                 "rename_conversation": ConversationSummary,
                 "stop_conversation": StopReceipt,
                 "delete_conversation": DeleteReceipt,
+                "get_feedback": FeedbackView,
+                "put_feedback": FeedbackView,
             }[function]
             if function == "get_conversation":
                 # The shared service already validated nested report content.
@@ -317,6 +320,9 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
                 result = ConversationDetailResponse.model_construct(**{**values, "artifacts": artifacts})
             else:
                 result = result_model.model_validate(model_json(result))
+            if function in {"get_feedback", "put_feedback"} and (
+                    result.conversation_id != kwargs["conversation_id"] or result.run_id != kwargs["run_id"]):
+                raise RuntimeError("Feedback response identity does not match the request")
             return JSONResponse(success_envelope(result))
         except AgentStoreError as exc:
             return _failure(exc.code, exc.message, exc.status_code, details=exc.details, retryable=exc.retryable)
@@ -367,6 +373,25 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
                 description="按会话 ID 幂等删除；先对新请求隐藏，等待活跃资源使用结束后清理文件。")
     async def delete_conversation(conversation_id: Annotated[OpaqueId, Path()], request: Request):
         return await respond("delete_conversation", request, conversation_id=conversation_id)
+
+    @app.get(f"{_PREFIX}/conversations/{{conversation_id}}/runs/{{run_id}}/feedback", tags=["Agent"],
+             response_model=SuccessEnvelope[FeedbackView], responses=errors,
+             summary="读取指定诊断报告的反馈", operation_id="get_agent_feedback",
+             description="读取当前用户对指定轮次的点赞或点踩；不运行模型。")
+    async def get_feedback(conversation_id: Annotated[OpaqueId, Path()], run_id: Annotated[OpaqueId, Path()],
+                           request: Request) -> JSONResponse:
+        if await request.body():
+            return _invalid()
+        return await respond("get_feedback", request, conversation_id=conversation_id, run_id=run_id)
+
+    @app.put(f"{_PREFIX}/conversations/{{conversation_id}}/runs/{{run_id}}/feedback", tags=["Agent"],
+             response_model=SuccessEnvelope[FeedbackView], responses=errors,
+             summary="保存指定诊断报告的反馈", operation_id="put_agent_feedback",
+             description="LIKE 点赞，DISLIKE 点踩；重试保留 request_id，换票使用新 request_id。只支持正式通用定位 V2 报告。")
+    async def put_feedback(conversation_id: Annotated[OpaqueId, Path()], run_id: Annotated[OpaqueId, Path()],
+                           body: FeedbackRequest, request: Request) -> JSONResponse:
+        return await respond("put_feedback", request, conversation_id=conversation_id, run_id=run_id,
+                             **body.model_dump())
 
     @app.post(
         f"{_PREFIX}/conversations/{{conversation_id}}/messages", tags=["Agent"],
