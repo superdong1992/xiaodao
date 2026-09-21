@@ -22,6 +22,21 @@ from .atomic import is_reparse_point
 
 
 _OPAQUE_ID = TypeAdapter(OpaqueId)
+_LOGPARSE_PREPROCESS_WORKSPACE_SUFFIX = ".logparse-preprocess"
+
+
+def workspace_owner_id(segment: str) -> str:
+    """Validate a managed workspace name and return its owning Job identity."""
+
+    owner_id = segment.removesuffix(_LOGPARSE_PREPROCESS_WORKSPACE_SUFFIX)
+    return _OPAQUE_ID.validate_python(owner_id)
+
+
+def job_workspace_names(job_id: str) -> tuple[str, str]:
+    """Enumerate only the product-owned workspace names for one Job."""
+
+    owner_id = _OPAQUE_ID.validate_python(job_id)
+    return owner_id, f"{owner_id}{_LOGPARSE_PREPROCESS_WORKSPACE_SUFFIX}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,9 +198,11 @@ __all__ = [
     "ensure_within",
     "formal_storage_key",
     "job_directory",
+    "job_workspace_names",
     "parse_storage_key",
     "proposal_directory_name",
     "proposal_stage_path",
     "resource_path",
     "validate_data_root",
+    "workspace_owner_id",
 ]

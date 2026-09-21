@@ -287,13 +287,13 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert '"type": "http"' in readme
     assert '"url": "${PROBLEM_LOCATOR_MCP_URL}"' in readme
     assert "NO_PROXY" in readme
-    assert "七个公开 MCP input schema 全部扁平化" in readme
+    assert "七个公开 MCP 工具的输入 schema 均为扁平结构" in readme
     assert "initial_user_fact_names/initial_user_fact_values" in readme
     assert "input_names/input_values" in readme
-    assert "Test Flow 的 built-in adapter" in readme
+    assert "Test Flow 的内置适配器" in readme
     assert "Linux 服务端 DFX" in readme
-    assert "executable hash" in readme
-    assert "版本不在文档中写死" in readme
+    assert "可执行文件哈希" in readme
+    assert "文档不固定指定版本" in readme
     assert "不得新增 `$ref/$defs`" in readme
     assert "PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE" not in readme
     assert "client.hook.tool.started" not in readme

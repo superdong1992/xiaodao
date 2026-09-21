@@ -1,16 +1,18 @@
 # 网站 API：会话与附件
 
-已有网站升级请先读 [8.2 前端必改清单](website-agent-upgrade-8.2.md)，再按本文核对完整合同。
+诊断记录、报告和附件默认保留 **7 天**，每轮独立到期。页面应提示用户及时下载；到期轮次不再可查。创建请求幂等记录和已删除会话的最小凭据也有 7 天保留期。SSE 返回 `409 / AGENT_EVENT_CURSOR_EXPIRED` 时，先读取会话快照，再用其 `last_event_id` 作为 `Last-Event-ID` 重新订阅。完整策略见[服务端文件保留与清理](storage-retention.md)。
 
-适用于 xiaodao `8.2.0`、V11 / `v11-contract-r2`。网站把用户原话和日志交给 xiaodao，展示追问、执行进度和经过服务端验证的定位报告。一个会话包含多轮独立诊断，历史消息、追问和结果按轮次保留。网站只操作会话与附件两个抽象：所有展示信息由会话返回，文件单独流式传输。会话查询合同为 `schema_version=3`；SSE 为 schema_version=2，报告内部合同仍为 schema 3。
+已有网站升级请先读 [8.2 前端必改清单](website-agent-upgrade-8.2.md)，再按本文核对完整接口说明。
+
+适用于 xiaodao `8.2.0`、V11 / `v11-contract-r2`。网站把用户原话和日志交给 xiaodao，展示追问、执行进度和经过服务端验证的定位报告。一个会话包含多轮独立诊断，历史消息、追问和结果按轮次保留。网站只需接入会话和附件两类接口：页面所需的信息从会话接口读取，文件单独流式传输。会话查询响应的版本为 `schema_version=3`；SSE 为 schema_version=2，报告内部数据格式仍为 schema 3。
 
 首次接入先读 [部署后快速接入与联调清单](website-agent-quickstart.md)。本文是完整接口参考。在线入口是 xiaodao 服务的 `/docs` 和 `/openapi.json`；仓库保存 [完整 OpenAPI 快照](../schemas/v2/web-api.openapi.snapshot.json)。联调前核对线上 `info.version` 和路由，不能假设已部署服务与当前源码一致。
 
-调用关系：网站前端 → 网站后端 → Linux 上的 xiaodao REST API。网站原有问答功能保持独立。网站后端负责登录校验；xiaodao 持久保存并统一检查会话、附件、订阅和文件的归属；UUID 不是授权凭据。不要把 xiaodao 内部地址或下载地址直接交给浏览器。
+调用关系：网站前端 → 网站后端 → Linux 上的 xiaodao REST API。网站原有问答功能保持独立。网站后端负责登录校验；xiaodao 保存会话、附件、订阅和文件的所属用户信息，并在访问时统一检查。UUID 不是授权凭据。不要把 xiaodao 内部地址或下载地址直接交给浏览器。
 
 ## 1. 网站开发者需要实现的流程
 
-1. 网站后端从登录身份派生归属键，再创建会话；xiaodao 保存归属，网站不再维护另一份目录。
+1. 网站后端根据登录身份生成用户标识，再创建会话；xiaodao 保存会话与用户的对应关系，网站不再单独维护一份会话目录。
 2. 用户发送非空的问题原话，服务端立即按 MCP 客户端的固定中性模板创建 Case；创建前不追问预期行为、范围、日志或时间，也不调用 INTAKE。网站不需要构造 `problem_spec` 或命名事实。日志可先上传，再随问题消息发送附件 ID。
 3. 订阅 SSE。选中 Skill 后，服务端先从已有消息（包括首条原文）提取所需参数，并提交通过校验的部分；此时显示 `INTAKE` 的整理进度。采用结果后，`assistant.question` 只列出仍未满足的要求，用户继续调用消息接口回答。没有剩余要求时不额外追问。
 4. 初次打开或刷新调用 `GET /api/v1/agent/conversations/{conversation_id}`，一次获取状态、历史、报告和下载信息。收到 `result.available` 且页面尚无报告时，用同一路径加 `?include=report` 读取 `data.result`。采用网站示例时前缀是 `/api/agent`。不要等待 ZIP 才展示报告。
@@ -21,13 +23,13 @@
 
 全部用户原话保存在会话历史中。关联 Case 的 `raw_problem_text` 保留创建任务的完整用户原话，`statement` 和 `actual_behavior` 使用同一文本。其余问题字段使用 MCP 客户端的固定中性默认值，初始事实为空；`expected_behavior` 不要求用户单独填写。后续消息按当前 OPEN requirements 补充，不拼接进 `raw_problem_text`；网站展示聊天历史时读取会话消息。只有附件、没有问题文本时，服务端先提示用户提供问题原话。
 
-消息已经用于建案（`APPLIED`）不表示其中的 Skill 参数已提取。首次参数提取在路由产生具体要求之后执行；若此时已有新消息排队，会连同首条原文一起处理，避免重复提取。每条消息最多触发一次 Intake，GET、SSE、轮询和已接收命令的重放不增加模型调用。单条消息中的部分有效参数会立即采用；同一次诊断的后续补充会携带已冻结事实和仍相关的原文草稿。同值重述不重复提交，更正已冻结值需结束当前轮后重新诊断；新诊断不自动继承旧事实。
+消息已经用于创建 Case（`APPLIED`）不表示其中的 Skill 参数已提取。首次参数提取在路由确定所需信息后执行；若此时已有新消息排队，会连同首条原文一起处理，避免重复提取。每条消息最多触发一次 Intake，GET、SSE、轮询和已接收命令的重放不增加模型调用。单条消息中有效的参数会立即采用；同一次诊断的后续补充会携带已确定的事实和仍相关的原文草稿。重复提供相同值不会再次提交；更正已确定的值需结束当前轮后重新诊断，新诊断不自动继承旧事实。
 
 先发描述、再单独发送附件也支持上述流程：服务端会检查此前是否还有未提取的文字，不会因为最新消息没有 `text` 就跳过首条描述。文字已经整理后，仅选择或补交附件不再调用提取模型。网站可以先把一个日志包上传到 `READY`，再用同一条消息发送问题文字和 `attachment_ids`。
 
 当前诊断要求一份日志归档。尚未采用附件时，以最近一条携带 `attachment_ids` 的消息作为附件选择；只发文字不会清除已有选择。一次选了多个包时，会话继续等待选择或合包，有效文字参数仍会采用。重新发送一条只引用目标附件 ID 的消息即可选择已有文件，无需重复上传。已被 Case 采用的日志不受后续选择影响。
 
-模型只负责提取，不决定是否忽略已提供参数：即使返回 `NEED_CLARIFICATION`，服务端也会提交有效的新事实和附件，然后按最新 Case 展示剩余要求。引用可以包含值两侧的原文上下文；完全重复项合并，未知字段、无原文依据或格式不符的单项被过滤，不影响其余有效项。明确包含日期和时区的 `problem_time` 可确定性转换为毫秒 UTC；不猜测时区，不改写标识符。缺少的要求继续追问，更正已冻结值需结束当前轮后重新诊断。未完成的输入整理和参数提交期间，快照不暴露过时追问，并发新消息也会保持待处理。
+模型只负责提取参数，是否采用参数由服务端决定。即使返回 `NEED_CLARIFICATION`，服务端也会提交有效的新事实和附件，再根据最新 Case 展示仍需补充的信息。引用可以包含值两侧的原文上下文。完全重复的项会合并；未知字段、无原文依据或格式不符的项会被过滤，其余有效项不受影响。明确包含日期和时区的 `problem_time` 可按固定规则转换为毫秒 UTC；服务端不会猜测时区或改写标识符。缺少的信息继续追问，更正已确定的值需结束当前轮后重新诊断。整理输入和提交参数尚未完成时，会话快照不显示过时追问；同时收到的新消息保持待处理状态。
 
 时间须包含完整日期、时分秒及 `Z` 或明确时区偏移，日期与时间之间支持 `T` 或一个普通空格，例如 `2026-09-16 10:00:00+08:00`。不接受缺少时区的时间，也不会舍弃亚毫秒精度。Skill 已登记的角色说明会随对应字段要求传给提取模型，每段说明最多使用 256 个 UTF-8 字节；没有登记的字段别名和含义不会自动补造。
 
@@ -35,7 +37,7 @@
 
 性能边界：空闲会话只读取轻量处理状态和带索引的未完成命令，不重载消息历史或查询 Case。首条消息会补上旧流程漏掉的一次必要提取；没有可提取参数的首条也可能耗用这一次调用，因此零模型验证不能保证真实模型的端到端时延不变。模型失败不自动重试。
 
-## 2. 接口和公共合同
+## 2. 接口和通用约定
 
 以下路径是 **xiaodao 服务接口**。部署示例的 `$BASE` 是网站后端可访问的 xiaodao 地址，例如 `http://xiaodao.internal:8000`。本文 UUID 仅用于说明，实际调用需使用创建响应中的值。
 
@@ -57,7 +59,7 @@
 
 返回字段固定，`included` 明确本次加载的部分。未加载的 `history`、`attachments`、`result`、`artifacts` 为 null；空数组表示已加载且没有记录。前端只更新本次加载的部分，不能用 null 清空此前的报告。`report_state` 表示业务可用性，`READY` 与 `result=null` 可以同时出现，含义是本次没有请求报告。
 
-默认完整查询适合首次打开和刷新；持续更新用 SSE 或 `include=none`。收到报告或归档就绪事件时再加载相应部分。正常轻量查询不读消息正文、附件历史、Case 快照或报告文件；交付异常时仍需查询权威状态以判断是否真正完成。最新阶段使用可重建索引读取，首次启动补建一次，不改历史事件字节或序号。
+默认完整查询适合首次打开和刷新；持续更新用 SSE 或 `include=none`。收到报告或归档就绪事件时再加载相应部分。正常轻量查询不读消息正文、附件历史、Case 快照或报告文件；交付异常时仍需读取服务端保存的状态，确认是否已经完成。最新阶段从索引读取，首次启动时补建一次；索引可以重建，不改历史事件字节或序号。
 
 旧 `/status`、`/report`、网站产物列表和会话下预约附件路径已删除，不提供兼容别名。底层 Case API 仍供已有 Case 集成使用，网站无需查询。文件下载入口随 `artifacts[].download_url` 返回，点击后才传输二进制文件。
 
@@ -86,11 +88,11 @@
 }
 ```
 
-常见 HTTP 状态：`400` 参数错误；`404` 不存在；`409` 状态或幂等冲突；`413` 超出限制；`422` 文件校验失败；`503` 服务未配置或暂时不可用。网站自身还应返回 `401` 未登录和 `403` 无权访问。Agent 错误码属于 Agent 接口；现有 Case 接口仍使用既有错误合同。
+常见 HTTP 状态：`400` 参数错误；`404` 不存在；`409` 状态或幂等冲突；`413` 超出限制；`422` 文件校验失败；`503` 服务未配置或暂时不可用。网站自身还应返回 `401` 未登录和 `403` 无权访问。Agent 错误码只用于 Agent 接口；现有 Case 接口的错误格式和处理规则保持不变。
 
 ### 创建与发送消息
 
-每个原生 Agent 请求都必须带 `X-Agent-Owner-Key`。网站后端计算 `SHA-256(JSON.stringify([固定网站命名空间, 已认证用户 ID]))`，得到 64 位小写十六进制。命名空间与用户 ID 必须长期稳定。该头不是登录凭据，xiaodao 只能开放给可信网站后端；浏览器不得选择它。Core Case 接口访问 Agent 创建的数据时也检查同一归属。
+每个发往 xiaodao 的 Agent 请求都必须带 `X-Agent-Owner-Key`。网站后端计算 `SHA-256(JSON.stringify([固定网站命名空间, 已认证用户 ID]))`，得到 64 位小写十六进制用户标识。命名空间与用户 ID 必须长期稳定。这个请求头不是登录凭据，xiaodao 只能开放给可信网站后端；其值不能由浏览器指定。Core Case 接口在访问 Agent 创建的数据时，也会核对数据是否属于该用户。
 
 `current_run` 始终是当前轮；`selected_run_id` 指明这次读取的状态、报告和文件属于哪一轮。省略 `run_id` 选当前轮，传历史轮 ID 即可读取旧报告，不重新诊断。`capabilities` 给出发送、停止、重新诊断、重命名和删除按钮是否可用，前端不必自行猜测状态组合。
 
@@ -140,13 +142,13 @@ Content-Type: application/json
 }
 ```
 
-`ACCEPTED` 只表示消息已持久接收。后台收到首条非空问题文本就创建 Case；建案本身不调用 INTAKE，随后路由和诊断仍可能调用模型。INTAKE 仅在 Case 创建后的合法补充点整理用户输入，按 OPEN INPUT requirements 提取有原文来源的事实；公开追问始终使用 requirements 的原始 prompt。定位运行期间的新消息显示“已收到，尚未用于本次诊断”。更正已冻结事实或任务目标时应停止当前轮，再发送完整的新问题。
+`ACCEPTED` 只表示消息已接收并保存。后台收到首条非空问题文本就创建 Case；创建本身不调用 INTAKE，随后路由和诊断仍可能调用模型。INTAKE 只在 Case 创建后允许补充信息时整理用户输入，按 OPEN INPUT requirements 提取有原文依据的事实；展示给用户的追问始终使用 requirements 的原始 prompt。定位运行期间的新消息显示“已收到，尚未用于本次诊断”。更正已确定的事实或任务目标时，应停止当前轮，再发送完整的新问题。
 
 ### 预约和上传日志
 
 文件名只接受现有压缩日志格式：`.zip`、`.tar`、`.tar.gz`、`.tgz`、`.gz`。文件名不得包含目录或控制字符，压缩后缀使用小写。类型分别为 `application/zip`、`application/x-tar`、`application/gzip`。单文件最多 2,684,354,560 字节，每会话最多 20 个附件且总量受服务端限制；不支持截图或 PDF 解析。
 
-先计算文件真实字节数和完整 SHA-256，再预约。以下 digest 仅演示字段格式，不能直接用于上传真实文件。
+先计算文件真实字节数和完整 SHA-256，再预约。以下哈希值仅演示字段格式，不能直接用于上传真实文件。
 
 ```http
 POST /api/v1/agent/attachments
@@ -235,11 +237,11 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `PrepareAgentAttachmentBody` | `content_type` | 与文件压缩格式一致的媒体类型。 |
 | `PrepareAgentAttachmentBody` | `declared_size` | 完整文件的字节数，不是分块大小。 |
 | `PrepareAgentAttachmentBody` | `declared_sha256` | 完整原始文件的 SHA-256，小写 64 位十六进制。 |
-| `ConversationReceipt` | `schema_version` | 会话回执合同版本，固定为 `1`。 |
-| `ConversationReceipt` | `conversation_id` | 已持久创建的会话 UUID。 |
+| `ConversationReceipt` | `schema_version` | 会话回执的数据格式版本，固定为 `1`。 |
+| `ConversationReceipt` | `conversation_id` | 已创建并保存的会话 UUID。 |
 | `ConversationReceipt` | `request_id` | 创建请求的原始幂等标识。 |
 | `MessageReceipt` | `conversation_id` | 接收消息的会话 UUID。 |
-| `MessageReceipt` | `message_id` | 已持久接收的消息 UUID。 |
+| `MessageReceipt` | `message_id` | 已接收并保存的消息 UUID。 |
 | `MessageReceipt` | `request_id` | 本次消息请求的原始幂等标识。 |
 | `MessageReceipt` | `event_id` | 消息接收事件的序号；不是 Case revision。 |
 | `MessageReceipt` | `status` | 固定为 `ACCEPTED`，不表示消息已经用于诊断。 |
@@ -248,21 +250,21 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `AgentMessage` | `text` | 持久保存的用户原话。 |
 | `AgentMessage` | `attachment_ids` | 这条消息引用的会话附件 UUID 数组。 |
 | `AgentMessage` | `status` | `QUEUED`、`PROCESSING`、`APPLIED` 或 `UNUSED`，表示消息采用状态。 |
-| `AgentMessage` | `created_at` | 消息持久接收的时间。 |
+| `AgentMessage` | `created_at` | 接收并保存消息的时间。 |
 | `AgentMessage` | `notice` | 可空的中文采用说明；例如尚未用于本次诊断。 |
 | `AgentAttachment` | `attachment_id` | 会话附件 UUID，同时用于上传幂等请求头。 |
-| `AgentAttachment` | `conversation_id` | 附件所属会话；网站仍需验证用户归属。 |
+| `AgentAttachment` | `conversation_id` | 附件所属会话；网站仍需检查该会话是否属于当前用户。 |
 | `AgentAttachment` | `request_id` | 预约上传时的幂等标识。 |
 | `AgentAttachment` | `name` | 预约并校验的文件名。 |
 | `AgentAttachment` | `content_type` | 预约并校验的媒体类型。 |
 | `AgentAttachment` | `size` | 预约声明的字节数；`READY` 后表示上传字节数也已核对。 |
 | `AgentAttachment` | `sha256` | 预约声明的完整文件哈希；`READY` 后表示上传内容也已核对。 |
 | `AgentAttachment` | `status` | `RESERVED`、`UPLOADING`、`READY`、`IMPORTED` 或 `FAILED`。 |
-| `AgentAttachment` | `created_at` | 预约持久创建的时间。 |
+| `AgentAttachment` | `created_at` | 创建并保存上传预约的时间。 |
 | `AgentAttachment` | `case_attachment_id` | 导入既有 Case 后的附件 UUID；导入前为 `null`。 |
 | `PreparedAgentAttachment` | `attachment` | 本次预约的完整 `AgentAttachment`。 |
 | `PreparedAgentAttachment` | `upload` | `WebUploadDescriptor`，含上传 URL、方法、请求头和大小上限。 |
-| `ConversationDetailResponse` | `schema_version` | 统一会话读取合同版本，固定为 `3`。 |
+| `ConversationDetailResponse` | `schema_version` | 会话查询响应的数据格式版本，固定为 `3`。 |
 | `ConversationDetailResponse` | `conversation_id` | 会话 UUID。 |
 | `ConversationDetailResponse` | `status` | `INTAKE`、`WAITING_INPUT`、`RUNNING`、`CANCELLING`、`CANCELLED`、`COMPLETED`、`FAILED` 或 `INTERRUPTED`。 |
 | `ConversationDetailResponse` | `case_id` | 关联 Case UUID；整理问题阶段尚未创建时为 `null`。 |
@@ -276,21 +278,21 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `ConversationDetailResponse` | `last_event_id` | 当前最新事件序号；恢复页面时与本地已处理游标配合使用。 |
 | `ConversationDetailResponse` | `created_at` | 会话创建时间。 |
 | `ConversationDetailResponse` | `updated_at` | 最近一次会话持久更新的时间。 |
-| `ConversationDetailResponse` | `case_revision` | 加载报告或产物时捕获的权威 Case 版本；未读取时为 null。 |
+| `ConversationDetailResponse` | `case_revision` | 加载报告或产物时读取的服务端 Case 版本；未读取时为 null。 |
 | `ConversationDetailResponse` | `source_job_id` | 报告及产物的来源 Job；无结果或未加载时为 null。 |
 | `ConversationDetailResponse` | `progress` | 最新公开阶段和固定中文说明；尚无阶段事件时为 null。 |
 | `ConversationDetailResponse` | `report_state` | PENDING 等待诊断或补充，READY 已发布，UNAVAILABLE 已结束且无报告。 |
 | `ConversationDetailResponse` | `included` | 实际加载的 history、report、artifacts；轻量查询为空数组。 |
 | `ConversationDetailResponse` | `result` | 请求 report 时返回完整 ConversationReportView；未请求时为 null。 |
 | `ConversationDetailResponse` | `artifacts` | 请求 artifacts 时返回下载元数据和入口；未请求时为 null。 |
-| `AgentEvent` | `schema_version` | 公共事件合同版本，固定为 `2`；每条事件含 `run_id`。旧事件字节不改，读取时投影到 v2。 |
+| `AgentEvent` | `schema_version` | 公开事件的数据格式版本，固定为 `2`；每条事件含 `run_id`。旧事件字节不改，读取时转换为 v2 格式。 |
 | `AgentEvent` | `sequence` | 会话内递增序号；用于去重和手动续传，不另发送 SSE `id` 行。 |
 | `AgentEvent` | `conversation_id` | 事件所属会话 UUID。 |
 | `AgentEvent` | `case_id` | 事件关联 Case UUID，创建前为 `null`。 |
 | `AgentEvent` | `job_id` | 事件关联 Job UUID，没有关联时为 `null`。 |
 | `AgentEvent` | `type` | 公共事件类型；按下一节事件表分发，不作为诊断结论解析。 |
 | `AgentEvent` | `created_at` | 服务端持久记录事件的时间。 |
-| `AgentEvent` | `data` | 与事件类型对应的公开载荷，字段规则见下一节。 |
+| `AgentEvent` | `data` | 与事件类型对应的公开数据，字段规则见下一节。 |
 | `AgentErrorEnvelope` | `ok` | 失败时固定为 `false`。 |
 | `AgentErrorEnvelope` | `data` | 失败时固定为 `null`。 |
 | `AgentErrorEnvelope` | `error` | `AgentHttpError`，含安全中文错误和重试提示。 |
@@ -341,7 +343,7 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `ConversationHistoryEntry` | `questions` | 追问列表，其他类型为 null。 |
 | `ConversationHistoryEntry` | `result` | 结果摘要，其他类型为 null。 |
 | `ConversationResultSummary` | `status` | COMPLETED、FAILED、INTERRUPTED 或 CANCELLED；无报告的结束轮也保留卡片。 |
-| `ConversationResultSummary` | `case_id` | 该轮关联 Case；建案前结束时为 null。 |
+| `ConversationResultSummary` | `case_id` | 该轮关联的 Case；创建 Case 前已结束时为 null。 |
 | `ConversationResultSummary` | `case_status` | 该轮 Case 状态，可空。 |
 | `ConversationResultSummary` | `report_state` | READY 表示正式报告可读，UNAVAILABLE 表示本轮结束但没有报告。 |
 | `ConversationResultSummary` | `source_job_id` | 报告来源 Job，可空。 |
@@ -361,9 +363,9 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `ConversationDetailResponse` | `run_id` | 所选轮次 UUID。 |
 | `ConversationDetailResponse` | `history_next_cursor` | 更早记录游标，可空。 |
 | `ConversationReceipt` | `run_id` | 创建的首轮 UUID。 |
-| `MessageReceipt` | `run_id` | 消息归属的轮次 UUID。 |
-| `AgentMessage` | `run_id` | 消息归属轮次。 |
-| `AgentEvent` | `run_id` | 该事件归属轮次；sequence 仍在整个会话递增。 |
+| `MessageReceipt` | `run_id` | 消息所属轮次的 UUID。 |
+| `AgentMessage` | `run_id` | 消息所属轮次。 |
+| `AgentEvent` | `run_id` | 该事件所属轮次；sequence 仍在整个会话递增。 |
 
 ## 3. 实时事件、历史和状态显示
 
@@ -389,7 +391,7 @@ data: {"schema_version":2,"run_id":"50000000-0000-0000-0000-000000000001","seque
 
 ```
 
-所有业务事件都有同一外层字段，`sequence` 在会话内单调递增。不发送 `id:`、`event:`、`retry:` 行，也不发送 `[DONE]`；结束标志是 JSON 中的 `type=conversation.completed`。这是基础 SSE 传输，不是 OpenAI `choices` / `delta` 响应合同。
+所有业务事件的外层字段相同，`sequence` 在会话内单调递增。不发送 `id:`、`event:`、`retry:` 行，也不发送 `[DONE]`；结束标志是 JSON 中的 `type=conversation.completed`。这里使用基础 SSE 传输，不采用 OpenAI 的 `choices` / `delta` 响应格式。
 
 连接建立后立即发送 `: connected` 注释，服务端每 15 秒发送一次空闲 `: heartbeat` 注释。注释不触发 `onmessage`，不是业务事件，也不更新游标。网站代理需关闭响应缓冲、保持流式转发，并将读取超时设为大于心跳间隔，例如 60 秒。
 
@@ -426,11 +428,11 @@ data: {"schema_version":2,"run_id":"50000000-0000-0000-0000-000000000001","seque
 
 字段校验错误若有可公开的位置，`failure.details` 会含 `{"field":"location","actual":"input_values[2]"}` 这类条目。位置仅来自结构化错误的字段路径，不包含被拒绝的原始值、预期值或异常原文；没有安全位置时展示错误码、阶段和诊断 ID 即可。
 
-`failure.details` 若含 `phase=ARCHIVE_STATUS_COMMIT` 和 `persistence=UNKNOWN`，表示报告已生成，但当前进程无法确认归档状态。页面保留 `RUNNING / PENDING`，展示这条提示并继续读取正式 JSON。它不写入会话历史，不代表诊断失败，也不会生成 `conversation.completed`。其他交付状态未知可返回带安全 details 的 HTTP `503`，页面保留已有内容；不得自行推定成功、失败或重跑模型。
+`failure.details` 若含 `phase=ARCHIVE_STATUS_COMMIT` 和 `persistence=UNKNOWN`，表示报告已生成，但当前进程无法确认归档状态。页面保留 `RUNNING / PENDING`，展示这条提示并继续读取正式 JSON。它不写入会话历史，不代表诊断失败，也不会生成 `conversation.completed`。其他交付状态无法确认时，可能返回 HTTP `503`，并在 details 中提供可公开的错误详情。页面应保留已有内容，不得自行判定成功、失败或重新运行模型。
 
 消息已接收但尚未创建 Case 时，若服务因其他任务故障暂停调度，查询快照和建立 SSE 会返回 `503 / DISPATCH_REJECTED`，详情为 `phase=DISPATCH_PAUSED`、`persistence=UNKNOWN`。页面提示任务暂时无法继续，保留原消息和收据；该提示不含其他任务 ID，也不改写会话终态。空会话和已关闭历史仍可查询。
 
-网页可用 `EventSource` 订阅网站自己的同源 SSE 路由。由于响应没有 `id:` 行，它不会记录业务游标；短暂断线自动重连或刷新后的新连接都会从历史开始回放，显示层必须按 JSON 的 `sequence` 去重。需要精准续传时，使用流式 `fetch`，手动把最后处理成功的序号放入 `Last-Event-ID` 请求头。
+网页可用 `EventSource` 订阅网站自己的同源 SSE 路由。由于响应没有 `id:` 行，它不会记录业务游标；短暂断线自动重连或刷新后的新连接都会从保留的历史开始回放，显示层必须按 JSON 的 `sequence` 去重。以下简化示例适用于历史尚未到期的会话；长期会话及精准续传应使用流式 `fetch`，手动把最后处理成功的序号放入 `Last-Event-ID` 请求头。历史已清理时，服务端明确返回游标过期，不能反复从 0 重连；按本文开头的快照恢复流程继续。
 
 ```javascript
 const events = new EventSource(`/api/agent/conversations/${conversationId}/events`);
@@ -520,7 +522,7 @@ events.onmessage = (message) => {
 
 报告区已有可直接使用的 [report-view.js](../examples/website-agent/report-view.js)：导入 `renderReport` 后，将 `renderVerifiedReport(data)` 实现为 `renderReport(reportContainer, data)` 即可。组件按固定字段显示结构化报告、Skill 直出或通用诊断的 Markdown 原文，以及历史报告，处理空值、证据缺口及归档异常。先运行 [离线预览](../examples/website-agent/README.md)查看效果，再复制组件和 CSS 到网站。若使用 [browser-client.js](../examples/website-agent/browser-client.js)，其方法已经检查响应并返回 `data`，不要再次取 `.data`。
 
-其余 `renderEventAsText`、`renderConversationAsText`、`renderFailureAsText`、`showEventRetry` 接入网站自己的消息、状态和重试组件；渲染须幂等，失败要抛错，所有普通文本都不得作为 HTML 执行。`renderFailureAsText` 展示安全 code、phase 和诊断关联 ID；归档 UNKNOWN 保留报告区。历史结果事件只更新摘要卡片，用户点击后再用 SDK 的 `conversations.get(id, {include: ["report", "artifacts"], run_id: runId})` 获取并展示，独立于订阅生命周期，不会在刷新时下载全部旧报告。当前轮结束后订阅会关闭；用户明确发送新问题后重新初始化订阅和快照。组件销毁时调用 `closeAgentEvents()`，只断开订阅，不取消诊断。服务器和示例均限制待处理事件数量，慢连接不会无限积压。
+其余 `renderEventAsText`、`renderConversationAsText`、`renderFailureAsText`、`showEventRetry` 接入网站自己的消息、状态和重试组件。渲染须保持幂等，失败时抛出错误；普通文本不得作为 HTML 执行。`renderFailureAsText` 展示可公开的 code、phase 和诊断关联 ID；归档状态为 UNKNOWN 时保留报告区。历史结果事件只更新摘要卡片，用户点击后再用 SDK 的 `conversations.get(id, {include: ["report", "artifacts"], run_id: runId})` 获取并展示。这一步不依赖订阅是否仍在连接，刷新时也不会下载全部旧报告。当前轮结束后订阅会关闭；用户明确发送新问题后，重新初始化订阅和快照。组件销毁时调用 `closeAgentEvents()`，只断开订阅，不取消诊断。服务器和示例均限制待处理事件数量，慢连接不会无限积压。
 
 临时网络断线可由 `EventSource` 自动重连，但这里不会自动携带业务 `Last-Event-ID`，重连会回放历史，本例按 `lastSequence` 跳过已经处理成功的事件。报告加载、解析或显示失败时，本例关闭连接并显示重试入口，不处理排队中的完成事件；点击重试需重新执行订阅初始化，从历史回放，页面按 ID 更新已有内容。需要持久精准续传时，用流式 `fetch` 携带最后处理成功的 `Last-Event-ID`；按空行拆帧并忽略以冒号开头的注释，不按读取到的网络块直接 `JSON.parse`。刷新恢复还应根据会话快照重新获取已经发布的报告，不能只恢复进度文字。
 
@@ -540,7 +542,7 @@ events.onmessage = (message) => {
 
 `format=problem-locator-diagnosis-v3` 时正文在 `report`；`format=markdown` 时正文在 `markdown`；历史 `format=generic-v1` 时正文在 `report`，且 `artifact=null`。未就绪和无报告不是 HTTP 错误；非法 ID、会话不存在、读取故障或文件损坏仍返回受控的 `4xx/5xx`。`artifact.sha256` 描述原始产物字节，不是整个 API 响应的哈希。
 
-当前默认 `METHODS_EVIDENCE_VALIDATION=off`，专有定位也返回 `format=markdown`。正文直接采用 Skill 输出，`case_status` 采用 Skill 自己选择的 `RESOLVED` 或 `UNRESOLVED`；框架不再复核结论证据、清空根因或自动改为 `PARTIAL`。网站按已有 Markdown 分支展示，不能因为诊断模式是 `SPECIALIZED` 就要求 JSON 报告。该模式不生成 `diagnosis-result.json` 或 `result.zip`，`archive_status=NOT_REQUIRED`。
+当前默认 `METHODS_EVIDENCE_VALIDATION=off`，专用定位也返回 `format=markdown`。正文直接采用 Skill 输出，`case_status` 采用 Skill 自己选择的 `RESOLVED` 或 `UNRESOLVED`；框架不再复核结论证据、清空根因或自动改为 `PARTIAL`。网站按已有 Markdown 分支展示，不能因为诊断模式是 `SPECIALIZED` 就要求 JSON 报告。该模式不生成 `diagnosis-result.json` 或 `result.zip`，`archive_status=NOT_REQUIRED`。
 
 报告已发布时，即使 `archive_status=PENDING/FAILED` 或 failure 提示归档状态无法确认，`report_state` 仍为 `READY`。读取会话报告不会读取 ZIP。报告原始内容上限为 16 MiB；网站示例为含报告的响应保留 `6 × 16 MiB + 64 KiB`，同时包含历史时再加 16 MiB。不含报告的 JSON 响应上限仍为 16 MiB。
 
@@ -550,7 +552,7 @@ events.onmessage = (message) => {
 
 `result.available` 是报告已发布的通知。会话 `artifacts` 给出已核验产物的 ID、种类、类型、字节数、SHA-256、来源 Job 和下载入口；`created_by_job_id` 与同一会话响应的 `source_job_id` 一致。网站直接显示这些下载项，不再请求 Case 或单独产物列表。
 
-默认专有定位与 Generic V2 都发布唯一的 `GENERIC_REPORT` Markdown 产物。只有显式恢复 `advisory` / `strict` 的专有定位才发布 `USER_RESULT` / `diagnosis-result.json`。下载必须是 HTTP 200，不允许重定向；真实字节数、SHA-256 和 Content-Type 必须与权威产物描述一致。响应可以省略 `Content-Length` 和 `X-Content-SHA256`，但存在时也必须核对，不能用缺省响应头跳过实际字节校验。结构化报告要求 `schema_version=3`、`format_id=problem-locator-diagnosis-v3`，保留完整字段。不从 `methods_result`、SSE 阶段消息或 stdout 重建结论。
+默认专用定位与 Generic V2 都发布唯一的 `GENERIC_REPORT` Markdown 产物。只有手动恢复 `advisory` / `strict` 的专用定位才发布 `USER_RESULT` / `diagnosis-result.json`。下载响应必须为 HTTP 200，不允许重定向；真实字节数、SHA-256 和 Content-Type 必须与服务端的产物描述一致。响应可以省略 `Content-Length` 和 `X-Content-SHA256`，但存在时也必须核对；不能因为缺少响应头就跳过实际内容校验。结构化报告要求 `schema_version=3`、`format_id=problem-locator-diagnosis-v3`，并保留完整字段。不要根据 `methods_result`、SSE 阶段消息或 stdout 重新拼出结论。
 
 | Case 状态 | 报告和可用产物 |
 | --- | --- |
@@ -559,7 +561,7 @@ events.onmessage = (message) => {
 | `UNRESOLVED` | 默认仍展示 Skill Markdown 原文；`advisory` / `strict` 的结果为 `INCONCLUSIVE` JSON 和审计包，`root_cause=null`，没有结果 ZIP |
 | `FAILED` / `CANCELLED` / `INTERRUPTED` | 展示 failure 或状态，不伪造报告 |
 
-Markdown 报告按原文展示，渲染器应关闭原始 HTML。结构化报告的展示顺序为：定位结论、问题描述、关键发现、确认/候选/排除因素、完成条件、服务端验证及证据、时间相关性、证据缺口、限制、处置建议与安全说明。缺失必需字段属于协议错误；`null` 或空数组按其真实含义显示，不自动补写根因。会话中的 `result` 已由原生服务按原始产物字节校验，前端直接渲染，不必重复下载，也不要对重新序列化的 JSON 计算产物哈希。这些字节校验不代表对报告结论的证据复核。
+Markdown 报告按原文展示，渲染器应关闭原始 HTML。结构化报告的展示顺序为：定位结论、问题描述、关键发现、确认/候选/排除因素、完成条件、服务端验证及证据、时间相关性、证据缺口、限制、处置建议与安全说明。缺失必需字段属于协议错误；`null` 或空数组按其真实含义显示，不自动补写根因。会话中的 `result` 已由 xiaodao 服务按原始产物字节校验，前端可直接渲染，无需重复下载，也不要对重新序列化的 JSON 计算产物哈希。这些校验只验证文件内容是否完整，不代表已核实报告结论的证据。
 
 `archive_status=PENDING`：JSON 立即可展示，继续等 `archive.updated`。`READY`：按用户请求下载 `USER_RESULT_ARCHIVE` / `result.zip`。`FAILED`：归档失败，但已经交付的报告仍有效。`NOT_REQUIRED`：没有待生成的结果 ZIP，审计包是否可下载以产物列表为准。
 
@@ -567,7 +569,7 @@ Markdown 报告按原文展示，渲染器应关闭原始 HTML。结构化报告
 
 ## 5. 可运行的 TypeScript 网站后端
 
-仓库的 `examples/website-agent/server.ts` 使用 Node.js 24 内置 TypeScript 支持和标准库，无需安装 npm 包；`Access` 类型和启动入口在此文件，唯一业务实现在 `server.mjs`。它实现登录回调和服务端归属校验、同源会话接口、SSE 转发、上传转发、统一会话视图，以及经校验的文件下载。网站可直接集成其中逻辑，或把它作为后端服务接入现有反向代理。
+仓库的 `examples/website-agent/server.ts` 使用 Node.js 24 内置 TypeScript 支持和标准库，无需安装 npm 包。`Access` 类型和启动入口在此文件，业务逻辑统一在 `server.mjs` 中实现。示例提供登录回调、服务端用户权限检查、同源会话接口、SSE 转发、上传转发、统一会话视图和文件下载校验。网站可直接集成其中的逻辑，也可将它作为后端服务接入现有反向代理。
 
 ```powershell
 $env:XIAODAO_BASE_URL = 'http://xiaodao.internal:8000'
@@ -577,21 +579,21 @@ node examples/website-agent/server.ts
 
 Linux 启动命令、认证回调及反向代理要求见 [示例 README](../examples/website-agent/README.md)。示例固定监听 `127.0.0.1`，不是可以直接暴露给所有浏览器的完整网站。
 
-未配置 `WEBSITE_AUTH_MODULE` 时，服务仍可启动，但业务请求全部返回 `401`。不要为了联调删掉授权检查。认证模块导出 `access`，只需实现 `authenticate(request)`：验证网站登录态，返回稳定的 `{id}`，未登录时返回 `null`。BFF 从已认证 ID 和固定的 `WEBSITE_OWNER_NAMESPACE` 派生 `owner_key`，归属由原生服务唯一保存；不再维护第二份会话或附件归属库。Cookie 认证还需接入网站既有 CSRF 和 Origin 校验；不得相信客户端自行传入的用户名或 user ID。
+未配置 `WEBSITE_AUTH_MODULE` 时，服务仍可启动，但业务请求全部返回 `401`。不要为了联调删掉授权检查。认证模块导出 `access`，只需实现 `authenticate(request)`：验证网站登录态，返回稳定的 `{id}`，未登录时返回 `null`。BFF 根据已认证的 ID 和固定的 `WEBSITE_OWNER_NAMESPACE` 生成 `owner_key`。会话、附件与用户的对应关系统一由 xiaodao 保存，BFF 不再单独维护一份。Cookie 认证还需接入网站既有 CSRF 和 Origin 校验；不得相信客户端自行传入的用户名或用户 ID。
 
 网站示例前缀是 `/api/agent`，xiaodao 上游前缀是 `/api/v1/agent`。两者的会话和附件操作一致；网站负责授权、受控错误和同源下载地址，不再额外生成中文 sections。
 
 | 网站示例路径 | 用途 |
 | --- | --- |
 | `GET /api/agent/conversations/{id}` | 一次返回完整会话，支持与上游相同的 include 参数 |
-| `POST /api/agent/attachments` | 预约上传；JSON 必须带 conversation_id，先检查该会话归属 |
+| `POST /api/agent/attachments` | 预约上传；JSON 必须带 conversation_id，先检查该会话是否属于当前用户 |
 | `GET /api/agent/conversations/{id}/files/{artifact_id}/content` | 从会话核验文件身份后下载 |
 | 上一下载路径加 `?download=archive&acknowledge_raw_logs=true` | 用户确认原始日志提示后下载结果 ZIP |
 | 上一下载路径加 `?download=audit` | 用户主动下载审计包 |
 
 文件下载仍流式传输，与会话 JSON 分开；下载入口由会话提供，属于会话能力。旧独立读取路径和旧 SDK 方法不再提供。
 
-示例只向配置的 `XIAODAO_BASE_URL` 发请求。核验会话归属、Case ID、Artifact ID 和来源 Job 后，使用固定 API 路径重建内部下载地址；响应中的 `download_url` 不参与寻址，不能指定主机、路径或重定向目标。网站的内部 upstream 可以与服务端 `PUBLIC_BASE_URL` 不同，配置的路径前缀会保留，浏览器始终使用网站同源接口。
+示例只向配置的 `XIAODAO_BASE_URL` 发请求。检查会话所属用户、Case ID、Artifact ID 和来源 Job 后，根据固定 API 路径构造内部下载地址。响应中的 `download_url` 不用于构造请求地址，也不能指定主机、路径或重定向目标。网站访问的内部上游地址可以与服务端 `PUBLIC_BASE_URL` 不同，配置中的路径前缀会保留；浏览器始终使用网站同源接口。
 
 运行接入示例确定性测试：
 
@@ -603,34 +605,34 @@ node --test examples/website-agent/server.test.mjs
 
 ## 6. 服务配置与升级
 
-当前产品数据合同仍是 `8.2.0` / `v11-contract-r2`。本轮网站会话读取改为 `schema_version=3`，旧查询入口删除；网站前后端需同步升级。报告 schema 3 不变；Agent 存储升级为 2、会话详情为 3、公开事件为 2。旧事件的原始字节不改，读取时投影到 v2。已有 r1 或 r2 数据必须提供 `--ownership-map`，按[副本升级说明](data-upgrade-v11-r2.md)显式升级后，才能交给新版本；保留原数据和历史报告，不要直接修改合同标记或把旧目录交给新版本。
+当前产品版本和数据格式仍是 `8.2.0` / `v11-contract-r2`。本次网站会话查询改为 `schema_version=3`，旧查询入口已删除，网站前后端需同步升级。报告 schema 3 不变；Agent 存储升级为 2、会话详情为 3、公开事件为 2。旧事件的原始字节不改，读取时转换为 v2 格式。已有 r1 或 r2 数据必须提供 `--ownership-map`，按[副本升级说明](data-upgrade-v11-r2.md)手动升级后，才能交给新版本。请保留原数据和历史报告，不要直接修改数据格式标记或把旧目录交给新版本。
 
-历史兼容说明：早期 `8.0.0` 预览版曾把命名事件改成 data-only 帧，那次 SSE 调整本身没有改变 V11 数据合同。仍使用旧版 `event:` 监听器的网站须改用 `onmessage`，从 JSON 读取 `type` 和 `sequence`，不再依赖 `lastEventId` 或服务端 `retry:`。这段历史说明不代表本次 8.1 升级无需处理数据合同。
+历史兼容说明：早期 `8.0.0` 预览版曾把命名事件改成只含 data 的事件帧，那次 SSE 调整本身没有改变 V11 数据格式。仍使用旧版 `event:` 监听器的网站须改用 `onmessage`，从 JSON 读取 `type` 和 `sequence`，不再依赖 `lastEventId` 或服务端 `retry:`。这段历史说明不代表本次 8.1 升级无需处理数据格式变化。
 
-`INTAKE_CLAUDE_COMMAND` 配置独立补充信息整理角色；缺省沿用路由角色命令。该角色只在已建 Case 的补充点整理用户消息和公开 requirements，不负责创建任务，不获得诊断工具、日志读取或发布结果权限。
+`INTAKE_CLAUDE_COMMAND` 配置信息整理角色的独立命令；未设置时沿用路由角色命令。该角色只在已创建的 Case 需要补充信息时整理用户消息和公开 requirements，不负责创建任务，也没有使用诊断工具、读取日志或发布结果的权限。
 
-`METHODS_EVIDENCE_VALIDATION` 当前默认为 `off`：直接交付 Skill Markdown，关闭输出后的 grounding、证据一致性复核、Candidate 语义判定和独立 Reviewer。即使旧配置仍有 `SPECIALIZED_REVIEWER_ENABLED=true`，也不会启动审核。模型执行前的 Logparse、日志冻结、marker 扫描和命中方法卡加载保持不变。新 Job 冻结 `agent-profile/skill-direct` 和 `output-contract/skill-direct`，保持 `SPECIALIZED` 模式与 `selected_skill_ref`；Case 使用 `generic_result_v2` 记录 Markdown 和实际 `skill_name`。已有 Job 保留原冻结身份，升级或切换策略前先结束活跃任务，再重启服务。
+`METHODS_EVIDENCE_VALIDATION` 当前默认为 `off`：直接交付 Skill Markdown，关闭输出后的依据核验、证据一致性复核、Candidate 语义判定和独立 Reviewer。即使旧配置仍有 `SPECIALIZED_REVIEWER_ENABLED=true`，也不会启动审核。模型执行前的 Logparse、固定日志快照、marker 扫描和命中方法卡加载保持不变。新 Job 使用创建时固定的 `agent-profile/skill-direct` 和 `output-contract/skill-direct`，保持 `SPECIALIZED` 模式与 `selected_skill_ref`；Case 使用 `generic_result_v2` 记录 Markdown 和实际 `skill_name`。已有 Job 保留创建时固定的配置标识。升级或切换策略前，应先结束活跃任务，再重启服务。
 
-显式设置 `advisory` 可恢复原建议模式及 `PARTIAL` / `INCONCLUSIVE` 结构化交付，`strict` 恢复原核验；这两种策略下，`SPECIALIZED_REVIEWER_ENABLED` 继续控制独立审核。输入单项无效只影响该项；非法输入、模型执行协议错误、共享输入变化、权限、路径和文件完整性异常仍失败。不增加模型重试或续办。详见[诊断交付策略](diagnosis-advisory.md)。
+手动设置 `advisory` 可恢复原建议模式及 `PARTIAL` / `INCONCLUSIVE` 结构化交付，设置 `strict` 可恢复原核验方式；这两种策略下，`SPECIALIZED_REVIEWER_ENABLED` 继续控制独立审核。单项输入无效只影响该项；非法输入、模型执行协议错误、共享输入变化，以及权限、路径和文件完整性异常仍会使任务失败。不增加模型重试或任务续接。详见[诊断交付策略](diagnosis-advisory.md)。
 
-使用 JSON 合同的模型阶段若在最终 `result` 中先写 Markdown 说明、再给唯一完整 JSON，服务端会按[受限提取规则](model-output-compatibility.md#说明文字与最终-json)处理，前端无需自行截取或修复。多个候选、截断或无法识别的结果仍返回具体失败信息。默认 Skill 直出使用首行 `SKILL_DIAGNOSIS_RESULT_V1` 终态标记和 Markdown 正文，不做 JSON 提取。`stream-json` 只规定 CLI 事件外层，不改变各阶段的业务输出合同；兼容逻辑不增加模型调用。
+要求输出 JSON 的模型阶段，如果在最终 `result` 中先写 Markdown 说明、再给出唯一完整 JSON，服务端会按[受限提取规则](model-output-compatibility.md#说明文字与最终-json)处理，前端无需自行截取或修复。出现多个候选、内容截断或无法识别的结果时，仍会返回具体失败信息。默认 Skill 直接输出首行 `SKILL_DIAGNOSIS_RESULT_V1` 终态标记和 Markdown 正文，不做 JSON 提取。`stream-json` 只规定 CLI 事件的外层格式，不改变各阶段的业务输出要求；兼容处理不增加模型调用。
 
-新部署使用全新空 `DATA_ROOT`；升级 `8.0.0` 时使用显式生成并核验的 r2 副本，原目录保持原样。其他旧数据按升级说明支持范围处理，不自动迁移，也不从旧 `methods_result` 反推报告。MCP 仍为原来的七个工具，输入继续根层扁平；网站直接使用 REST Agent 接口。
+新部署使用全新空 `DATA_ROOT`；升级 `8.0.0` 时，需手动生成并核验 r2 副本，原目录保持原样。其他旧数据按升级说明支持的范围处理，不自动迁移，也不从旧 `methods_result` 反推报告。MCP 仍为原来的七个工具，输入参数继续平铺在根层；网站直接使用 REST Agent 接口。
 
 ## 7. 状态与报告响应字段
 
 统一会话顶层字段见第 2 节。以下 `ConversationReportView` 是 `data.result` 的固定结构，不是独立接口。三种正常报告状态都返回 HTTP 200，`failure` 可为 null；READY 时可能附带归档异常，报告仍可展示。
 
-默认专有定位和 Generic V2 都使用 `markdown` 字段交付原文，`report=null`。结构化 `report` 沿用正式 `UserResultPayloadV3` 或历史 `GenericResult`，不生成另一份结论。下表仅补充前文尚未说明的字段；已有报告字段继续使用前文合同。报告包含的证据、规则和时间信息都是已发布内容，读取接口不会重新审核或调用模型。
+默认专用定位和 Generic V2 都使用 `markdown` 字段交付原文，`report=null`。结构化 `report` 沿用正式 `UserResultPayloadV3` 或历史 `GenericResult`，不生成另一份结论。下表仅补充前文尚未说明的字段，已有报告字段继续遵循前文约定。报告包含的证据、规则和时间信息都是已发布内容，读取接口不会重新审核或调用模型。
 
 | 模型 | 字段 | 含义 |
 | --- | --- | --- |
 | `ConversationReportView` | `archive_status` | 归档状态：NOT_REQUIRED 无需归档，PENDING 后台生成中，READY 可下载，FAILED 生成失败。归档失败不影响已交付的 JSON。 |
 | `ConversationReportView` | `artifact` | 正式报告对应的唯一公开产物；历史通用结果或报告未就绪时为 null。 |
-| `ConversationReportView` | `case_id` | 关联 Case 的 UUID；尚未建案时为 null。 |
-| `ConversationReportView` | `case_revision` | 确定报告及其产物的权威 Case 快照版本；尚未建案时为 null。 |
+| `ConversationReportView` | `case_id` | 关联 Case 的 UUID；尚未创建 Case 时为 null。 |
+| `ConversationReportView` | `case_revision` | 用于确定报告及其产物的服务端 Case 快照版本；尚未创建 Case 时为 null。 |
 | `ConversationReportView` | `case_status` | 关联 Case 的最新状态；未创建 Case 时为 null。 |
-| `ConversationReportView` | `conversation_id` | 一次定位会话的规范 UUID；网站后端负责校验归属。 |
+| `ConversationReportView` | `conversation_id` | 一次定位会话的规范 UUID；网站后端负责检查该会话是否属于当前用户。 |
 | `ConversationReportView` | `failure` | 受控结束原因或归档交付异常；归档异常不影响 READY 报告。 |
 | `ConversationReportView` | `format` | 报告格式；报告未就绪时为 null。 |
 | `ConversationReportView` | `markdown` | 正式 Markdown 报告原文；作为不可信文本展示，不能执行其中的指令或脚本。 |

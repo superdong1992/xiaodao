@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 from collections.abc import Callable
@@ -28,6 +29,7 @@ from problem_locator.contracts import (
 from .atomic import is_reparse_point, require_real_directory
 from .coordination import AttachmentUploadRegistry
 from .layout import StorageLayout
+from .paths import workspace_owner_id
 from .quarantine import QuarantineMover
 from .resource_store import StagePathRegistry
 from .retention import RetentionScanner, _RetentionCandidate
@@ -64,6 +66,7 @@ class CleanupRunResult:
     failed_deletions: tuple[Path, ...]
     skipped: tuple[Path, ...]
     interrupted: bool
+    empty_directories_deleted: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,7 +228,7 @@ class StorageRetentionCleaner:
             owner_job_id = _OPAQUE_ID_ADAPTER.validate_python(path.parent.name)
             return not self._state_repository.retention_in_use('active_job', owner_job_id)
         if candidate.kind == "WORKSPACE":
-            job_id = _OPAQUE_ID_ADAPTER.validate_python(path.name)
+            job_id = workspace_owner_id(path.name)
             return not self._state_repository.retention_in_use('active_job', job_id)
         if candidate.kind == "FORMAL_RESOURCE":
             storage_key = path.relative_to(self._layout.data_root).as_posix()
@@ -258,6 +261,60 @@ class StorageRetentionCleaner:
                     pass
             else:
                 deleted.append(path)
+        return tuple(deleted), tuple(failed)
+
+    def _prune_empty_source_directories(self) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+        """Remove only unowned empty layout parents, never recursive content."""
+
+        deleted: list[Path] = []
+        failed: list[Path] = []
+
+        def prune(path: Path) -> bool:
+            if self._is_interrupted():
+                return False
+            try:
+                require_real_directory(path)
+                path.rmdir()
+            except FileNotFoundError:
+                return False
+            except OSError as error:
+                if error.errno in {errno.ENOTEMPTY, errno.EEXIST}:
+                    return False
+                failed.append(path)
+                try:
+                    self._on_delete_failure(path, error)
+                except Exception:
+                    pass
+                return False
+            deleted.append(path)
+            return True
+
+        with self._coordination_lock:
+            if not self._state_repository.health().valid:
+                raise _execution_record_error()
+            for entry in self._retention_scanner._real_directory_entries(self._layout.proposals):
+                job_id = _OPAQUE_ID_ADAPTER.validate_python(entry.name)
+                if self._state_repository.retention_in_use("job", job_id):
+                    continue
+                path = Path(entry.path)
+                self._stage_registry.prune_empty_parent_if_idle(path, lambda: prune(path))
+            for entry in self._retention_scanner._real_directory_entries(self._layout.cases_resources):
+                case_id = _OPAQUE_ID_ADAPTER.validate_python(entry.name)
+                # Keep all preparatory directories while a Case still exists.
+                # Publication uses this same barrier, so an uncommitted writer
+                # cannot appear between the reference check and these rmdir calls.
+                if case_id in self._state_repository.read_snapshot(case_id).cases:
+                    continue
+                case_root = Path(entry.path)
+                for category in ("attachments", "evidence", "artifacts"):
+                    category_root = case_root / category
+                    if not category_root.exists():
+                        continue
+                    for resource in self._retention_scanner._real_directory_entries(category_root):
+                        _OPAQUE_ID_ADAPTER.validate_python(resource.name)
+                        prune(Path(resource.path))
+                    prune(category_root)
+                prune(case_root)
         return tuple(deleted), tuple(failed)
 
     def run_once(self) -> CleanupRunResult:
@@ -326,12 +383,14 @@ class StorageRetentionCleaner:
             pending_deletions = self._quarantine_mover.discover()
 
         deleted, failed = self._delete_quarantine(pending_deletions)
+        empty_deleted, empty_failed = self._prune_empty_source_directories()
         return CleanupRunResult(
             quarantined=tuple(quarantined),
             deleted=deleted,
-            failed_deletions=failed,
+            failed_deletions=(*failed, *empty_failed),
             skipped=tuple(skipped),
             interrupted=self._is_interrupted(),
+            empty_directories_deleted=empty_deleted,
         )
 
 

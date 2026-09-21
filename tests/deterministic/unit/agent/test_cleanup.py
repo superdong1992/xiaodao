@@ -54,6 +54,7 @@ def stack(tmp_path):
         _file(tmp_path, f"resources/cases/{CASE_ID}/artifacts/{JOB_ID}/payload"),
         _file(tmp_path, f"jobs/{JOB_ID}/execution.json"),
         _file(tmp_path, f"tmp/workspaces/{JOB_ID}/model-response.txt"),
+        _file(tmp_path, f"tmp/workspaces/{JOB_ID}.logparse-preprocess/output/result.json"),
         _file(tmp_path, f"tmp/proposals/{JOB_ID}/p-example/payload")]
     retained = _file(tmp_path, f"resources/cases/{OTHER_CASE}/artifacts/{OTHER_JOB}/payload", b"keep other case")
     usage = ConversationUsageGuard()
@@ -166,6 +167,49 @@ def test_cleanup_removes_intake_workspaces_without_guessing_other_directories(st
     assert cleanup.run_once()
     assert not owned.exists()
     assert unrelated.exists()
+
+
+def test_cleanup_removes_owned_preprocessing_without_touching_other_jobs(stack):
+    repository, store, cid, paths, _, _, cleanup = stack
+    unrelated = _file(repository.layout.data_root,
+        f"tmp/workspaces/{OTHER_JOB}.logparse-preprocess/output/result.json")
+    owned = next(path for path in paths if ".logparse-preprocess" in str(path))
+    _finish(repository)
+    store.request_delete(cid)
+
+    assert cleanup.run_once()
+
+    assert not owned.exists()
+    assert unrelated.read_bytes() == b"private data"
+
+
+def test_core_download_delays_whole_conversation_cleanup_until_close(stack):
+    from problem_locator.application.queries import ApplicationQueryService
+    from problem_locator.contracts import ResourceRef
+    from tests.deterministic.contracts.fakes import InMemoryResourceStore
+    from tests.deterministic.unit.application.test_queries import ARTIFACT_ID, _Notifier, _diagnostic_artifact
+
+    repository, store, cid, paths, _, _, cleanup = stack
+    artifact = _diagnostic_artifact(b"{}")
+    state = repository.read_snapshot(CASE_ID)
+    repository.commit(state.generation, state.cases[CASE_ID].case.case_revision,
+        _empty_mutation(insert_artifacts=[artifact]))
+    _finish(repository)
+    resources = InMemoryResourceStore()
+    resources.seed_formal_resource(ResourceRef(resource_kind=artifact.resource_kind,
+        storage_key=artifact.storage_key, size=artifact.size, sha256=artifact.sha256),
+        state_reference_count=1, payload=b"{}")
+    opened = ApplicationQueryService(repository, resources, _Notifier()).open_artifact(CASE_ID, ARTIFACT_ID)
+    store.request_delete(cid)
+
+    assert not cleanup.run_once()
+    assert all(path.exists() for path in paths)
+    assert repository._db.execute("SELECT error_code FROM agent_cleanup_jobs WHERE conversation_id=?", (cid,)).fetchone()[0] == "CLEANUP_BUSY"
+    assert opened.stream.read(2) == b"{}"
+    opened.stream.close()
+
+    assert cleanup.run_once()
+    assert all(not path.exists() for path in paths)
 
 
 def test_cleanup_recovers_running_claim_after_adapter_restart(stack):

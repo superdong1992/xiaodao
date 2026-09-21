@@ -10,10 +10,12 @@ import pytest
 from problem_locator.contracts import JobType
 from problem_locator.diagnostics import bind_diagnostics
 from problem_locator.journey import (
+    JourneyEvent,
     configure_journey,
     journey_enabled,
     record_journey_event,
 )
+from problem_locator.storage import log_rotation
 
 
 CASE_ID = "00000000-0000-4000-8000-000000000001"
@@ -125,3 +127,43 @@ def test_runtime_write_failure_disables_journey_without_raising() -> None:
 def test_journey_rejects_stream_and_file_together(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="cannot be configured together"):
         configure_journey(stream=io.StringIO(), log_file=tmp_path / "journey.jsonl")
+
+
+def test_journey_rotation_preserves_sequence_on_reconfiguration_and_giant_records(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(log_rotation, "LOG_FILE_MAX_BYTES", 1024)
+    target = tmp_path / "journey.jsonl"
+    configure_journey(log_file=target)
+    for index in range(12):
+        event = record_journey_event("job.stage.completed", case_id=CASE_ID, job_id=JOB_ID,
+                                     data={"index": index, "text": "中" * 20_000})
+        assert event is not None
+        assert event.data["log_truncation"]["truncated"] is True
+    configure_journey(log_file=target)
+    final = record_journey_event("case.status.changed", case_id=CASE_ID,
+                                 data={"to_status": "COMPLETED"})
+    configure_journey()
+    assert final.sequence == 13
+    segments = log_rotation.jsonl_segment_paths(target)
+    assert len(segments) == 5
+    assert all(segment.stat().st_size <= 1024 for segment in segments)
+    events = [JourneyEvent.model_validate_json(line, strict=True)
+              for segment in segments for line in segment.read_bytes().splitlines()]
+    assert [event.sequence for event in events] == list(range(events[0].sequence, 14))
+    assert all(event.case_id == CASE_ID for event in events)
+
+
+def test_unrecoverable_legacy_giant_journey_never_restarts_at_sequence_one(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(log_rotation, "LOG_FILE_MAX_BYTES", 1024)
+    target = tmp_path / "journey.jsonl"
+    target.write_bytes((json.dumps({"sequence": 87, "data": {"text": "x" * 20_000}}) + "\n").encode())
+    with pytest.raises(ValueError, match="无法恢复事件序号"):
+        configure_journey(log_file=target)
+    assert not journey_enabled()
+    marker = json.loads(target.read_bytes())
+    assert "sequence" not in marker
+    assert marker["log_truncation"]["sequence_unavailable"] is True
+    with pytest.raises(ValueError, match="无法恢复事件序号"):
+        configure_journey(log_file=target)
+    assert json.loads(target.read_bytes()) == marker

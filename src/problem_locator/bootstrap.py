@@ -43,7 +43,6 @@ from problem_locator.contracts import (
     StateExportObjectCounts,
     StateExportResource,
     StateFile,
-    UPLOAD_TEMP_RETENTION_SECONDS,
     ValidationIssue,
     ValidationReport,
     canonical_json_bytes,
@@ -95,6 +94,7 @@ from problem_locator.storage.state_repository import CaseStateRepository
 
 
 _SHUTDOWN_TIMEOUT_SECONDS = 30.0
+_RETENTION_INTERVAL_SECONDS = 3_600.0
 _READINESS_NAMES = (
     "CONFIG",
     "INSTANCE_LOCK",
@@ -636,7 +636,7 @@ class StandaloneStateAdmin:
 
 
 class RetentionService:
-    """Single managed thread for S02's startup and 24-hour cleanup cadence."""
+    """Run independent history and temporary-file cleanup at startup and hourly."""
 
     def __init__(
         self,
@@ -650,7 +650,7 @@ class RetentionService:
         clock: ProductionClock,
         file_sync: PlatformFileSync,
         replacer: PlatformReplaceOperation,
-        interval_seconds: float = UPLOAD_TEMP_RETENTION_SECONDS,
+        interval_seconds: float = _RETENTION_INTERVAL_SECONDS,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError("cleanup interval must be positive")
@@ -661,6 +661,7 @@ class RetentionService:
         self._last_result: CleanupRunResult | None = None
         self._last_failure_code: ErrorCode | None = None
         self._last_failure_type: str | None = None
+        self.history: Any | None = None
         self.cleaner = StorageRetentionCleaner(
             layout,
             coordination_lock,
@@ -724,14 +725,19 @@ class RetentionService:
         thread.join(timeout_seconds)
         return not thread.is_alive()
 
-    def _run(self) -> None:
-        while not self._stop.is_set():
+    def _run_once(self) -> None:
+        failed = False
+        for stage, cleaner in (("history", self.history), ("temporary", self.cleaner)):
+            if cleaner is None or self._stop.is_set():
+                continue
             try:
-                result = self.cleaner.run_once()
+                result = cleaner.run_once()
             except ApplicationPortError as exc:
+                failed = True
                 log_event(
                     "retention.run.application_error",
                     level=logging.ERROR,
+                    stage=stage,
                     error_code=exc.error.code,
                     application_error=exc.error,
                     error=exc,
@@ -741,9 +747,11 @@ class RetentionService:
                     self._last_failure_code = exc.error.code
                     self._last_failure_type = type(exc).__name__
             except Exception as exc:
+                failed = True
                 log_event(
                     "retention.run.unhandled_error",
                     level=logging.ERROR,
+                    stage=stage,
                     error=exc,
                 )
                 with self._lock:
@@ -751,18 +759,26 @@ class RetentionService:
                     self._last_failure_code = None
                     self._last_failure_type = type(exc).__name__
             else:
-                log_event(
-                    "retention.run.completed",
-                    deleted_count=len(result.deleted),
-                    quarantined_count=len(result.quarantined),
-                    failed_deletion_count=len(result.failed_deletions),
-                    skipped_count=len(result.skipped),
-                    interrupted=result.interrupted,
-                )
-                with self._lock:
-                    self._last_result = result
-                    self._last_failure_code = None
-                    self._last_failure_type = None
+                if stage == "temporary":
+                    log_event(
+                        "retention.run.completed",
+                        deleted_count=len(result.deleted),
+                        empty_directory_deleted_count=len(result.empty_directories_deleted),
+                        quarantined_count=len(result.quarantined),
+                        failed_deletion_count=len(result.failed_deletions),
+                        skipped_count=len(result.skipped),
+                        interrupted=result.interrupted,
+                    )
+                    with self._lock:
+                        self._last_result = result
+        if not failed:
+            with self._lock:
+                self._last_failure_code = None
+                self._last_failure_type = None
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self._run_once()
             if self._stop.wait(self._interval_seconds):
                 return
 
@@ -874,41 +890,44 @@ class ServiceComposition:
                     return
             self._closing = True
 
-        deadline = time.monotonic() + timeout_seconds
-        agent_stopped = self.agent.shutdown(max(0.0, deadline - time.monotonic()))
-        scheduler_stopped = self.scheduler.shutdown(max(0.0, deadline - time.monotonic()))
-        retention_stopped = self.retention.shutdown(
-            max(0.0, deadline - time.monotonic())
-        )
-        archive_stopped = self.archive.shutdown(max(0.0, deadline - time.monotonic()))
-        with self._lifecycle_condition:
-            if self._start_in_progress:
-                self._lifecycle_condition.wait_for(
-                    lambda: not self._start_in_progress,
-                    timeout=max(0.0, deadline - time.monotonic()),
-                )
-            safe_to_release = (
-                scheduler_stopped
-                and agent_stopped
-                and retention_stopped
-                and archive_stopped
-                and not self._start_in_progress
+        try:
+            deadline = time.monotonic() + timeout_seconds
+            agent_stopped = self.agent.shutdown(max(0.0, deadline - time.monotonic()))
+            scheduler_stopped = self.scheduler.shutdown(max(0.0, deadline - time.monotonic()))
+            retention_stopped = self.retention.shutdown(
+                max(0.0, deadline - time.monotonic())
             )
+            archive_stopped = self.archive.shutdown(max(0.0, deadline - time.monotonic()))
+            with self._lifecycle_condition:
+                if self._start_in_progress:
+                    self._lifecycle_condition.wait_for(
+                        lambda: not self._start_in_progress,
+                        timeout=max(0.0, deadline - time.monotonic()),
+                    )
+                safe_to_release = (
+                    scheduler_stopped
+                    and agent_stopped
+                    and retention_stopped
+                    and archive_stopped
+                    and not self._start_in_progress
+                )
 
-        if not safe_to_release:
+            if not safe_to_release:
+                raise RuntimeError(
+                    "managed service threads did not stop before the shutdown deadline"
+                )
+
+            self.repository.close()
+            self.asset_catalog.close()
+            self.instance_lock.release()
+            with self._lifecycle_condition:
+                self._closed = True
+        finally:
+            # Failed shutdown keeps the instance lock for a safe retry, but
+            # must release the lifecycle claim and wake concurrent closers.
             with self._lifecycle_condition:
                 self._closing = False
                 self._lifecycle_condition.notify_all()
-            raise RuntimeError(
-                "managed service threads did not stop before the shutdown deadline"
-            )
-
-        self.repository.close()
-        self.instance_lock.release()
-        with self._lifecycle_condition:
-            self._closed = True
-            self._closing = False
-            self._lifecycle_condition.notify_all()
 
 
 @dataclass(slots=True)
@@ -1067,6 +1086,7 @@ def _assemble(
             specialized_reviewer_enabled=settings.specialized_reviewer_enabled,
             methods_evidence_validation=settings.methods_evidence_validation,
             allow_test_skills=allow_test_skills,
+            defer_snapshot=True,
         )
     except (OSError, TypeError, ValueError) as exc:
         raise _CompositionFailure(
@@ -1138,6 +1158,7 @@ def _assemble(
     replacer = PlatformReplaceOperation()
 
     try:
+        asset_catalog.freeze_assets(layout.temporary / "assets")
         execution_records = FileExecutionRecordStore(
             layout.data_root,
             coordination_lock,
@@ -1279,6 +1300,11 @@ def _assemble(
         agent.cleanup = ConversationCleanupService(agent_store, repository,
             QuarantineMover(layout, coordination_lock, file_sync, replacer), agent.usage_guard,
             dispatcher=scheduler, archive=archive)
+        from problem_locator.storage.history_retention import HistoryRetentionService
+        retention.history = HistoryRetentionService(repository, agent_store,
+            QuarantineMover(layout, coordination_lock, file_sync, replacer), agent.usage_guard,
+            clock, dispatcher=scheduler, archive=archive,
+            attachment_registry=attachment_registry, coordination_lock=coordination_lock)
         return ServiceComposition(
             settings=settings,
             clock=clock,

@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import shutil
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import TracebackType
 from typing import Literal, Self
@@ -194,6 +194,15 @@ class StagePathRegistry:
                     if lease.purpose == "stage"
                 )
             )
+
+    def prune_empty_parent_if_idle(self, directory: Path, prune: Callable[[], bool]) -> bool:
+        """Serialize empty-parent removal with child stage registration."""
+
+        parent = _absolute_lexical(directory)
+        with self._lock:
+            if any(path == parent or path.is_relative_to(parent) for path in self._claims):
+                return False
+            return prune()
 
     def is_stage_active(self, directory: Path) -> bool:
         key = _absolute_lexical(directory)

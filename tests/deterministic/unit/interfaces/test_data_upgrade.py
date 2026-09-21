@@ -59,6 +59,11 @@ def _rows(db):
 
 def _legacy_agent_schema(db):
     """Build actual old Agent v1 fixtures, never downgrade a production root."""
+    # Current fixture creation also initializes newer Core retention metadata.
+    # These tables did not exist in the old source schema accepted by this
+    # upgrader; remove them here instead of broadening its production allowlist.
+    for table in ("completed_case_retention", "history_cleanup_jobs"):
+        db.execute(f'DROP TABLE IF EXISTS "{table}"')
     keep = {"agent_messages_conversation", "agent_events_progress", "agent_dispatches_conversation_status"}
     for name, sql in db.execute("SELECT name,sql FROM sqlite_master WHERE type='index'").fetchall():
         if sql is not None and name.startswith("agent_") and name not in keep:
@@ -86,6 +91,8 @@ def _legacy_agent_schema(db):
                 db.execute(f'UPDATE "{table}" SET "{column}"=? WHERE rowid=?', (json.dumps(value, ensure_ascii=False), rowid))
     db.execute("DELETE FROM metadata WHERE key='agent_storage_version'")
     db.execute("UPDATE agent_conversations SET status='FAILED' WHERE status='CANCELLED'")
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert tables == upgrade._CORE_TABLES | upgrade._AGENT_TABLES
 
 
 @pytest.fixture

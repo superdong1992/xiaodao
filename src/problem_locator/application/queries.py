@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from contextlib import ExitStack, suppress
 
 from problem_locator.contracts import (
     ApplicationPortError,
@@ -30,6 +31,7 @@ from problem_locator.operational import OperationalState
 
 from .errors import raise_port_error
 from .reports import PublishedReport, read_published_report, published_artifacts
+from .resource_usage import CaseResourceStream, case_resource_usage
 from .projection import (
     project_artifact_summaries,
     project_artifact_summary,
@@ -100,14 +102,15 @@ class ApplicationQueryService:
             raise_port_error(ErrorCode.CASE_NOT_FOUND, "定位任务不存在或已删除。")
 
     def read_conversation_delivery(self, case_id: str, snapshot: StateFile, *, report: bool, artifacts: bool):
-        aggregate = self.check_snapshot(case_id, snapshot).cases.get(case_id)
-        if aggregate is None:
-            raise_port_error(ErrorCode.CASE_NOT_FOUND, "定位任务不存在。")
-        # All metadata and the selected report refer to this same immutable
-        # capture. Resource IO happens here, after the capture locks are gone.
-        result = read_published_report(aggregate, self._resource_store) if report else None
-        items = published_artifacts(aggregate) if artifacts else None
-        return aggregate.case, result, items
+        with case_resource_usage(self._repository, case_id):
+            aggregate = self.check_snapshot(case_id, snapshot).cases.get(case_id)
+            if aggregate is None:
+                raise_port_error(ErrorCode.CASE_NOT_FOUND, "定位任务不存在。")
+            # The caller holds the conversation lease around this capture;
+            # retain its Case resources until all selected report IO finishes.
+            result = read_published_report(aggregate, self._resource_store) if report else None
+            items = published_artifacts(aggregate) if artifacts else None
+            return aggregate.case, result, items
 
     def get_case(
         self,
@@ -190,10 +193,11 @@ class ApplicationQueryService:
             case_id = GetCase.model_validate({"case_id": case_id}, strict=True).case_id
         except (TypeError, ValueError):
             raise_port_error(ErrorCode.VALIDATION_ERROR, "任务标识无效。")
-        aggregate = self._checked_snapshot(case_id).cases.get(case_id)
-        if aggregate is None:
-            raise_port_error(ErrorCode.CASE_NOT_FOUND, "定位任务不存在。")
-        return read_published_report(aggregate, self._resource_store)
+        with case_resource_usage(self._repository, case_id):
+            aggregate = self._checked_snapshot(case_id).cases.get(case_id)
+            if aggregate is None:
+                raise_port_error(ErrorCode.CASE_NOT_FOUND, "定位任务不存在。")
+            return read_published_report(aggregate, self._resource_store)
 
     def list_artifacts(
         self,
@@ -245,6 +249,19 @@ class ApplicationQueryService:
             )
         case_id = query.case_id
         artifact_id = query.artifact_id
+        with ExitStack() as resources:
+            resources.enter_context(case_resource_usage(self._repository, case_id))
+            opened = self._open_artifact(case_id, artifact_id)
+            resources.callback(opened.stream.close)
+            stream = CaseResourceStream(opened.stream, resources.pop_all())
+            try:
+                return OpenArtifactResult(artifact=opened.artifact, stream=stream)
+            except BaseException:
+                with suppress(Exception):
+                    stream.close()
+                raise
+
+    def _open_artifact(self, case_id: str, artifact_id: str) -> OpenArtifactResult:
         self._require_visible(case_id)
         snapshot = self._repository.read_snapshot(case_id)
         aggregate = snapshot.cases.get(case_id)

@@ -582,8 +582,9 @@ def test_completed_proposal_for_nonterminal_state_job_remains_pending_publish(
     assert proposal in result.skipped
 
 
+@pytest.mark.parametrize("workspace_suffix", ["", ".logparse-preprocess"])
 def test_state_references_and_nonterminal_workspaces_are_retained(
-    tmp_path: Path,
+    tmp_path: Path, workspace_suffix: str,
 ) -> None:
     payload = b"referenced attachment"
     sha256 = hashlib.sha256(payload).hexdigest()
@@ -629,8 +630,8 @@ def test_state_references_and_nonterminal_workspaces_are_retained(
         age_seconds=ORPHAN_RESOURCE_RETENTION_SECONDS + 1,
         payload=payload,
     )
-    pending_workspace = harness.layout.workspaces / next(iter(aggregate.jobs))
-    terminal_workspace = harness.layout.workspaces / TERMINAL_JOB_ID
+    pending_workspace = harness.layout.workspaces / f"{next(iter(aggregate.jobs))}{workspace_suffix}"
+    terminal_workspace = harness.layout.workspaces / f"{TERMINAL_JOB_ID}{workspace_suffix}"
     rejected_archive = (
         harness.layout.jobs
         / TERMINAL_JOB_ID
@@ -653,6 +654,97 @@ def test_state_references_and_nonterminal_workspaces_are_retained(
     assert pending_workspace.exists()
     assert not terminal_workspace.exists()
     assert rejected_archive.read_bytes() == b'{"invalid":"agent output"}\n'
+
+
+def test_running_job_protects_both_workspaces_until_it_finishes(tmp_path: Path) -> None:
+    state = _state()
+    aggregate = state.cases[CASE_ID]
+    job_id = next(iter(aggregate.jobs))
+    aggregate.jobs[job_id] = aggregate.jobs[job_id].model_copy(update={"status": JobStatus.RUNNING})
+    harness = _harness(tmp_path, state=state)
+    workspaces = [
+        harness.layout.workspaces / job_id,
+        harness.layout.workspaces / f"{job_id}.logparse-preprocess",
+    ]
+    for workspace in workspaces:
+        workspace.mkdir()
+        _set_age(workspace, WORKSPACE_RETENTION_SECONDS + 1)
+
+    protected = harness.cleaner.run_once()
+
+    assert all(workspace.exists() and workspace in protected.skipped for workspace in workspaces)
+    aggregate.jobs[job_id] = aggregate.jobs[job_id].model_copy(update={"status": JobStatus.SUCCEEDED})
+
+    harness.cleaner.run_once()
+
+    assert all(not workspace.exists() for workspace in workspaces)
+
+
+def test_orphan_empty_source_parents_are_reclaimed_but_case_directories_remain(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    orphan_case = harness.layout.cases_resources / OLD_RESOURCE_ID
+    orphan_resource = orphan_case / "artifacts" / EXACT_RESOURCE_ID
+    orphan_resource.mkdir(parents=True)
+    orphan_proposal_parent = harness.layout.proposals / OUTCOME_JOB_ID
+    orphan_proposal_parent.mkdir()
+    active_resource = harness.layout.cases_resources / CASE_ID / "attachments" / OLD_RESOURCE_ID
+    active_resource.mkdir(parents=True)
+    active_job_id = next(iter(harness.repository.state.cases[CASE_ID].jobs))
+    active_proposal_parent = harness.layout.proposals / active_job_id
+    active_proposal_parent.mkdir()
+
+    result = harness.cleaner.run_once()
+
+    assert not orphan_case.exists() and not orphan_proposal_parent.exists()
+    assert orphan_case in result.empty_directories_deleted
+    assert orphan_resource in result.empty_directories_deleted
+    assert active_resource.is_dir() and active_proposal_parent.is_dir()
+
+
+def test_empty_proposal_parent_is_preserved_while_child_stage_is_registered(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    child = proposal_stage_path(harness.layout.data_root, OUTCOME_JOB_ID, "not-created-yet")
+    child.parent.mkdir()
+    with harness.stages.acquire_stage(child):
+        harness.cleaner.run_once()
+        assert child.parent.is_dir()
+    harness.cleaner.run_once()
+    assert not child.parent.exists()
+
+
+def test_empty_parent_pruning_never_removes_nonempty_resource_content(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    orphan = harness.layout.cases_resources / OLD_RESOURCE_ID / "artifacts" / EXACT_RESOURCE_ID
+    orphan.mkdir(parents=True)
+    payload = orphan / "payload"
+    payload.write_bytes(b"retained until orphan expiry")
+
+    result = harness.cleaner.run_once()
+
+    assert payload.read_bytes() == b"retained until orphan expiry"
+    assert result.failed_deletions == ()
+
+
+def test_empty_parent_pruning_retries_errors_without_blocking_other_parents(tmp_path: Path, monkeypatch) -> None:
+    harness = _harness(tmp_path)
+    first = harness.layout.proposals / OUTCOME_JOB_ID
+    second = harness.layout.proposals / TERMINAL_JOB_ID
+    first.mkdir()
+    second.mkdir()
+    original = Path.rmdir
+
+    def fail_selected(path):
+        if path == first:
+            raise PermissionError("injected parent removal failure")
+        return original(path)
+
+    monkeypatch.setattr(Path, "rmdir", fail_selected)
+    result = harness.cleaner.run_once()
+    assert first.exists() and not second.exists()
+    assert first in result.failed_deletions
+    monkeypatch.setattr(Path, "rmdir", original)
+    harness.cleaner.run_once()
+    assert not first.exists()
 
 
 def test_commit_that_wins_shared_lock_prevents_orphan_quarantine(

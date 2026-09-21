@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -20,6 +21,7 @@ from problem_locator.journey_timing import (
     TimingSpan,
     analyze_timing,
 )
+from problem_locator.storage.log_rotation import read_jsonl_segments
 
 
 _KNOWN_EVENTS = frozenset(
@@ -107,6 +109,8 @@ class JourneyOutputError(OSError):
 class JourneyLine:
     line_number: int
     event: JourneyEvent
+    source_name: str = "journey.jsonl"
+    source_line: int | None = None
 
 
 class RenderJourneyReceipt(BaseModel):
@@ -140,27 +144,32 @@ def load_journey(path: Path) -> tuple[JourneyLine, ...]:
     """Read and validate the entire source before any Case filtering."""
 
     try:
-        raw = path.read_bytes()
+        segments = read_jsonl_segments(path)
     except OSError as exc:
         raise JourneySourceError(f"journey.jsonl could not be read: {exc}") from exc
-    if not raw:
+    if not any(raw for _, raw in segments):
         raise JourneySourceError("journey.jsonl is empty")
 
-    raw_lines = raw.splitlines(keepends=True)
+    raw_lines = [
+        (source.name, source_line, raw_line)
+        for source, raw in segments
+        for source_line, raw_line in enumerate(raw.splitlines(keepends=True), start=1)
+    ]
     loaded: list[JourneyLine] = []
     expected_sequence = 1
-    for line_number, raw_line in enumerate(raw_lines, start=1):
+    for line_number, (source_name, source_line, raw_line) in enumerate(raw_lines, start=1):
+        location = f"{source_name}:{source_line}"
         if not raw_line.endswith(b"\n"):
             raise JourneySourceError(
-                f"journey.jsonl:{line_number}: truncated line without LF"
+                f"{location}: truncated line without LF"
             )
         body = raw_line[:-1]
         if body.endswith(b"\r"):
             raise JourneySourceError(
-                f"journey.jsonl:{line_number}: CRLF is not supported"
+                f"{location}: CRLF is not supported"
             )
         if not body:
-            raise JourneySourceError(f"journey.jsonl:{line_number}: blank line")
+            raise JourneySourceError(f"{location}: blank line")
         try:
             text = body.decode("utf-8")
             payload = json.loads(
@@ -171,16 +180,29 @@ def load_journey(path: Path) -> tuple[JourneyLine, ...]:
             event = JourneyEvent.model_validate(payload, strict=True)
         except (UnicodeDecodeError, ValueError, TypeError, ValidationError) as exc:
             raise JourneySourceError(
-                f"journey.jsonl:{line_number}: invalid Journey event: {exc}"
+                f"{location}: invalid Journey event: {exc}"
             ) from exc
+        if line_number == 1 and any(source != path for source, _ in segments):
+            expected_sequence = event.sequence
         if event.sequence != expected_sequence:
             raise JourneySourceError(
-                f"journey.jsonl:{line_number}: expected sequence "
+                f"{location}: expected sequence "
                 f"{expected_sequence}, got {event.sequence}"
             )
-        loaded.append(JourneyLine(line_number=line_number, event=event))
+        truncation = event.data.get("log_truncation")
+        if isinstance(truncation, dict) and truncation.get("truncated") is True:
+            raise JourneySourceError(f"{location}: 日志事件超出大小限制，内容已截断，不能生成完整诊断日志。")
+        loaded.append(JourneyLine(line_number=line_number, event=event,
+                                  source_name=source_name, source_line=source_line))
         expected_sequence += 1
     return tuple(loaded)
+
+
+def _source_locations(rendered: str, lines: tuple[JourneyLine, ...]) -> str:
+    locations = {line.line_number: f"{line.source_name}:{line.source_line or line.line_number}"
+                 for line in lines}
+    return re.sub(r"journey\.jsonl:(\d+)",
+                  lambda match: locations.get(int(match[1]), match[0]), rendered)
 
 
 def _nested(mapping: Any, *keys: str) -> Any:
@@ -571,7 +593,7 @@ def render_detailed(
         result.append("  语义数据:")
         result.extend(_pretty_data(event.data))
         result.append("")
-    return "\n".join(result).rstrip() + "\n"
+    return _source_locations("\n".join(result).rstrip() + "\n", lines)
 
 
 def _skill_text(data: dict[str, Any]) -> str | None:
@@ -831,7 +853,7 @@ def render_brief(case_id: str, lines: tuple[JourneyLine, ...]) -> str:
         )
     if not terminal:
         result.append("提示: 该 Case 尚未结束，本文件不能作为最终根因结论。")
-    return "\n".join(result).rstrip() + "\n"
+    return _source_locations("\n".join(result).rstrip() + "\n", lines)
 
 
 def _atomic_replace(path: Path, data: bytes) -> None:
@@ -868,6 +890,11 @@ def render_journey(log_dir: Path, case_id: str) -> RenderJourneyReceipt:
 
     detailed = render_detailed(case_id, lines).encode("utf-8")
     brief = render_brief(case_id, lines).encode("utf-8")
+    if all_lines[0].event.sequence != 1:
+        notice = (f"日志保留提示：较早事件已被轮转淘汰，当前从 sequence "
+                  f"{all_lines[0].event.sequence} 开始；以下仅包含保留片段，"
+                  "不能据此还原完整诊断过程。\n\n").encode("utf-8")
+        detailed, brief = notice + detailed, notice + brief
     output_dir = log_dir / "cases" / case_id
     detailed_path = output_dir / "detailed.log"
     brief_path = output_dir / "brief.log"

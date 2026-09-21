@@ -224,10 +224,13 @@ def test_terminal_index_and_metadata_lookup_do_not_parse_history(repository, mon
     assert repository.read_job(JOB_ID).case_id == CASE_ID
 
 
-def test_corrupt_case_is_detected_on_demand_and_does_not_require_startup_scan(repository):
+@pytest.mark.parametrize('retention_index_present', [True, False])
+def test_corrupt_case_is_detected_on_demand_and_does_not_require_startup_scan(repository, retention_index_present):
     _populate(repository)
     _finish(repository)
     repository._db.execute("UPDATE completed_cases SET snapshot=? WHERE case_id=?", (b"invalid json", CASE_ID))
+    if not retention_index_present:
+        repository._db.execute("DELETE FROM completed_case_retention WHERE case_id=?", (CASE_ID,))
     restarted = _open(repository.layout.data_root)
     try:
         assert restarted.health().valid

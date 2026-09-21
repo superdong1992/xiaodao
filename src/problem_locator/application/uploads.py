@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 
+from contextlib import ExitStack
 from dataclasses import dataclass
 
 from problem_locator.contracts import (
@@ -258,6 +259,7 @@ class AttachmentUploadService:
         timings = {}
         staged_ref = None
         upload_lease = None
+        case_resources = ExitStack()
         try:
             upload_lease = self.upload_guard.acquire(command.attachment_id)
             initial = self.repository.read_snapshot(attachment_id=command.attachment_id, request_key=f"UploadAttachmentContent:{command.idempotency_key}")
@@ -272,6 +274,14 @@ class AttachmentUploadService:
                 )
 
             aggregate, attachment = _attachment(initial, command.attachment_id)
+            case_usage = getattr(self.repository, "case_usage", None)
+            if case_usage is not None:
+                case_resources.enter_context(case_usage(attachment.case_id))
+                # The owner lookup happened before acquiring its lifecycle
+                # lease. Recheck before consuming bytes if cleanup won first.
+                initial = self.repository.read_snapshot(attachment_id=command.attachment_id,
+                    request_key=f"UploadAttachmentContent:{command.idempotency_key}")
+                aggregate, attachment = _attachment(initial, command.attachment_id)
             ready_receipt = _validate_uploadable(command, aggregate, attachment)
             if ready_receipt is not None:
                 return ready_receipt
@@ -503,8 +513,11 @@ class AttachmentUploadService:
                 # modeled failure already selected by the upload pipeline.
                 pass
             finally:
-                if upload_lease is not None:
-                    upload_lease.release()
+                try:
+                    if upload_lease is not None:
+                        upload_lease.release()
+                finally:
+                    case_resources.close()
 
 
 __all__ = ["AttachmentUploadService"]

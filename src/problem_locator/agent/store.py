@@ -59,6 +59,7 @@ _V2_TABLES = (
     "CREATE INDEX IF NOT EXISTS agent_cleanup_status ON agent_cleanup_jobs(status)",
     "CREATE TABLE IF NOT EXISTS agent_deleted_requests (request_hash TEXT PRIMARY KEY,conversation_id TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS agent_create_keys (request_hash TEXT PRIMARY KEY,conversation_id TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS agent_create_key_times (request_hash TEXT PRIMARY KEY,created_at TEXT NOT NULL)",
 )
 
 
@@ -109,6 +110,8 @@ def upgrade_agent_storage_v2(db, owner_map=None):
         "CREATE INDEX IF NOT EXISTS agent_history ON agent_events(conversation_id,sequence) WHERE json_extract(body, '$.type') IN ('message.accepted','assistant.question','result.available','conversation.completed')",
         "CREATE INDEX IF NOT EXISTS agent_dispatches_run ON agent_dispatches(conversation_id,run_id,status,epoch)",
         "CREATE INDEX IF NOT EXISTS agent_dispatches_pending ON agent_dispatches(epoch,conversation_id,run_id) WHERE status='PENDING'",
+        "CREATE INDEX IF NOT EXISTS agent_retention_runs ON agent_conversation_runs("
+        "coalesce(json_extract(body,'$.completed_at'),json_extract(body,'$.updated_at')))",
         "CREATE INDEX IF NOT EXISTS agent_conversations_intake_work ON agent_conversations(conversation_id) "
         "WHERE deleted_at IS NULL AND status NOT IN ('COMPLETED','FAILED','INTERRUPTED','CANCELLED','CANCELLING') "
         "AND coalesce(json_extract(body,'$.report_available'),0)=0 AND coalesce(json_extract(body,'$.stop_requested'),0)=0 "
@@ -116,6 +119,9 @@ def upgrade_agent_storage_v2(db, owner_map=None):
         "AND (case_id IS NULL OR json_extract(body,'$.case_status') IS NULL OR json_extract(body,'$.case_status') IN ('WAITING_INPUT','WAITING_ATTACHMENT'))",
     ):
         db.execute(statement)
+    db.execute("INSERT OR IGNORE INTO agent_create_key_times SELECT k.request_hash,"
+        "coalesce(json_extract(c.body,'$.conversation_created_at'),json_extract(c.body,'$.created_at'),c.deleted_at,c.updated_at) "
+        "FROM agent_create_keys k JOIN agent_conversations c USING(conversation_id)")
     db.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES ('agent_storage_version',?)", (AGENT_STORAGE_VERSION,))
 
 
@@ -238,12 +244,23 @@ class AgentStore:
         return body
 
     def _save(self, db, body):
+        # A pre-retention closed run has no immutable completion anchor yet.
+        # Capture its previous stored time before a rename/metadata refresh can
+        # replace updated_at. New closures already set completed_at in _close.
+        if body["status"] in _CLOSED and "completed_at" not in body:
+            previous = db.execute("SELECT body FROM agent_conversation_runs WHERE run_id=? AND conversation_id=?",
+                                  (body["run_id"], body["conversation_id"])).fetchone()
+            if previous is not None:
+                original = json.loads(previous[0])
+                body["completed_at"] = original.get("completed_at", original["updated_at"])
         body["updated_at"] = self._now()
         cid, run_id = body["conversation_id"], body["run_id"]
         db.execute("UPDATE agent_conversation_runs SET status=?,case_id=?,body=? WHERE run_id=? AND conversation_id=?",
             (body["status"], body.get("case_id"), _json(body), run_id, cid))
         row = db.execute("SELECT current_run_id,body FROM agent_conversations WHERE conversation_id=?", (cid,)).fetchone()
         head = body if row[0] == run_id else json.loads(row[1])
+        head["events_pruned_through"] = max(head.get("events_pruned_through", 0),
+            json.loads(row[1]).get("events_pruned_through", 0))
         head["last_event_id"] = max(head.get("last_event_id", 0), body["last_event_id"])
         head["updated_at"] = body["updated_at"]
         db.execute("UPDATE agent_conversations SET status=?,case_id=?,body=?,updated_at=? WHERE conversation_id=?",
@@ -292,6 +309,7 @@ class AgentStore:
                        (conversation_id, key, self.runtime_epoch, "INTAKE", _json(body), owner_key, _title(title or ""), run_id, now))
             db.execute("INSERT INTO agent_conversation_runs VALUES (?,?,1,NULL,NULL,?,'INTAKE',?)", (run_id, conversation_id, self.runtime_epoch, _json(body)))
             db.execute("INSERT INTO agent_create_keys VALUES (?,?)", (request_hash, conversation_id))
+            db.execute("INSERT INTO agent_create_key_times VALUES (?,?)", (request_hash, now))
         return ConversationReceipt(conversation_id=conversation_id, request_id=request_id, run_id=run_id)
 
     @staticmethod
@@ -312,6 +330,7 @@ class AgentStore:
         body = dict(conversation_id=cid, run_id=run_id, ordinal=ordinal, status="INTAKE", case_id=None,
             job_id=None, case_status=None, archive_status="NOT_REQUIRED", current_questions=[], failure=None,
             last_event_id=previous["last_event_id"], created_at=now, updated_at=now,
+            events_pruned_through=previous.get("events_pruned_through", 0),
             conversation_created_at=previous.get("conversation_created_at", previous["created_at"]),
             draft={}, report_available=False, intake_pending=False, intake_covered_message_ids=[], stop_requested=False)
         db.execute("INSERT INTO agent_conversation_runs VALUES (?,?,?,NULL,NULL,?,'INTAKE',?)", (run_id, cid, ordinal, self.runtime_epoch, _json(body)))
@@ -444,6 +463,12 @@ class AgentStore:
             raise AgentStoreError("AGENT_INVALID_CURSOR", "事件游标或批量大小无效。")
         with self.repository.database_read() as db:
             body = self._load(db, conversation_id)
+            head = db.execute("SELECT body FROM agent_conversations WHERE conversation_id=?", (conversation_id,)).fetchone()
+            pruned = json.loads(head[0]).get("events_pruned_through", 0)
+            if after < pruned:
+                raise AgentStoreError("AGENT_EVENT_CURSOR_EXPIRED",
+                    "事件记录已过保留期，请先读取会话当前状态，再从 last_event_id 重新订阅。", 409,
+                    details=[{"field": "retained_after_sequence", "actual": pruned}])
             if after > body["last_event_id"]:
                 raise AgentStoreError("AGENT_INVALID_CURSOR", "事件游标超出会话范围。", 409)
             return [self._event(row[0], row[1]) for row in db.execute(
@@ -1033,6 +1058,7 @@ class AgentStore:
         self._notify(conversation_id)
 
     def _close(self, db, body, status, code=None, *, failure=None):
+        body.setdefault("completed_at", self._now())
         body["status"] = status
         body["intake_pending"] = False
         body["current_questions"] = []

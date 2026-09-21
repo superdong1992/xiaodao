@@ -446,9 +446,9 @@ test("website guidance describes SSE v2 and explicit owned-storage upgrade", () 
     assert.match(content, /8\.0\.0.*预览版/);
     assert.match(content, /8\.2\.0/);
     assert.match(content, /v11-contract-r2/);
-    assert.match(content, /(?:显式.*升级|必须.*副本升级)/);
+    assert.match(content, /(?:显式|手动|必须)[^\n]*升级/);
     assert.ok(content.includes("data-upgrade-v11-r2.md"));
-    assert.match(content, /(?:那次|历史)[\s\S]*没有改变 V11 数据合同/);
+    assert.match(content, /(?:那次|历史)[\s\S]*没有改变 V11 数据(?:合同|规范|格式)/);
     assert.doesNotMatch(content, /会在短暂断线时自动携带/);
     assert.doesNotMatch(content, /自带的游标表示/);
   }
@@ -465,11 +465,11 @@ test("quickstart identifies the deployed contract and separates preflight from m
   for (const route of ["/live", "/ready", "/openapi.json", "/docs"]) assert.ok(preflight.includes(route));
   assert.match(preflight, /"ok":true,"data":\{"status":"live"\},"error":null/);
   assert.match(preflight, /data\.ready=true/);
-  assert.match(preflight, /不套 `ok\/data` 信封/);
+  assert.match(preflight, /不(?:套|使用) `ok\/data` (?:信封|包装)/);
   assert.match(preflight, /不会创建定位任务/);
-  assert.match(preflight, /创建一个空会话.*这会持久保存会话，但不会调用模型/);
-  assert.match(preflight, /不证明模型或诊断全链路已经可用/);
-  assert.match(quickstart, /发送消息会触发真实模型/);
+  assert.match(preflight, /创建一个空会话[^\n]*保存会话，但不会调用模型/);
+  assert.match(preflight, /不(?:证明|代表)模型或(?:诊断全链路|完整诊断流程)已经可用/);
+  assert.match(quickstart, /发送消息会(?:触发|调用)真实模型/);
   for (const term of ["--plan-only", "admission blocker", "Proof", "Stage", "Gate", "verdict.json"]) assert.ok(quickstart.includes(term));
   assert.match(quickstart, /手工联调记录不能替代官方/);
 });
@@ -482,12 +482,12 @@ test("example setup documents the actual authorization callbacks and safe deploy
   for (const name of names) assert.ok(example.includes(`\`${name}(`), `missing callback guidance: ${name}`);
   for (const setting of ["WEBSITE_AUTH_MODULE", "XIAODAO_BASE_URL", "PUBLIC_BASE_URL", "PORT"]) assert.ok(example.includes(setting));
   assert.match(example, /Node\.js 24\+/);
-  assert.match(example, /具名导出 `access`/);
+  assert.match(example, /具名导出[^\n]*`access`/);
   assert.match(example, /从仓库根目录启动/);
   assert.match(example, /node examples\/website-agent\/server\.ts/);
   assert.match(example, /固定监听 `127\.0\.0\.1`/);
   assert.match(example, /业务请求全部返回 `401`/);
-  assert.match(example, /持久、幂等/);
+  assert.match(example, /持久保存[^\n]*重复请求不会重复登记/);
   assert.match(example, /CSRF \/ Origin/);
   assert.match(example, /不要为了联调删除授权检查/);
 });

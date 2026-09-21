@@ -32,6 +32,8 @@ from problem_locator.contracts import (
     VersionedRef,
     default_resource_limits,
 )
+from problem_locator.storage.atomic import require_real_directory
+from problem_locator.storage.paths import ensure_no_symlink_ancestors
 
 from .catalog_hash import hash_product_directory
 from .asset_snapshot import register_snapshot, release_snapshots
@@ -219,6 +221,7 @@ class VersionedAssetCatalog:
         specialized_reviewer_enabled: bool = False,
         methods_evidence_validation: str = "strict",
         allow_test_skills: bool = False,
+        defer_snapshot: bool = False,
     ) -> None:
         if type(allow_test_skills) is not bool:
             raise TypeError("allow_test_skills must be boolean")
@@ -308,27 +311,80 @@ class VersionedAssetCatalog:
             )
         )
 
-        self._snapshot_directory = tempfile.TemporaryDirectory(prefix="problem-locator-assets-")
-        snapshot_parent = Path(self._snapshot_directory.name).resolve()
-        weakref.finalize(self, release_snapshots, str(snapshot_parent))
-        for ordinal, (key, resolved) in enumerate(tuple(self._assets.items())):
-            if resolved.asset_kind is AssetKind.LOGPARSE_TOOL:
-                continue
-            source = Path(resolved.root_path)
-            destination = snapshot_parent / str(ordinal) / source.name
-            shutil.copytree(source, destination)
-            frozen = resolved.model_copy(update={"root_path": str(destination)})
-            descriptor = self._skills.get(key)
-            specialized = None
-            if descriptor is not None:
-                specialized = load_specialized_skill_registration(destination)
-                if specialized.combined_sha256 != resolved.ref.content_hash:
-                    raise ValueError("Skill changed while its startup snapshot was captured")
-                self._skills[key] = replace(descriptor, resolved_asset=frozen, specialized=specialized)
-            elif hash_product_directory(destination) != resolved.ref.content_hash:
-                raise ValueError("Asset changed while its startup snapshot was captured")
-            self._assets[key] = frozen
-            register_snapshot(destination, frozen.ref, specialized)
+        self._snapshot_directory = None
+        self._snapshot_path = None
+        self._snapshot_finalizer = None
+        if not defer_snapshot:
+            self.freeze_assets()
+
+    def freeze_assets(self, snapshot_root: Path | None = None) -> None:
+        """Capture once; the caller owns the instance lock for a managed root."""
+        if self._snapshot_path is not None:
+            raise RuntimeError("runtime assets are already frozen")
+        if snapshot_root is None:
+            self._snapshot_directory = tempfile.TemporaryDirectory(prefix="problem-locator-assets-")
+            snapshot_parent = Path(self._snapshot_directory.name).resolve()
+        else:
+            snapshot_parent = Path(snapshot_root).absolute()
+            require_real_directory(snapshot_parent.parent)
+            ensure_no_symlink_ancestors(snapshot_parent.parent, snapshot_parent)
+            if snapshot_parent.exists():
+                require_real_directory(snapshot_parent)
+                # One fixed tree per DATA_ROOT; startup under the instance lock
+                # can reclaim a previous process's abandoned snapshot safely.
+                shutil.rmtree(snapshot_parent)
+            snapshot_parent.mkdir(mode=0o700)
+        self._snapshot_path = snapshot_parent
+        self._snapshot_finalizer = weakref.finalize(
+            self, release_snapshots, str(snapshot_parent)
+        )
+        source_assets = dict(self._assets)
+        source_skills = dict(self._skills)
+        try:
+            for ordinal, (key, resolved) in enumerate(tuple(self._assets.items())):
+                if resolved.asset_kind is AssetKind.LOGPARSE_TOOL:
+                    continue
+                source = Path(resolved.root_path)
+                destination = snapshot_parent / str(ordinal) / source.name
+                shutil.copytree(source, destination)
+                frozen = resolved.model_copy(update={"root_path": str(destination)})
+                descriptor = self._skills.get(key)
+                specialized = None
+                if descriptor is not None:
+                    specialized = load_specialized_skill_registration(destination)
+                    if specialized.combined_sha256 != resolved.ref.content_hash:
+                        raise ValueError("Skill changed while its startup snapshot was captured")
+                    self._skills[key] = replace(descriptor, resolved_asset=frozen, specialized=specialized)
+                elif hash_product_directory(destination) != resolved.ref.content_hash:
+                    raise ValueError("Asset changed while its startup snapshot was captured")
+                self._assets[key] = frozen
+                register_snapshot(destination, frozen.ref, specialized)
+        except BaseException:
+            self._assets = source_assets
+            self._skills = source_skills
+            try:
+                self.close()
+            except Exception:
+                # Preserve the capture error. The fixed directory is reclaimed
+                # on the next startup; its cache finalizer is already inactive.
+                pass
+            raise
+
+    def close(self) -> None:
+        """Release the startup copy only after all runtime users have stopped."""
+        if self._snapshot_path is None:
+            return
+        snapshot = self._snapshot_path
+        if self._snapshot_finalizer is not None:
+            self._snapshot_finalizer()
+        if self._snapshot_directory is not None:
+            self._snapshot_directory.cleanup()
+        elif snapshot.exists():
+            ensure_no_symlink_ancestors(snapshot.parent, snapshot)
+            require_real_directory(snapshot)
+            shutil.rmtree(snapshot)
+        self._snapshot_path = None
+        self._snapshot_directory = None
 
     @staticmethod
     def _scan_skills(skill_dir: Path) -> tuple[_SkillDescriptor, ...]:

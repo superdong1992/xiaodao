@@ -13,6 +13,119 @@ import time
 
 MAX_SOURCE_BYTES = 64 * 1024 * 1024
 POLL_SECONDS = 0.1
+PIN_SOURCE_INODE = os.name == "posix"
+
+
+class SourceRotationGap(ValueError):
+    """The next retained segment cannot be established without losing evidence."""
+
+
+class RotatingSource:
+    """Follow renamed JSONL segments in order, including rotations between polls."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.identity = None
+        self.offset = 0
+        self.closed = False
+        self._pinned_source = None
+
+    def _segment_snapshot(self):
+        backups = []
+        for candidate in self.path.parent.glob(self.path.name + ".*"):
+            suffix = candidate.name[len(self.path.name) + 1:]
+            if suffix.isdecimal() and int(suffix) > 0:
+                backups.append((int(suffix), candidate))
+        paths = [item[1] for item in sorted(backups, reverse=True)] + [self.path]
+        result = []
+        for path in paths:
+            try:
+                metadata = path.stat()
+            except FileNotFoundError:
+                continue
+            result.append((path, (metadata.st_dev, metadata.st_ino)))
+        if len({identity for _, identity in result}) != len(result):
+            raise SourceRotationGap("rotation changed while reading segment identities")
+        return result
+
+    def _segments(self):
+        first = self._segment_snapshot()
+        if self._segment_snapshot() != first:
+            raise SourceRotationGap("rotation changed between complete segment snapshots")
+        return first
+
+    def _select_segment(self, segments, index: int) -> None:
+        path, identity = segments[index]
+        # POSIX permits renaming open files. Pin the current inode so unlinking
+        # it cannot let the filesystem recycle its number for a later segment.
+        # Windows must close between reads to permit the writer's renames.
+        replacement = path.open("rb", buffering=0) if PIN_SOURCE_INODE else None
+        try:
+            if replacement is not None:
+                metadata = os.fstat(replacement.fileno())
+                if (metadata.st_dev, metadata.st_ino) != identity:
+                    raise SourceRotationGap("rotation changed before pinning the next segment")
+            if self._segments() != segments:
+                raise SourceRotationGap("rotation changed while selecting the next segment")
+        except BaseException:
+            if replacement is not None:
+                replacement.close()
+            raise
+        previous = self._pinned_source
+        self._pinned_source = replacement
+        self.identity = identity
+        self.offset = 0
+        if previous is not None:
+            previous.close()
+
+    def _read_segment(self, path: Path, size: int) -> bytes:
+        # A long-lived descriptor blocks rename on Windows. Keep the inode and
+        # byte offset instead, and verify every short-lived open before reading.
+        with path.open("rb", buffering=0) as source:
+            metadata = os.fstat(source.fileno())
+            if (metadata.st_dev, metadata.st_ino) != self.identity:
+                raise SourceRotationGap("rotation changed before opening the next segment")
+            if metadata.st_size < self.offset:
+                raise SourceRotationGap("source segment was truncated before its read offset")
+            source.seek(self.offset)
+            chunk = source.read(size)
+            if os.fstat(source.fileno()).st_size < self.offset + len(chunk):
+                raise SourceRotationGap("source segment was truncated while reading")
+        self.offset += len(chunk)
+        return chunk
+
+    def read(self, size: int) -> bytes:
+        if self.closed:
+            raise ValueError("read from closed rotating source")
+        while True:
+            segments = self._segments()
+            if self.identity is None:
+                if not segments:
+                    return b""
+                self._select_segment(segments, 0)
+            identities = [identity for _, identity in segments]
+            if self.identity not in identities:
+                raise SourceRotationGap("unread rotated log segments are no longer retained")
+            path, _ = segments[identities.index(self.identity)]
+            chunk = self._read_segment(path, size)
+            if chunk:
+                return chunk
+            # Rotation can happen during a read. Establish the next segment
+            # from another stable mapping, never from a stale filename order.
+            segments = self._segments()
+            identities = [identity for _, identity in segments]
+            if self.identity not in identities:
+                raise SourceRotationGap("unread rotated log segments are no longer retained")
+            index = identities.index(self.identity)
+            if index + 1 == len(segments):
+                return b""
+            self._select_segment(segments, index + 1)
+
+    def close(self) -> None:
+        self.closed = True
+        if self._pinned_source is not None:
+            self._pinned_source.close()
+            self._pinned_source = None
 
 
 def _arguments() -> argparse.Namespace:
@@ -109,16 +222,18 @@ def main() -> int:
         0o600,
     )
     started = time.monotonic()
-    source = None
+    source = RotatingSource(arguments.source)
     source_bytes = 0
     tail = b""
     source_sequence = 0
     output_sequence = 0
     try:
         while True:
-            if source is None and arguments.source.is_file():
-                source = arguments.source.open("rb", buffering=0)
-            chunk = b"" if source is None else source.read(65536)
+            try:
+                chunk = source.read(65536)
+            except (SourceRotationGap, OSError):
+                _receipt(arguments, status="FAIL", code="SOURCE_ROTATION_GAP", count=source_sequence)
+                return 1
             if chunk:
                 source_bytes += len(chunk)
                 if source_bytes > MAX_SOURCE_BYTES:
@@ -149,6 +264,13 @@ def main() -> int:
                             code="SOURCE_JSON",
                             count=source_sequence,
                         )
+                        return 1
+                    data = event.get("data")
+                    truncation = event.get("log_truncation")
+                    if not isinstance(truncation, dict) and isinstance(data, dict):
+                        truncation = data.get("log_truncation")
+                    if isinstance(truncation, dict) and truncation.get("truncated") is True:
+                        _receipt(arguments, status="FAIL", code="SOURCE_EVENT_TRUNCATED", count=source_sequence)
                         return 1
                     expected = source_sequence + 1
                     if arguments.mode == "journey" and (

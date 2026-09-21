@@ -28,6 +28,7 @@ from problem_locator.contracts.limits import (
 
 from .atomic import is_reparse_point, require_ordinary_file, require_real_directory
 from .layout import StorageLayout
+from .paths import workspace_owner_id
 from .resource_files import iter_case_resource_nodes
 
 
@@ -151,7 +152,7 @@ class RetentionScanner:
                     candidates.append(candidate)
 
         for entry in self._real_directory_entries(self._layout.workspaces):
-            _OPAQUE_ID_ADAPTER.validate_python(entry.name)
+            workspace_owner_id(entry.name)
             path = Path(entry.path)
             candidate = self._candidate(
                 "WORKSPACE",

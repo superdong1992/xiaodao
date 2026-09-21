@@ -26,7 +26,7 @@ def test_direct_report_keeps_skill_status_and_exact_body_without_citations(statu
     "<<<SKILL_DIAGNOSIS_RESULT_V1:PARTIAL>>>\n正文",
     "<<<SKILL_DIAGNOSIS_RESULT_V1:RESOLVED>>>\n \n",
     "<<<SKILL_DIAGNOSIS_RESULT_V1:RESOLVED>>>\n" + "中" * 21846,
-])
+], ids=["none", "empty", "missing-envelope", "missing-body", "invalid-status", "blank-body", "oversized-utf8"])
 def test_invalid_delivery_protocol_is_an_error_not_an_evidence_conclusion(text):
     with pytest.raises(RuntimeExecutionError) as rejected:
         parse_skill_direct_response(text, skill_name="rpc-timeout")

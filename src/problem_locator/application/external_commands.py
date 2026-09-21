@@ -105,6 +105,8 @@ ExternalNonUploadCommand = (
     CreateCase | PrepareAttachment | SubmitSupplement | ResumeCase | CancelCase
 )
 
+_MAX_CASE_ATTACHMENTS = 20
+
 _TERMINAL_CASE_STATUSES = {
     CaseStatus.RESOLVED,
     CaseStatus.PARTIALLY_RESOLVED,
@@ -454,6 +456,20 @@ class ExternalCommandHandler:
                 command.expected_case_revision,
             )
             self._require_nonterminal(aggregate.case)
+            if len(aggregate.attachments) >= _MAX_CASE_ATTACHMENTS:
+                _raise_port_error(
+                    ErrorCode.RESOURCE_LIMIT_EXCEEDED,
+                    "本次诊断的附件已达 20 个上限，请另建诊断。",
+                    [
+                        _detail(
+                            field="attachments",
+                            resource_type="case",
+                            resource_id=command.case_id,
+                            limit=_MAX_CASE_ATTACHMENTS,
+                            observed=len(aggregate.attachments) + 1,
+                        ),
+                    ],
+                )
             if command.declared_size is not None and command.declared_size > MAX_ATTACHMENT_BYTES:
                 _raise_port_error(
                     ErrorCode.RESOURCE_LIMIT_EXCEEDED,

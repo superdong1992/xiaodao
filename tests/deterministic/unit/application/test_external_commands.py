@@ -698,6 +698,48 @@ def test_prepare_attachment_classifies_limits_and_only_bumps_case_revision() -> 
     assert len(repository.commit_calls) == 1
 
 
+@pytest.mark.parametrize("declared_size", [None, 0])
+def test_attachment_reservation_count_is_bounded_and_existing_requests_still_replay(declared_size):
+    handler, repository, guard, resources, _, notifier, clock, ids = _handler(
+        _state(), ScriptedCoordinator()
+    )
+    commands = []
+    receipts = []
+    for index in range(20):
+        command = PrepareAttachment(
+            idempotency_key=f"empty-reservation-{index}",
+            case_id=CASE_ID,
+            expected_case_revision=index + 1,
+            name=f"server-{index}.log",
+            content_type="text/plain",
+            declared_size=declared_size,
+        )
+        commands.append(command)
+        receipts.append(handler.execute(command).business_receipt)
+
+    before = repository.read_snapshot()
+    assert len(before.cases[CASE_ID].attachments) == 20
+    assert len(before.idempotency_records) == 20
+    rejected = commands[-1].model_copy(update={
+        "idempotency_key": "new-reservation-over-limit",
+        "expected_case_revision": 21,
+    })
+    error = _expect_port_error(
+        lambda: handler.execute(rejected), ErrorCode.RESOURCE_LIMIT_EXCEEDED
+    )
+    assert error.error.details[0].limit == 20
+    assert error.error.details[0].observed == 21
+    assert repository.read_snapshot() == before
+    assert len(repository.commit_calls) == 20
+    assert guard.acquire_calls == guard.release_calls == 20
+    assert len(resources.capacity_calls) == len(notifier.notify_calls) == 20
+    assert clock.calls == len(ids.new_calls) == 20
+
+    assert handler.execute(commands[0]).business_receipt == receipts[0]
+    assert repository.read_snapshot() == before
+    assert len(repository.commit_calls) == 20
+
+
 def test_post_commit_state_read_faults_preserve_external_business_receipt() -> None:
     for code in {
         ErrorCode.STATE_CORRUPT,

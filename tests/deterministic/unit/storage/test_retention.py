@@ -249,6 +249,43 @@ def test_all_physical_candidate_kinds_use_strict_thresholds_and_exact_paths(
     assert all(path not in {ignored_tmp, ignored_quarantine} for _, path in candidates)
 
 
+@pytest.mark.parametrize("suffix", ["", ".logparse-preprocess"])
+@pytest.mark.parametrize(
+    ("age_seconds", "expired"),
+    [(WORKSPACE_RETENTION_SECONDS + 1, True), (WORKSPACE_RETENTION_SECONDS, False), (-1, False)],
+)
+def test_job_and_preprocessing_workspaces_do_not_abort_other_candidate_scans(
+    tmp_path: Path, suffix: str, age_seconds: int, expired: bool,
+) -> None:
+    layout = _layout(tmp_path)
+    workspace = layout.workspaces / f"{WORKSPACE_OLD_ID}{suffix}"
+    workspace.mkdir()
+    _set_age(workspace, age_seconds)
+    upload, marker = _staged_directory(layout.uploads, UPLOAD_OLD_ID)
+    _set_age(marker, UPLOAD_TEMP_RETENTION_SECONDS + 1)
+
+    candidates = _candidate_pairs(RetentionScanner(layout, FixedClock(NOW)))
+
+    assert ("UPLOAD", upload) in candidates
+    assert (("WORKSPACE", workspace) in candidates) is expired
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        f"{WORKSPACE_OLD_ID}.logparse-preprocess.extra",
+        f"{WORKSPACE_OLD_ID}.logparse-preprocess.logparse-preprocess",
+        "not-a-job-id.logparse-preprocess",
+    ],
+)
+def test_workspace_retention_rejects_unmanaged_suffixes(tmp_path: Path, name: str) -> None:
+    layout = _layout(tmp_path)
+    (layout.workspaces / name).mkdir()
+
+    with pytest.raises(ValueError):
+        RetentionScanner(layout, FixedClock(NOW)).discover()
+
+
 @pytest.mark.parametrize(
     "invalid_shape",
     [

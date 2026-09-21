@@ -1,26 +1,26 @@
 # 浏览器 REST API 接入指南
 
-本文是浏览器前端接入 Problem Locator REST API 的人工可读指南。前端开发者只需本文、部署方提供的服务基址，以及服务发布的 OpenAPI 文件即可完成接入；不需要了解服务内部实现。
+本文说明浏览器前端如何接入 Problem Locator REST API。前端开发者可根据本文、部署方提供的服务地址和服务发布的 OpenAPI 文件完成接入，无需了解服务内部实现。
 
 8.0 新增面向内部网站的自然语言 Agent 会话接口，支持追问、上传和 SSE 进度。新入口采用“网站前端 → 网站后端 → xiaodao”，详见 [网站 Agent API 指南](website-agent-api.md)。本文继续说明底层 Case、附件和报告接口，已有接入保持不变。
 
-当前正式浏览器目标是**当前稳定版 Google Chrome**。服务不承诺 Firefox、Safari、反向代理或旧版 Chrome 的兼容性。本文中的 TypeScript 使用标准 `fetch`、`File`、`Blob`、Web Worker 和 Web Streams，不依赖 React、Vue 等界面框架。
+目前正式支持的浏览器是**当前稳定版 Google Chrome**。服务不保证兼容 Firefox、Safari、反向代理或旧版 Chrome。本文中的 TypeScript 使用标准 `fetch`、`File`、`Blob`、Web Worker 和 Web Streams，不依赖 React、Vue 等界面框架。
 
 ## 1. 接入前先确认
 
-- 向部署方取得服务基址，例如 `https://locator.example`。下文记为 `baseUrl`，末尾是否带 `/` 均可。
+- 向部署方取得服务地址，例如 `https://locator.example`。下文记为 `baseUrl`，末尾是否带 `/` 均可。
 - 先请求 `GET /live` 和 `GET /ready`。只有 `/ready` 成功时才开始业务操作。
-- 运行时机器合同是 `GET /openapi.json`；仓库内可离线使用的同一合同是 [`schemas/v2/web-api.openapi.snapshot.json`](../schemas/v2/web-api.openapi.snapshot.json)。交互查看入口是 `GET /docs`。
-- Core 独立 Case 沿用受控网络访问方式；Agent 创建的 Case、附件和产物必须携带可信网站后端派生的 `X-Agent-Owner-Key`，服务统一核对归属。归属键不是登录凭据，服务只能开放给可信后端。
+- `GET /openapi.json` 返回服务当前的 OpenAPI 接口定义；仓库保存的同一份定义可供离线使用：[`schemas/v2/web-api.openapi.snapshot.json`](../schemas/v2/web-api.openapi.snapshot.json)。也可打开 `GET /docs` 交互查看。
+- Core 独立 Case 沿用受控网络访问方式。访问 Agent 创建的 Case、附件和产物时，必须携带可信网站后端生成的 `X-Agent-Owner-Key`，服务会核对数据是否属于该用户。这个用户标识不是登录凭据，服务只能开放给可信后端。
 - 首版没有 Case 列表、恢复、取消接口。前端必须持久保存创建响应中的 `case_id`，并把 `INTERRUPTED` 视为只能查询的状态。
 
-底层 Case 与运维入口如下；网站只接入会话与附件两个抽象，会话管理路由及会话 schema 3 见上述指南。报告、状态和下载信息统一从会话读取；下列底层路径用于已有 Case 集成和文件传输，网站无需额外查询：
+下表列出底层 Case 与运维接口。网站只需接入会话和附件两类接口，会话管理路由及会话 schema 3 见上述指南。报告、状态和下载信息统一从会话读取；下列底层路径用于已有 Case 集成和文件传输，网站无需额外查询：
 
 | 方法与路径 | 用途 | 响应类型 |
 | --- | --- | --- |
 | `GET /live` | 进程存活检查 | JSON envelope |
 | `GET /ready` | 启动、运行状态及已知存储故障检查 | JSON envelope |
-| `GET /openapi.json` | 下载完整 OpenAPI 合同 | OpenAPI JSON |
+| `GET /openapi.json` | 下载完整 OpenAPI 接口定义 | OpenAPI JSON |
 | `GET /docs` | 打开交互调试页 | HTML |
 | `POST /api/v1/cases` | 创建 Case | `ApplicationResponse` envelope |
 | `GET /api/v1/cases/{case_id}` | 查询或长轮询 Case | `CaseQueryResponse` envelope |
@@ -30,7 +30,7 @@
 | `GET /api/v1/cases/{case_id}/artifacts` | 列出公开产物 | `ArtifactListData` envelope |
 | `GET /api/v1/artifacts/{artifact_id}/content` | 下载公开产物字节 | 二进制 |
 
-## 2. 通用 wire 约定
+## 2. 通用传输约定
 
 ### 2.1 JSON、CORS 与响应头
 
@@ -58,7 +58,7 @@
 OpenAPI 对受 UTF-8 字节数约束的字符串同时给出 `maxLength` 和
 `x-max-utf8-bytes`；前者是字符长度提示，后者才是多字节文本也必须遵守的实际字节上限。
 
-### 2.3 JSON envelope
+### 2.3 JSON 响应格式
 
 除 `/openapi.json`、`/docs` 和成功的二进制下载外，成功响应固定为：
 
@@ -105,22 +105,22 @@ OpenAPI 对受 UTF-8 字节数约束的字符串同时给出 `maxLength` 和
 3. 同一 `request_id` 改变业务内容会得到 `IDEMPOTENCY_CONFLICT`；这不是可恢复的 revision 冲突。停止自动重试，检查前端是否错误复用了 ID。
 4. `prepare` 与 `supplement` 只提交最后一次查询或写响应给出的 `case_revision`。Job 生命周期和每次附件生命周期都可能推进 revision。
 5. 收到 `REVISION_CONFLICT` 后，立即 `GET` 最新 Case，重新展示并确认用户准备提交的内容仍适用，然后使用同一逻辑操作的 `request_id` 和新的 `case_revision` 重试。
-6. 写响应中的 `business_receipt` 是持久化成功的权威回执。即使 `case_view` 为 `null`，也不得把写操作当作失败或创建替代 Case；保存回执中的 `case_id`、`case_revision`、`job_id`，再查询刷新。
+6. 写操作是否已成功保存，以响应中的 `business_receipt` 回执为准。即使 `case_view` 为 `null`，也不得把写操作当作失败或创建替代 Case；保存回执中的 `case_id`、`case_revision`、`job_id`，再查询刷新。
 7. `dispatch_pending=true` 表示 Job 已持久化，但本次调度尚未被接受。不要创建新 Case 或换新 `request_id`；先轮询该 Case，必要时以完全相同的业务请求做幂等重放。
 
 ### 2.5 长轮询和 Job 切换
 
 - `wait_timed_out=true` 只表示本次有限等待到期，后台 Job 仍可能运行；它不是业务错误。
-- 查询时省略 `wait_for_job_id`，服务会在请求开始时选择当前活动 Job；显式提供它则只等待该 Job。
+- 查询时省略 `wait_for_job_id`，服务会在请求开始时选择当前活动 Job；传入该参数则只等待指定的 Job。
 - 推荐循环：读取 `case_view.active_job.job_id`，用它和 `wait_seconds=30` 查询；响应后先处理状态。若仍为 `RUNNING`/`REVIEWING` 且 `active_job.job_id` 已变化，下一次等待新 ID。
 - `WAITING_INPUT`、`WAITING_ATTACHMENT`、所有终态和 `INTERRUPTED` 会立即结束等待。
 - 浏览器切页或组件卸载时用 `AbortController` 取消本地 HTTP 等待；这不会取消后台 Job。
 
-## 3. 服务与合同入口
+## 3. 健康检查与接口定义
 
 ### GET `/live`
 
-无 path、query、header 或 body 参数。它只表示 HTTP 进程正在响应，不表示依赖可用。
+无需路径参数、查询参数、请求头参数或请求体。它只表示 HTTP 进程正在响应，不表示依赖可用。
 
 ```json
 {"ok":true,"data":{"status":"live"},"error":null}
@@ -130,7 +130,7 @@ OpenAPI 对受 UTF-8 字节数约束的字符串同时给出 `maxLength` 和
 
 ### GET `/ready`
 
-无 path、query、header 或 body 参数。成功时 `ready` 为 `true`；`checks` 是逐项布尔结果，成功响应中的 `message` 固定为 `null`。
+无需路径参数、查询参数、请求头参数或请求体。成功时 `ready` 为 `true`；`checks` 是逐项布尔结果，成功响应中的 `message` 固定为 `null`。
 
 | `checks[].name` | 含义 |
 | --- | --- |
@@ -158,21 +158,21 @@ OpenAPI 对受 UTF-8 字节数约束的字符串同时给出 `maxLength` 和
 }
 ```
 
-代表性失败为 `503` error envelope。前端应保持只读不可操作状态并退避重试；不要用 `/live` 成功覆盖 `/ready` 失败。
+常见失败响应为 `503`，内容使用统一错误格式。前端应保持只读、禁用业务操作，并逐步延长重试间隔；即使 `/live` 成功，也不能忽略 `/ready` 失败。
 
 ### GET `/openapi.json`
 
-无参数。返回 OpenAPI `3.1.0` JSON 文档，不套 envelope。代码生成、请求模型与离线合同校验以它为准。代表性失败是普通网络/服务错误。
+无参数。直接返回 OpenAPI `3.1.0` JSON 文档，不使用通用响应格式。代码生成、请求模型与离线接口校验均以它为准。常见失败原因是网络或服务错误。
 
 ### GET `/docs`
 
-无参数。返回 HTML 调试页，不套 envelope，仅供开发调试，不应嵌入生产业务流程。
+无参数。直接返回 HTML 调试页，不使用通用响应格式；仅供开发调试，不应嵌入生产业务流程。
 
 ## 4. 七个业务操作
 
 ### POST `/api/v1/cases`
 
-创建新 Case。请求 body：
+创建新 Case。请求体：
 
 | 字段 | 类型 | 必填 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
@@ -342,7 +342,7 @@ GET /api/v1/cases/10000000-0000-4000-8000-000000000001?wait_for_job_id=20000000-
 }
 ```
 
-代表性错误：`400 VALIDATION_ERROR`（非法/重复/未知 query）、`404 CASE_NOT_FOUND`、`404 JOB_NOT_FOUND`、`409 JOB_CASE_MISMATCH`、`503 STATE_CORRUPT` 或 `STATE_SCHEMA_UNSUPPORTED`。
+代表性错误：`400 VALIDATION_ERROR`（查询参数非法、重复或未定义）、`404 CASE_NOT_FOUND`、`404 JOB_NOT_FOUND`、`409 JOB_CASE_MISMATCH`、`503 STATE_CORRUPT` 或 `STATE_SCHEMA_UNSUPPORTED`。
 
 ### POST `/api/v1/cases/{case_id}/attachments`
 
@@ -448,11 +448,11 @@ const response = await fetch(upload.url, {
 }
 ```
 
-代表性错误：`400 VALIDATION_ERROR`（四个必需头非法）、`404 ATTACHMENT_NOT_FOUND`、`409 RESOURCE_CASE_MISMATCH`、`409 INVALID_CASE_STATE`、`409 IDEMPOTENCY_CONFLICT`、`413 RESOURCE_LIMIT_EXCEEDED`、`422 RESOURCE_SIZE_MISMATCH`、`422 RESOURCE_HASH_MISMATCH`、`409 UPLOAD_INCOMPLETE`。上传成功只表示 `READY`；仍需 `supplements` 显式采用。
+代表性错误：`400 VALIDATION_ERROR`（四个必需请求头非法）、`404 ATTACHMENT_NOT_FOUND`、`409 RESOURCE_CASE_MISMATCH`、`409 INVALID_CASE_STATE`、`409 IDEMPOTENCY_CONFLICT`、`413 RESOURCE_LIMIT_EXCEEDED`、`422 RESOURCE_SIZE_MISMATCH`、`422 RESOURCE_HASH_MISMATCH`、`409 UPLOAD_INCOMPLETE`。上传成功只表示 `READY`；仍需调用 `supplements` 提交附件，诊断才会采用。
 
 ### POST `/api/v1/cases/{case_id}/supplements`
 
-提交当前开放 requirement 的事实和/或已为该 Case 上传成 `READY` 的附件。
+按当前待补充的 requirement 提交事实、附件，或同时提交两者。附件必须已上传到该 Case，且状态为 `READY`。
 
 | 位置 | 字段 | 类型 | 必填 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- | --- |
@@ -509,7 +509,7 @@ const response = await fetch(upload.url, {
 | --- | --- | --- | --- | --- |
 | path | `case_id` | `uuid` | 是 | 要列出公开产物的 Case。 |
 
-此端点不接受任何 query。下载必须基于已授权 Case 和权威产物 ID。网站后端使用配置的 `XIAODAO_BASE_URL` 及固定内容路径构造内部地址，保留配置前缀；响应中的 `download_url` 仅作描述，不决定网络寻址。网站示例可直接使用同一 CaseView 的公开产物元数据，避免再次查询列表。
+此端点不接受查询参数。下载时必须使用已授权的 Case 和服务端返回的产物 ID。网站后端根据配置的 `XIAODAO_BASE_URL` 和固定内容路径构造内部地址，并保留配置中的路径前缀。响应中的 `download_url` 仅描述下载入口，不能用来决定实际请求地址。网站示例可直接使用同一 CaseView 的公开产物元数据，避免再次查询列表。
 
 完整请求：
 
@@ -550,7 +550,7 @@ GET /api/v1/cases/10000000-0000-4000-8000-000000000001/artifacts
 }
 ```
 
-代表性错误：`400 VALIDATION_ERROR`（存在 query）、`404 CASE_NOT_FOUND`、`503 STATE_CORRUPT` 或 `STATE_SCHEMA_UNSUPPORTED`。
+代表性错误：`400 VALIDATION_ERROR`（带有查询参数）、`404 CASE_NOT_FOUND`、`503 STATE_CORRUPT` 或 `STATE_SCHEMA_UNSUPPORTED`。
 
 ### GET `/api/v1/artifacts/{artifact_id}/content`
 
@@ -563,9 +563,9 @@ GET /api/v1/cases/10000000-0000-4000-8000-000000000001/artifacts
 
 | 响应头 | 类型 | 含义 |
 | --- | --- | --- |
-| `Content-Length` | 非负十进制 integer | 权威字节数，必须等于产物列表的 `size`。 |
+| `Content-Length` | 非负十进制 integer | 文件字节数，必须等于产物列表的 `size`。 |
 | `Content-Type` | `content_type` | 文件类型，必须等于产物列表的 `content_type`。 |
-| `X-Content-SHA256` | `sha256` | 权威散列，必须等于产物列表的 `sha256`。 |
+| `X-Content-SHA256` | `sha256` | 文件哈希值，必须等于产物列表的 `sha256`。 |
 | `X-Problem-Locator-Correlation-ID` | `uuid` | 本次 HTTP 请求关联 ID。 |
 
 完整请求：
@@ -574,9 +574,9 @@ GET /api/v1/cases/10000000-0000-4000-8000-000000000001/artifacts
 GET /api/v1/artifacts/40000000-0000-4000-8000-000000000001/content?case_id=10000000-0000-4000-8000-000000000001
 ```
 
-原生服务返回以上响应头及原始内容，不套 JSON envelope。下载完成前不要把文件标记为可用；以权威产物元数据校验实际字节数、SHA-256 和内容类型。经过代理后 `Content-Length`、`X-Content-SHA256` 可缺失，存在时必须一致；仍禁止重定向和不支持的内容编码。
+服务端返回以上响应头和文件原始内容，不使用 JSON 响应格式。下载完成前不要把文件标记为可用；应根据服务端的产物元数据，校验实际字节数、SHA-256 和内容类型。经过代理后，`Content-Length`、`X-Content-SHA256` 可以缺失，但存在时必须一致；仍禁止重定向和不支持的内容编码。
 
-代表性错误仍为 JSON envelope：`400 VALIDATION_ERROR`、`404 CASE_NOT_FOUND`、`404 ARTIFACT_NOT_FOUND`、`500 RESOURCE_NOT_FOUND`、`422 RESOURCE_SIZE_MISMATCH`、`422 RESOURCE_HASH_MISMATCH`、`503 STATE_CORRUPT` 或 `STATE_SCHEMA_UNSUPPORTED`。
+错误响应仍使用统一 JSON 格式，例如：`400 VALIDATION_ERROR`、`404 CASE_NOT_FOUND`、`404 ARTIFACT_NOT_FOUND`、`500 RESOURCE_NOT_FOUND`、`422 RESOURCE_SIZE_MISMATCH`、`422 RESOURCE_HASH_MISMATCH`、`503 STATE_CORRUPT` 或 `STATE_SCHEMA_UNSUPPORTED`。
 
 ## 5. Case 状态与前端动作
 
@@ -587,7 +587,7 @@ GET /api/v1/artifacts/40000000-0000-4000-8000-000000000001/content?case_id=10000
 | `WAITING_INPUT` | 否 | 只读取 `status=OPEN` 且 `kind=INPUT` 的 `pending_requirements`，按 `prompt` 和 `constraints` 收集值，再提交 supplement。 |
 | `WAITING_ATTACHMENT` | 否 | 只读取 `status=OPEN` 且 `kind=ATTACHMENT` 的 requirement，依次执行 prepare → raw PUT → `READY` → supplement。 |
 | `REVIEWING` | 否 | 展示审核中；以新的 `active_job.job_id` 长轮询，不能把先前诊断 Job 的 ID 继续当作当前目标。 |
-| `RESOLVED` | 是 | `generic_result_v2` 非空时直接展示 Markdown 原文，适用于默认专有定位和 Generic V2；`final_result` 非空时下载并校验 `diagnosis-result.json`。`result.zip` 仅在用户要求时下载，并先提示其中含原始目标日志。 |
+| `RESOLVED` | 是 | `generic_result_v2` 非空时直接展示 Markdown 原文，适用于默认专用定位和 Generic V2；`final_result` 非空时下载并校验 `diagnosis-result.json`。`result.zip` 仅在用户要求时下载，并先提示其中含原始目标日志。 |
 | `PARTIALLY_RESOLVED` | 是 | 按 `final_result` 展示已确认因素、待确认因素、未满足条件和限制；自动下载并校验 `diagnosis-result.json`，ZIP 仍按需下载。 |
 | `UNRESOLVED` | 是 | `generic_result_v2` 非空时仍展示诊断的 Markdown 原文；`unresolved_result` 非空时自动下载并校验其 `INCONCLUSIVE` `diagnosis-result.json`。只在用户要求时下载 `AUDIT_BUNDLE`。 |
 | `FAILED` | 是 | 展示 `failure.code`、`message`、`reason_code` 和 `diagnostic_id`，不要伪造用户报告，也不要自动创建替代 Case。 |
@@ -596,9 +596,9 @@ GET /api/v1/artifacts/40000000-0000-4000-8000-000000000001/content?case_id=10000
 
 `active_job` 只会在 `RUNNING` 或 `REVIEWING` 非空；等待状态、终态和 `INTERRUPTED` 均为 `null`。不能根据 `wait_timed_out` 推断状态，必须读取 `case_view.status`。
 
-当前默认专有定位使用 `generic_result_v2` 和 `GENERIC_REPORT` 交付 Markdown 诊断原文，`skill_name` 记录实际使用的专有定位定义名称。Job 仍为 `SPECIALIZED`，Case 保留 `selected_skill_ref`，前端不能仅按诊断模式选择 JSON 报告。`RESOLVED` / `UNRESOLVED` 采用诊断方法给出的判断；框架不再做输出后的证据复核，不自动降级为 `PARTIALLY_RESOLVED` 或补写“证据不足”。该交付方式不会进入 `REVIEWING`，不生成证据核验 JSON 或结果 ZIP，`archive_status=NOT_REQUIRED`。
+当前默认专用定位使用 `generic_result_v2` 和 `GENERIC_REPORT` 交付 Markdown 诊断原文，`skill_name` 记录实际使用的专用定位定义名称。Job 仍为 `SPECIALIZED`，Case 保留 `selected_skill_ref`，前端不能仅按诊断模式选择 JSON 报告。`RESOLVED` / `UNRESOLVED` 采用诊断方法给出的判断；框架不再做输出后的证据复核，不自动降级为 `PARTIALLY_RESOLVED` 或补写“证据不足”。该交付方式不会进入 `REVIEWING`，不生成证据核验 JSON 或结果 ZIP，`archive_status=NOT_REQUIRED`。
 
-服务端也保留结构化报告交付方式，前端按实际非空结果字段选择展示分支。`final_result` 非空时读取 `USER_RESULT`；`unresolved_result` 非空时读取其绑定的 `INCONCLUSIVE` JSON 和审计包。`REVIEWING` 阶段不公开结果。ZIP 在后台生成，`archive_status=PENDING` 或 `FAILED` 都不影响 JSON 展示；只有 `READY` 才显示 ZIP 下载入口。`methods_result` 不属于当前结果合同。服务端策略及切换说明见[诊断交付策略](diagnosis-advisory.md)。
+服务端也保留结构化报告交付方式，前端按实际非空结果字段选择展示分支。`final_result` 非空时读取 `USER_RESULT`；`unresolved_result` 非空时读取其绑定的 `INCONCLUSIVE` JSON 和审计包。`REVIEWING` 阶段不公开结果。ZIP 在后台生成，`archive_status=PENDING` 或 `FAILED` 都不影响 JSON 展示；只有 `READY` 才显示 ZIP 下载入口。`methods_result` 不属于当前结果格式。服务端策略及切换说明见[诊断交付策略](diagnosis-advisory.md)。
 
 Case 的 `attachments` 包含附件摘要。活动 Case 在服务重启后不恢复；已交付的终态报告和待归档任务保留。查询继续返回完整 CaseView。
 
@@ -616,7 +616,7 @@ Markdown 正文原样展示，渲染器关闭原始 HTML。结构化报告 `diag
 
 ## 7. 框架无关 TypeScript/`fetch` 客户端
 
-以下代码覆盖七个业务操作、错误解析、长轮询、上传和下载校验。为保持示例可审计，嵌套响应类型在下一节附录定义；生产项目可由完整 OpenAPI 合同生成等价类型。
+以下代码覆盖七个业务操作、错误解析、长轮询、上传和下载校验。嵌套响应类型在下一节附录中列出，便于核对示例；生产项目可根据完整 OpenAPI 定义生成相应类型。
 
 ```ts
 type UUID = string;
@@ -1200,21 +1200,21 @@ const ready = await client.uploadAttachment(prepared.upload, file, measured);
 latestCaseRevision = ready.case_revision;
 ```
 
-下载时传入的 `DownloadSink` 必须提供暂存语义，例如基于当前稳定版 Chrome File System Access API 的临时目标：`write` 只追加 chunk，`commit` 在大小与 SHA-256 全部通过后发布，`abort` 删除未验证内容。`downloadArtifact` 不创建整包 `Blob`，而是对 `response.body` 单次流式读取，同时计数、向 Worker 发送 chunk 副本并写入 sink。
+下载时传入的 `DownloadSink` 必须先暂存内容，例如使用当前稳定版 Chrome File System Access API 创建临时文件。`write` 只追加数据块，`commit` 在大小与 SHA-256 全部通过校验后保存正式文件，`abort` 删除未验证的内容。`downloadArtifact` 不创建整包 `Blob`，而是流式读取一次 `response.body`，同时统计字节数、向 Worker 发送数据块副本并写入 sink。
 
-`crypto.subtle.digest` 需要 HTTPS 等安全上下文，并且不是增量 API。上面的 `sha256SmallBlob` 只适合明确受限的小文件预览，不是上传或下载的通用路径。附件上限约 2.5 GiB，接近上限时绝不能调用 `file.arrayBuffer()`，也不能把所有 chunk 保存后再合并。生产实现应：
+`crypto.subtle.digest` 需要 HTTPS 等安全上下文，而且不支持增量计算。上面的 `sha256SmallBlob` 只适合有明确大小限制的小文件预览，不能用于一般的上传或下载。附件上限约 2.5 GiB，接近上限时绝不能调用 `file.arrayBuffer()`，也不能先保存所有数据块再合并。生产实现应：
 
 1. 在 Web Worker 内创建一个项目锁定版本、经测试的增量 SHA-256 实现，并用消息代理实现 `WorkerSha256Port`；每个实例只处理一个流。
-2. `measureBlob` 或 `downloadArtifact` 顺序读取 `Uint8Array`，每次把 chunk 副本交给 Worker `update` 后立即释放，最终由 `digestHex` 返回 64 位小写 hex。
+2. `measureBlob` 或 `downloadArtifact` 顺序读取 `Uint8Array`，每次把数据块副本交给 Worker `update` 后立即释放，最终由 `digestHex` 返回 64 位小写十六进制字符串。
 3. 提供取消消息并在取消时 `reader.cancel()`；显示已处理字节数。
-4. 用空文件、`abc`、跨 chunk 边界和大于内存预算的 fixture 做已知向量测试；上传前再次核对 `file.size`，下载后同样用流式实现核对散列。
-5. 不要尝试把各 chunk 的 SHA-256 再做一次 SHA-256；那不等于整个文件的 SHA-256。
+4. 使用预先确定结果的测试数据，覆盖空文件、`abc`、跨数据块边界和大于内存预算的文件；上传前再次核对 `file.size`，下载后同样用流式计算核对哈希值。
+5. 不要尝试把各数据块的 SHA-256 再做一次 SHA-256；那不等于整个文件的 SHA-256。
 
 ## 8. 响应模型附录
 
-除特别注明“可省略”外，服务实际 JSON 序列化会输出下列字段；`null` 也是显式值。所有 object 都拒绝未知字段。请求模型已在各端点中给出，本节集中定义所有 REST 可达响应模型。
+除特别注明“可省略”外，服务返回的 JSON 都会包含下列字段，包括值为 `null` 的字段。所有对象都拒绝未知字段。请求模型已在各端点中给出，本节汇总 REST 接口涉及的全部响应模型。
 
-### 8.1 Envelope、健康状态与写回执
+### 8.1 响应外层结构、健康状态与写操作回执
 
 | 模型 | 字段 | 类型 | 含义 |
 | --- | --- | --- | --- |
@@ -1231,7 +1231,7 @@ latestCaseRevision = ready.case_revision;
 | `ReadinessCheckData` | `name` | `string` | 稳定检查名。 |
 | `ReadinessCheckData` | `passed` | `boolean` | 是否通过。 |
 | `ReadinessCheckData` | `message` | literal `null` | 不向前端暴露基础设施文本。 |
-| `ApplicationResponse` | `business_receipt` | `BusinessReceipt` | 已持久化写操作的权威回执。 |
+| `ApplicationResponse` | `business_receipt` | `BusinessReceipt` | 确认写操作已成功保存的回执。 |
 | `ApplicationResponse` | `case_view` | `CaseView \| null` | 写后投影；读取状态失败时可为 `null`，不否定回执。 |
 | `ApplicationResponse` | `wait_timed_out` | `boolean` | 本次有限等待是否到期。 |
 | `ApplicationResponse` | `dispatch_pending` | `boolean` | 已创建 Job 是否仍待调度接受。 |
@@ -1266,13 +1266,13 @@ latestCaseRevision = ready.case_revision;
 | `CaseView` | `open_questions` | `DiagnosisItem[]` | 尚未解决的问题。 |
 | `CaseView` | `pending_requirements` | `PendingRequirement[]` | 所有待办记录；收集输入时只看 `OPEN`。 |
 | `CaseView` | `attachments` | `AttachmentSummary[]` | 已准备或上传的附件摘要，包括 ID、名称、大小和上传状态。 |
-| `CaseView` | `archive_status` | `NOT_REQUIRED \| PENDING \| READY \| FAILED` | ZIP 归档状态；默认专有定位的 Markdown 结果为 `NOT_REQUIRED`。仅 `READY` 时提供 ZIP，其他状态不阻塞已交付报告。 |
+| `CaseView` | `archive_status` | `NOT_REQUIRED \| PENDING \| READY \| FAILED` | ZIP 归档状态；默认专用定位的 Markdown 结果为 `NOT_REQUIRED`。仅 `READY` 时提供 ZIP，其他状态不阻塞已交付报告。 |
 | `CaseView` | `active_job` | `JobSummary \| null` | 仅 `RUNNING`/`REVIEWING` 存在。 |
 | `CaseView` | `selected_skill_ref` | `VersionedRef \| null` | 服务所选执行定义的固定版本引用；前端只展示，不提交。 |
-| `CaseView` | `final_result` | `CandidateConclusion \| null` | 专有定位结构化报告在 `RESOLVED`/`PARTIALLY_RESOLVED` 的最终 Candidate；Markdown 交付时为 null。 |
-| `CaseView` | `unresolved_result` | `UnresolvedResult \| null` | 专有定位结构化报告在 `UNRESOLVED` 的结果与产物绑定；Markdown 交付时为 null。 |
+| `CaseView` | `final_result` | `CandidateConclusion \| null` | 专用定位结构化报告在 `RESOLVED`/`PARTIALLY_RESOLVED` 的最终 Candidate；Markdown 交付时为 null。 |
+| `CaseView` | `unresolved_result` | `UnresolvedResult \| null` | 专用定位结构化报告在 `UNRESOLVED` 的结果与产物绑定；Markdown 交付时为 null。 |
 | `CaseView` | `generic_result` | `GenericResult \| null` | 通用流程终态结果。 |
-| `CaseView` | `generic_result_v2` | `GenericResultV2 \| null` | 默认专有定位或 Generic V2 的终态 Markdown 结果；与 `generic_result` 互斥，正文是不可信数据。 |
+| `CaseView` | `generic_result_v2` | `GenericResultV2 \| null` | 默认专用定位或 Generic V2 的终态 Markdown 结果；与 `generic_result` 互斥，正文是不可信数据。 |
 | `CaseView` | `methods_result` | `MethodsTerminalProjectionV2`，可省略 | 仅为 wire 兼容保留；V9 始终缺省，禁止作为结果来源。 |
 | `MethodsTerminalProjectionV2` | `schema_version` | `2` | 旧投影版本；V9 不产生。 |
 | `MethodsTerminalProjectionV2` | `case_id` | `uuid` | 旧投影所属 Case；V9 不产生。 |
@@ -1315,7 +1315,7 @@ latestCaseRevision = ready.case_revision;
 | `ProblemSpec` | `completion_criteria` | `text[]`，至少 1 项 | 完成判据。 |
 | `ProblemSpec` | `revision` | `integer > 0` | 问题定义自身版本，不用于 Case 写并发。 |
 
-### 8.3 事实、问题与 provenance
+### 8.3 事实、问题与来源信息
 
 | 模型 | 字段 | 类型 | 含义 |
 | --- | --- | --- | --- |
@@ -1330,7 +1330,7 @@ latestCaseRevision = ready.case_revision;
 | `DiagnosisProvenance` | `source_ref` | `uuid` | 对应来源资源。 |
 | `DiagnosisProvenance` | `input_name` | `name \| null` | 用户输入时为精确 requirement 名；后台结果时为 `null`。 |
 
-### 8.4 Requirements
+### 8.4 待补充信息
 
 | 模型 | 字段 | 类型 | 含义 |
 | --- | --- | --- | --- |
@@ -1338,7 +1338,7 @@ latestCaseRevision = ready.case_revision;
 | `PendingRequirement` | `kind` | `RequirementKind` | 所需内容是字符串还是附件。 |
 | `PendingRequirement` | `name` | `name` | supplement 必须原样使用的键。 |
 | `PendingRequirement` | `prompt` | `text` | 展示给用户的提问。 |
-| `PendingRequirement` | `required` | literal `true` | 当前合同中的 requirement 均必需。 |
+| `PendingRequirement` | `required` | literal `true` | 当前接口中的 requirement 均为必填项。 |
 | `PendingRequirement` | `constraints` | `InputRequirementConstraints \| AttachmentRequirementConstraints` | 根据 `kind` 选择对应形态。 |
 | `PendingRequirement` | `status` | `RequirementStatus` | 是否仍开放。 |
 | `PendingRequirement` | `requested_by_job_id` | `uuid` | 提出它的 Job。 |
@@ -1347,7 +1347,7 @@ latestCaseRevision = ready.case_revision;
 | `InputRequirementConstraints` | `value_type` | literal `"STRING"` | 当前只接受字符串。 |
 | `InputRequirementConstraints` | `min_utf8_bytes` | `integer > 0` | 最小 UTF-8 字节数。 |
 | `InputRequirementConstraints` | `max_utf8_bytes` | `integer > 0` | 最大 UTF-8 字节数，且不超过 65,536。 |
-| `InputRequirementConstraints` | `pattern` | `string \| null` | 非空时按 Python `fullmatch` 语义校验；不要直接假设它等价于 JavaScript `RegExp`，浏览器预校验只能作为提示，服务端结果才是权威。 |
+| `InputRequirementConstraints` | `pattern` | `string \| null` | 非空时按 Python `fullmatch` 语义校验；不要直接假设它等价于 JavaScript `RegExp`。浏览器预校验仅作提示，最终以服务端校验结果为准。 |
 | `InputRequirementConstraints` | `allowed_values` | `text[]` | 非空时只能从中选择。 |
 | `AttachmentRequirementConstraints` | `allowed_content_types` | `content_type[]` | 可接受类型，唯一。 |
 | `AttachmentRequirementConstraints` | `min_count` | `integer > 0` | 最少附件数。 |
@@ -1433,9 +1433,9 @@ latestCaseRevision = ready.case_revision;
 | `CaseFailure` | `reason_code` | `MethodsValidationReasonCode \| null`，可省略 | 服务端证据复核失败时的稳定原因码。 |
 | `CaseFailure` | `diagnostic_id` | `uuid \| ^diag-[0-9a-f]{64}$ \| null`，可省略 | 与 `reason_code` 同时出现或同时缺省，用于关联执行记录。 |
 
-默认专有定位和 Generic V2 都从 `generic_result_v2` 读取 Markdown，并提供对应的 `GENERIC_REPORT`；`RESOLVED` 与 `UNRESOLVED` 均适用，不要求 JSON 或 ZIP。
+默认专用定位和 Generic V2 都从 `generic_result_v2` 读取 Markdown，并提供对应的 `GENERIC_REPORT`；`RESOLVED` 与 `UNRESOLVED` 均适用，不要求 JSON 或 ZIP。
 
-专有定位的结构化结果下载规则如下：
+专用定位的结构化结果下载规则如下：
 
 - `RESOLVED` / `PARTIALLY_RESOLVED`：公开一个 `USER_RESULT`，ZIP 就绪后再公开 `USER_RESULT_ARCHIVE`，来源 Job 等于 `final_result.proposed_by_job_id`。
 - `UNRESOLVED`：必须有一个 `INCONCLUSIVE` `USER_RESULT` 和一个 `AUDIT_BUNDLE`，分别匹配 `unresolved_result` 中的两个 Artifact ID；不得出现 `USER_RESULT_ARCHIVE`。
@@ -1476,8 +1476,8 @@ latestCaseRevision = ready.case_revision;
 | `ArtifactView` | `kind` | `ArtifactKind` | 产物种类。 |
 | `ArtifactView` | `name` | `text` | 下载文件名。 |
 | `ArtifactView` | `content_type` | `content_type` | 媒体类型。 |
-| `ArtifactView` | `size` | `integer >= 0` | 权威字节数。 |
-| `ArtifactView` | `sha256` | `sha256` | 权威散列。 |
+| `ArtifactView` | `size` | `integer >= 0` | 服务端记录的文件字节数。 |
+| `ArtifactView` | `sha256` | `sha256` | 服务端记录的文件哈希值。 |
 | `ArtifactView` | `created_at` | `timestamp` | 生成时间。 |
 | `ArtifactView` | `download_url` | `string` | 含 `case_id` query 的完整下载 URL，原样使用。 |
 
@@ -1535,7 +1535,7 @@ latestCaseRevision = ready.case_revision;
 | `409` | `JOB_CASE_MISMATCH` | `false` | Job 不属于该 Case；修正客户端关联。 |
 | `409` | `INVALID_CASE_STATE` | `false` | 重新查询并按最新状态动作。 |
 | `409` | `ACTIVE_JOB_EXISTS` | `false` | 等待当前 Job，不能并发推进。 |
-| `409` | `NEW_CASE_REQUIRED` | `false` | 当前事实不可在原 Case 中替换；让用户显式创建新 Case。 |
+| `409` | `NEW_CASE_REQUIRED` | `false` | 当前事实不可在原 Case 中替换；请用户另行创建新 Case。 |
 | `409` | `REVISION_CONFLICT` | `true` | 重新查询、重新确认内容、复用原 `request_id` 和新 revision。 |
 | `409` | `IDEMPOTENCY_CONFLICT` | `false` | 停止；同一 ID 被用于不同业务内容。 |
 | `409` | `RESOURCE_CASE_MISMATCH` | `false` | 资源不属于该 Case；修正关联。 |
@@ -1574,11 +1574,11 @@ latestCaseRevision = ready.case_revision;
 
 前端上线前至少自动验证：
 
-- 从 `/openapi.json` 生成或校验客户端类型，构建时拒绝合同漂移。
+- 从 `/openapi.json` 生成或校验客户端类型，构建时检查类型是否与接口定义一致，不一致则停止构建。
 - 创建后刷新页面仍能从本地持久化恢复 `case_id`；不能依赖服务端 Case 列表。
 - 覆盖 `case_view=null`、`wait_timed_out=true`、`dispatch_pending=true`、Job ID 切换、`REVISION_CONFLICT` 和 `IDEMPOTENCY_CONFLICT`。
 - 覆盖全部 Case 状态，特别是 `PARTIALLY_RESOLVED`、`UNRESOLVED`、`FAILED` 与 `INTERRUPTED`。
 - 在当前稳定版 Chrome 做真实跨源预检、`File`/`Blob` PUT、大小/散列失败、成功上传、采用、多附件 revision 推进和逐字节下载校验。
 - 确认浏览器脚本没有设置 `Content-Length`，也没有发送 Cookie 或其他凭据。
 
-本文未提供的能力——Case 历史列表、恢复、取消、认证、用户/租户权限——不能由前端通过猜测 URL、直接读存储或重用其他端点模拟。需要这些能力时必须先新增并发布明确的 REST 合同。
+本文未提供 Case 历史列表、恢复、取消、认证及用户/租户权限接口。前端不能猜测 URL、直接读存储或复用其他端点来模拟这些能力；如有需要，必须先新增并发布相应的 REST 接口定义。

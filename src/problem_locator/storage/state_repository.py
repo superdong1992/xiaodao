@@ -11,6 +11,7 @@ import threading
 import weakref
 from contextlib import contextmanager, nullcontext, ExitStack
 from collections.abc import Callable, Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,8 @@ class CaseStateRepository:
         self._live: dict[str, StateFile] = {}
         self._objects: dict[str, str] = {}
         self._requests: dict[str, str] = {}
+        self._case_users: dict[str, int] = {}
+        self._case_cleaning: set[str] = set()
         self._state_failure: ApplicationError | None = None
         self.on_terminal: Callable[[str], None] = lambda case_id: None
         # Projection receives only the candidate aggregate and the shared SQL
@@ -95,6 +98,12 @@ class CaseStateRepository:
                     case_id TEXT PRIMARY KEY, status TEXT NOT NULL,
                     payload BLOB NOT NULL, error TEXT);
                 CREATE INDEX IF NOT EXISTS archive_tasks_status ON archive_tasks(status);
+                CREATE TABLE IF NOT EXISTS completed_case_retention (
+                    case_id TEXT PRIMARY KEY, retained_at TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS completed_case_retention_age
+                    ON completed_case_retention(retained_at);
+                CREATE TABLE IF NOT EXISTS history_cleanup_jobs (
+                    cleanup_id TEXT PRIMARY KEY, manifest TEXT NOT NULL);
             """)
             self._db.execute("UPDATE archive_tasks SET status='PENDING' WHERE status='RUNNING'")
             now = self._clock.now()
@@ -150,6 +159,41 @@ class CaseStateRepository:
     def _lock_for(self, case_id: str) -> threading.RLock:
         with self._index_lock:
             return self._case_locks.setdefault(case_id, threading.RLock())
+
+    @contextmanager
+    def case_usage(self, case_id: str):
+        """Hold an operation/read-stream lease; release may run on another thread."""
+        case_id = _OPAQUE_ID.validate_python(case_id)
+        with self._index_lock:
+            if case_id in self._case_cleaning:
+                raise _port_error(ErrorCode.CASE_NOT_FOUND, 'Case 已到期或正在清理。')
+            self._case_users[case_id] = self._case_users.get(case_id, 0) + 1
+        try:
+            yield
+        finally:
+            with self._index_lock:
+                remaining = self._case_users[case_id] - 1
+                if remaining:
+                    self._case_users[case_id] = remaining
+                else:
+                    self._case_users.pop(case_id, None)
+
+    def case_cleanup_if_idle(self, case_id: str):
+        """Reserve immediately, returning a release context or None when busy."""
+        case_id = _OPAQUE_ID.validate_python(case_id)
+        with self._index_lock:
+            if self._case_users.get(case_id) or case_id in self._case_cleaning:
+                return None
+            self._case_cleaning.add(case_id)
+        return self._release_case_cleanup(case_id)
+
+    @contextmanager
+    def _release_case_cleanup(self, case_id):
+        try:
+            yield
+        finally:
+            with self._index_lock:
+                self._case_cleaning.remove(case_id)
 
     def _locate(self, key: str, *, request: bool = False) -> str | None:
         with self._index_lock:
@@ -288,6 +332,8 @@ class CaseStateRepository:
             try:
                 self._db.execute('INSERT OR REPLACE INTO completed_cases VALUES (?, ?)',
                                   (case_id, canonical_json_bytes(state)))
+                self._db.execute('INSERT OR IGNORE INTO completed_case_retention VALUES (?, ?)',
+                                  (case_id, aggregate.case.updated_at))
                 self._db.executemany('INSERT OR REPLACE INTO object_index VALUES (?, ?)',
                                      ((key, case_id) for key in objects))
                 self._db.executemany('INSERT OR REPLACE INTO request_index VALUES (?, ?)',
@@ -507,6 +553,9 @@ class CaseStateRepository:
         with ExitStack() as locks:
             for case_id in selected:
                 locks.enter_context(self._lock_for(case_id))
+            with self._index_lock:
+                if any(self._case_users.get(case_id) for case_id in selected):
+                    return False
             with self._database_lock:
                 self._require_deleted_case_owner(self._db, conversation_id, selected)
             for case_id in selected:
@@ -533,7 +582,7 @@ class CaseStateRepository:
             with self.database_transaction() as db:
                 self._require_deleted_case_owner(db, conversation_id, selected)
                 for case_id in selected:
-                    for table in ("completed_cases", "object_index", "request_index", "resource_index", "archive_tasks"):
+                    for table in ("completed_cases", "object_index", "request_index", "resource_index", "archive_tasks", "completed_case_retention"):
                         db.execute(f"DELETE FROM {table} WHERE case_id=?", (case_id,))
             with self._index_lock:
                 for case_id in selected:
@@ -542,6 +591,136 @@ class CaseStateRepository:
                     for key, owner in tuple(index.items()):
                         if owner in selected:
                             index.pop(key, None)
+
+    def history_case_candidates(self, cutoff: str) -> list[str]:
+        """Read an age index plus live idle Cases, never deserialize all history."""
+        self._backfill_history_case_ages()
+        with self._database_lock:
+            selected = [row[0] for row in self._db.execute(
+                'SELECT case_id FROM completed_case_retention WHERE retained_at<=? '
+                'ORDER BY retained_at,case_id', (cutoff,))]
+        with self._index_lock:
+            live = tuple(self._live)
+        for case_id in live:
+            with self._lock_for(case_id):
+                state = self._live.get(case_id)
+                if state is None:
+                    continue
+                case = state.cases[case_id].case
+                if case.active_job_id is None and case.updated_at <= cutoff:
+                    selected.append(case_id)
+        return list(dict.fromkeys(selected))
+
+    def _backfill_history_case_ages(self) -> None:
+        """Adopt valid legacy age metadata during maintenance, never at startup.
+
+        Already indexed Cases never have their snapshots read. Each missing
+        index is handled under its Case lock; decoding does not hold the shared
+        database lock. Unverifiable history remains untouched for on-demand
+        diagnosis rather than acquiring a fabricated retention timestamp.
+        """
+        with self._database_lock:
+            missing = [row[0] for row in self._db.execute(
+                'SELECT c.case_id FROM completed_cases c WHERE NOT EXISTS '
+                '(SELECT 1 FROM completed_case_retention r WHERE r.case_id=c.case_id)')]
+        for case_id in missing:
+            with self._lock_for(case_id):
+                with self._database_lock:
+                    row = self._db.execute('SELECT snapshot FROM completed_cases c '
+                        'WHERE case_id=? AND NOT EXISTS (SELECT 1 FROM completed_case_retention r '
+                        'WHERE r.case_id=c.case_id)', (case_id,)).fetchone()
+                if row is None:
+                    continue
+                try:
+                    state = StateFile.model_validate_json(row[0])
+                    if set(state.cases) != {case_id}:
+                        continue
+                    case = state.cases[case_id].case
+                    if case.status not in _TERMINAL or case.active_job_id is not None:
+                        continue
+                    retained_at = datetime.fromisoformat(case.updated_at.replace('Z', '+00:00')).isoformat(
+                        timespec='milliseconds').replace('+00:00', 'Z')
+                except (ValidationError, ValueError, TypeError):
+                    continue
+                with self.database_transaction() as db:
+                    db.execute('INSERT OR IGNORE INTO completed_case_retention VALUES (?, ?)',
+                               (case_id, retained_at))
+
+    def _history_case_manifest(self, case_id, cutoff):
+        state = self._load_case(case_id)
+        if state is None:
+            return {"case_ids": [], "job_ids": [], "attachment_ids": [], "paths": []}
+        aggregate = state.cases[case_id]
+        case = aggregate.case
+        with self._database_lock:
+            retained = self._db.execute('SELECT retained_at FROM completed_case_retention '
+                'WHERE case_id=?', (case_id,)).fetchone()
+            archive = self._db.execute("SELECT 1 FROM archive_tasks WHERE case_id=? "
+                "AND status IN ('PENDING','RUNNING')", (case_id,)).fetchone()
+        age_anchor = retained[0] if retained is not None else case.updated_at
+        if (case.active_job_id is not None or age_anchor > cutoff or archive is not None
+                or case.status not in _TERMINAL | {CaseStatus.INTERRUPTED, CaseStatus.WAITING_INPUT, CaseStatus.WAITING_ATTACHMENT}):
+            return None
+        jobs = sorted(aggregate.jobs)
+        attachments = sorted(aggregate.attachments)
+        paths = {f'resources/cases/{case_id}'}
+        paths.update(f'tmp/uploads/{value}' for value in attachments)
+        for value in jobs:
+            paths.update((f'jobs/{value}', f'tmp/workspaces/{value}', f'tmp/proposals/{value}'))
+        return {"case_ids": [case_id], "job_ids": jobs, "attachment_ids": attachments,
+                "paths": sorted(paths)}
+
+    def prepare_history_case_cleanup(self, case_id, cutoff):
+        case_id = _OPAQUE_ID.validate_python(case_id)
+        with self._lock_for(case_id):
+            return self._history_case_manifest(case_id, cutoff)
+
+    def commit_history_cleanup(self, cleanup_id, manifest, *, case_id=None,
+                               cutoff=None, mutate=None) -> bool:
+        """Commit exact retry paths and remove references in the same transaction.
+
+        The caller owns the Case/conversation cleanup leases and the publication
+        barrier. The callback only touches SQL; it must not acquire Case locks.
+        """
+        cleanup_id = _OPAQUE_ID.validate_python(cleanup_id)
+        if case_id is not None:
+            case_id = _OPAQUE_ID.validate_python(case_id)
+        with self._lock_for(case_id) if case_id is not None else nullcontext():
+            if case_id is not None:
+                with self._index_lock:
+                    if case_id not in self._case_cleaning:
+                        raise RuntimeError('history cleanup requires an exclusive Case lease')
+                current = self._history_case_manifest(case_id, cutoff)
+                if current is None or not set(current['paths']).issubset(manifest['paths']):
+                    return False
+            with self.database_transaction() as db:
+                if mutate is not None and mutate(db) is False:
+                    return False
+                db.execute('INSERT OR REPLACE INTO history_cleanup_jobs VALUES (?, ?)',
+                    (cleanup_id, json.dumps(manifest, ensure_ascii=False, sort_keys=True)))
+                if case_id is not None:
+                    for table in ('completed_cases', 'object_index', 'request_index',
+                                  'resource_index', 'archive_tasks', 'completed_case_retention'):
+                        db.execute(f'DELETE FROM {table} WHERE case_id=?', (case_id,))
+            if case_id is not None:
+                with self._index_lock:
+                    self._live.pop(case_id, None)
+                    for index in (self._objects, self._requests):
+                        for key, owner in tuple(index.items()):
+                            if owner == case_id:
+                                index.pop(key, None)
+                self.on_terminal(case_id)
+            return True
+
+    def compact_history_database(self) -> None:
+        """Reclaim deleted pages and WAL bytes outside every business transaction."""
+        with self._database_lock:
+            if self._db.in_transaction:
+                raise RuntimeError('database compaction cannot run inside a transaction')
+            self._db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+            if self._db.execute('PRAGMA freelist_count').fetchone()[0]:
+                self._db.execute('VACUUM')
+            self._db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
 
     def validate_all(self) -> ValidationReport:
         state = self.read_snapshot()

@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from problem_locator.storage import log_rotation
+
 from problem_locator.diagnostics import (
     bind_diagnostics,
     configure_diagnostics,
@@ -127,3 +129,34 @@ def test_diagnostics_reject_stream_and_file_together(tmp_path: Path) -> None:
             stream=io.StringIO(),
             log_file=tmp_path / "service.jsonl",
         )
+
+
+def test_configured_diagnostics_rotate_and_bound_one_giant_event(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(log_rotation, "LOG_FILE_MAX_BYTES", 1024)
+    target = tmp_path / "debug.jsonl"
+    root = logging.getLogger()
+    original_handlers, original_level = list(root.handlers), root.level
+    uvicorn_state = {name: (list(logging.getLogger(name).handlers), logging.getLogger(name).propagate,
+                            logging.getLogger(name).disabled)
+                     for name in ("uvicorn", "uvicorn.error", "uvicorn.access")}
+    try:
+        configure_diagnostics(log_file=target)
+        for index in range(30):
+            log_event("rotation.regression", request_id=f"request-{index}", text="中文" * 10_000)
+    finally:
+        for handler in tuple(root.handlers):
+            if handler not in original_handlers:
+                root.removeHandler(handler)
+                handler.close()
+        root.handlers[:] = original_handlers
+        root.setLevel(original_level)
+        for name, (handlers, propagate, disabled) in uvicorn_state.items():
+            logger = logging.getLogger(name)
+            logger.handlers[:], logger.propagate, logger.disabled = handlers, propagate, disabled
+    segments = log_rotation.jsonl_segment_paths(target)
+    assert len(segments) == 5
+    assert all(segment.stat().st_size <= 1024 for segment in segments)
+    last = json.loads(target.read_bytes().splitlines()[-1])
+    assert last["event"] == "rotation.regression"
+    assert last["request_id"] == "request-29"
+    assert last["log_truncation"]["truncated"] is True

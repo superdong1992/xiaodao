@@ -280,6 +280,39 @@ def test_loader_rejects_unsupported_schema_version(tmp_path: Path) -> None:
         load_journey(source)
 
 
+def test_renderer_reads_rotated_segments_with_exact_file_locations(tmp_path: Path) -> None:
+    (tmp_path / "journey.jsonl.2").write_bytes(canonical_json_bytes(_event(1, "case.created")))
+    (tmp_path / "journey.jsonl.1").write_bytes(canonical_json_bytes(_event(2, "job.queued")))
+    (tmp_path / "journey.jsonl").write_bytes(canonical_json_bytes(_event(3, "case.status.changed",
+                                                data={"to_status": "WAITING_INPUT"})))
+    receipt = render_journey(tmp_path, CASE_ID)
+    detailed = Path(receipt.detailed_log).read_text(encoding="utf-8")
+    assert receipt.events_rendered == 3
+    assert "journey.jsonl.2:1" in detailed
+    assert "journey.jsonl.1:1" in detailed
+    assert "journey.jsonl:1" in detailed
+
+
+def test_renderer_marks_evicted_prefix_and_rejects_rotation_gaps(tmp_path: Path) -> None:
+    (tmp_path / "journey.jsonl.1").write_bytes(canonical_json_bytes(_event(3, "case.created")))
+    (tmp_path / "journey.jsonl").write_bytes(canonical_json_bytes(_event(4, "case.status.changed",
+                                                data={"to_status": "WAITING_INPUT"})))
+    receipt = render_journey(tmp_path, CASE_ID)
+    for output in (receipt.brief_log, receipt.detailed_log):
+        text = Path(output).read_text(encoding="utf-8")
+        assert "较早事件已被轮转淘汰" in text
+        assert "仅包含保留片段" in text
+    (tmp_path / "journey.jsonl").write_bytes(canonical_json_bytes(_event(5, "case.created")))
+    with pytest.raises(JourneySourceError, match="expected sequence 4"):
+        render_journey(tmp_path, CASE_ID)
+
+
+def test_renderer_rejects_explicitly_truncated_event(tmp_path: Path) -> None:
+    _write(tmp_path, [_event(1, "case.created", data={"log_truncation": {"truncated": True}})])
+    with pytest.raises(JourneySourceError, match="内容已截断"):
+        render_journey(tmp_path, CASE_ID)
+
+
 def test_timing_attribution_ranks_exclusive_critical_path_and_agent_detail(
     tmp_path: Path,
 ) -> None:

@@ -4,9 +4,13 @@ import { once } from "node:events";
 import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
+import timers from "node:timers";
 import test from "node:test";
 import { createAgentBackend } from "./server.ts";
-import { createAgentBackend as createPureJsBackend } from "./server.mjs";
+import { createAgentBackend as createPureJsBackend, DOWNLOAD_TEMP_TTL_MS,
+  DOWNLOAD_TOTAL_TIMEOUT_MS, sweepDownloadSpools } from "./server.mjs";
 // 与后端示例同一 Gate 执行，保证浏览器模块变化后重新验证。
 import "./report-view.test.mjs";
 import "./browser-client.test.mjs";
@@ -549,3 +553,164 @@ for (const options of [{ headerOverrides: { "Content-Length": null, "X-Content-S
     }); assert.equal(fixture.calls.length, 2);
   });
 }
+
+async function spoolFixture(root, pid, label, processIdentity = null) {
+  const directory = join(root, `xiaodao-website-p${pid}-${label}`);
+  await fsPromises.mkdir(directory);
+  await fsPromises.writeFile(join(directory, "payload"), "temporary archive");
+  await fsPromises.writeFile(join(directory, "owner.json"), JSON.stringify({
+    schema_version: 1, pid, process_identity: processIdentity,
+  }));
+  return directory;
+}
+
+async function removeTestRoot(root) {
+  assert.equal(dirname(resolve(root)), resolve(tmpdir()));
+  assert.match(basename(root), /^xiaodao-spool-tests-/);
+  await fsPromises.rm(root, { recursive: true, force: true });
+}
+
+test("expired download spools reclaim dead owners and failed same-process cleanup without touching live owners", async () => {
+  const root = await fsPromises.mkdtemp(join(tmpdir(), "xiaodao-spool-tests-"));
+  try {
+    const dead = await spoolFixture(root, 2_147_483_647, "dead");
+    const failedCleanup = await spoolFixture(root, process.pid, "inactive");
+    const live = await spoolFixture(root, process.ppid, "live");
+    const legacy = join(root, "xiaodao-website-legacy");
+    await fsPromises.mkdir(legacy);
+    await fsPromises.writeFile(join(legacy, "payload"), "unknown owner");
+    await sweepDownloadSpools({ root });
+    assert.ok(fs.existsSync(dead), "期限内的目录需要保留。");
+    await sweepDownloadSpools({ root, now: Date.now() + DOWNLOAD_TEMP_TTL_MS * 2 });
+    assert.equal(fs.existsSync(dead), false);
+    assert.equal(fs.existsSync(failedCleanup), false);
+    assert.ok(fs.existsSync(live), "其他存活进程的目录不能删除。");
+    assert.ok(fs.existsSync(legacy), "旧版未知归属目录不能自动删除。");
+  } finally { await removeTestRoot(root); }
+});
+
+test("Linux start identity reclaims a stale spool even when its PID has been reused", { skip: process.platform !== "linux" }, async () => {
+  const root = await fsPromises.mkdtemp(join(tmpdir(), "xiaodao-spool-tests-"));
+  try {
+    const reused = await spoolFixture(root, process.ppid, "reused", "previous-boot:0");
+    await sweepDownloadSpools({ root, now: Date.now() + DOWNLOAD_TEMP_TTL_MS * 2 });
+    assert.equal(fs.existsSync(reused), false);
+  } finally { await removeTestRoot(root); }
+});
+
+test("active download survives the sweeper and its spool disappears after delivery", async (context) => {
+  const originalMkdtemp = fsPromises.mkdtemp, originalRmdir = fsPromises.rmdir;
+  let directory, release;
+  const created = new Promise((resolveCreated) => {
+    context.mock.method(fsPromises, "mkdtemp", async (...args) => {
+      directory = await originalMkdtemp(...args); resolveCreated(); return directory;
+    });
+  });
+  const removed = new Promise((resolveRemoved) => {
+    context.mock.method(fsPromises, "rmdir", async (...args) => {
+      const result = await originalRmdir(...args);
+      if (args[0] === directory) resolveRemoved();
+      return result;
+    });
+  });
+  syncBuiltinESMExports();
+  const payload = Buffer.from("zip bytes");
+  const fixture = artifactFixture({ kind: "USER_RESULT_ARCHIVE", payload,
+    receivedPayload: new ReadableStream({ start(controller) {
+      release = () => { controller.enqueue(payload); controller.close(); };
+    } }) });
+  try {
+    await withServer({ access, fetchImpl: fixture.fetchImpl }, async (origin) => {
+      const pending = fetch(origin + reportDownloadPath + "?download=archive&acknowledge_raw_logs=true");
+      await created;
+      await sweepDownloadSpools({ now: Date.now() + DOWNLOAD_TEMP_TTL_MS * 2 });
+      assert.ok(fs.existsSync(directory));
+      release();
+      const response = await pending;
+      assert.equal(response.status, 200);
+      assert.equal(await response.text(), "zip bytes");
+      await removed;
+      assert.equal(fs.existsSync(directory), false);
+    });
+  } finally { context.mock.restoreAll(); syncBuiltinESMExports(); }
+});
+
+test("download total timeout cancels a stalled upstream and removes its spool", async (context) => {
+  const originalSetTimeout = timers.setTimeout, originalWriteFile = fsPromises.writeFile;
+  let expire, directory, cancelled = false;
+  context.mock.method(timers, "setTimeout", (callback, delay, ...args) => {
+    if (delay === DOWNLOAD_TOTAL_TIMEOUT_MS) {
+      expire = callback;
+      return originalSetTimeout(() => {}, delay);
+    }
+    return originalSetTimeout(callback, delay, ...args);
+  });
+  const prepared = new Promise((resolvePrepared) => {
+    context.mock.method(fsPromises, "writeFile", async (path, ...args) => {
+      const result = await originalWriteFile(path, ...args);
+      if (basename(String(path)) === "owner.json") { directory = dirname(String(path)); resolvePrepared(); }
+      return result;
+    });
+  });
+  syncBuiltinESMExports();
+  const fixture = artifactFixture({ kind: "USER_RESULT_ARCHIVE", payload: Buffer.from("zip bytes"),
+    receivedPayload: new ReadableStream({ cancel() { cancelled = true; } }) });
+  try {
+    await withServer({ access, fetchImpl: fixture.fetchImpl }, async (origin) => {
+      const pending = fetch(origin + reportDownloadPath + "?download=archive&acknowledge_raw_logs=true");
+      await prepared;
+      expire();
+      const response = await pending;
+      assert.equal(response.status, 504);
+      assert.match((await response.json()).error.message, /下载超时/);
+      assert.equal(cancelled, true);
+      assert.equal(fs.existsSync(directory), false);
+    });
+  } finally { context.mock.restoreAll(); syncBuiltinESMExports(); }
+});
+
+test("startup cleanup failure is visible and the periodic sweep retries", async (context) => {
+  const originalReaddir = fsPromises.readdir, originalSetInterval = timers.setInterval;
+  let attempts = 0, retrySweep, reported;
+  const report = new Promise((resolveReported) => { reported = resolveReported; });
+  context.mock.method(fsPromises, "readdir", async (...args) => {
+    if (++attempts === 1) throw Object.assign(new Error("fixture cleanup denied"), { code: "EACCES" });
+    return originalReaddir(...args);
+  });
+  context.mock.method(timers, "setInterval", (callback, delay, ...args) => {
+    retrySweep = callback; return originalSetInterval(callback, delay, ...args);
+  });
+  context.mock.method(console, "error", (message, code) => {
+    assert.match(message, /下一轮重试/); assert.equal(code, "EACCES"); reported();
+  });
+  syncBuiltinESMExports();
+  try {
+    await withServer({ access }, async () => {
+      await report;
+      await retrySweep();
+      assert.equal(attempts, 2);
+    });
+  } finally { context.mock.restoreAll(); syncBuiltinESMExports(); }
+});
+
+test("expired SSE cursor preserves its public code and safe retained sequence", async () => {
+  await withServer({ access, fetchImpl: async (_url, init) => {
+    assert.equal(init.headers.get("Last-Event-ID"), "1");
+    return new Response(JSON.stringify({ ok: false, data: null, error: {
+      code: "AGENT_EVENT_CURSOR_EXPIRED", message: "private /srv/path", retryable: false,
+      details: [{ field: "retained_after_sequence", actual: 2, internal: "private" },
+        { field: "retained_after_sequence", actual: -1 },
+        { field: "retained_after_sequence", actual: "private" },
+        { field: "retained_after_sequence", actual: Number.MAX_SAFE_INTEGER + 1 },
+        { field: "path", actual: "/srv/private" }],
+    } }), { status: 409, headers: { "Content-Type": "application/json" } });
+  } }, async (origin) => {
+    const response = await fetch(origin + conversationPath + "/events", { headers: { "Last-Event-ID": "1" } });
+    assert.equal(response.status, 409);
+    assert.deepEqual((await response.json()).error, {
+      code: "AGENT_EVENT_CURSOR_EXPIRED",
+      message: "历史事件已过保留期，请先刷新会话状态，再从 last_event_id 重新订阅。",
+      details: [{ field: "retained_after_sequence", actual: 2 }], retryable: false,
+    });
+  });
+});

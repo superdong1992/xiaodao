@@ -6,11 +6,12 @@
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdtemp, rm, rmdir } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, readdir, rm, rmdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { clearInterval, clearTimeout, setInterval, setTimeout } from "node:timers";
 import { fileURLToPath, pathToFileURL } from "node:url";
 export const denyAccess = {
     authenticate: async ()=>null
@@ -34,6 +35,77 @@ const MAX_JSON_BYTES = 1024 * 1024;
 const MAX_ATTACHMENT_BYTES = 2_684_354_560;
 const MAX_DOWNLOAD_BYTES = 5_368_709_120;
 const MAX_REPORT_BYTES = 16 * 1024 * 1024;
+export const DOWNLOAD_TOTAL_TIMEOUT_MS = 30 * 60 * 1000;
+export const DOWNLOAD_TEMP_TTL_MS = 60 * 60 * 1000;
+const DOWNLOAD_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
+const DOWNLOAD_DIRECTORY = /^xiaodao-website-p([1-9][0-9]*)-[A-Za-z0-9_-]+$/;
+const activeDownloads = new Set();
+
+async function processIdentity(pid) {
+    if (process.platform !== "linux") return null;
+    try {
+        const [stat, boot] = await Promise.all([
+            readFile(`/proc/${pid}/stat`, "utf8"),
+            readFile("/proc/sys/kernel/random/boot_id", "utf8"),
+        ]);
+        const start = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)[19];
+        return /^[0-9]+$/.test(start ?? "") ? `${boot.trim()}:${start}` : null;
+    } catch {
+        return null;
+    }
+}
+
+function processAlive(pid) {
+    try { process.kill(pid, 0); return true; }
+    catch (error) { return error.code !== "ESRCH"; }
+}
+
+function reportSpoolCleanupFailure(error) {
+    console.error("网站下载临时目录未能清理，将在下一轮重试。", error?.code ?? "CLEANUP_FAILED");
+}
+
+async function removeDownloadDirectory(directory) {
+    await rm(join(directory, "payload"), { force: true });
+    await rm(join(directory, "owner.json"), { force: true });
+    try { await rmdir(directory); }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+}
+
+/** 仅回收已过期且可以确认不再使用的本示例临时目录。 */
+export async function sweepDownloadSpools({ root = tmpdir(), now = Date.now() } = {}) {
+    for (const entry of await readdir(root, { withFileTypes: true })) {
+        const match = DOWNLOAD_DIRECTORY.exec(entry.name);
+        if (!match || !entry.isDirectory()) continue;
+        const pid = Number(match[1]);
+        if (!Number.isSafeInteger(pid) || pid > 2_147_483_647) continue;
+        const directory = join(root, entry.name);
+        if (activeDownloads.has(directory)) continue;
+        try {
+            const metadata = await lstat(directory);
+            if (!metadata.isDirectory() || now - metadata.mtimeMs < DOWNLOAD_TEMP_TTL_MS) continue;
+            let owner = null;
+            try {
+                const ownerPath = join(directory, "owner.json"), ownerMetadata = await lstat(ownerPath);
+                if (!ownerMetadata.isFile() || ownerMetadata.size > 1024) continue;
+                owner = JSON.parse(await readFile(ownerPath, "utf8"));
+                if (owner.schema_version !== 1 || owner.pid !== pid ||
+                    !(owner.process_identity === null || typeof owner.process_identity === "string")) continue;
+            } catch (error) {
+                if (error.code !== "ENOENT") throw error;
+            }
+            // 同进程中只有不在 activeDownloads 的目录才可重试清理。
+            // 其他进程仍存活时，Linux 的启动标识可排除 PID 被复用的旧目录。
+            let unused = pid === process.pid || !processAlive(pid);
+            if (!unused && owner?.process_identity) {
+                const currentIdentity = await processIdentity(pid);
+                unused = currentIdentity !== null && currentIdentity !== owner.process_identity;
+            }
+            if (unused && !activeDownloads.has(directory)) await removeDownloadDirectory(directory);
+        } catch (error) {
+            if (error.code !== "ENOENT") reportSpoolCleanupFailure(error);
+        }
+    }
+}
 // JSON 字符串转义最多膨胀六倍。此处限制传输封装，原始报告仍由原生 API 单独限额。
 const MAX_REPORT_RESPONSE_BYTES = 6 * MAX_REPORT_BYTES + 64 * 1024;
 const KINDS = new Set([
@@ -105,6 +177,7 @@ const PUBLIC_CODES = new Set([
     "AGENT_ATTACHMENT_NOT_READY",
     "AGENT_MESSAGE_LIMIT",
     "AGENT_INVALID_CURSOR",
+    "AGENT_EVENT_CURSOR_EXPIRED",
     "AGENT_ATTACHMENT_LIMIT",
     "AGENT_ATTACHMENT_NOT_FOUND",
     "AGENT_ATTACHMENT_STATE_CONFLICT",
@@ -174,6 +247,10 @@ function safeError(value, terminal = false) {
             field: "persistence",
             actual: "UNKNOWN"
         });
+        else if (item?.field === "retained_after_sequence" && Number.isSafeInteger(item.actual) && item.actual >= 0) details.push({
+            field: "retained_after_sequence",
+            actual: item.actual
+        });
         else if ([
             "case_id",
             "job_id",
@@ -199,6 +276,7 @@ function safeError(value, terminal = false) {
         AGENT_CONVERSATION_NOT_FOUND: "会话不存在或已删除。",
         AGENT_RUN_NOT_FOUND: "诊断轮次不存在。",
         AGENT_RUN_CHANGED: "诊断轮次已变化，请刷新后重试。",
+        AGENT_EVENT_CURSOR_EXPIRED: "历史事件已过保留期，请先刷新会话状态，再从 last_event_id 重新订阅。",
         AGENT_DELETE_REQUIRED: "会话正在删除，请稍后查看目录。",
         AGENT_CANCELLING: "正在停止本轮诊断，请稍后再发送。",
         AGENT_IDEMPOTENCY_CONFLICT: "同一 request_id 的内容不能更改。",
@@ -419,9 +497,10 @@ export function createAgentBackend(options) {
         if (result.failure) result.failure = safeError(result.failure, true);
         return result;
     }
-    async function downloadResponse(ownerKey, artifact) {
+    async function downloadResponse(ownerKey, artifact, signal) {
         const response = await fetchImpl(artifact.download_url, {
             redirect: "manual",
+            signal,
             headers: {
                 "X-Agent-Owner-Key": ownerKey
             }
@@ -454,11 +533,24 @@ export function createAgentBackend(options) {
         }
         return content;
     }
-    async function verifiedDownload(ownerKey, artifact, use) {
-        const response = await downloadResponse(ownerKey, artifact);
-        const directory = await mkdtemp(join(tmpdir(), "xiaodao-website-"));
-        const file = join(directory, "payload");
+    async function verifiedDownload(ownerKey, artifact, clientResponse, use) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(new HttpError(504, "下载超时，请重新下载。")), DOWNLOAD_TOTAL_TIMEOUT_MS);
+        timeout.unref();
+        const disconnected = () => {
+            if (!clientResponse.writableFinished) controller.abort(new HttpError(499, "下载连接已断开。"));
+        };
+        clientResponse.once("close", disconnected);
+        let directory;
         try {
+            const response = await downloadResponse(ownerKey, artifact, controller.signal);
+            directory = await mkdtemp(join(tmpdir(), `xiaodao-website-p${process.pid}-`));
+            activeDownloads.add(directory);
+            const file = join(directory, "payload");
+            await writeFile(join(directory, "owner.json"), JSON.stringify({
+                schema_version: 1, pid: process.pid, process_identity: await processIdentity(process.pid),
+                created_at: new Date().toISOString(),
+            }), { flag: "wx", mode: 0o600 });
             const hash = createHash("sha256");
             let size = 0;
             const verifier = new Transform({
@@ -472,19 +564,24 @@ export function createAgentBackend(options) {
             await pipeline(Readable.fromWeb(response.body), verifier, createWriteStream(file, {
                 flags: "wx",
                 mode: 0o600
-            }));
+            }), { signal: controller.signal });
             if (size !== artifact.size || hash.digest("hex") !== artifact.sha256) {
                 throw new HttpError(502, "下载内容的大小或 SHA-256 校验失败。");
             }
-            await use(file);
+            await use(file, controller.signal);
+        } catch (error) {
+            throw controller.signal.aborted ? controller.signal.reason : error;
         } finally{
-            await rm(file, {
-                force: true
-            });
-            await rmdir(directory);
+            clearTimeout(timeout);
+            clientResponse.removeListener("close", disconnected);
+            if (directory) {
+                activeDownloads.delete(directory);
+                try { await removeDownloadDirectory(directory); }
+                catch (error) { reportSpoolCleanupFailure(error); }
+            }
         }
     }
-    return createServer(async (request, response)=>{
+    const server = createServer(async (request, response)=>{
         try {
             const user = await access.authenticate(request);
             if (!user || typeof user.id !== "string" || !user.id.trim()) throw new HttpError(401, "请先登录。");
@@ -709,9 +806,9 @@ export function createAgentBackend(options) {
                     response.writeHead(200, downloadHeaders);
                     response.end(content);
                 } else {
-                    await verifiedDownload(ownerKey, artifact, async (path)=>{
+                    await verifiedDownload(ownerKey, artifact, response, async (path, signal)=>{
                         response.writeHead(200, downloadHeaders);
-                        await pipeline(createReadStream(path), response);
+                        await pipeline(createReadStream(path), response, { signal });
                     });
                 }
                 return;
@@ -753,6 +850,19 @@ export function createAgentBackend(options) {
             });
         }
     });
+    let sweeping = false;
+    const sweep = async () => {
+        if (sweeping) return;
+        sweeping = true;
+        try { await sweepDownloadSpools(); }
+        catch (error) { reportSpoolCleanupFailure(error); }
+        finally { sweeping = false; }
+    };
+    void sweep();
+    const sweepTimer = setInterval(sweep, DOWNLOAD_SWEEP_INTERVAL_MS);
+    sweepTimer.unref();
+    server.once("close", () => clearInterval(sweepTimer));
+    return server;
 }
 export async function startAgentBackend() {
     const authModule = process.env.WEBSITE_AUTH_MODULE;

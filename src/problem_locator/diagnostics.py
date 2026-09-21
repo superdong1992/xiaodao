@@ -16,6 +16,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, TextIO
 
+from problem_locator.storage.log_rotation import JsonlFileHandler
+
 
 _LOGGER_NAME = "problem_locator.dfx"
 _HANDLER_MARKER = "_problem_locator_dfx_handler"
@@ -132,7 +134,7 @@ def configure_diagnostics(
     stream: TextIO | None = None,
     log_file: Path | str | None = None,
 ) -> None:
-    """Install one process-wide JSON handler for stderr or an append-only file."""
+    """Install one process-wide JSON handler for stderr or a bounded file set."""
 
     numeric_level = getattr(logging, level.upper(), None)
     if not isinstance(numeric_level, int):
@@ -147,11 +149,7 @@ def configure_diagnostics(
     else:
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        handler = logging.FileHandler(
-            log_path,
-            mode="a",
-            encoding="utf-8",
-        )
+        handler = JsonlFileHandler(log_path)
 
     root = logging.getLogger()
     for existing in tuple(root.handlers):

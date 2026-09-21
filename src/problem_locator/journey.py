@@ -23,6 +23,7 @@ from problem_locator.contracts.models import (
     UtcTimestamp,
 )
 from problem_locator.diagnostics import current_diagnostics_context, log_event
+from problem_locator.storage.log_rotation import BoundedJsonlFile
 
 
 JOURNEY_SCHEMA_VERSION = 1
@@ -129,13 +130,20 @@ def journey_json_value(value: Any, *, seen: set[int] | None = None) -> Any:
 
 
 class _JourneyWriter:
-    def __init__(self, stream: TextIO, *, close_stream: bool) -> None:
+    def __init__(self, stream: TextIO | None, *, close_stream: bool,
+                 file: BoundedJsonlFile | None = None) -> None:
         self.stream = stream
         self.close_stream = close_stream
-        self.sequence = 0
+        self.file = file
+        previous = None if file is None else file.last_record()
+        if previous is not None and isinstance(previous.get("log_truncation"), dict):
+            if previous["log_truncation"].get("sequence_unavailable") is True:
+                raise ValueError("日志历史已截断且无法恢复事件序号，不能继续追加 Journey。")
+        self.sequence = (0 if previous is None else
+                         JourneyEvent.model_validate(previous, strict=True).sequence)
 
     def close(self) -> None:
-        if self.close_stream:
+        if self.close_stream and self.stream is not None:
             self.stream.close()
 
     def emit(
@@ -181,8 +189,13 @@ class _JourneyWriter:
             sort_keys=True,
             separators=(",", ":"),
         )
-        self.stream.write(line + "\n")
-        self.stream.flush()
+        if self.file is not None:
+            persisted = self.file.write_line(line)
+            payload = JourneyEvent.model_validate_json(persisted, strict=True)
+        else:
+            assert self.stream is not None
+            self.stream.write(line + "\n")
+            self.stream.flush()
         self.sequence = sequence
         return payload
 
@@ -202,17 +215,13 @@ def configure_journey(
     if stream is not None and log_file is not None:
         raise ValueError("stream and log_file cannot be configured together")
 
-    writer: _JourneyWriter | None = None
-    if stream is not None:
-        writer = _JourneyWriter(stream, close_stream=False)
-    elif log_file is not None:
-        log_path = Path(log_file)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        handle = log_path.open("a", encoding="utf-8", newline="\n")
-        writer = _JourneyWriter(handle, close_stream=True)
-
     global _WRITER, _WRITE_FAILURE_REPORTED
     with _LOCK:
+        writer: _JourneyWriter | None = None
+        if stream is not None:
+            writer = _JourneyWriter(stream, close_stream=False)
+        elif log_file is not None:
+            writer = _JourneyWriter(None, close_stream=False, file=BoundedJsonlFile(log_file))
         previous = _WRITER
         _WRITER = writer
         _WRITE_FAILURE_REPORTED = False

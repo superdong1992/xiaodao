@@ -427,6 +427,26 @@ def test_sse_replays_bounded_batches_and_resumes_without_duplicate():
     assert [call[1][2] for call in fake.calls] == [20] * 11
 
 
+def test_sse_expired_history_cursor_requires_snapshot_refresh():
+    class RetainedAgent(FakeAgent):
+        def list_events(self, conversation_id, after_sequence, limit, owner_key=None):
+            if after_sequence < 2:
+                raise AgentStoreError("AGENT_EVENT_CURSOR_EXPIRED",
+                    "历史事件已过期，请先读取会话当前状态，再从 last_event_id 重新订阅。", 409,
+                    details=[{"field": "retained_after_sequence", "actual": 2}])
+            return dict(events=[event(3)] if after_sequence == 2 else [], stream_closed=True)
+
+    fake = RetainedAgent()
+    response = run_request(fake, "GET", VIEW + "/events", headers={"Last-Event-ID": "1"})
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "AGENT_EVENT_CURSOR_EXPIRED"
+    assert response.headers["content-type"].startswith("application/json")
+    resumed = run_request(fake, "GET", VIEW + "/events", headers={"Last-Event-ID": "2"})
+    assert resumed.status_code == 200
+    assert [json.loads(line[6:])["sequence"] for line in resumed.text.splitlines()
+            if line.startswith("data: ")] == [3]
+
+
 def test_sse_business_frames_are_single_line_data_for_default_message_handlers():
     response = run_request(FakeAgent([event(1), event(2)]), "GET", VIEW + "/events")
     assert response.status_code == 200

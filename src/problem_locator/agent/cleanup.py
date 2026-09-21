@@ -4,12 +4,14 @@ from __future__ import annotations
 import logging
 import threading
 import uuid
+from contextlib import ExitStack
 from pathlib import PurePosixPath
 
 from pydantic import TypeAdapter
 
 from problem_locator.contracts import OpaqueId
 from problem_locator.diagnostics import log_event
+from problem_locator.storage.paths import job_workspace_names, workspace_owner_id
 
 _ID = TypeAdapter(OpaqueId)
 
@@ -64,7 +66,8 @@ class ConversationCleanupService:
         paths.update(f"resources/conversations/{value}" for value in attachment_ids)
         paths.update(f"tmp/workspaces/{value}" for value in workspace_ids)
         for value in job_ids:
-            paths.update((f"jobs/{value}", f"tmp/workspaces/{value}", f"tmp/proposals/{value}"))
+            paths.update((f"jobs/{value}", f"tmp/proposals/{value}"))
+            paths.update(f"tmp/workspaces/{name}" for name in job_workspace_names(value))
         cleanup_id = str(uuid.uuid5(uuid.UUID(conversation_id), "agent-conversation-cleanup-v2"))
         # Paths originate exclusively from the durable Agent/Case metadata, not
         # HTTP input. Reject malformed identities before touching the filesystem.
@@ -75,14 +78,17 @@ class ConversationCleanupService:
             if len(parts) == 2 and parts[0] == "jobs" and parts[1] in job_ids:
                 continue
             if len(parts) == 3:
+                if parts[:2] == ("tmp", "workspaces"):
+                    owner_id = workspace_owner_id(parts[2])
+                    if owner_id in job_ids or (parts[2] == owner_id and owner_id in workspace_ids):
+                        continue
+                    raise ValueError("cleanup workspace is outside its owning conversation")
                 _ID.validate_python(parts[2])
                 if parts[:2] == ("resources", "cases") and parts[2] in case_ids:
                     continue
                 if parts[:2] == ("resources", "conversations") and parts[2] in attachment_ids:
                     continue
-                if parts[:2] in {("tmp", "workspaces"), ("tmp", "proposals")} and parts[2] in job_ids:
-                    continue
-                if parts[:2] == ("tmp", "workspaces") and parts[2] in workspace_ids:
+                if parts[:2] == ("tmp", "proposals") and parts[2] in job_ids:
                     continue
                 if parts[:2] == ("tmp", "uploads"):
                     # This identity was captured by prepare_agent_case_cleanup
@@ -112,9 +118,15 @@ class ConversationCleanupService:
             if lease is None:
                 self.store.fail_cleanup(conversation_id, "CLEANUP_BUSY")
                 return False
-            with lease:
+            with lease, ExitStack() as case_leases:
                 context = self.store.cleanup_context(conversation_id)
                 case_ids = self._ids([*case_ids, *context.get("case_ids", [])])
+                for case_id in case_ids:
+                    case_lease = self.repository.case_cleanup_if_idle(case_id)
+                    if case_lease is None:
+                        self.store.fail_cleanup(conversation_id, "CLEANUP_BUSY")
+                        return False
+                    case_leases.enter_context(case_lease)
                 for worker in (self.dispatcher, self.archive):
                     if worker is not None:
                         worker.cancel_cases(case_ids)

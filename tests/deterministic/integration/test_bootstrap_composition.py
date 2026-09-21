@@ -6,6 +6,7 @@ import sys
 import threading
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -20,6 +21,7 @@ from problem_locator.bootstrap import (
     main,
 )
 from problem_locator.contracts import (
+    ApplicationPortError,
     CLI_EXIT_CONFIG_OR_STATE_CORRUPT,
     CreateCase,
     DispatchReceipt,
@@ -32,6 +34,7 @@ from problem_locator.contracts import (
 from problem_locator.entrypoints.settings import Settings
 from problem_locator.storage.layout import StorageLayout
 from problem_locator.storage.platform import FileInstanceLock
+from problem_locator.storage.retention_cleaner import CleanupRunResult
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -183,6 +186,8 @@ def test_unique_object_graph_recovery_export_and_shutdown_lock_order(
         assert graph.retention.cleaner._attachment_registry is (
             graph.attachment_registry
         )
+        assert graph.retention.history is not None
+        assert graph.retention._interval_seconds == 3_600
         assert graph.asset_catalog._logparse_broker_factory is (
             graph.logparse_broker_factory
         )
@@ -230,6 +235,145 @@ def test_unique_object_graph_recovery_export_and_shutdown_lock_order(
     assert graph.retention.thread_alive is False
     replacement = FileInstanceLock(graph.layout.instance_lock).acquire()
     replacement.release()
+
+
+def test_history_cleanup_failure_does_not_block_temporary_cleanup(tmp_path: Path) -> None:
+    graph = build_service(_settings(tmp_path / "data"))
+    calls = []
+    result = CleanupRunResult((), (), (), (), False)
+
+    def fail_history():
+        calls.append("history")
+        raise OSError("simulated storage failure")
+
+    def clean_temporary():
+        calls.append("temporary")
+        return result
+
+    try:
+        graph.retention.history = SimpleNamespace(run_once=fail_history)
+        graph.retention.cleaner = SimpleNamespace(run_once=clean_temporary)
+        graph.retention._run_once()
+        assert calls == ["history", "temporary"]
+        assert graph.retention.last_result is result
+        assert graph.retention.last_failure_type == "OSError"
+        graph.retention.history = SimpleNamespace(run_once=lambda: calls.append("retried"))
+        graph.retention._run_once()
+        assert calls[-2:] == ["retried", "temporary"]
+        assert graph.retention.last_failure_type is None
+    finally:
+        graph.close()
+
+
+def test_startup_snapshot_is_bounded_per_installation_and_reclaims_crash_leftovers(tmp_path: Path) -> None:
+    settings = _settings(tmp_path / "data")
+    graph = build_service(settings)
+    snapshot = graph.layout.temporary / "assets"
+    try:
+        assert snapshot.is_dir()
+        assert graph.asset_catalog._snapshot_path == snapshot
+        with pytest.raises(ApplicationPortError) as rejected:
+            build_service(settings)
+        assert rejected.value.error.code is ErrorCode.INSTANCE_LOCKED
+        assert snapshot.is_dir()  # A competing process cannot clear a live snapshot.
+    finally:
+        graph.close()
+    assert not snapshot.exists()
+    snapshot.mkdir()
+    (snapshot / "crash-leftover").write_bytes(b"old startup snapshot")
+    replacement = build_service(settings)
+    try:
+        assert snapshot.is_dir()
+        assert not (snapshot / "crash-leftover").exists()
+    finally:
+        replacement.close()
+    assert not snapshot.exists()
+
+
+@pytest.mark.parametrize("component,method", [
+    ("agent", "shutdown"),
+    ("repository", "close"),
+    ("asset_catalog", "close"),
+])
+def test_close_failure_retains_instance_lock_and_allows_retry(tmp_path, monkeypatch, component, method):
+    graph = build_service(_settings(tmp_path / "data"))
+
+    def fail(*args, **kwargs):
+        raise OSError("injected shutdown failure")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(getattr(graph, component), method, fail)
+            with pytest.raises(OSError, match="injected shutdown failure"):
+                graph.close()
+        assert graph.instance_lock.is_acquired()
+        assert not graph.closed
+        assert not graph._closing
+        graph.close()
+        assert graph.closed
+        assert not graph.instance_lock.is_acquired()
+    finally:
+        # Avoid hanging the test process if the lifecycle claim regresses.
+        with graph._lifecycle_condition:
+            graph._closing = False
+            graph._lifecycle_condition.notify_all()
+        graph.close()
+
+
+def test_failed_close_wakes_a_concurrent_closer_to_retry(tmp_path, monkeypatch):
+    graph = build_service(_settings(tmp_path / "data"))
+    entered = threading.Event()
+    release_failure = threading.Event()
+    waiting = threading.Event()
+    failures = []
+    original_close = graph.asset_catalog.close
+    original_wait = graph._lifecycle_condition.wait_for
+    attempts = 0
+
+    def fail_once():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            entered.set()
+            assert release_failure.wait(2.0)
+            raise OSError("first close failed")
+        original_close()
+
+    def observe_wait(*args, **kwargs):
+        waiting.set()
+        return original_wait(*args, **kwargs)
+
+    def close():
+        try:
+            graph.close()
+        except BaseException as error:
+            failures.append(error)
+
+    monkeypatch.setattr(graph.asset_catalog, "close", fail_once)
+    monkeypatch.setattr(graph._lifecycle_condition, "wait_for", observe_wait)
+    first = threading.Thread(target=close, daemon=True)
+    second = threading.Thread(target=close, daemon=True)
+    try:
+        first.start()
+        assert entered.wait(2.0)
+        second.start()
+        assert waiting.wait(2.0)
+        release_failure.set()
+        first.join(2.0)
+        second.join(2.0)
+        assert not first.is_alive() and not second.is_alive()
+        assert len(failures) == 1 and str(failures[0]) == "first close failed"
+        assert graph.closed
+        assert not graph.instance_lock.is_acquired()
+    finally:
+        release_failure.set()
+        with graph._lifecycle_condition:
+            graph._closing = False
+            graph._lifecycle_condition.notify_all()
+        first.join(2.0)
+        if second.ident is not None:
+            second.join(2.0)
+        graph.close()
 
 
 @pytest.mark.parametrize("mode", ["advisory", "strict"])
