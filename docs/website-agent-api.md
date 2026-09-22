@@ -50,10 +50,14 @@
 | 会话 | `DELETE /api/v1/agent/conversations/{conversation_id}` | 删除会话，无请求体；按会话 ID 幂等 |
 | 会话 | `POST /api/v1/agent/conversations/{conversation_id}/messages` | 发送问题、补充回答或附件引用，JSON：`request_id`、可空 `text`、`attachment_ids` |
 | 会话 | `GET /api/v1/agent/conversations/{conversation_id}` | 一次返回状态、进度、追问、失败、历史、完整报告和下载信息 |
+| 会话 | `GET /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/feedback` | 指定报告的评价资格与当前投票，无请求体 |
+| 会话 | `PUT /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/feedback` | JSON：`request_id`、`rating`（`LIKE` 或 `DISLIKE`） |
 | 会话 | `GET /api/v1/agent/conversations/{conversation_id}/events` | SSE 历史回放和实时订阅；可带 `Last-Event-ID` |
 | 会话 | `GET /api/v1/agent/conversations/{conversation_id}/files/{artifact_id}/content` | 下载文件，可用 `run_id` 固定历史轮次 |
 | 附件 | `POST /api/v1/agent/attachments` | 预约日志上传，JSON 含 `conversation_id` 和文件元数据 |
 | 附件 | `PUT /api/v1/agent/attachments/{attachment_id}/content` | 上传文件原始字节 |
+
+赞踩接入、响应格式、换票和错误处理见[通用定位经验库与网站赞踩接入](generic-feedback-memory.md)。评价接口不接受查询参数，`request_id` 最多 128 个 Unicode 字符；仅已交付的通用定位 V2 正式报告支持评价，资格由服务端判断。前端负责按钮，不新增 SSE 事件。
 
 会话 GET 支持 `include`、`run_id`、`history_before`、`history_limit`。不传时加载 `history,report,artifacts`；`include=none` 只返回状态、追问、最新阶段和事件游标；也可传 `include=report`、`include=artifacts` 或不重复的逗号组合。目录查询支持 `cursor`、`limit`；文件支持 `run_id`；其余路由不接受查询参数。未知项、重复项和重复 `include` 参数返回明确校验错误。
 
@@ -304,6 +308,25 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `AgentPublicFailure` | `message` | 可直接展示的中文说明，不含模型原文、堆栈或内部路径。 |
 | `AgentPublicFailure` | `details` | `field`/`actual` 形式的安全详情，例如 `phase`、`diagnostic_id`、`reason_code`、`location`；运行态故障还可含 `persistence=UNKNOWN`。 |
 | `AgentPublicFailure` | `retryable` | 固定为 `false`；查询或读取报告不会重新运行模型，也不能据此续办已结束的任务。 |
+
+### 通用报告的点赞和点踩
+
+评价属于指定会话的指定轮次，GET 和 PUT 都返回 `FeedbackView`，外层仍为 `{ok,data,error}`。网站按钮根据 `can_rate` 决定是否可用，根据 `rating` 显示选中状态；切换历史报告时使用 `selected_run_id`，忽略其他报告的迟到响应。
+
+| 模型 | 字段 | 含义 |
+| --- | --- | --- |
+| `FeedbackRequest` | `request_id` | 本次评价的幂等标识，1 到 128 个 Unicode 字符，不能全为空白；重试保持原 ID 和内容，换票使用新 ID。 |
+| `FeedbackRequest` | `rating` | `LIKE` 有帮助，`DISLIKE` 没帮助；不支持取消评价。 |
+| `FeedbackView` | `schema_version` | 反馈响应合同版本，固定为 `1`。 |
+| `FeedbackView` | `conversation_id` | 已核验当前用户归属的会话 UUID，必须与请求路径一致。 |
+| `FeedbackView` | `run_id` | 被评价报告的轮次 UUID，必须与请求路径一致。 |
+| `FeedbackView` | `can_rate` | 当前是否支持评价；仅已交付的通用定位 V2 正式报告可评价，功能关闭或报告不适用时为 `false`。 |
+| `FeedbackView` | `rating` | 当前保存的 `LIKE` 或 `DISLIKE`；尚未评价时为 `null`。旧请求重放也返回最新投票。 |
+| `FeedbackView` | `updated_at` | 最近一次投票变化的 UTC 时间，精确到毫秒；尚未评价时为 `null`。 |
+
+两个接口不接受查询参数，GET 不接受请求体，PUT 只接受表中的两个字段。同一报告的提交应串行处理，重复同票不累计票数、不重复提炼经验。反馈只对当前用户可见，响应不包含其他用户的报告。
+
+不适用报告返回 `409 / AGENT_FEEDBACK_UNSUPPORTED`，重试改参数返回 `409 / AGENT_IDEMPOTENCY_CONFLICT`，反馈存储配额已满返回 `429 / AGENT_FEEDBACK_LIMIT_EXCEEDED`。浏览器封装、完整错误处理及启用条件见[经验库与赞踩接入说明](generic-feedback-memory.md)。
 
 ### 会话管理和历史字段
 

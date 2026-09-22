@@ -27,6 +27,8 @@ const AGENT_OPERATIONS = [
   "GET /api/v1/agent/conversations/{conversation_id}/files/{artifact_id}/content",
   "GET /api/v1/agent/conversations/{conversation_id}",
   "GET /api/v1/agent/conversations/{conversation_id}/events",
+  "GET /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/feedback",
+  "PUT /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/feedback",
   "POST /api/v1/agent/attachments",
   "POST /api/v1/agent/conversations",
   "POST /api/v1/agent/conversations/{conversation_id}/messages",

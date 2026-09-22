@@ -21,6 +21,8 @@ from problem_locator.contracts.limits import (
 from problem_locator.contracts.models import CaseFailure
 from problem_locator.contracts.serialization import canonical_json_bytes
 from problem_locator.interfaces.error_mapping import http_status_for
+from problem_locator.interfaces.agent_http import AgentErrorEnvelope
+from problem_locator.memory.models import FeedbackRequest, FeedbackView
 from problem_locator.interfaces.http_app import create_http_app
 from problem_locator.interfaces.mcp_server import McpAdapter
 from problem_locator.interfaces.rest_models import (
@@ -34,6 +36,7 @@ from problem_locator.interfaces.rest_models import (
     PrepareAttachmentSuccessEnvelope,
     ReadinessSuccessEnvelope,
     SubmitSupplementBody,
+    SuccessEnvelope,
     UploadReadySuccessEnvelope,
 )
 from tests.deterministic.contracts._support import REPOSITORY_ROOT
@@ -419,6 +422,8 @@ def test_openapi_and_swagger_publish_the_browser_contract() -> None:
         ("/api/v1/agent/conversations/{conversation_id}", "patch"): "rename_agent_conversation",
         ("/api/v1/agent/conversations/{conversation_id}", "delete"): "delete_agent_conversation",
         ("/api/v1/agent/conversations/{conversation_id}/stop", "post"): "stop_agent_conversation",
+        ("/api/v1/agent/conversations/{conversation_id}/runs/{run_id}/feedback", "get"): "get_agent_feedback",
+        ("/api/v1/agent/conversations/{conversation_id}/runs/{run_id}/feedback", "put"): "put_agent_feedback",
         ("/api/v1/agent/conversations/{conversation_id}/files/{artifact_id}/content", "get"): "download_agent_file",
         ("/api/v1/agent/conversations/{conversation_id}", "get"): "get_agent_conversation",
         ("/api/v1/agent/conversations/{conversation_id}/messages", "post"): "send_agent_message",
@@ -528,6 +533,7 @@ def test_openapi_describes_every_parameter_and_reachable_model_field() -> None:
     schema = _app().openapi()
     uuid_names = {
         "conversation_id",
+        "run_id",
         "case_id",
         "wait_for_job_id",
         "attachment_id",
@@ -673,6 +679,7 @@ def test_openapi_examples_validate_against_the_real_rest_dtos() -> None:
 
     for model, schema_name in (
         (CreateCaseBody, "CreateCaseBody"),
+        (FeedbackRequest, "FeedbackRequest"),
         (PrepareAttachmentBody, "PrepareAttachmentBody"),
         (SubmitSupplementBody, "SubmitSupplementBody"),
     ):
@@ -682,6 +689,8 @@ def test_openapi_examples_validate_against_the_real_rest_dtos() -> None:
             model.model_validate(example)
 
     success_models = {
+        "get_agent_feedback": SuccessEnvelope[FeedbackView],
+        "put_agent_feedback": SuccessEnvelope[FeedbackView],
         "get_liveness": LiveSuccessEnvelope,
         "get_readiness": ReadinessSuccessEnvelope,
         "create_case": ApplicationSuccessEnvelope,
@@ -707,11 +716,18 @@ def test_openapi_examples_validate_against_the_real_rest_dtos() -> None:
                         value = example["value"]
                         if value.get("ok") is not False:
                             continue
-                        parsed = ErrorEnvelope.model_validate(value)
-                        assert http_status_for(parsed.error) == int(status)
+                        if media["schema"].get("$ref") == "#/components/schemas/AgentErrorEnvelope":
+                            parsed = AgentErrorEnvelope.model_validate(value)
+                            assert {"AGENT_CONVERSATION_NOT_FOUND": 404, "AGENT_FEEDBACK_UNSUPPORTED": 409,
+                                    "AGENT_FEEDBACK_LIMIT_EXCEEDED": 429}[parsed.error.code] == int(status)
+                        else:
+                            parsed = ErrorEnvelope.model_validate(value)
+                            assert http_status_for(parsed.error) == int(status)
                         operations_with_error_examples.add(operation_id)
 
     assert operations_with_error_examples == {
+        "get_agent_feedback",
+        "put_agent_feedback",
         "get_readiness",
         "create_case",
         "get_case",
@@ -904,3 +920,72 @@ def test_wildcard_cors_allows_browser_preflight_without_credentials() -> None:
     assert "x-problem-locator-correlation-id" in actual.headers[
         "access-control-expose-headers"
     ].lower()
+
+
+def test_feedback_openapi_metadata_matches_the_feedback_contract() -> None:
+    schema = _app().openapi()
+    feedback = schema["paths"]["/api/v1/agent/conversations/{conversation_id}/runs/{run_id}/feedback"]
+    assert set(feedback) == {"get", "put"}
+    assert "requestBody" not in feedback["get"]
+    for operation in feedback.values():
+        paths = [parameter for parameter in operation["parameters"] if parameter["in"] == "path"]
+        assert {parameter["name"] for parameter in paths} == {"conversation_id", "run_id"}
+        assert {parameter["name"] for parameter in operation["parameters"] if parameter["in"] == "header"} == {"X-Agent-Owner-Key"}
+        for parameter in paths:
+            assert parameter["required"] is True
+            assert parameter["schema"]["format"] == "uuid"
+        assert operation["responses"]["429"]["description"] == "反馈存储配额已满；不自动重试。"
+    components = schema["components"]["schemas"]
+    request = components["FeedbackRequest"]
+    assert request["additionalProperties"] is False
+    assert set(request["required"]) == {"request_id", "rating"}
+    assert request["properties"]["request_id"]["maxLength"] == 128
+    assert "x-max-utf8-bytes" not in request["properties"]["request_id"]
+    assert request["properties"]["rating"]["enum"] == ["LIKE", "DISLIKE"]
+    assert {example["rating"] for example in request["examples"]} == {"LIKE", "DISLIKE"}
+    view = components["FeedbackView"]
+    assert set(view["required"]) == {"schema_version", "conversation_id", "run_id", "can_rate", "rating", "updated_at"}
+    assert "Case" not in view["properties"]["updated_at"]["description"]
+    assert "历史报告" in view["properties"]["run_id"]["description"]
+
+
+def test_feedback_openapi_example_executes_through_the_complete_http_app() -> None:
+    class FeedbackPort:
+        def __init__(self):
+            self.calls = []
+            self.rating = None
+
+        def get_feedback(self, conversation_id, run_id, *, owner_key):
+            self.calls.append(("GET", conversation_id, run_id, owner_key))
+            return FeedbackView(conversation_id=conversation_id, run_id=run_id, can_rate=True,
+                rating=self.rating, updated_at=None if self.rating is None else "2026-09-21T12:00:00.000Z")
+
+        def put_feedback(self, conversation_id, run_id, request_id, rating, *, owner_key):
+            self.calls.append(("PUT", conversation_id, run_id, owner_key, request_id, rating))
+            self.rating = rating
+            return FeedbackView(conversation_id=conversation_id, run_id=run_id, can_rate=True,
+                rating=rating, updated_at="2026-09-21T12:00:00.000Z")
+
+    service = FeedbackPort()
+    app = create_http_app(command_port=FakeApplicationService(), query_port=FakeQuery(),
+        state_admin=FakeStateAdmin(readiness=readiness()), public_base_url="http://127.0.0.1:8000",
+        agent_service=service)
+    example = app.openapi()["components"]["schemas"]["FeedbackRequest"]["examples"][0]
+    path = f"/api/v1/agent/conversations/{CASE_ID}/runs/{JOB_ID}/feedback"
+    owner = "a" * 64
+
+    async def operation(client):
+        headers = {"X-Agent-Owner-Key": owner}
+        return (await client.get(path, headers=headers),
+                await client.put(path, headers=headers, json=example),
+                await client.get(path, headers=headers),
+                await client.put(path, headers=headers, json={**example, "owner_key": owner}))
+
+    first, updated, current, invalid = _run(app, operation)
+    assert [response.status_code for response in (first, updated, current, invalid)] == [200, 200, 200, 400]
+    assert first.json()["data"]["rating"] is None
+    for response in (updated, current):
+        parsed = SuccessEnvelope[FeedbackView].model_validate(response.json())
+        assert parsed.data.rating == "LIKE" and parsed.data.run_id == JOB_ID
+    assert service.calls == [("GET", CASE_ID, JOB_ID, owner),
+        ("PUT", CASE_ID, JOB_ID, owner, example["request_id"], "LIKE"), ("GET", CASE_ID, JOB_ID, owner)]

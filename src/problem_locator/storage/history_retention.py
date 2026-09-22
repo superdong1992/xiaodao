@@ -169,13 +169,15 @@ class HistoryRetentionService:
         self._database_dirty |= changed
         return changed
 
-    @staticmethod
-    def _prune_run(db, cid, run_id, cutoff):
+    def _prune_run(self, db, cid, run_id, cutoff):
         row = db.execute("SELECT r.body,c.current_run_id,c.body FROM agent_conversation_runs r "
             "JOIN agent_conversations c USING(conversation_id) WHERE r.conversation_id=? AND r.run_id=? "
             "AND c.deleted_at IS NULL", (cid, run_id)).fetchone()
         if row is None or row[1] == run_id or not HistoryRetentionService._expired(json.loads(row[0]), cutoff):
             return False
+        memory_store = getattr(self.store, "memory_store", None)
+        if memory_store is not None:
+            memory_store.expire_sources(db, cid, run_id=run_id)
         maximum = db.execute("SELECT max(sequence) FROM agent_events WHERE conversation_id=? AND run_id=?",
                              (cid, run_id)).fetchone()[0]
         head = json.loads(row[2])
@@ -253,9 +255,9 @@ class HistoryRetentionService:
                     manifest = self.repository.prepare_history_case_cleanup(case_id, cutoff)
                     if manifest is None or not self._uploads_idle(manifest["attachment_ids"]):
                         return False
-            # Existing explicit deletion settles dormant WAITING_INPUT Cases,
-            # drains workers and persists its own crash-safe resource manifest.
-            self.store.request_delete(cid)
+            # Reuse durable resource cleanup, but preserve completed experience
+            # cards and discard any source still awaiting extraction.
+            self.store.request_expiry(cid)
             self._database_dirty = True
             return True
 

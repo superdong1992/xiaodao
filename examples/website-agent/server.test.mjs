@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
+import { request as httpRequest } from "node:http";
 import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
@@ -8,7 +9,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import timers from "node:timers";
 import test from "node:test";
-import { createAgentBackend } from "./server.ts";
+import { createAgentBackend, HttpError } from "./server.ts";
 import { createAgentBackend as createPureJsBackend, DOWNLOAD_TEMP_TTL_MS,
   DOWNLOAD_TOTAL_TIMEOUT_MS, sweepDownloadSpools } from "./server.mjs";
 // 与后端示例同一 Gate 执行，保证浏览器模块变化后重新验证。
@@ -712,5 +713,109 @@ test("expired SSE cursor preserves its public code and safe retained sequence", 
       message: "历史事件已过保留期，请先刷新会话状态，再从 last_event_id 重新订阅。",
       details: [{ field: "retained_after_sequence", actual: 2 }], retryable: false,
     });
+  });
+});
+
+const feedbackPath = `${conversationPath}/runs/${runId}/feedback`;
+function nativeFeedback(overrides = {}) {
+  return { schema_version: 1, conversation_id: conversation, run_id: runId,
+    can_rate: true, rating: null, updated_at: null, ...overrides };
+}
+
+test("feedback uses one authoritative request with trusted ownership and no report loading", async () => {
+  const calls = [];
+  await withServer({ access, upstream: base + "/prefix", fetchImpl: async (url, init) => {
+    assert.equal(new Headers(init.headers).get("X-Agent-Owner-Key"), ownerKey);
+    calls.push({ url: url.href, init });
+    return envelope(nativeFeedback(init.method === "PUT" ? {
+      rating: "DISLIKE", updated_at: "2026-09-21T10:00:00.123456+00:00",
+    } : {}));
+  } }, async (origin) => {
+    const read = await fetch(origin + feedbackPath, { headers: { "X-Agent-Owner-Key": "spoof" } });
+    assert.equal(read.status, 200);
+    assert.deepEqual((await read.json()).data, nativeFeedback());
+    for (let replay = 0; replay < 2; replay++) {
+      const write = await fetch(origin + feedbackPath, { method: "PUT",
+        headers: { "Content-Type": "application/json", "X-Agent-Owner-Key": "spoof" },
+        body: JSON.stringify({ request_id: "repeat-me", rating: "LIKE" }) });
+      assert.equal(write.status, 200);
+      assert.equal((await write.json()).data.rating, "DISLIKE");
+    }
+  });
+  assert.equal(calls.length, 3);
+  assert.ok(calls.every(({ url }) => url === `${base}/prefix/api/v1/agent/conversations/${conversation}/runs/${runId}/feedback`));
+  assert.equal(calls[0].init.body, undefined);
+  assert.equal(calls[0].init.method, "GET");
+  assert.deepEqual(JSON.parse(calls[1].init.body), { request_id: "repeat-me", rating: "LIKE" });
+  assert.equal(calls[1].init.body, calls[2].init.body);
+});
+
+test("feedback refuses invalid parameters and GET request bodies without contacting upstream", async () => {
+  await withServer({ access, fetchImpl: async () => assert.fail("无效评价不能访问上游。") }, async (origin) => {
+    for (const path of [feedbackPath + "?owner_key=spoof", feedbackPath + "?run_id=" + runId,
+      feedbackPath.replace(runId, "bad"), feedbackPath.replace(conversation, "bad")]) {
+      assert.equal((await fetch(origin + path)).status, 400);
+    }
+    for (const body of [{}, { request_id: "vote", rating: "like" }, { request_id: "", rating: "LIKE" },
+      { request_id: " ", rating: "LIKE" }, { request_id: "😀".repeat(129), rating: "LIKE" },
+      { request_id: "vote", rating: "LIKE", owner_key: "spoof" }, { request_id: "vote", rating: null }]) {
+      const response = await fetch(origin + feedbackPath, { method: "PUT",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      assert.equal(response.status, 400);
+    }
+    for (const framing of [{ "Content-Length": "2" }, { "Transfer-Encoding": "chunked" }]) {
+      await new Promise((resolve, reject) => {
+        const request = httpRequest(origin + feedbackPath, { method: "GET", headers: framing }, (response) => {
+          assert.equal(response.statusCode, 400); response.resume(); response.on("end", resolve);
+        });
+        request.on("error", reject); request.end("{}");
+      });
+    }
+  });
+});
+
+test("feedback requires website login and CSRF authorization before forwarding", async () => {
+  for (const [accessOverride, status] of [[undefined, 401], [{ authenticate: async () => {
+    throw new HttpError(403, "请求来源校验失败。");
+  } }, 403]]) {
+    await withServer({ access: accessOverride, fetchImpl: async () => assert.fail("未授权评价不能访问上游。") }, async (origin) => {
+      for (const method of ["GET", "PUT"]) assert.equal((await fetch(origin + feedbackPath, { method,
+        headers: { "Content-Type": "application/json" }, body: method === "PUT" ? '{"request_id":"vote","rating":"LIKE"}' : undefined,
+      })).status, status);
+    });
+  }
+});
+
+test("feedback keeps native denial, unsupported, conflict and rate cap status without leaking upstream text", async () => {
+  for (const [status, code] of [[404, "AGENT_CONVERSATION_NOT_FOUND"], [404, "AGENT_RUN_NOT_FOUND"],
+    [409, "AGENT_FEEDBACK_UNSUPPORTED"], [409, "AGENT_IDEMPOTENCY_CONFLICT"], [429, "AGENT_FEEDBACK_LIMIT_EXCEEDED"]]) {
+    await withServer({ access, fetchImpl: async () => new Response(JSON.stringify({ ok: false, data: null,
+      error: { code, message: "SECRET /srv/internal", details: [{ field: "private", actual: "SECRET" }], retryable: false },
+    }), { status }) }, async (origin) => {
+      const response = await fetch(origin + feedbackPath, { method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ request_id: "vote", rating: "LIKE" }) });
+      assert.equal(response.status, status);
+      const output = await response.text();
+      assert.equal(JSON.parse(output).error.code, code);
+      assert.ok(!output.includes("SECRET"));
+    });
+  }
+});
+
+test("feedback validates upstream identity and contract before forwarding either response", async () => {
+  const badValues = [null, [], {}, ...[{ schema_version: 2 }, { conversation_id: caseId }, { run_id: jobId },
+    { can_rate: 1 }, { rating: "NEUTRAL" }, { rating: "LIKE" }, { updated_at: "2026-09-21T10:00:00Z" },
+    { rating: "LIKE", updated_at: "private" }, { source_report: "SECRET" }].map(nativeFeedback)];
+  for (const result of badValues) await withServer({ access, fetchImpl: async () => envelope(result) }, async (origin) => {
+    for (const method of ["GET", "PUT"]) {
+      const response = await fetch(origin + feedbackPath, { method, headers: { "Content-Type": "application/json" },
+        body: method === "PUT" ? '{"request_id":"vote","rating":"LIKE"}' : undefined });
+      assert.equal(response.status, 502);
+      assert.equal((await response.json()).data, null);
+    }
+  });
+  await withServer({ access, fetchImpl: async () => envelope(nativeFeedback({ can_rate: false })) }, async (origin) => {
+    const response = await fetch(origin + feedbackPath);
+    assert.equal(response.status, 200); assert.equal((await response.json()).data.can_rate, false);
   });
 });

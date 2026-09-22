@@ -645,12 +645,26 @@ class AgentStore:
             db.execute("UPDATE agent_stop_requests SET receipt=? WHERE conversation_id=? AND request_id=?", (_json(receipt), conversation_id, key))
 
     def request_delete(self, conversation_id, *, owner_key=None):
+        return self._request_delete(conversation_id, owner_key=owner_key, preserve_completed_memory=False)
+
+    def request_expiry(self, conversation_id):
+        """Internal history retention keeps only already completed experience cards."""
+        return self._request_delete(conversation_id, owner_key=None, preserve_completed_memory=True)
+
+    def _request_delete(self, conversation_id, *, owner_key, preserve_completed_memory):
         with self.repository.database_transaction() as db:
             self.require_owner(conversation_id, owner_key, deleted=True)
             head = db.execute("SELECT deleted_at,cleanup_status FROM agent_conversations WHERE conversation_id=?", (conversation_id,)).fetchone()
+            memory_store = getattr(self, "memory_store", None)
+            # A user can delete a naturally expired conversation before its
+            # tombstone disappears. That still revokes its surviving cards.
+            if memory_store is not None and not preserve_completed_memory:
+                memory_store.revoke_conversation(db, conversation_id)
             if head[0] is not None:
                 return DeleteReceipt(conversation_id=conversation_id, status=head[1])
             db.execute("UPDATE agent_conversations SET deleted_at=?,cleanup_status='DELETING' WHERE conversation_id=?", (self._now(), conversation_id))
+            if memory_store is not None and preserve_completed_memory:
+                memory_store.expire_sources(db, conversation_id)
             db.execute("UPDATE archive_tasks SET status='CANCELLED' WHERE status IN ('PENDING','RUNNING') "
                 "AND case_id IN (SELECT case_id FROM agent_conversation_runs WHERE conversation_id=?)", (conversation_id,))
             for run_id, in db.execute("SELECT run_id FROM agent_conversation_runs WHERE conversation_id=?", (conversation_id,)).fetchall():

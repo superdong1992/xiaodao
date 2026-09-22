@@ -5,6 +5,7 @@ import re
 import sys
 import threading
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -85,6 +86,22 @@ def test_public_create_app_does_not_expose_the_test_skill_override(
             _settings(tmp_path / "data"),
             allow_test_skills=True,
         )
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_memory_worker_and_recall_follow_the_same_feature_flag(tmp_path, enabled):
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    app = create_app(replace(_settings(tmp_path / "data", skill_dir=skills),
+                             generic_memory_enabled=enabled))
+    graph = app.state.problem_locator_composition
+    assert graph.memory_worker is not None
+    assert graph.memory_worker._enabled is enabled
+    assert (graph.runtime._generic_locator_executor._experience_retriever is not None) is enabled
+    with TestClient(app) as client:
+        assert client.get("/ready").status_code == 200
+        assert graph.memory_worker._thread.is_alive()
+    assert not graph.memory_worker._thread.is_alive()
 
 
 def test_production_app_starts_with_empty_diagnosis_skill_catalog(
@@ -375,6 +392,87 @@ def test_failed_close_wakes_a_concurrent_closer_to_retry(tmp_path, monkeypatch):
             second.join(2.0)
         graph.close()
 
+
+@pytest.mark.parametrize("failure_mode", ["exception", "timeout"])
+def test_memory_shutdown_failure_blocks_late_start_and_allows_close_retry(
+    tmp_path, monkeypatch, failure_mode,
+):
+    graph = build_service(replace(_settings(tmp_path / "data"), generic_memory_enabled=True))
+    memory = graph.memory_worker
+    assert memory is not None
+    entered_start = threading.Event()
+    release_start = threading.Event()
+    startup_finished = threading.Event()
+    startup_failures = []
+    late_start_results = []
+    original_start = memory.start
+    original_shutdown = memory.shutdown
+    shutdown_attempts = 0
+
+    def delayed_start():
+        entered_start.set()
+        assert release_start.wait(5.0)
+        result = original_start()
+        late_start_results.append(result)
+        return result
+
+    def start_service():
+        try:
+            graph.start()
+        except BaseException as error:
+            startup_failures.append(error)
+        finally:
+            startup_finished.set()
+
+    def fail_first_shutdown(timeout_seconds):
+        nonlocal shutdown_attempts
+        shutdown_attempts += 1
+        stopped = original_shutdown(timeout_seconds)
+        if shutdown_attempts == 1:
+            # Finish the delayed start before returning the failure so the
+            # timeout branch tests memory_stopped, not _start_in_progress.
+            release_start.set()
+            assert startup_finished.wait(5.0)
+            if failure_mode == "exception":
+                raise OSError("memory shutdown failed")
+            return False
+        return stopped
+
+    starter = threading.Thread(target=start_service, daemon=True)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(memory, "start", delayed_start)
+            patch.setattr(memory, "shutdown", fail_first_shutdown)
+            starter.start()
+            assert entered_start.wait(5.0)
+            error_type = OSError if failure_mode == "exception" else RuntimeError
+            message = "memory shutdown failed" if failure_mode == "exception" else "managed service threads"
+            with pytest.raises(error_type, match=message):
+                graph.close(timeout_seconds=5.0)
+            starter.join(5.0)
+            assert not starter.is_alive()
+            assert late_start_results == [False]
+            assert memory._thread is None
+            assert len(startup_failures) == 1
+            assert isinstance(startup_failures[0], RuntimeError)
+            assert str(startup_failures[0]) == "service closed during startup"
+            assert not graph._start_in_progress
+            assert not graph.closed and not graph._closing
+            assert graph.instance_lock.is_acquired()
+
+            graph.close(timeout_seconds=5.0)
+            assert shutdown_attempts == 2
+            assert graph.closed
+            assert not graph.instance_lock.is_acquired()
+    finally:
+        release_start.set()
+        if starter.ident is not None:
+            starter.join(5.0)
+        # Keep a lifecycle regression from hanging the test process during cleanup.
+        with graph._lifecycle_condition:
+            graph._closing = False
+            graph._lifecycle_condition.notify_all()
+        graph.close(timeout_seconds=5.0)
 
 @pytest.mark.parametrize("mode", ["advisory", "strict"])
 def test_production_composition_injects_enabled_specialized_reviewer(

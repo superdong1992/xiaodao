@@ -40,8 +40,13 @@ class _RunStopped(Exception):
 class AgentConversationService:
     """One bounded intake worker; subscribing never starts or repeats model work."""
 
-    def __init__(self, store, application, intake_engine, layout):
+    def __init__(self, store, application, intake_engine, layout, *, memory_store=None, memory_enabled=False):
         self.store, self.application, self.intake_engine = store, application, intake_engine
+        from problem_locator.memory.service import FeedbackService
+        self.memory_store = memory_store
+        self.memory_enabled = memory_enabled
+        store.memory_store = memory_store
+        self.feedback = None if memory_store is None else FeedbackService(self, memory_store, enabled=memory_enabled)
         self.uploads = ConversationUploads(store, application, layout)
         self.usage_guard = ConversationUsageGuard()
         self.cleanup = None
@@ -113,6 +118,22 @@ class AgentConversationService:
         self._available()
         with self.operation_lease(conversation_id, owner_key=owner_key):
             return self.store.submit_message(conversation_id, request_id, text or "", attachment_ids or [])
+
+    def get_feedback(self, conversation_id, run_id, *, owner_key=None):
+        if self.feedback is not None:
+            return self.feedback.get_feedback(conversation_id, run_id, owner_key=owner_key)
+        from problem_locator.memory.models import FeedbackView
+        if owner_key is None:
+            raise AgentStoreError("AGENT_CONVERSATION_NOT_FOUND", "会话不存在。", 404)
+        with self.operation_lease(conversation_id, owner_key=owner_key):
+            self.store.get_run(conversation_id, run_id)
+            return FeedbackView(conversation_id=conversation_id, run_id=run_id, can_rate=False)
+
+    def put_feedback(self, conversation_id, run_id, request_id, rating, *, owner_key=None):
+        if self.feedback is None:
+            self.get_feedback(conversation_id, run_id, owner_key=owner_key)
+            raise AgentStoreError("AGENT_FEEDBACK_UNSUPPORTED", "这份报告暂不支持反馈。", 409)
+        return self.feedback.put_feedback(conversation_id, run_id, request_id, rating, owner_key=owner_key)
 
     def list_conversations(self, owner_key, *, cursor=None, limit=20):
         return self.store.list_conversations(owner_key, cursor=cursor, limit=limit)

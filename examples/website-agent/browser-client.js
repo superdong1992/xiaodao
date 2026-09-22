@@ -18,6 +18,27 @@ export function createAgentClient({ basePath = "/api/agent", fetchImpl = globalT
     throw new TypeError("basePath 必须是网站同源路径，例如 /api/agent。");
   }
   const conversationPath = (id) => `${base}/conversations/${encodeURIComponent(id)}`;
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  const feedbackPath = (id, runId) => {
+    if (typeof id !== "string" || !uuid.test(id) || typeof runId !== "string" || !uuid.test(runId))
+      throw new TypeError("会话和轮次标识必须是小写规范 UUID。");
+    return `${conversationPath(id)}/runs/${runId}/feedback`;
+  };
+  const feedbackResult = (data, id, runId) => {
+    const keys = ["schema_version", "conversation_id", "run_id", "can_rate", "rating", "updated_at"];
+    if (!data || typeof data !== "object" || Array.isArray(data) ||
+        Object.keys(data).length !== keys.length || keys.some((key) => !Object.hasOwn(data, key)) ||
+        data.schema_version !== 1 || data.conversation_id !== id || data.run_id !== runId ||
+        typeof data.can_rate !== "boolean" || ![null, "LIKE", "DISLIKE"].includes(data.rating) ||
+        (data.rating === null ? data.updated_at !== null : typeof data.updated_at !== "string" ||
+          !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(data.updated_at) ||
+          !Number.isFinite(Date.parse(data.updated_at)))) {
+      throw new AgentApiError("评价响应与当前报告不一致或格式无效，请重新读取评价状态。", {
+        status: 502, code: "WEBSITE_INVALID_RESPONSE",
+      });
+    }
+    return data;
+  };
 
   async function request(path, { method = "GET", body, requestHeaders, signal } = {}) {
     const combined = new Headers(typeof headers === "function" ? headers() : headers);
@@ -92,6 +113,22 @@ export function createAgentClient({ basePath = "/api/agent", fetchImpl = globalT
         if (history_before !== undefined) query.set("history_before", history_before);
         if (history_limit !== undefined) query.set("history_limit", history_limit);
         return request(withQuery(conversationPath(id), query), { signal });
+      },
+      async getFeedback(id, runId, { signal } = {}) {
+        return feedbackResult(await request(feedbackPath(id, runId), { signal }), id, runId);
+      },
+      async setFeedback(id, runId, feedback) {
+        const path = feedbackPath(id, runId);
+        if (!feedback || typeof feedback !== "object" || Array.isArray(feedback) ||
+            Object.keys(feedback).length !== 2 || typeof feedback.request_id !== "string" ||
+            !feedback.request_id.trim() || [...feedback.request_id].length > 128 ||
+            !["LIKE", "DISLIKE"].includes(feedback.rating)) {
+          throw new TypeError("评价只接受 request_id 和 rating；request_id 为 1 到 128 个字符，rating 为 LIKE 或 DISLIKE。");
+        }
+        const data = await request(path, { method: "PUT",
+          body: JSON.stringify({ request_id: feedback.request_id, rating: feedback.rating }),
+          requestHeaders: { "Content-Type": "application/json" } });
+        return feedbackResult(data, id, runId);
       },
       eventsUrl: (id) => `${conversationPath(id)}/events`,
     },
