@@ -1083,6 +1083,7 @@ def _assemble(
             logparse_tool=logparse_asset,
             logparse_broker_factory=broker_factory,
             generic_skill_name=settings.generic_skill_name,
+            generic_logparse_product=settings.generic_logparse_product,
             specialized_reviewer_enabled=settings.specialized_reviewer_enabled,
             methods_evidence_validation=settings.methods_evidence_validation,
             allow_test_skills=allow_test_skills,

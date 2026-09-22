@@ -97,7 +97,7 @@ _BUILTIN_SPECS = (
     _BuiltinSpec("profiles/router", AssetKind.AGENT_PROFILE, "agent-profile/router"),
     _BuiltinSpec("profiles/specialist", AssetKind.AGENT_PROFILE, "agent-profile/specialist", "8.0.0"),
     _BuiltinSpec("profiles/reviewer", AssetKind.AGENT_PROFILE, "agent-profile/reviewer", "7.0.0"),
-    _BuiltinSpec("profiles/generic-locator", AssetKind.AGENT_PROFILE, "agent-profile/generic-locator", "2.0.0"),
+    _BuiltinSpec("profiles/generic-locator", AssetKind.AGENT_PROFILE, "agent-profile/generic-locator", "3.0.0"),
     _BuiltinSpec("tool-bundles/router", AssetKind.TOOL_BUNDLE, "tool-bundle/router", "3.0.0"),
     _BuiltinSpec("tool-bundles/diagnose", AssetKind.TOOL_BUNDLE, "tool-bundle/diagnose", "4.0.0"),
     _BuiltinSpec("tool-bundles/review", AssetKind.TOOL_BUNDLE, "tool-bundle/review", "3.0.0"),
@@ -105,7 +105,7 @@ _BUILTIN_SPECS = (
     _BuiltinSpec("context-policies/route", AssetKind.CONTEXT_POLICY, "context-policy/route"),
     _BuiltinSpec("context-policies/diagnose", AssetKind.CONTEXT_POLICY, "context-policy/diagnose"),
     _BuiltinSpec("context-policies/review", AssetKind.CONTEXT_POLICY, "context-policy/review", "3.0.0"),
-    _BuiltinSpec("context-policies/generic-locator", AssetKind.CONTEXT_POLICY, "context-policy/generic-locator"),
+    _BuiltinSpec("context-policies/generic-locator", AssetKind.CONTEXT_POLICY, "context-policy/generic-locator", "2.0.0"),
     _BuiltinSpec("output-contracts/route", AssetKind.OUTPUT_CONTRACT, "output-contract/route", "5.0.0"),
     _BuiltinSpec("output-contracts/diagnose", AssetKind.OUTPUT_CONTRACT, "output-contract/diagnose", "11.0.0"),
     _BuiltinSpec("output-contracts/review", AssetKind.OUTPUT_CONTRACT, "output-contract/review", "10.0.0"),
@@ -218,6 +218,7 @@ class VersionedAssetCatalog:
         logparse_tool: ResolvedAsset | None = None,
         logparse_broker_factory: LogparseBrokerFactory | None = None,
         generic_skill_name: str,
+        generic_logparse_product: str = "default",
         specialized_reviewer_enabled: bool = False,
         methods_evidence_validation: str = "strict",
         allow_test_skills: bool = False,
@@ -250,6 +251,9 @@ class VersionedAssetCatalog:
         self._logparse_tool_ref: VersionedRef | None = None
         self._logparse_broker_factory = logparse_broker_factory
         self._generic_skill_name = generic_skill_name
+        if re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}", generic_logparse_product) is None:
+            raise ValueError("generic_logparse_product is invalid")
+        self._generic_logparse_product = generic_logparse_product
         self._specialized_review_policy = (
             ReviewPolicy.INDEPENDENT
             if specialized_reviewer_enabled and methods_evidence_validation != "off"
@@ -557,7 +561,14 @@ class VersionedAssetCatalog:
             ) from None
         return _clone(bindings)
 
-    def generic_diagnose_bindings(self) -> RuntimeBindings:
+    def generic_diagnose_bindings(self, *, with_logs: bool = False) -> RuntimeBindings:
+        if with_logs and (
+            self._logparse_tool_ref is None or not self._ref_is_current(self._logparse_tool_ref)
+        ):
+            raise _catalog_port_error(
+                "generic_diagnose_bindings", ErrorCode.ASSET_VERSION_UNAVAILABLE,
+                "通用定位所需的日志解析配置不可用。",
+            )
         try:
             bindings = RuntimeBindings(
                 diagnosis_mode=DiagnosisMode.GENERIC,
@@ -569,8 +580,8 @@ class VersionedAssetCatalog:
                 tool_bundle_ref=self._builtin_ref("tool-bundle/generic-locator"),
                 context_policy_ref=self._builtin_ref("context-policy/generic-locator"),
                 output_contract_ref=self._builtin_ref("output-contract/generic-locator"),
-                logparse_tool_ref=None,
-                logparse_product=None,
+                logparse_tool_ref=_clone(self._logparse_tool_ref) if with_logs else None,
+                logparse_product=self._generic_logparse_product if with_logs else None,
                 resource_limits=default_resource_limits(JobType.DIAGNOSE),
             )
         except Exception:

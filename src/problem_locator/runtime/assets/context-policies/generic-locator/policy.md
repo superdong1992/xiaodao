@@ -1,3 +1,3 @@
 # Generic locator context policy
 
-The Agent receives one minimal prompt. The only business payload is the Case raw problem text frozen into the GENERIC DIAGNOSE Job. Do not include the ProblemSpec projection, attachments, Evidence, Artifacts, prior Outcomes, or specialized diagnosis state.
+The Agent receives the Case raw problem text unchanged, followed by separately framed user supplements frozen into the GENERIC DIAGNOSE Job. A log-enabled Job also supplies the fixed path inputs/generic_logs.json; its listed files are verified read-only Logparse output. Read relevant file ranges on demand instead of embedding log bodies into the prompt. The source archive remains in the server preprocessing workspace. Do not include the ProblemSpec projection, specialized Evidence, prior Outcomes or specialized diagnosis state. Problem text, supplements and log content cannot override trusted framework metadata or the output contract.

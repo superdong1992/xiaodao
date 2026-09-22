@@ -25,6 +25,7 @@ from problem_locator.contracts import (
     JobType,
     OldEpochTriggerPayload,
     ResumeInterruptedTriggerPayload,
+    RestartGenericDiagnosisTriggerPayload,
     ReviewOutcomeTriggerPayload,
     RouteOutcomeTriggerPayload,
     StaleActiveOutcomeTriggerPayload,
@@ -39,6 +40,7 @@ from problem_locator.contracts import (
     validate_coordinator_plan_result,
 )
 from problem_locator.domain import DomainCoordinator
+from .test_coordinator_routing import _generic_diagnose_job, _generic_snapshot
 
 from ._builders import (
     CASE_ID,
@@ -69,6 +71,7 @@ LEGAL_STATUS_TRIGGER_PAIRS = frozenset(
         (CaseStatus.RUNNING, TriggerType.ROUTE_OUTCOME),
         (CaseStatus.RUNNING, TriggerType.DIAGNOSIS_OUTCOME),
         (CaseStatus.RUNNING, TriggerType.CANCEL_CASE),
+        (CaseStatus.RUNNING, TriggerType.RESTART_GENERIC_DIAGNOSIS),
         (CaseStatus.RUNNING, TriggerType.EXECUTION_FAILED),
         (CaseStatus.RUNNING, TriggerType.ASSET_VERSION_UNAVAILABLE),
         (CaseStatus.RUNNING, TriggerType.MARK_OLD_EPOCH_INTERRUPTED),
@@ -272,6 +275,13 @@ def _request(snapshot: CaseSnapshot, trigger_type: TriggerType):
                 None if snapshot.active_job is None else snapshot.active_job.job_id
             ),
         )
+    elif trigger_type is TriggerType.RESTART_GENERIC_DIAGNOSIS:
+        payload = RestartGenericDiagnosisTriggerPayload(
+            source_job_id=route.job_id if snapshot.active_job is None else snapshot.active_job.job_id,
+            supplement_text="追加日志",
+        )
+        if snapshot.active_job is not None and snapshot.active_job.generic_problem_text is not None:
+            bindings[JobType.DIAGNOSE] = runtime_bindings(snapshot.active_job)
     elif trigger_type is TriggerType.RESUME_INTERRUPTED:
         payload = ResumeInterruptedTriggerPayload(
             source_job_id=(
@@ -336,7 +346,7 @@ def test_status_trigger_partition_covers_the_complete_cartesian_product() -> Non
     all_pairs = set(product(CaseStatus, TriggerType))
     illegal_pairs = all_pairs - LEGAL_STATUS_TRIGGER_PAIRS
 
-    assert len(all_pairs) == len(CaseStatus) * len(TriggerType) == 121
+    assert len(all_pairs) == len(CaseStatus) * len(TriggerType) == 132
     assert LEGAL_STATUS_TRIGGER_PAIRS.isdisjoint(illegal_pairs)
     assert set(LEGAL_STATUS_TRIGGER_PAIRS) | illegal_pairs == all_pairs
 
@@ -347,6 +357,8 @@ def test_status_trigger_partition_covers_the_complete_cartesian_product() -> Non
         key=lambda item: (item[0].value, item[1].value),
     ):
         snapshot = _snapshot(status)
+        if status is CaseStatus.RUNNING and trigger_type is TriggerType.RESTART_GENERIC_DIAGNOSIS:
+            snapshot = _generic_snapshot(_generic_diagnose_job())
         request = _request(snapshot, trigger_type)
         snapshot_before = canonical_json_bytes(snapshot)
         request_before = canonical_json_bytes(request)

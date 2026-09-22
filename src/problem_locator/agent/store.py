@@ -51,6 +51,8 @@ class ConversationRead:
 
 AGENT_STORAGE_VERSION = "2"
 _V2_TABLES = (
+    "CREATE TABLE IF NOT EXISTS agent_generic_restarts (conversation_id TEXT NOT NULL,request_id TEXT NOT NULL,run_id TEXT NOT NULL,fingerprint TEXT NOT NULL,command_key TEXT UNIQUE NOT NULL,status TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(conversation_id,request_id))",
+    "CREATE INDEX IF NOT EXISTS agent_generic_restarts_pending ON agent_generic_restarts(status,run_id)",
     "CREATE TABLE IF NOT EXISTS agent_conversation_runs (run_id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,ordinal INTEGER NOT NULL,case_id TEXT UNIQUE,create_request_id TEXT UNIQUE,epoch TEXT NOT NULL,status TEXT NOT NULL,body TEXT NOT NULL,UNIQUE(conversation_id,ordinal))",
     "CREATE INDEX IF NOT EXISTS agent_runs_conversation ON agent_conversation_runs(conversation_id,ordinal)",
     "CREATE TABLE IF NOT EXISTS agent_attachment_imports (run_id TEXT NOT NULL,attachment_id TEXT NOT NULL,case_attachment_id TEXT NOT NULL,PRIMARY KEY(run_id,attachment_id))",
@@ -338,7 +340,8 @@ class AgentStore:
         self._append(db, body, "run.started", {"ordinal": ordinal}, "started")
         return body
 
-    def submit_message(self, conversation_id, request_id, text="", attachment_ids=None, *, target_run_id=None):
+    def submit_message(self, conversation_id, request_id, text="", attachment_ids=None, *, target_run_id=None,
+                       routed_request_key=None):
         request = SendMessageRequest(request_id=request_id, text=text, attachment_ids=attachment_ids or [])
         # Preserve legacy request fingerprints when no explicit target is used.
         payload = request.model_dump()
@@ -353,6 +356,26 @@ class AgentStore:
                 if previous[0] != fingerprint:
                     raise AgentStoreError("AGENT_IDEMPOTENCY_CONFLICT", "同一 request_id 的内容不能更改。", 409)
                 return MessageReceipt.model_validate({**json.loads(previous[1]), "run_id": previous[2]})
+            restart = db.execute("SELECT fingerprint,command_key,status,payload,run_id FROM agent_generic_restarts WHERE conversation_id=? AND request_id=?",
+                (conversation_id, request_id)).fetchone()
+            if restart is not None:
+                if restart[0] != fingerprint:
+                    raise AgentStoreError("AGENT_IDEMPOTENCY_CONFLICT", "同一 request_id 的内容不能更改。", 409)
+                if (routed_request_key != restart[1] or restart[2] != "PENDING"
+                        or json.loads(restart[3]).get("operation") != "MarkInitialLogArchiveExpected"):
+                    raise AgentStoreError("AGENT_RESTART_PENDING", "日志接入尚未完成，请稍后重试同一请求。", 409)
+                # The ROUTE marker lost to a specialized route. Resolve its
+                # frozen request as the ordinary supplement it always was,
+                # atomically with message acceptance and without a new run.
+                self._ensure_open(body)
+                if restart[4] != body["run_id"]:
+                    raise AgentStoreError("AGENT_RUN_CHANGED", "本次定位已结束或发生变化，请刷新会话。", 409)
+                if body.get("case_has_selected_skill") is not True:
+                    # Core projects this value in its own commit transaction.
+                    # Never acquire a Case lock while holding the DB lock.
+                    raise AgentStoreError("AGENT_ROUTE_CHANGED", "定位策略已更新，正在接入日志，请稍后重试同一请求。", 409)
+            elif routed_request_key is not None:
+                raise AgentStoreError("AGENT_RUN_CHANGED", "日志接入请求已失效，请刷新会话。", 409)
             if target_run_id is not None and (target_run_id != body["run_id"] or body["status"] in _CLOSED or body.get("report_available")):
                 raise AgentStoreError("AGENT_RUN_CHANGED", "本次诊断已结束或发生变化，请刷新会话。", 409)
             if body["status"] in _CLOSED or body.get("report_available"):
@@ -387,8 +410,117 @@ class AgentStore:
             if body.get("case_status") in {None, "WAITING_INPUT", "WAITING_ATTACHMENT"}:
                 body["status"] = "INTAKE"
             self._save(db, body)
+            if routed_request_key is not None:
+                db.execute("UPDATE agent_generic_restarts SET status='COMPLETED' WHERE command_key=? AND status='PENDING'",
+                    (routed_request_key,))
         self._notify(conversation_id)
         return receipt
+
+    def message_request(self, conversation_id, request):
+        """Read either the public receipt or a frozen, not-yet-accepted restart."""
+        fingerprint = hashlib.sha256(_json(request.model_dump()).encode()).hexdigest()
+        with self.repository.database_read() as db:
+            self._load(db, conversation_id)
+            previous = db.execute("SELECT fingerprint,receipt,run_id FROM agent_messages WHERE conversation_id=? AND request_id=?",
+                (conversation_id, request.request_id)).fetchone()
+            restart = db.execute("SELECT fingerprint,status,payload FROM agent_generic_restarts WHERE conversation_id=? AND request_id=?",
+                (conversation_id, request.request_id)).fetchone()
+            if any(row is not None and row[0] != fingerprint for row in (previous, restart)):
+                raise AgentStoreError("AGENT_IDEMPOTENCY_CONFLICT", "同一 request_id 的内容不能更改。", 409)
+            receipt = None if previous is None else MessageReceipt.model_validate({**json.loads(previous[1]), "run_id": previous[2]})
+            pending = None if restart is None else {**json.loads(restart[2]), "status": restart[1]}
+            return receipt, pending
+
+    def freeze_generic_restart(self, conversation_id, request, command, *, run_id, archive_sha256):
+        """Persist intent before the Case commit; this does not accept the message."""
+        fingerprint = hashlib.sha256(_json(request.model_dump()).encode()).hexdigest()
+        with self.repository.database_transaction() as db:
+            body = self._load(db, conversation_id)
+            self._ensure_open(body)
+            if body["run_id"] != run_id or body.get("case_id") != command.case_id:
+                raise AgentStoreError("AGENT_RUN_CHANGED", "本次定位已结束或发生变化，请刷新会话。", 409)
+            existing = db.execute("SELECT fingerprint,status,payload FROM agent_generic_restarts WHERE conversation_id=? AND request_id=?",
+                (conversation_id, request.request_id)).fetchone()
+            if existing is not None:
+                if existing[0] != fingerprint:
+                    raise AgentStoreError("AGENT_IDEMPOTENCY_CONFLICT", "同一 request_id 的内容不能更改。", 409)
+                return {**json.loads(existing[2]), "status": existing[1]}
+            if db.execute("SELECT 1 FROM agent_generic_restarts WHERE run_id=? AND status IN ('PENDING','COMMITTED')", (run_id,)).fetchone():
+                raise AgentStoreError("AGENT_RESTART_PENDING", "上一份日志正在接入，请稍后重试。", 409)
+            if (type(command).__name__ == "RestartGenericDiagnosis" and archive_sha256 is not None
+                    and body.get("generic_archive_sha256") == archive_sha256):
+                raise AgentStoreError("AGENT_LOG_ALREADY_SELECTED", "这份日志已用于当前定位，无需重复提交。", 409)
+            count = db.execute("SELECT count(*) FROM agent_messages WHERE conversation_id=? AND run_id=?", (conversation_id, run_id)).fetchone()[0]
+            if count >= 200:
+                raise AgentStoreError("AGENT_MESSAGE_LIMIT", "本次会话消息已达上限，请另建任务。", 409)
+            # Recheck readiness and ownership at the durable intent boundary.
+            for attachment_id in request.attachment_ids:
+                row = db.execute("SELECT body FROM agent_attachments WHERE attachment_id=? AND conversation_id=?",
+                    (attachment_id, conversation_id)).fetchone()
+                if row is None or json.loads(row[0])["status"] not in {"READY", "IMPORTED"}:
+                    raise AgentStoreError("AGENT_ATTACHMENT_NOT_READY", "附件不存在、未上传完成或不属于本会话。", 409)
+            message = AgentMessage(message_id=self._id("message"), request_id=request.request_id,
+                text=request.text, attachment_ids=request.attachment_ids, status="QUEUED", created_at=self._now(),
+                notice=_QUEUED_NOTICE, run_id=run_id)
+            payload = {"conversation_id": conversation_id, "run_id": run_id,
+                "operation": type(command).__name__, "command": command.model_dump(mode="json"),
+                "message": message.model_dump(mode="json"),
+                "archive_sha256": archive_sha256}
+            db.execute("INSERT INTO agent_generic_restarts VALUES (?,?,?,?,?,'PENDING',?)",
+                (conversation_id, request.request_id, run_id, fingerprint, command.idempotency_key, _json(payload)))
+            return {**payload, "status": "PENDING"}
+
+    def pending_generic_restarts(self):
+        with self.repository.database_read() as db:
+            return [{**json.loads(row[1]), "status": row[0]} for row in db.execute(
+                "SELECT status,payload FROM agent_generic_restarts WHERE status IN ('PENDING','COMMITTED') ORDER BY rowid")]
+
+    def retarget_routed_log_request(self, command_key, command):
+        """A rejected route marker may follow the now-active Generic Job once."""
+        with self.repository.database_transaction() as db:
+            row = db.execute("SELECT status,payload FROM agent_generic_restarts WHERE command_key=?", (command_key,)).fetchone()
+            if row is None or row[0] != "PENDING":
+                raise AgentStoreError("AGENT_RUN_CHANGED", "本次定位已结束或发生变化，请刷新会话。", 409)
+            payload = json.loads(row[1])
+            if payload.get("operation") != "MarkInitialLogArchiveExpected":
+                raise AgentStoreError("AGENT_RUN_CHANGED", "本次定位已结束或发生变化，请刷新会话。", 409)
+            self._ensure_open(self._load(db, payload["conversation_id"], run_id=payload["run_id"]))
+            payload.update(operation="RestartGenericDiagnosis", command=command.model_dump(mode="json"))
+            db.execute("UPDATE agent_generic_restarts SET command_key=?,payload=? WHERE command_key=?",
+                (command.idempotency_key, _json(payload), command_key))
+            return {**payload, "status": "PENDING"}
+
+    def finish_generic_restart(self, command_key, *, rejected=False):
+        with self.repository.database_transaction() as db:
+            db.execute("UPDATE agent_generic_restarts SET status=? WHERE command_key=? AND status IN ('PENDING','COMMITTED')",
+                ("REJECTED" if rejected else "COMPLETED", command_key))
+
+    def _accept_generic_restarts(self, db, body, state):
+        rows = list(db.execute("SELECT request_id,fingerprint,command_key,payload FROM agent_generic_restarts "
+            "WHERE conversation_id=? AND run_id=? AND status='PENDING'", (body["conversation_id"], body["run_id"])))
+        for request_id, fingerprint, key, raw in rows:
+            payload = json.loads(raw)
+            accepted = next((record for record in state.idempotency_records.values()
+                if record.operation == payload.get("operation", "RestartGenericDiagnosis") and record.idempotency_key == key
+                and record.case_id == body["case_id"]), None)
+            if accepted is None:
+                continue
+            # A stop/delete that wins this transaction rolls back the core
+            # restart too. The old run must never acquire a replacement Job.
+            self._ensure_open(body)
+            message = AgentMessage.model_validate(payload["message"])
+            body["job_id"] = state.cases[body["case_id"]].case.active_job_id
+            event = self._append(db, body, "message.accepted", message.model_dump(mode="json"), "message:" + message.message_id)
+            receipt = MessageReceipt(conversation_id=body["conversation_id"], message_id=message.message_id,
+                request_id=request_id, event_id=event.sequence, run_id=body["run_id"])
+            db.execute("INSERT INTO agent_messages(message_id,conversation_id,request_id,fingerprint,body,receipt,run_id,event_sequence) VALUES (?,?,?,?,?,?,?,?)",
+                (message.message_id, body["conversation_id"], request_id, fingerprint, _json(message), _json(receipt), body["run_id"], event.sequence))
+            db.execute("UPDATE agent_generic_restarts SET status='COMMITTED' WHERE command_key=?", (key,))
+            body.update(intake_pending=True, current_questions=[], generic_archive_sha256=payload["archive_sha256"])
+            if payload.get("operation", "RestartGenericDiagnosis") == "RestartGenericDiagnosis" and message.text.strip():
+                adopted = body.setdefault("generic_adopted_message_ids", [])
+                if message.message_id not in adopted:
+                    adopted.append(message.message_id)
 
     def get_conversation(self, conversation_id, *, run_id=None):
         with self.repository.database_read() as db:
@@ -713,7 +845,7 @@ class AgentStore:
             if row[2] == "DELETED":
                 return
             db.execute("DELETE FROM agent_attachment_imports WHERE run_id IN (SELECT run_id FROM agent_conversation_runs WHERE conversation_id=?)", (conversation_id,))
-            for table in ("agent_message_adoptions", "agent_messages", "agent_events", "agent_dispatches", "agent_attachments", "agent_stop_requests", "agent_conversation_runs"):
+            for table in ("agent_message_adoptions", "agent_messages", "agent_events", "agent_dispatches", "agent_attachments", "agent_stop_requests", "agent_generic_restarts", "agent_conversation_runs"):
                 db.execute(f"DELETE FROM {table} WHERE conversation_id=?", (conversation_id,))
             digest = hashlib.sha256(row[1].encode()).hexdigest()
             db.execute("INSERT OR IGNORE INTO agent_deleted_requests VALUES (?,?)", (digest, conversation_id))
@@ -930,6 +1062,27 @@ class AgentStore:
             "notice": message["notice"]}, "message-status:" + message["message_id"] + ":" + status)
 
     def _accept_committed_adoptions(self, db, body, state):
+        batches = list(db.execute("SELECT payload FROM agent_dispatches WHERE conversation_id=? AND run_id=? "
+            "AND json_type(payload,'$.generic_message_ids')='array'", (body["conversation_id"], body["run_id"])))
+        for (raw,) in batches:
+            payload = json.loads(raw)
+            if payload.get("operation") != "SubmitSupplement":
+                continue
+            key = payload["command"]["idempotency_key"]
+            if not any(record.operation == "SubmitSupplement" and record.idempotency_key == key
+                    and record.case_id == body.get("case_id") for record in state.idempotency_records.values()):
+                continue
+            adopted = body.setdefault("generic_adopted_message_ids", [])
+            for message_id in payload["generic_message_ids"]:
+                row = db.execute("SELECT body FROM agent_messages WHERE conversation_id=? AND run_id=? AND message_id=?",
+                    (body["conversation_id"], body["run_id"], message_id)).fetchone()
+                if row is None:
+                    raise AgentStoreError("AGENT_MESSAGE_NOT_FOUND", "补充描述引用了不属于本次诊断的消息。", 409)
+                message = json.loads(row[0])
+                if message["status"] in {"QUEUED", "PROCESSING"}:
+                    self._finalize_message(db, body, message, "APPLIED")
+                if message_id not in adopted:
+                    adopted.append(message_id)
         rows = list(db.execute("SELECT a.message_id,d.payload,m.body FROM agent_message_adoptions a "
             "JOIN agent_dispatches d ON d.dispatch_id=a.dispatch_id "
             "JOIN agent_messages m ON m.message_id=a.message_id "
@@ -1096,6 +1249,7 @@ class AgentStore:
             if row:
                 body = self._load(db, row[0], run_id=row[1], deleted=True)
                 body["case_id"] = case_id
+                self._accept_generic_restarts(db, body, state)
                 self._accept_committed_adoptions(db, body, state)
                 self._project_case(db, body, aggregate)
 
@@ -1104,7 +1258,8 @@ class AgentStore:
         if body["status"] in _CLOSED:
             return
         body.update(case_id=case.case_id, job_id=case.active_job_id, case_status=case.status.value,
-                    archive_status=case.archive_status)
+                    archive_status=case.archive_status,
+                    case_has_selected_skill=getattr(case, "selected_skill_ref", None) is not None)
         self._append(db, body, "case.updated", {"status": case.status.value, "case_revision": case.case_revision},
                      "case:" + str(case.case_revision))
         if body.get("stop_requested") and case.status.value not in _RESULT:

@@ -54,8 +54,6 @@ def runtime_bindings_match_role(
             or bindings.skill_ref is not None
             or expected_skill_ref is not None
             or bindings.generic_skill_name is None
-            or bindings.logparse_tool_ref is not None
-            or bindings.logparse_product is not None
         )
     else:
         invalid = (

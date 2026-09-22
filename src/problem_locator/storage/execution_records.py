@@ -101,6 +101,8 @@ _AUDIT_FILENAMES = frozenset(
         "methods-limitations-v2.json",
         "methods_logparse_receipt.json",
         "methods_preflight.json",
+        "generic_logparse_request.json",
+        "generic_logs.json",
         "methods_request.json",
         "methods-reviewer-primary.rejected.json",
         "methods-reviewer-prompt.txt",

@@ -90,6 +90,18 @@ def test_all_fixed_configuration_defaults_are_exact(tmp_path: Path) -> None:
     assert settings.dfx_log_dir is None
     assert settings.specialized_reviewer_enabled is False
     assert settings.methods_evidence_validation == "off"
+    assert settings.generic_logparse_product == "default"
+
+
+def test_generic_logparse_product_is_a_deployment_setting(tmp_path: Path) -> None:
+    settings = Settings.load(environ={**environment(tmp_path), "GENERIC_LOGPARSE_PRODUCT": "compact-v2"})
+    assert settings.generic_logparse_product == "compact-v2"
+
+
+@pytest.mark.parametrize("product", ["", "../default", "default\n", "two products", "--flag", "x" * 129])
+def test_generic_logparse_product_rejects_noncanonical_values(tmp_path: Path, product: str) -> None:
+    with pytest.raises(SettingsError, match="GENERIC_LOGPARSE_PRODUCT"):
+        Settings.load(environ={**environment(tmp_path), "GENERIC_LOGPARSE_PRODUCT": product})
 
 
 @pytest.mark.parametrize("mode", ["off", "advisory", "strict"])

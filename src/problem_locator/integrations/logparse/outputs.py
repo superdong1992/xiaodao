@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import codecs
+import hashlib
 import json
 import os
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -84,9 +87,16 @@ def _plain_root(value: Path) -> Path:
     return resolved
 
 
-def _task_directory(root: Path) -> tuple[str, Path]:
+def _task_directory(root: Path, *, check_abort: Callable[[], None] | None = None) -> tuple[str, Path]:
     try:
-        entries = list(os.scandir(root))
+        entries = []
+        with os.scandir(root) as scanned:
+            for entry in scanned:
+                if check_abort is not None:
+                    check_abort()
+                entries.append(entry)
+                if len(entries) > 1:
+                    break
     except OSError as exc:
         raise ValueError("controlled logparse root cannot be enumerated") from exc
     if len(entries) != 1:
@@ -141,13 +151,17 @@ def _validate_parse_manifest(task_id: str, task_root: Path, product: str) -> str
     return f"{task_id}/parse_manifest.json"
 
 
-def inspect_controlled_run(root: Path, *, product: str) -> ControlledRun:
+def inspect_controlled_run(
+    root: Path, *, product: str, check_abort: Callable[[], None] | None = None,
+) -> ControlledRun:
     """Validate and hash a complete parse output root."""
 
+    if check_abort is not None:
+        check_abort()
     controlled_root = _plain_root(root)
-    task_id, task_root = _task_directory(controlled_root)
+    task_id, task_root = _task_directory(controlled_root, check_abort=check_abort)
     manifest_relative_path = _validate_parse_manifest(task_id, task_root, product)
-    tree_manifest, size, digest = build_tree_manifest(controlled_root)
+    tree_manifest, size, digest = build_tree_manifest(controlled_root, check_abort=check_abort)
     return ControlledRun(
         root=controlled_root,
         task_id=task_id,
@@ -176,6 +190,127 @@ def inspect_existing_run(
     ):
         raise ValueError("materialized LOGPARSE_RUN does not match its frozen metadata")
     return run
+
+
+def _validate_text_log(
+    root: Path, relative_path: str, size: int, sha256: str, *,
+    check_abort: Callable[[], None] | None = None,
+) -> None:
+    if check_abort is not None:
+        check_abort()
+    path = root.joinpath(*PurePosixPath(relative_path).parts)
+    if _plain_target_path(root, os.fspath(path)) != relative_path:
+        raise ValueError("parsed log path differs from the verified tree")
+    before = path.stat(follow_symlinks=False)
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    decoder = codecs.getincrementaldecoder("utf-8")("strict")
+    digest = hashlib.sha256()
+    observed_size = 0
+    fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns")
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or any(getattr(before, field) != getattr(opened, field) for field in fields)
+        ):
+            raise ValueError("parsed log changed before it was read")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            while True:
+                if check_abort is not None:
+                    check_abort()
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                if b"\x00" in chunk:
+                    raise ValueError("parsed log contains binary content")
+                decoder.decode(chunk)
+                observed_size += len(chunk)
+                digest.update(chunk)
+        decoder.decode(b"", final=True)
+        after = os.fstat(descriptor)
+    except UnicodeDecodeError as exc:
+        raise ValueError("parsed log is not strict UTF-8 text") from exc
+    finally:
+        os.close(descriptor)
+    named = path.stat(follow_symlinks=False)
+    if (
+        observed_size != size
+        or digest.hexdigest() != sha256
+        or any(getattr(opened, field) != getattr(after, field) for field in fields)
+        or any(getattr(opened, field) != getattr(named, field) for field in fields)
+    ):
+        raise ValueError("parsed log differs from the verified tree")
+
+
+def generic_parse_result(
+    run: ControlledRun,
+    *,
+    source_attachment_id: str,
+    source_attachment_sha256: str,
+    check_abort: Callable[[], None] | None = None,
+) -> bytes:
+    """List every verified textual mechanism log without selecting a target."""
+
+    logs: list[dict[str, Any]] = []
+    listed_bytes = 0
+    if check_abort is not None:
+        check_abort()
+    for entry in run.tree_manifest.entries:
+        if check_abort is not None:
+            check_abort()
+        parts = PurePosixPath(entry.path).parts
+        if (
+            len(parts) < 3
+            or parts[:2] != (run.task_id, "mech_modules")
+            or PurePosixPath(entry.path).suffix != ".log"
+        ):
+            continue
+        _validate_text_log(run.root, entry.path, entry.size, entry.sha256, check_abort=check_abort)
+        item = {"relative_path": entry.path, "size": entry.size, "sha256": entry.sha256}
+        listed_bytes += len(canonical_json_bytes(item))
+        if listed_bytes > _MAX_MACHINE_RESULT_BYTES:
+            raise ValueError("parsed log inventory exceeds the machine-result limit")
+        logs.append(item)
+    result = canonical_json_bytes({
+        "schema_version": 1,
+        "api_version": 1,
+        "task_id": run.task_id,
+        "parse_manifest_relative_path": run.parse_manifest_relative_path,
+        "source_attachment_id": source_attachment_id,
+        "source_attachment_sha256": source_attachment_sha256,
+        "tree_manifest_sha256": run.sha256,
+        "logs": logs,
+    })
+    if len(result) > _MAX_MACHINE_RESULT_BYTES:
+        raise ValueError("parsed log inventory exceeds the machine-result limit")
+    return result
+
+
+def validate_generic_parse_result(
+    payload: bytes,
+    *,
+    controlled_root: Path,
+    product: str,
+    source_attachment_id: str,
+    source_attachment_sha256: str,
+    check_abort: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    """Revalidate a parse-only response against its source and current output tree."""
+
+    if check_abort is not None:
+        check_abort()
+    value = _json_object(payload, label="logparse parse-only result")
+    run = inspect_controlled_run(controlled_root, product=product, check_abort=check_abort)
+    expected = generic_parse_result(
+        run,
+        source_attachment_id=source_attachment_id,
+        source_attachment_sha256=source_attachment_sha256,
+        check_abort=check_abort,
+    )
+    if canonical_json_bytes(value) != expected:
+        raise ValueError("parse-only result differs from its verified output tree")
+    return value
 
 
 def _normalized_slot(value: str) -> str:
@@ -304,7 +439,9 @@ def aggregate_target_results(
 __all__ = [
     "ControlledRun",
     "aggregate_target_results",
+    "generic_parse_result",
     "inspect_controlled_run",
     "inspect_existing_run",
     "normalize_target_result",
+    "validate_generic_parse_result",
 ]

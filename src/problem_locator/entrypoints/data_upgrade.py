@@ -39,7 +39,7 @@ _BARRIER_FILENAME = "data-format.json.tmp"
 _MUTABLE_FILES = _DATABASE_FILES | {"data-format.json", _BARRIER_FILENAME}
 _CORE_TABLES = {"metadata", "completed_cases", "object_index", "request_index", "resource_index", "archive_tasks"}
 _AGENT_TABLES = {"agent_conversations", "agent_messages", "agent_events", "agent_dispatches", "agent_message_adoptions", "agent_attachments"}
-_AGENT_V2_TABLES = {"agent_conversation_runs", "agent_attachment_imports", "agent_stop_requests", "agent_cleanup_jobs", "agent_deleted_requests", "agent_create_keys", "agent_create_key_times"}
+_AGENT_V2_TABLES = {"agent_conversation_runs", "agent_attachment_imports", "agent_stop_requests", "agent_cleanup_jobs", "agent_deleted_requests", "agent_create_keys", "agent_create_key_times", "agent_generic_restarts"}
 _TERMINAL_CASES = {"RESOLVED", "PARTIALLY_RESOLVED", "UNRESOLVED", "FAILED", "CANCELLED"}
 _CLOSED_CONVERSATIONS = {"COMPLETED", "FAILED", "INTERRUPTED"}
 

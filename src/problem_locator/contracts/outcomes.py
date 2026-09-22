@@ -19,6 +19,7 @@ from .enums import (
     OutcomeResultType,
     RequirementKind,
     RequirementStatus,
+    SupplementPolicy,
     ReviewVerdict,
     RouteKind,
     TriggerType,
@@ -69,6 +70,7 @@ from .models import (
     ProblemSpecPatch,
     RequirementFulfillment,
     ResumeInterruptedTriggerPayload,
+    RestartGenericDiagnosisTriggerPayload,
     ReviewAssessment,
     ReviewOutcomeTriggerPayload,
     ReviewTargetBinding,
@@ -166,6 +168,7 @@ def validate_coordinator_plan_result(
                 ReviewOutcomeTriggerPayload: TriggerType.REVIEW_OUTCOME,
                 SubmitSupplementTriggerPayload: TriggerType.SUBMIT_SUPPLEMENT,
                 CancelCaseTriggerPayload: TriggerType.CANCEL_CASE,
+                RestartGenericDiagnosisTriggerPayload: TriggerType.RESTART_GENERIC_DIAGNOSIS,
                 ResumeInterruptedTriggerPayload: TriggerType.RESUME_INTERRUPTED,
                 ExecutionFailedTriggerPayload: TriggerType.EXECUTION_FAILED,
                 AssetUnavailableTriggerPayload: TriggerType.ASSET_VERSION_UNAVAILABLE,
@@ -407,6 +410,36 @@ def validate_outcome_for_job(
                 "GENERIC Job and Outcome must remain isolated from specialized context"
             )
         if outcome.result_type is OutcomeResultType.FAILED:
+            return outcome
+        if outcome.result_type is OutcomeResultType.NEED_ATTACHMENT:
+            if (
+                not job.generic_log_archive_expected
+                or job.attachment_refs
+                or not isinstance(payload, DiagnosisOutcome)
+                or payload.findings
+                or payload.candidate_conclusion_draft is not None
+                or payload.requested_input
+                or any(value for name, value in payload.state_delta.model_dump(mode="python").items()
+                       if name != "add_pending_requirements")
+                or len(payload.state_delta.add_pending_requirements) != 1
+            ):
+                raise ValueError("GENERIC preflight may request only its expected log archive")
+            requirement = payload.state_delta.add_pending_requirements[0]
+            if (
+                requirement.kind is not RequirementKind.ATTACHMENT
+                or requirement.name != "log_archive"
+                or not requirement.required
+                or requirement.status is not RequirementStatus.OPEN
+                or requirement.requested_by_job_id != job.job_id
+                or requirement.fulfilled_by_refs
+                or requirement.supplement_policy is not SupplementPolicy.MISSING_ONLY
+                or requirement.constraints.model_dump(mode="python") != {
+                    "allowed_content_types": ["application/gzip", "application/zip", "application/x-tar"],
+                    "min_count": 1, "max_count": 1,
+                }
+                or payload.requested_attachments != [requirement.requirement_id]
+            ):
+                raise ValueError("GENERIC preflight requires the product log archive contract")
             return outcome
         if (
             outcome.result_type is not OutcomeResultType.COMPLETED

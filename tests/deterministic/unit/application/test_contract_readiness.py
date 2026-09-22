@@ -149,6 +149,7 @@ def test_submit_supplement_trigger_carries_stable_target_decision() -> None:
         "user_facts",
         "ready_attachment_ids",
         "stable_target_changed",
+        "generic_supplement_text",
     ]
     payload = SubmitSupplementTriggerPayload(
         user_facts=[],

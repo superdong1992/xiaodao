@@ -67,6 +67,8 @@ def resolve_workspace_path(
 def validate_proposal_io_paths(
     request_path: str,
     result_path: str,
+    *,
+    operation: str | None = None,
 ) -> str:
     request = validate_relative_path(request_path)
     result = validate_relative_path(result_path)
@@ -78,7 +80,9 @@ def validate_proposal_io_paths(
         or request_parts[3] != "request.json"
         or len(result_parts) != 4
         or result_parts[:2] != ("output", "proposals")
-        or result_parts[3] != "target_logs.json"
+        or result_parts[3] != (
+            "generic_logs.json" if operation == "parse-only" else "target_logs.json"
+        )
         or request_parts[2] != result_parts[2]
     ):
         raise ValueError("broker I/O must use one output/proposals/<key> directory")

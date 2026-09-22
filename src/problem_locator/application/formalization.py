@@ -1301,6 +1301,8 @@ def build_job(
         review_policy=spec.review_policy,
         generic_skill_name=spec.generic_skill_name,
         generic_problem_text=spec.generic_problem_text,
+        generic_log_archive_expected=spec.generic_log_archive_expected,
+        generic_supplement_texts=list(spec.generic_supplement_texts),
         status=JobStatus.PENDING,
         goal=spec.goal,
         base_state_revision=spec.target_state_revision,

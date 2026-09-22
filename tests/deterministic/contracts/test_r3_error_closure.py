@@ -639,6 +639,7 @@ def test_coordinator_error_codes_are_trigger_specific() -> None:
         TriggerType.REVIEW_OUTCOME: {invalid, validation},
         TriggerType.SUBMIT_SUPPLEMENT: {invalid, active, new_case, validation},
         TriggerType.CANCEL_CASE: {invalid, validation},
+        TriggerType.RESTART_GENERIC_DIAGNOSIS: {invalid, validation},
         TriggerType.RESUME_INTERRUPTED: {invalid, active, validation},
         TriggerType.EXECUTION_FAILED: {invalid, validation},
         TriggerType.ASSET_VERSION_UNAVAILABLE: {invalid, validation},

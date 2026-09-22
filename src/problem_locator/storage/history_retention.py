@@ -183,7 +183,7 @@ class HistoryRetentionService:
         db.execute("UPDATE agent_conversations SET body=? WHERE conversation_id=?", (_json(head), cid))
         db.execute("DELETE FROM agent_message_adoptions WHERE message_id IN "
             "(SELECT message_id FROM agent_messages WHERE conversation_id=? AND run_id=?)", (cid, run_id))
-        for table in ("agent_attachment_imports", "agent_stop_requests", "agent_messages", "agent_events", "agent_dispatches"):
+        for table in ("agent_attachment_imports", "agent_stop_requests", "agent_messages", "agent_events", "agent_dispatches", "agent_generic_restarts"):
             db.execute(f"DELETE FROM {table} WHERE run_id=?", (run_id,))
         db.execute("DELETE FROM agent_conversation_runs WHERE run_id=? AND conversation_id=?", (run_id, cid))
         return True
@@ -290,7 +290,10 @@ class HistoryRetentionService:
                 # attachment, even after the original upload is seven days old.
                 referenced = db.execute("SELECT 1 FROM agent_messages m,json_each(m.body,'$.attachment_ids') x "
                     "WHERE m.conversation_id=? AND x.value=? LIMIT 1", (cid, aid)).fetchone()
-                if referenced or db.execute("SELECT 1 FROM agent_attachment_imports WHERE attachment_id=?", (aid,)).fetchone():
+                pending_restart = db.execute("SELECT 1 FROM agent_generic_restarts r,"
+                    "json_each(r.payload,'$.message.attachment_ids') x WHERE r.status IN ('PENDING','COMMITTED') "
+                    "AND x.value=? LIMIT 1", (aid,)).fetchone()
+                if referenced or pending_restart or db.execute("SELECT 1 FROM agent_attachment_imports WHERE attachment_id=?", (aid,)).fetchone():
                     return False
                 maximum = db.execute("SELECT max(sequence) FROM agent_events WHERE conversation_id=? "
                     "AND json_extract(body,'$.data.attachment_id')=?", (cid, aid)).fetchone()[0]

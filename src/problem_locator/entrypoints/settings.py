@@ -58,6 +58,7 @@ class Settings:
     logparse_concurrency: int = 1
     archive_workers: int = 1
     methods_evidence_validation: str = "off"
+    generic_logparse_product: str = "default"
 
     @classmethod
     def load(
@@ -145,6 +146,9 @@ class Settings:
         if any(not command or command.isspace() for command in role_commands):
             raise SettingsError("Agent role command settings must be non-empty")
 
+        generic_logparse_product = values.get("GENERIC_LOGPARSE_PRODUCT", "default")
+        if re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}", generic_logparse_product) is None:
+            raise SettingsError("GENERIC_LOGPARSE_PRODUCT 必须是有效的产品标识")
         generic_skill_name = values["GENERIC_SKILL_NAME"]
         if (
             len(generic_skill_name) > 64
@@ -198,6 +202,7 @@ class Settings:
             port=port,
             claude_command=claude_command,
             generic_skill_name=generic_skill_name,
+            generic_logparse_product=generic_logparse_product,
             skill_dir=paths["SKILL_DIR"],
             logparse_repo=paths["LOGPARSE_REPO"],
             logparse_config_path=paths["LOGPARSE_CONFIG_PATH"],

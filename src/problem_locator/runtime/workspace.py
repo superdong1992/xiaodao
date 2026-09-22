@@ -32,6 +32,7 @@ from problem_locator.contracts.models import (
     MaterializedPath,
     MethodsReviewerInputV2,
     ResolvedLogparsePlanInput,
+    ResolvedLogparseParseOnlyPlanInput,
     ResourceRef,
     ReviewSubjectV2,
     TreeManifest,
@@ -1393,7 +1394,7 @@ class WorkspaceManager:
         aggregate: CaseAggregate,
         resource_store: ResourceStore,
         *,
-        resolved_logparse_plan: ResolvedLogparsePlanInput | None = None,
+        resolved_logparse_plan: ResolvedLogparsePlanInput | ResolvedLogparseParseOnlyPlanInput | None = None,
         review_subject: ReviewSubjectV2 | None = None,
         methods_evaluation_plan: MethodEvaluationPlanV2 | None = None,
         workspace_phase: Literal["logparse-preprocess"] | None = None,
@@ -1448,13 +1449,26 @@ class WorkspaceManager:
             materialize_payloads=False,
         )
 
+    def prepare_generic_main_metadata_only(
+        self, job: Job, aggregate: CaseAggregate, *,
+        resolved_logparse_plan: ResolvedLogparseParseOnlyPlanInput,
+    ) -> PreparedWorkspace:
+        """Keep the uploaded archive in the server's preprocessing workspace only."""
+        if job.diagnosis_mode is not DiagnosisMode.GENERIC or len(job.attachment_refs) != 1:
+            raise ValueError("generic log workspace requires one fixed attachment")
+        return self._prepare(
+            job, aggregate, None, resolved_logparse_plan=resolved_logparse_plan,
+            review_subject=None, methods_evaluation_plan=None, workspace_phase=None,
+            materialize_payloads=False,
+        )
+
     def _prepare(
         self,
         job: Job,
         aggregate: CaseAggregate,
         resource_store: ResourceStore | None,
         *,
-        resolved_logparse_plan: ResolvedLogparsePlanInput | None,
+        resolved_logparse_plan: ResolvedLogparsePlanInput | ResolvedLogparseParseOnlyPlanInput | None,
         review_subject: ReviewSubjectV2 | None,
         methods_evaluation_plan: MethodEvaluationPlanV2 | None,
         workspace_phase: Literal["logparse-preprocess"] | None,
@@ -2025,16 +2039,18 @@ class WorkspaceManager:
         workspace: PreparedWorkspace,
         *,
         request_bytes: bytes,
-        operation: Literal["parse-targets", "target-logs"],
+        operation: Literal["parse-targets", "target-logs", "parse-only"],
     ) -> tuple[str, str]:
         """Publish the product-owned request consumed by the sole broker operation."""
 
         if not isinstance(request_bytes, bytes) or not request_bytes:
             raise TypeError("Logparse preprocessing request must be non-empty bytes")
-        if operation not in {"parse-targets", "target-logs"}:
+        if operation not in {"parse-targets", "target-logs", "parse-only"}:
             raise ValueError("Logparse preprocessing operation is invalid")
-        request_path = "output/proposals/methods-preprocess/request.json"
-        result_path = "output/proposals/methods-preprocess/target_logs.json"
+        proposal = "generic-preprocess" if operation == "parse-only" else "methods-preprocess"
+        result_name = "generic_logs.json" if operation == "parse-only" else "target_logs.json"
+        request_path = f"output/proposals/{proposal}/request.json"
+        result_path = f"output/proposals/{proposal}/{result_name}"
         try:
             output_metadata = (workspace.root / "output").stat(follow_symlinks=False)
             if (

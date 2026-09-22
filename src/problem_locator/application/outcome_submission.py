@@ -350,6 +350,8 @@ class OutcomeSubmissionService:
                 reclassify_stale=True,
             )
 
+        # A newly accepted archive intent may race an uncommitted publication
+        # of the text-only successor. Keep the two immutable jobs distinct.
         prospective_job_id = self._ids.derive(
             "job",
             [
@@ -357,6 +359,12 @@ class OutcomeSubmissionService:
                 located.case_id,
                 outcome.outcome_id,
                 "next_job",
+                *(["with_logs"] if (
+                    located.job_type is JobType.ROUTE
+                    and outcome.result_type is OutcomeResultType.NO_CAPABILITY
+                    and (aggregate.case.initial_log_archive_expected
+                         or _outcome_continuation(snapshot, outcome).attachment_refs)
+                ) else []),
             ],
         )
         try:
@@ -436,12 +444,12 @@ class OutcomeSubmissionService:
             assert recovered_bindings is not None
             bindings = {expected_next_job_type: recovered_bindings}
         else:
-            bindings = self._bindings_for_outcome(located, outcome)
+            bindings = self._bindings_for_outcome(located, outcome, snapshot=snapshot)
         try:
             trigger = _outcome_trigger(
                 snapshot,
                 outcome,
-                continuation_for_outcome(snapshot, outcome),
+                _outcome_continuation(snapshot, outcome),
                 bindings,
                 outcome_trigger_id,
             )
@@ -611,6 +619,7 @@ class OutcomeSubmissionService:
         self,
         job: Job,
         outcome: JobOutcome,
+        *, snapshot: StateFile | None = None,
     ) -> dict[JobType, RuntimeBindings]:
         next_job_type = _expected_next_job_type(job, outcome)
         if next_job_type is None:
@@ -635,7 +644,12 @@ class OutcomeSubmissionService:
             job.job_type is JobType.ROUTE
             and outcome.result_type is OutcomeResultType.NO_CAPABILITY
         ):
-            bindings = self._asset_catalog.generic_diagnose_bindings()
+            with_logs = False
+            if snapshot is not None:
+                with_logs = (snapshot.cases[job.case_id].case.initial_log_archive_expected
+                    or bool(_outcome_continuation(snapshot, outcome).attachment_refs))
+            bindings = (self._asset_catalog.generic_diagnose_bindings(with_logs=True)
+                if with_logs else self._asset_catalog.generic_diagnose_bindings())
             return {
                 JobType.DIAGNOSE: _validate_catalog_bindings(
                     JobType.DIAGNOSE,
@@ -1858,6 +1872,24 @@ def _case_snapshot(snapshot: StateFile, case_id: str):
     from .projection import build_case_snapshot
 
     return build_case_snapshot(snapshot, case_id)
+
+
+def _outcome_continuation(
+    snapshot: StateFile, outcome: JobOutcome,
+) -> ContinuationResourceView:
+    continuation = continuation_for_outcome(snapshot, outcome)
+    if (outcome.job_type is JobType.ROUTE
+        and outcome.result_type is OutcomeResultType.NO_CAPABILITY):
+        attachments = snapshot.cases[outcome.case_id].attachments
+        # Specialist history can include ordinary text and other evidence
+        # attachments. Only supported product archives can become Generic logs.
+        return continuation.model_copy(update={"attachment_refs": [
+            attachment_id for attachment_id in continuation.attachment_refs
+            if attachments[attachment_id].content_type in {
+                "application/gzip", "application/zip", "application/x-tar",
+            }
+        ]})
+    return continuation
 
 
 def _outcome_trigger(

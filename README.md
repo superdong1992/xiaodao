@@ -26,7 +26,7 @@
 | 产品注册格式 | `registration-template.json@1` |
 | Methods 评估协议 | `Methods V1` |
 | ROUTE / DIAGNOSE / REVIEW 输出格式 | `5.0.0` / `11.0.0` / `10.0.0` |
-| GENERIC 输出格式 / 运行配置 | `2.0.0` / `2.0.0` |
+| GENERIC 输出格式 / 运行配置 | `2.0.0` / `3.0.0` |
 | Specialist / Reviewer 运行配置 | `8.0.0` / `7.0.0` |
 | 默认 Skill 直接输出所用配置 | `agent-profile/skill-direct` / `output-contract/skill-direct` |
 | Router / Diagnose / Review 工具包 | `3.0.0` / `4.0.0` / `3.0.0` |
@@ -106,6 +106,7 @@ uv lock --check
 | `PUBLIC_BASE_URL` | 是 | 无 | 对外提供服务的 HTTP(S) 根地址，不得包含查询参数或片段 |
 | `SKILL_DIR` | 是 | 无 | 由部署方维护的产品注册目录；每个子目录包含一个 `registration-template.json` 及对应的 Methods 包。须填写实际存在的目录的绝对路径；只使用通用定位时，目录可以为空。生产环境不接受 `TEST_ONLY` 注册，也不得使用 Agent 的个人 Skill 目录 |
 | `GENERIC_SKILL_NAME` | 是 | 无 | Agent 环境中预装的通用定位 Skill 名称；仅允许标准的小写字母和连字符命名格式。启动时不调用 Skill 检查是否已安装 |
+| `GENERIC_LOGPARSE_PRODUCT` | 否 | `default` | 通用定位解析日志时使用的 Logparse 产品标识；由部署方配置，用户无需填写时间、槽位或进程 |
 | `LOGPARSE_REPO` | 是 | 无 | 由部署方维护的 Logparse 源码目录；支持 Git 检出目录和源码压缩包解压目录，启动时按实际内容生成指纹 |
 | `LOGPARSE_CONFIG_PATH` | 是 | 无 | Logparse 工作区内的配置文件 |
 | `BIND_HOST` | 否 | `127.0.0.1` | Uvicorn 监听地址 |
@@ -202,9 +203,11 @@ fences are allowed. For `UNRESOLVED`, state the leading hypotheses and the missi
 information that prevents confirmation.
 ````
 
-GENERIC Job 的唯一业务输入是 Case 中已固定的完整 `raw_problem_text`。它不会接收从 ProblemSpec 提取的字段、`user_facts`、附件、Evidence、Artifact、先前的 Outcome 或专用诊断状态。Agent 的当前工作目录是服务端为 Job 创建的临时工作区，不是客户端工作区。
+GENERIC Job 保留 Case 中完整的 `raw_problem_text`，并可携带本轮明确选择的一份产品日志归档和单独保存的补充描述。Web 随问题提交日志时，服务端先自动导入附件，再调用 Logparse 的 `parse-only` 操作；不按时间、槽位或进程筛选，也不要求用户补齐这些参数。通用 Skill 从 `inputs/generic_logs.json` 读取文件清单，再按需检索和分段读取只读日志。原始归档保留在服务端预处理工作区，不进入通用 Skill 的输入目录。没有日志时仍按原有纯文本流程定位。
 
-通用 Skill 需要的事实必须已包含在原始问题文本中，或由它使用 Agent 环境中已授权的局域网工具自行查询。如果需要结构化参数、用户补充、上传日志归档、证据审计或独立 Review，应将其做成 `SKILL_DIR` 中带产品注册的 SPECIALIZED Methods Skill，不得暗中向通用 Skill 增加输入。
+运行中补交有效日志会取消旧 Generic Job，在同一 Case、同一会话轮次重新分析；原问题不变，补充文字单独传入，新包替换本轮旧包。旧任务退出后才启动新任务，迟到结果不能覆盖新结果。若旧报告先于重启请求完成提交，接口明确返回冲突，不能接受消息后静默丢弃日志。通用定位不接收专用 Evidence、历史 Outcome 或专用诊断状态，仍可使用 Agent 环境中已授权的工具。
+
+报告应说明实际使用的日志和引用位置。Logparse 整理出的日志不等于原包的全部内容；解析失败明确报错，成功解析但未找到可分析日志时返回 `UNRESOLVED`。日志读取能力须在实际 Linux 部署和私有通用 Skill 中验证，框架协议握手不能替代这项验收。
 
 服务端采用 V2 协议，同时兼容既有 V1 文件 `output/generic_diagnosis_result.txt`。以下情况均以不可重试的 `OUTCOME_INVALID` 结束：V1 与 V2 文件同时存在；V2 文件不合法；marker 与状态不匹配；正文为空或全为空白；编码不是严格 UTF-8；超过 65536 字节；文件是链接；读取期间内容发生变化。V2 文件损坏时，不会回退到 V1。
 

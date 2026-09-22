@@ -1101,6 +1101,7 @@ def _prepare_projection(
                 logparse_tool=logparse_asset,
                 logparse_broker_factory=broker_factory,
                 generic_skill_name=settings.generic_skill_name,
+                generic_logparse_product=settings.generic_logparse_product,
             )
             bindings = _current_bindings(catalog, source_job)
         except ReplayError:

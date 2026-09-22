@@ -1997,7 +1997,7 @@ class FakeAssetCatalog:
             )
         return _clone(value)
 
-    def generic_diagnose_bindings(self) -> RuntimeBindings:
+    def generic_diagnose_bindings(self, *, with_logs: bool = False) -> RuntimeBindings:
         self._maybe_fail("generic_diagnose_bindings")
         self.generic_calls += 1
         if self._generic is None:

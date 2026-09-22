@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
+from collections.abc import Callable
 from pathlib import Path
 
 from problem_locator.contracts import TreeManifest, TreeManifestEntry, canonical_json_bytes
@@ -16,12 +17,14 @@ def _invalid() -> ValueError:
     return ValueError("controlled logparse output tree is invalid")
 
 
-def _file_sha256(path: Path) -> tuple[int, str]:
+def _file_sha256(path: Path, *, check_abort: Callable[[], None] | None = None) -> tuple[int, str]:
     digest = hashlib.sha256()
     size = 0
     before = path.stat(follow_symlinks=False)
     with path.open("rb") as stream:
         while True:
+            if check_abort is not None:
+                check_abort()
             chunk = stream.read(_CHUNK_BYTES)
             if not chunk:
                 break
@@ -34,9 +37,13 @@ def _file_sha256(path: Path) -> tuple[int, str]:
     return size, digest.hexdigest()
 
 
-def build_tree_manifest(root: Path) -> tuple[TreeManifest, int, str]:
+def build_tree_manifest(
+    root: Path, *, check_abort: Callable[[], None] | None = None,
+) -> tuple[TreeManifest, int, str]:
     """Hash a directory using the exact S00 ``TreeManifest`` semantics."""
 
+    if check_abort is not None:
+        check_abort()
     supplied_root = Path(root)
     try:
         supplied_metadata = supplied_root.lstat()
@@ -51,9 +58,19 @@ def build_tree_manifest(root: Path) -> tuple[TreeManifest, int, str]:
     pending = [root]
     try:
         while pending:
+            if check_abort is not None:
+                check_abort()
             directory = pending.pop()
-            children = sorted(os.scandir(directory), key=lambda item: item.name)
+            children = []
+            with os.scandir(directory) as scanned:
+                for child in scanned:
+                    if check_abort is not None:
+                        check_abort()
+                    children.append(child)
+            children.sort(key=lambda item: item.name)
             for child in children:
+                if check_abort is not None:
+                    check_abort()
                 child_path = Path(child.path)
                 if child.is_symlink():
                     raise _invalid()
@@ -76,7 +93,7 @@ def build_tree_manifest(root: Path) -> tuple[TreeManifest, int, str]:
                     raise _invalid()
                 seen_inodes.add(inode)
                 relative = child_path.relative_to(root).as_posix()
-                size, digest = _file_sha256(child_path)
+                size, digest = _file_sha256(child_path, check_abort=check_abort)
                 if size != metadata.st_size:
                     raise _invalid()
                 entries.append(
@@ -88,6 +105,8 @@ def build_tree_manifest(root: Path) -> tuple[TreeManifest, int, str]:
         raise _invalid() from exc
 
     entries.sort(key=lambda entry: entry.path)
+    if check_abort is not None:
+        check_abort()
     manifest = TreeManifest(version=1, entries=entries)
     size = sum(entry.size for entry in entries)
     digest = hashlib.sha256(canonical_json_bytes(manifest)).hexdigest()

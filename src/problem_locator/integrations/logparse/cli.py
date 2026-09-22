@@ -29,7 +29,7 @@ from .paths import (
     resolve_workspace_path,
     validate_proposal_io_paths,
 )
-from .requests import BrokerEnvelope, ParseTargetsRequest, TargetLogsRequest
+from .requests import BrokerEnvelope, ParseOnlyRequest, ParseTargetsRequest, TargetLogsRequest
 
 
 _ENDPOINT_ENV = "PROBLEM_LOCATOR_LOGPARSE_ENDPOINT"
@@ -42,7 +42,7 @@ _MAX_RESULT_BYTES = 2_000_000
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="problem-locator-logparse")
     commands = parser.add_subparsers(dest="operation", required=True)
-    for operation in ("parse-targets", "target-logs"):
+    for operation in ("parse-targets", "target-logs", "parse-only"):
         command = commands.add_parser(operation)
         command.add_argument("--request", required=True)
         command.add_argument("--result", required=True)
@@ -96,7 +96,11 @@ def _read_request(
         or metadata.st_size > _MAX_REQUEST_BYTES
     ):
         raise ValueError("broker request file is invalid")
-    model = ParseTargetsRequest if operation == "parse-targets" else TargetLogsRequest
+    models = {"parse-targets": ParseTargetsRequest, "target-logs": TargetLogsRequest,
+              "parse-only": ParseOnlyRequest}
+    if operation not in models:
+        raise ValueError("broker operation is invalid")
+    model = models[operation]
     document = normalize_agent_json_file(
         request_file,
         surface=AgentJsonSurface.LOGPARSE_REQUEST,
@@ -159,7 +163,7 @@ def run(
 ) -> ExecutionFailure | None:
     """Validate one fixed request and relay it to the current broker session."""
 
-    validate_proposal_io_paths(request_path, result_path)
+    validate_proposal_io_paths(request_path, result_path, operation=operation)
     workspace_root = Path.cwd()
     request_bytes = _read_request(workspace_root, request_path, operation)
     result_file = resolve_workspace_path(

@@ -62,6 +62,7 @@ from problem_locator.contracts import (
     RequirementKind,
     RequirementStatus,
     ResumeInterruptedTriggerPayload,
+    RestartGenericDiagnosisTriggerPayload,
     ReviewAssessment,
     ReviewPolicy,
     ReviewOutcomeTriggerPayload,
@@ -417,6 +418,7 @@ class DomainCoordinator:
             TriggerType.REVIEW_OUTCOME: self._review_outcome,
             TriggerType.SUBMIT_SUPPLEMENT: self._submit_supplement,
             TriggerType.CANCEL_CASE: self._cancel_case,
+            TriggerType.RESTART_GENERIC_DIAGNOSIS: self._restart_generic_diagnosis,
             TriggerType.RESUME_INTERRUPTED: self._resume_interrupted,
             TriggerType.EXECUTION_FAILED: self._execution_failed,
             TriggerType.ASSET_VERSION_UNAVAILABLE: self._asset_unavailable,
@@ -464,6 +466,7 @@ class DomainCoordinator:
             or case.generic_result_v2 is not None
             or case.failure is not None
             or case.raw_problem_text != payload.raw_problem_text
+            or case.initial_log_archive_expected != payload.initial_log_archive_expected
         ):
             return _validation(
                 "The transient NEW snapshot does not match the normalized CreateCase payload."
@@ -526,17 +529,22 @@ class DomainCoordinator:
         decision = outcome.payload
         assert isinstance(decision, RouteDecision)
         if decision.kind is RouteKind.NO_CAPABILITY:
+            attachments = trigger.continuation_resources.attachment_refs
             next_job = self._job_spec(
                 trigger,
                 JobType.DIAGNOSE,
                 target_state_revision=snapshot.case.diagnosis_state.revision,
                 goal=_GENERIC_DIAGNOSE_GOAL,
                 evidence_bindings=[],
-                attachment_refs=[],
+                # Specialized history may contain several archives. Generic
+                # diagnosis waits for an explicit single selection in that case.
+                attachment_refs=attachments if len(attachments) == 1 else [],
                 previous_outcome_refs=[],
                 artifact_bindings=[],
                 selected_skill_ref=None,
                 generic_problem_text=snapshot.case.raw_problem_text,
+                generic_log_archive_expected=(snapshot.case.initial_log_archive_expected
+                    or bool(attachments)),
             )
             if isinstance(next_job, ApplicationError):
                 return next_job
@@ -619,6 +627,19 @@ class DomainCoordinator:
                 trigger,
                 source_outcome_id=outcome.outcome_id,
                 disposition=OutcomeDisposition.APPLIED,
+            )
+        if active.diagnosis_mode is DiagnosisMode.GENERIC and outcome.result_type is OutcomeResultType.NEED_ATTACHMENT:
+            assert isinstance(outcome.payload, DiagnosisOutcome)
+            return TransitionPlan(
+                accepted_state_delta=outcome.payload.state_delta,
+                target_case_status=CaseStatus.WAITING_ATTACHMENT,
+                job_updates=[_job_update(active, JobStatus.SUCCEEDED, trigger.occurred_at)],
+                outcome_disposition=OutcomeDisposition.APPLIED,
+                accepted_evidence_proposal_keys=[], accepted_artifact_proposal_keys=[],
+                accepted_candidate_proposal_key=None, selected_skill_update=None,
+                case_failure_update=None, candidate_mutation=None, next_job_spec=None,
+                final_result_target=None, clear_active_job=True,
+                reason="Wait for the explicitly selected log archive before generic diagnosis.",
             )
         direct = is_specialized_direct(active)
         if active.diagnosis_mode is DiagnosisMode.GENERIC or (
@@ -1520,17 +1541,34 @@ class DomainCoordinator:
                 "Retain the accepted supplement while the Attachment requirement remains open.",
             )
         continuation = trigger.continuation_resources
-        next_job = self._job_spec(
-            trigger,
-            JobType.DIAGNOSE,
-            target_state_revision=state.revision + 1,
-            goal=_SUPPLEMENT_GOAL,
-            evidence_bindings=_existing_bindings(continuation.evidence_refs),
-            attachment_refs=continuation.attachment_refs,
-            previous_outcome_refs=continuation.previous_outcome_refs,
-            artifact_bindings=_existing_bindings(continuation.artifact_refs),
-            selected_skill_ref=case.selected_skill_ref,
-        )
+        generic_source = snapshot.waiting_source_job
+        if generic_source is not None and generic_source.diagnosis_mode is DiagnosisMode.GENERIC:
+            if payload.user_facts or not payload.ready_attachment_ids:
+                return _validation("Generic supplements require the requested log archive without extracted facts.")
+            next_job = self._job_spec(
+                trigger, JobType.DIAGNOSE, target_state_revision=state.revision + 1,
+                goal=_SUPPLEMENT_GOAL, evidence_bindings=[],
+                attachment_refs=payload.ready_attachment_ids, previous_outcome_refs=[],
+                artifact_bindings=[], selected_skill_ref=None,
+                generic_problem_text=generic_source.generic_problem_text,
+                generic_log_archive_expected=True,
+                generic_supplement_texts=[*generic_source.generic_supplement_texts,
+                    *([payload.generic_supplement_text] if payload.generic_supplement_text.strip() else [])],
+            )
+        else:
+            if payload.generic_supplement_text:
+                return _validation("Generic supplement text requires a generic waiting Job.")
+            next_job = self._job_spec(
+                trigger,
+                JobType.DIAGNOSE,
+                target_state_revision=state.revision + 1,
+                goal=_SUPPLEMENT_GOAL,
+                evidence_bindings=_existing_bindings(continuation.evidence_refs),
+                attachment_refs=continuation.attachment_refs,
+                previous_outcome_refs=continuation.previous_outcome_refs,
+                artifact_bindings=_existing_bindings(continuation.artifact_refs),
+                selected_skill_ref=case.selected_skill_ref,
+            )
         if isinstance(next_job, ApplicationError):
             return next_job
         return TransitionPlan(
@@ -1548,6 +1586,47 @@ class DomainCoordinator:
             final_result_target=None,
             clear_active_job=False,
             reason="Fulfill all current requirements and continue diagnosis once.",
+        )
+
+    def _restart_generic_diagnosis(
+        self, snapshot: CaseSnapshot, trigger: ValidatedTrigger,
+    ) -> CoordinatorPlanResult:
+        source = snapshot.active_job
+        payload = trigger.payload
+        assert isinstance(payload, RestartGenericDiagnosisTriggerPayload)
+        if (snapshot.case.status is not CaseStatus.RUNNING or source is None
+            or source.job_id != payload.source_job_id
+            or source.diagnosis_mode is not DiagnosisMode.GENERIC
+            or source.status not in {JobStatus.PENDING, JobStatus.RUNNING}):
+            return _invalid_state(snapshot.case.status, trigger.trigger_type)
+        bindings = trigger.runtime_bindings_by_job_type.get(JobType.DIAGNOSE)
+        if bindings is None or bindings.logparse_tool_ref is None:
+            return _validation("Restarting generic diagnosis requires fixed logparse bindings.")
+        expected = _runtime_from_job(source).model_dump(mode="python")
+        if source.logparse_tool_ref is None:
+            expected.update(logparse_tool_ref=bindings.logparse_tool_ref, logparse_product=bindings.logparse_product)
+        if bindings != RuntimeBindings.model_validate(expected):
+            return _validation("Generic restart must preserve the source Job runtime bindings.")
+        next_job = self._job_spec(
+            trigger, JobType.DIAGNOSE,
+            target_state_revision=snapshot.case.diagnosis_state.revision,
+            goal=_GENERIC_DIAGNOSE_GOAL, evidence_bindings=[], attachment_refs=[],
+            previous_outcome_refs=[], artifact_bindings=[], selected_skill_ref=None,
+            generic_problem_text=source.generic_problem_text,
+            generic_log_archive_expected=True,
+            generic_supplement_texts=[*source.generic_supplement_texts,
+                *([payload.supplement_text] if payload.supplement_text.strip() else [])],
+        )
+        if isinstance(next_job, ApplicationError):
+            return next_job
+        return TransitionPlan(
+            accepted_state_delta=_empty_delta(), target_case_status=CaseStatus.RUNNING,
+            job_updates=[_job_update(source, JobStatus.CANCELLED, trigger.occurred_at)],
+            outcome_disposition=None, accepted_evidence_proposal_keys=[],
+            accepted_artifact_proposal_keys=[], accepted_candidate_proposal_key=None,
+            selected_skill_update=None, case_failure_update=None, candidate_mutation=None,
+            next_job_spec=next_job, final_result_target=None, clear_active_job=True,
+            reason="Restart generic diagnosis with the newly selected log archive.",
         )
 
     def _cancel_case(
@@ -1677,6 +1756,8 @@ class DomainCoordinator:
             methods_review_target=source.methods_review_target,
             replacement_for_job_id=source.job_id,
             generic_problem_text=source.generic_problem_text,
+            generic_log_archive_expected=source.generic_log_archive_expected,
+            generic_supplement_texts=source.generic_supplement_texts,
         )
         if isinstance(next_job, ApplicationError):
             return next_job
@@ -2028,6 +2109,8 @@ class DomainCoordinator:
         methods_review_target: MethodsReviewTargetV2 | None = None,
         replacement_for_job_id: str | None = None,
         generic_problem_text: str | None = None,
+        generic_log_archive_expected: bool = False,
+        generic_supplement_texts: Sequence[str] = (),
     ) -> JobSpec | ApplicationError:
         bindings = trigger.runtime_bindings_by_job_type.get(job_type)
         if bindings is None:
@@ -2065,6 +2148,8 @@ class DomainCoordinator:
             review_policy=bindings.review_policy,
             generic_skill_name=bindings.generic_skill_name,
             generic_problem_text=generic_problem_text,
+            generic_log_archive_expected=generic_log_archive_expected,
+            generic_supplement_texts=list(generic_supplement_texts),
             goal=goal,
             target_state_revision=target_state_revision,
             evidence_bindings=evidence_bindings,

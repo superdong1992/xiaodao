@@ -80,6 +80,28 @@ class TargetLogsRequest(_BaseRequest):
     artifact_id: OpaqueId
 
 
+class ParseOnlyRequest(_PrivateWireModel):
+    schema_version: Literal[1]
+    attachment_id: OpaqueId
+    artifact_proposal_key: Annotated[str, Field(min_length=1, max_length=64)]
+
+    @model_validator(mode="after")
+    def validate_proposal_key(self) -> ParseOnlyRequest:
+        if _SAFE_PROPOSAL_KEY.fullmatch(self.artifact_proposal_key) is None:
+            raise ValueError("artifact_proposal_key is not a safe path segment")
+        return self
+
+
+class ResolvedParseOnlyPlan(_PrivateWireModel):
+    schema_version: Literal[1]
+    operation: Literal["parse-only"]
+    attachment_id: OpaqueId
+
+    def validate_request(self, request: ParseOnlyRequest) -> None:
+        if not isinstance(request, ParseOnlyRequest) or request.attachment_id != self.attachment_id:
+            raise ValueError("parse-only request differs from the server-resolved plan")
+
+
 class ResolvedLogparsePlan(_BaseRequest):
     """Server-owned request bindings compiled from a pinned Skill and Job.
 
@@ -104,6 +126,8 @@ class ResolvedLogparsePlan(_BaseRequest):
         self,
         request: ParseTargetsRequest | TargetLogsRequest,
     ) -> None:
+        if not isinstance(request, (ParseTargetsRequest, TargetLogsRequest)):
+            raise ValueError("target request differs from the server-resolved plan")
         if request.problem_time != self.problem_time or request.anchors != self.anchors:
             raise ValueError("logparse request differs from the server-resolved plan")
         if isinstance(request, ParseTargetsRequest):
@@ -115,7 +139,7 @@ class ResolvedLogparsePlan(_BaseRequest):
 
 class BrokerEnvelope(_PrivateWireModel):
     schema_version: Literal[1]
-    operation: Literal["parse-targets", "target-logs"]
+    operation: Literal["parse-targets", "target-logs", "parse-only"]
     request_path: Annotated[str, Field(min_length=1, max_length=512)]
     result_path: Annotated[str, Field(min_length=1, max_length=512)]
     request_base64: Annotated[
@@ -124,13 +148,15 @@ class BrokerEnvelope(_PrivateWireModel):
     ]
 
 
-Request: type = ParseTargetsRequest | TargetLogsRequest
+Request: type = ParseTargetsRequest | TargetLogsRequest | ParseOnlyRequest
 
 
 __all__ = [
     "Anchor",
     "BrokerEnvelope",
     "ParseTargetsRequest",
+    "ParseOnlyRequest",
     "ResolvedLogparsePlan",
+    "ResolvedParseOnlyPlan",
     "TargetLogsRequest",
 ]

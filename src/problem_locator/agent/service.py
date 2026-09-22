@@ -5,14 +5,15 @@ import threading
 import inspect
 import time
 import uuid
+import weakref
 from contextlib import contextmanager, nullcontext
 from typing import Any
 
 from problem_locator.contracts import (
     ApplicationPortError, ApplicationResponse, CancellationReason, CreateCase,
-    PrepareAttachment, SubmitSupplement, CancelCase,
+    PrepareAttachment, SubmitSupplement, CancelCase, RestartGenericDiagnosis, MarkInitialLogArchiveExpected,
 )
-from problem_locator.contracts.models import ProblemSpecInput
+from problem_locator.contracts.models import ProblemSpecInput, derive_attachment_filename_suffix
 from problem_locator.diagnostics import log_event
 from problem_locator.application.reports import result_source_job_id
 from problem_locator.dispatch.cancellation import CancellationController
@@ -23,7 +24,7 @@ from .intake import (
     intake_processing_receipt,
 )
 from .models import (AgentPublicFailure, AgentStoreError, ConversationReportView, PublicArtifactData,
-                     ConversationDetail, ConversationArtifact)
+                     ConversationDetail, ConversationArtifact, SendMessageRequest)
 from .failures import exception_code, exception_details
 from .uploads import ConversationUploads
 from .usage import ConversationUsageGuard
@@ -47,6 +48,8 @@ class AgentConversationService:
         self.cleanup = None
         self.dispatcher = None
         self._run_lock = threading.Lock()
+        self._message_guard = threading.Lock()
+        self._message_locks = weakref.WeakValueDictionary()
         self._active_runs = {}
         self._local = threading.local()
         intake = getattr(intake_engine, "intake", None)
@@ -111,8 +114,121 @@ class AgentConversationService:
 
     def send_message(self, conversation_id, request_id, text="", attachment_ids=None, *, owner_key=None):
         self._available()
-        with self.operation_lease(conversation_id, owner_key=owner_key):
-            return self.store.submit_message(conversation_id, request_id, text or "", attachment_ids or [])
+        with self.operation_lease(conversation_id, owner_key=owner_key), self._message_lock(conversation_id):
+            request = SendMessageRequest(request_id=request_id, text=text or "", attachment_ids=attachment_ids or [])
+            receipt, pending = self.store.message_request(conversation_id, request)
+            if receipt is not None:
+                return receipt
+            if pending is not None:
+                return self._dispatch_generic_restart(pending, request)
+            view = self.store.get_status(conversation_id)
+            if (request.attachment_ids and view.case_id is not None and view.status not in _CLOSED
+                    and view.report_state != "READY"):
+                snapshot = self.store.repository.read_snapshot(view.case_id)
+                aggregate = snapshot.cases.get(view.case_id)
+                if aggregate is None or aggregate.case.status.value in _CASE_DONE:
+                    raise AgentStoreError("AGENT_RUN_CHANGED", "本次定位已结束。", 409)
+                job = None if aggregate is None else aggregate.jobs.get(aggregate.case.active_job_id)
+                if self._is_generic_job(job) or (job is not None and job.job_type.value == "ROUTE"):
+                    # Validate the selected archive before accepting or cancelling
+                    # anything. Multiple selections must never pick the first.
+                    records = [self.store.get_attachment(item) for item in request.attachment_ids]
+                    if any(item.conversation_id != conversation_id or item.status not in {"READY", "IMPORTED"} for item in records):
+                        raise AgentStoreError("AGENT_ATTACHMENT_NOT_READY", "附件不存在、未上传完成或不属于本会话。", 409)
+                    if len(records) != 1 and self._is_generic_job(job):
+                        raise AgentStoreError("AGENT_LOG_SELECTION_INVALID", "当前仅支持一份日志归档，请合并后上传，或重新选择一个附件。", 409)
+                    for record in records:
+                        derive_attachment_filename_suffix(record.name, record.content_type)
+                    record = records[0] if len(records) == 1 else None
+                    if self._is_generic_job(job) and record is not None and any(aggregate.attachments[item].sha256 == record.sha256 for item in job.attachment_refs
+                            if item in aggregate.attachments):
+                        raise AgentStoreError("AGENT_LOG_ALREADY_SELECTED", "这份日志已用于当前定位，无需重复提交。", 409)
+                    identity = str(uuid.uuid5(uuid.UUID(view.run_id), request_id))
+                    fields = dict(case_id=view.case_id, expected_case_revision=aggregate.case.case_revision,
+                        source_job_id=job.job_id)
+                    command = (RestartGenericDiagnosis(idempotency_key="agent-restart-" + identity,
+                        supplement_text=request.text, **fields) if self._is_generic_job(job) else
+                        MarkInitialLogArchiveExpected(idempotency_key="agent-route-logs-" + identity, **fields))
+                    pending = self.store.freeze_generic_restart(conversation_id, request, command,
+                        run_id=view.run_id, archive_sha256=record.sha256 if record is not None else None)
+                    return self._dispatch_generic_restart(pending, request)
+            return self.store.submit_message(conversation_id, request_id, request.text, request.attachment_ids)
+
+    def _message_lock(self, conversation_id):
+        with self._message_guard:
+            return self._message_locks.setdefault(conversation_id, threading.RLock())
+
+    @staticmethod
+    def _is_generic_job(job):
+        return job is not None and job.diagnosis_mode is not None and job.diagnosis_mode.value == "GENERIC"
+
+    def _generic_waiting_job(self, case_view):
+        if case_view.selected_skill_ref is not None:
+            return None
+        snapshot = self.store.repository.read_snapshot(case_view.case_id)
+        aggregate = snapshot.cases[case_view.case_id]
+        sources = [aggregate.jobs.get(item.requested_by_job_id) for item in case_view.pending_requirements
+            if item.status.value == "OPEN" and item.kind.value == "ATTACHMENT"]
+        return next((item for item in sources if self._is_generic_job(item)), None)
+
+    def _dispatch_generic_restart(self, pending, request=None, *, route_rechecked=False):
+        cid, run_id = pending["conversation_id"], pending["run_id"]
+        kind = {"RestartGenericDiagnosis": RestartGenericDiagnosis,
+                "MarkInitialLogArchiveExpected": MarkInitialLogArchiveExpected}[pending.get("operation", "RestartGenericDiagnosis")]
+        command = kind.model_validate(pending["command"])
+        if pending["status"] == "REJECTED":
+            raise AgentStoreError("AGENT_RUN_CHANGED", "本次定位已结束或发生变化，请刷新会话。", 409)
+        run = self.store.get_run(cid, run_id, deleted=True)
+        if run.get("stop_requested") or run.get("_deleted") or run["status"] in _CLOSED:
+            if self.dispatcher is not None:
+                # A stopped replacement still needs its predecessor killed if
+                # the first cancellation signal failed. Never redispatch it.
+                self.dispatcher.cancel(command.source_job_id)
+            self.store.finish_generic_restart(command.idempotency_key, rejected=True)
+            raise AgentStoreError("AGENT_RUN_CHANGED", "本次定位已结束。", 409)
+        try:
+            with self.store.run_scope(cid, run_id):
+                response = self.application.execute(command)
+        except ApplicationPortError as error:
+            if error.error.code.value in {"REVISION_CONFLICT", "INVALID_CASE_STATE", "CASE_NOT_FOUND", "JOB_NOT_FOUND"}:
+                if isinstance(command, MarkInitialLogArchiveExpected):
+                    snapshot = self.store.repository.read_snapshot(command.case_id)
+                    aggregate = snapshot.cases.get(command.case_id)
+                    job = None if aggregate is None else aggregate.jobs.get(aggregate.case.active_job_id)
+                    if self._is_generic_job(job) and len(pending["message"]["attachment_ids"]) == 1:
+                        replacement = RestartGenericDiagnosis(idempotency_key=command.idempotency_key + "-generic",
+                            case_id=command.case_id, expected_case_revision=aggregate.case.case_revision,
+                            source_job_id=job.job_id, supplement_text=pending["message"]["text"])
+                        retargeted = self.store.retarget_routed_log_request(command.idempotency_key, replacement)
+                        return self._dispatch_generic_restart(retargeted, request)
+                    if (aggregate is not None and aggregate.case.selected_skill_ref is not None
+                            and aggregate.case.status.value not in _CASE_DONE):
+                        message = pending["message"]
+                        try:
+                            return self.store.submit_message(cid, message["request_id"], message["text"],
+                                message["attachment_ids"], routed_request_key=command.idempotency_key)
+                        except AgentStoreError as changed:
+                            if changed.code != "AGENT_ROUTE_CHANGED":
+                                raise
+                            if route_rechecked:
+                                raise AgentStoreError("AGENT_RESTART_PENDING", "定位策略正在更新，请稍后重试同一请求。", 503) from changed
+                            return self._dispatch_generic_restart(pending, request, route_rechecked=True)
+                    if job is not None and job.job_type.value == "ROUTE":
+                        raise AgentStoreError("AGENT_RESTART_PENDING", "定位策略正在更新，请稍后重试同一请求。", 503)
+                self.store.finish_generic_restart(command.idempotency_key, rejected=True)
+                raise AgentStoreError("AGENT_RUN_CHANGED", "本次定位已结束或发生变化，请刷新会话。", 409) from error
+            raise
+        if not response.dispatch_pending:
+            self.store.finish_generic_restart(command.idempotency_key)
+        self._wake.set()
+        self._control_wake.set()
+        if request is None:
+            request = SendMessageRequest(request_id=pending["message"]["request_id"], text=pending["message"]["text"],
+                attachment_ids=pending["message"]["attachment_ids"])
+        receipt, _ = self.store.message_request(cid, request)
+        if receipt is None:
+            raise AgentStoreError("AGENT_RESTART_PENDING", "日志接入尚未完成，请稍后重试同一请求。", 503)
+        return receipt
 
     def list_conversations(self, owner_key, *, cursor=None, limit=20):
         return self.store.list_conversations(owner_key, cursor=cursor, limit=limit)
@@ -331,6 +447,14 @@ class AgentConversationService:
             return False
         progressed = False
         try:
+            for pending in self.store.pending_generic_restarts():
+                try:
+                    with self.usage_guard.acquire(pending["conversation_id"]):
+                        self._dispatch_generic_restart(pending)
+                    progressed = True
+                except Exception as error:
+                    log_event("agent.generic_restart.pending", conversation_id=pending["conversation_id"],
+                        run_id=pending["run_id"], error_type=type(error).__name__)
             for pending in self.store.pending_stops():
                 cid, run_id = pending["conversation_id"], pending["run_id"]
                 self._signal_run(cid, run_id)
@@ -449,7 +573,19 @@ class AgentConversationService:
                 return False
             raise
 
-    def _execute_command(self, conversation_id, label, command, *, message_id=None):
+    def _execute_command(self, conversation_id, label, command, *, message_id=None, generic_message_ids=None):
+        # A first message may already have been read while a second message
+        # uploads logs. Serialize only the short Case creation commit against
+        # message acceptance; never hold this lock during INTAKE or diagnosis.
+        with self._message_lock(conversation_id) if isinstance(command, CreateCase) else nullcontext():
+            if isinstance(command, CreateCase):
+                latest = self.store.get_conversation(conversation_id)
+                expects_logs = any(item.attachment_ids for item in latest.messages if item.status != "UNUSED")
+                command = command.model_copy(update={"initial_log_archive_expected": expects_logs})
+            return self._execute_frozen_command(conversation_id, label, command, message_id=message_id,
+                generic_message_ids=generic_message_ids)
+
+    def _execute_frozen_command(self, conversation_id, label, command, *, message_id=None, generic_message_ids=None):
         """Freeze the full command before dispatch, including its initial revision."""
         previous_phase = self._phase
         self._phase = {CreateCase: "CREATE_CASE", PrepareAttachment: "PREPARE_ATTACHMENT",
@@ -467,8 +603,10 @@ class AgentConversationService:
             payload = existing["payload"]
             command = _COMMANDS[payload["operation"]].model_validate(payload["command"])
         else:
-            self.store.record_dispatch(conversation_id, dispatch_id,
-                {"operation": type(command).__name__, "command": command.model_dump(mode="json")})
+            payload = {"operation": type(command).__name__, "command": command.model_dump(mode="json")}
+            if generic_message_ids is not None:
+                payload["generic_message_ids"] = generic_message_ids
+            self.store.record_dispatch(conversation_id, dispatch_id, payload)
         if message_id is not None:
             self.store.begin_adoption(conversation_id, message_id, dispatch_id)
         try:
@@ -525,6 +663,8 @@ class AgentConversationService:
                 raise
             if case_view.status.value not in {"WAITING_INPUT", "WAITING_ATTACHMENT"}:
                 return False
+            if self._generic_waiting_job(case_view) is not None:
+                return self._advance_generic_supplement(conversation_id)
         pending = [item for item in view.messages if item.status in {"QUEUED", "PROCESSING"}]
         covered = set(intake_state["covered_message_ids"])
         if not pending:
@@ -567,6 +707,7 @@ class AgentConversationService:
             self._execute_command(conversation_id, "create", CreateCase(
                 idempotency_key=create_key,
                 raw_problem_text=message.text, problem_spec=spec,
+                initial_log_archive_expected=bool(selected_attachment_ids),
                 initial_user_facts=[], wait_seconds=0,
             ), message_id=message.message_id)
             return True
@@ -642,6 +783,61 @@ class AgentConversationService:
             attachment_notice=attachment_notice)
         return True
 
+    @staticmethod
+    def _generic_message_selection(view):
+        messages = [item for item in view.messages if item.status != "UNUSED"]
+        selected = next((item.attachment_ids for item in reversed(messages) if item.attachment_ids), [])
+        return messages, selected
+
+    def _advance_generic_supplement(self, conversation_id):
+        """Import outside the input lock, then freeze the latest accepted batch."""
+        run_id = self.store.get_run(conversation_id)["run_id"]
+        while True:
+            self._check_run()
+            with self._message_lock(conversation_id):
+                view = self.store.get_conversation(conversation_id)
+                case_view = self.application.get_case(view.case_id).case_view
+                if case_view.status.value not in {"WAITING_INPUT", "WAITING_ATTACHMENT"}:
+                    return False
+                messages, selected = self._generic_message_selection(view)
+                _, attachment_ids, notice = self._attachment_selection(view, case_view, selected, generic=True)
+                if not attachment_ids:
+                    for item in messages:
+                        if item.status in {"QUEUED", "PROCESSING"}:
+                            self.store.set_message_status(conversation_id, item.message_id, "APPLIED")
+                    self.store.finish_intake(conversation_id, [item.message_id for item in messages], attachment_notice=notice)
+                    return True
+            self._phase = "IMPORT_ATTACHMENT"
+            targets = [self.uploads.import_into_case(conversation_id, case_view.case_id, item, self._execute_command,
+                run_id=run_id, check_cancelled=self._check_run) for item in attachment_ids]
+            with self._message_lock(conversation_id):
+                self._check_run()
+                latest = self.store.get_conversation(conversation_id)
+                messages, current_selection = self._generic_message_selection(latest)
+                if current_selection != selected:
+                    # An imported but superseded archive remains audited; it
+                    # must never start a model or replace the newer selection.
+                    continue
+                case_view = self.application.get_case(latest.case_id).case_view
+                if case_view.status.value not in {"WAITING_INPUT", "WAITING_ATTACHMENT"}:
+                    return False
+                adopted = set(self.store.get_run(conversation_id).get("generic_adopted_message_ids", []))
+                supplement_text = "\n\n".join(item.text for item in messages if item.text.strip()
+                    and item.message_id not in adopted and item.text != case_view.raw_problem_text)
+                for item in messages:
+                    if item.status == "QUEUED":
+                        self.store.set_message_status(conversation_id, item.message_id, "PROCESSING")
+                message_ids = [item.message_id for item in messages]
+                label = "message-" + message_ids[-1]
+                self._execute_command(conversation_id, label, SubmitSupplement(
+                    idempotency_key="agent-supplement-" + run_id + "-" + label,
+                    case_id=case_view.case_id, expected_case_revision=case_view.case_revision,
+                    inputs={}, attachment_ids=targets, wait_seconds=0,
+                    generic_supplement_text=supplement_text), message_id=message_ids[-1],
+                    generic_message_ids=message_ids)
+                self.store.finish_intake(conversation_id, message_ids, attachment_notice=None)
+                return True
+
     def _intake_input(self, view, messages, draft, case_view, attachments):
         sources = [IntakeMessage(message_id=item.message_id, role="USER", text=item.text) for item in messages]
         if view.current_questions:
@@ -668,7 +864,7 @@ class AgentConversationService:
             frozen_problem_spec=spec, frozen_user_facts=frozen_facts,
             frozen_input_requirements=frozen_requirements)
 
-    def _attachment_selection(self, view, case_view, selected_ids):
+    def _attachment_selection(self, view, case_view, selected_ids, *, generic=False):
         requirements = [item for item in case_view.pending_requirements
             if item.status.value == "OPEN" and item.kind.value == "ATTACHMENT"
             and item.supplement_policy.value == "MISSING_ONLY"]
@@ -677,7 +873,7 @@ class AgentConversationService:
         requirement = requirements[0]
         constraints = requirements[0].constraints
         selected = set(selected_ids)
-        used = {key for item in case_view.pending_requirements if item.kind.value == "ATTACHMENT"
+        used = set() if generic else {key for item in case_view.pending_requirements if item.kind.value == "ATTACHMENT"
             and item.status.value == "FULFILLED" for key in item.fulfilled_by_refs}
         records = [item for item in view.attachments if item.attachment_id in selected
             and item.status in {"READY", "IMPORTED"} and item.case_attachment_id not in used]
@@ -695,14 +891,15 @@ class AgentConversationService:
             return attachments, [], {"requirement_id": requirement.requirement_id, "message": notice}
         return attachments, [item.attachment_id for item in records], None
 
-    def _supplement(self, conversation_id, case_view, inputs, attachment_ids, label, *, message_id=None):
+    def _supplement(self, conversation_id, case_view, inputs, attachment_ids, label, *, message_id=None,
+                    generic_supplement_text=""):
         self._check_run()
         run_id = self.store.get_run(conversation_id)["run_id"]
         self._phase = "IMPORT_ATTACHMENT"
         targets = [self.uploads.import_into_case(conversation_id, case_view.case_id, item, self._execute_command,
             run_id=run_id, check_cancelled=self._check_run)
             for item in attachment_ids]
-        if not inputs and not targets:
+        if not inputs and not targets and not generic_supplement_text:
             self._phase = "SUBMIT_SUPPLEMENT"
             raise AgentStoreError("AGENT_NO_MATCHING_INPUT", "本次内容不符合当前补充要求。", 409)
         self._phase = "CASE_QUERY"
@@ -711,4 +908,5 @@ class AgentConversationService:
             idempotency_key="agent-supplement-" + run_id + "-" + label,
             case_id=latest.case_id, expected_case_revision=latest.case_revision,
             inputs=inputs, attachment_ids=targets, wait_seconds=0,
+            generic_supplement_text=generic_supplement_text,
         ), message_id=message_id)

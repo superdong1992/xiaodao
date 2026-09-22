@@ -190,6 +190,9 @@ COORDINATOR_PLAN_ERROR_CODES_BY_TRIGGER: Mapping[
         TriggerType.CANCEL_CASE: frozenset(
             {ErrorCode.INVALID_CASE_STATE, ErrorCode.VALIDATION_ERROR}
         ),
+        TriggerType.RESTART_GENERIC_DIAGNOSIS: frozenset(
+            {ErrorCode.INVALID_CASE_STATE, ErrorCode.VALIDATION_ERROR}
+        ),
         TriggerType.RESUME_INTERRUPTED: frozenset(
             {
                 ErrorCode.INVALID_CASE_STATE,

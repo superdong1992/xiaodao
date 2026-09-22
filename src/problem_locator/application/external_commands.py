@@ -37,6 +37,7 @@ from problem_locator.contracts import (
     Coordinator,
     CreateCase,
     DiagnosisItem,
+    DiagnosisMode,
     DiagnosisState,
     DiagnosisStateDelta,
     Dispatcher,
@@ -49,12 +50,15 @@ from problem_locator.contracts import (
     JobType,
     MAX_ATTACHMENT_BYTES,
     MAX_CASE_RESOURCE_BYTES,
+    MarkInitialLogArchiveExpected,
     PrepareAttachment,
     PublicationCommitGuard,
     RequirementKind,
     RequirementStatus,
     ResourceStore,
     ResumeCase,
+    RestartGenericDiagnosis,
+    RestartGenericDiagnosisTriggerPayload,
     ResumeInterruptedTriggerPayload,
     RuntimeBindings,
     StateChangeNotifier,
@@ -102,7 +106,7 @@ from .runtime_bindings import (
 
 
 ExternalNonUploadCommand = (
-    CreateCase | PrepareAttachment | SubmitSupplement | ResumeCase | CancelCase
+    CreateCase | PrepareAttachment | SubmitSupplement | ResumeCase | CancelCase | RestartGenericDiagnosis | MarkInitialLogArchiveExpected
 )
 
 _MAX_CASE_ATTACHMENTS = 20
@@ -251,7 +255,7 @@ class ExternalCommandHandler:
         self._operational = operational_state
 
     def execute(self, command: ExternalNonUploadCommand) -> ApplicationResponse:
-        if self._operational is not None and isinstance(command, (CreateCase, SubmitSupplement, ResumeCase)):
+        if self._operational is not None and isinstance(command, (CreateCase, SubmitSupplement, ResumeCase, RestartGenericDiagnosis, MarkInitialLogArchiveExpected)):
             self._operational.require_accepting()
         try:
             if isinstance(command, CreateCase):
@@ -264,6 +268,10 @@ class ExternalCommandHandler:
                 return self._resume_case(command)
             if isinstance(command, CancelCase):
                 return self._cancel_case(command)
+            if isinstance(command, RestartGenericDiagnosis):
+                return self._restart_generic_diagnosis(command)
+            if isinstance(command, MarkInitialLogArchiveExpected):
+                return self._mark_initial_log_archive_expected(command)
         except ApplicationPortError:
             raise
         except (TypeError, ValueError):
@@ -648,17 +656,29 @@ class ExternalCommandHandler:
                 for name in sorted(command.inputs)
             ]
             selected_skill = aggregate.case.selected_skill_ref
-            if selected_skill is None:
+            waiting_source = build_case_snapshot(snapshot, command.case_id).waiting_source_job
+            generic = waiting_source is not None and waiting_source.diagnosis_mode is DiagnosisMode.GENERIC
+            if selected_skill is None and not generic:
                 _raise_port_error(
                     ErrorCode.INVALID_CASE_STATE,
                     "The waiting Case has no selected diagnosis skill.",
                 )
             if fixed_diagnose_bindings is None:
-                fixed_diagnose_bindings = _validated_catalog_bindings(
-                    JobType.DIAGNOSE,
-                    self._asset_catalog.diagnose_bindings(selected_skill),
-                    expected_skill_ref=selected_skill,
-                )
+                if generic:
+                    assert waiting_source is not None
+                    if command.inputs:
+                        _raise_port_error(ErrorCode.VALIDATION_ERROR, "通用定位无需提取参数，请直接补充日志和问题说明。")
+                    if not self._asset_catalog.check(fixed_asset_refs(waiting_source)).available:
+                        _raise_port_error(ErrorCode.ASSET_VERSION_UNAVAILABLE, "本次诊断固定的配置已不可用，请重新发起。")
+                    fixed_diagnose_bindings = runtime_bindings_from_job(waiting_source)
+                else:
+                    if command.generic_supplement_text:
+                        _raise_port_error(ErrorCode.VALIDATION_ERROR, "该补充说明仅适用于通用定位。")
+                    fixed_diagnose_bindings = _validated_catalog_bindings(
+                        JobType.DIAGNOSE,
+                        self._asset_catalog.diagnose_bindings(selected_skill),
+                        expected_skill_ref=selected_skill,
+                    )
             trigger = ValidatedTrigger(
                 trigger_id=trigger_id,
                 trigger_type=TriggerType.SUBMIT_SUPPLEMENT,
@@ -668,6 +688,7 @@ class ExternalCommandHandler:
                 payload=SubmitSupplementTriggerPayload(
                     user_facts=user_facts,
                     ready_attachment_ids=list(command.attachment_ids),
+                    generic_supplement_text=command.generic_supplement_text,
                     stable_target_changed=self._stable_target_detector(
                         aggregate.case,
                         command.inputs,
@@ -876,6 +897,113 @@ class ExternalCommandHandler:
             )
         raise AssertionError("three-attempt retry loop exhausted unexpectedly")
 
+    def _mark_initial_log_archive_expected(
+        self, command: MarkInitialLogArchiveExpected,
+    ) -> ApplicationResponse:
+        occurred_at = None
+        for attempt in range(3):
+            snapshot = self._repository.read_snapshot(command.case_id,
+                request_key=f"MarkInitialLogArchiveExpected:{command.idempotency_key}")
+            replay = self._idempotency_result(snapshot, command)
+            if replay is not None:
+                return self._respond(snapshot, replay, 0)
+            aggregate = self._require_case(snapshot, command.case_id)
+            source = aggregate.jobs.get(command.source_job_id)
+            if (aggregate.case.status is not CaseStatus.RUNNING
+                or aggregate.case.active_job_id != command.source_job_id
+                or source is None or source.job_type is not JobType.ROUTE
+                or source.status not in {JobStatus.PENDING, JobStatus.RUNNING}
+                or command.expected_case_revision > aggregate.case.case_revision):
+                _raise_port_error(ErrorCode.INVALID_CASE_STATE, "路由已结束或发生变化，请刷新后重新提交日志。")
+            if occurred_at is None:
+                occurred_at = self._clock.now()
+            target_case = Case.model_validate({**aggregate.case.model_dump(mode="python"),
+                "initial_log_archive_expected": True,
+                "case_revision": aggregate.case.case_revision + 1,
+                "updated_at": occurred_at})
+            receipt = BusinessReceipt(operation="MarkInitialLogArchiveExpected",
+                primary_resource_id=command.case_id, case_id=command.case_id,
+                case_revision=target_case.case_revision, job_id=source.job_id,
+                status=target_case.status.value)
+            record = make_idempotency_record(command,
+                decide_idempotency(snapshot, command).request_hash, receipt,
+                case_id=command.case_id, created_at=occurred_at)
+            mutation = build_state_mutation(upsert_case=target_case,
+                insert_idempotency_records=[record])
+            try:
+                commit = self._commit(snapshot.generation,
+                    aggregate.case.case_revision, mutation)
+            except ApplicationPortError as error:
+                if self._retry_revision_conflict(error, attempt):
+                    continue
+                raise
+            return self._after_commit(_CommittedCommand(receipt=receipt,
+                generation=commit.generation, occurred_at=occurred_at,
+                event="case.initial_log_archive.expected", request_id=command.idempotency_key,
+                committed_case=target_case, previous_case=aggregate.case,
+                data={"operation": receipt.operation, "source_job_id": source.job_id}),
+                wait_seconds=0)
+        raise AssertionError("three-attempt retry loop exhausted unexpectedly")
+
+    def _restart_generic_diagnosis(self, command: RestartGenericDiagnosis) -> ApplicationResponse:
+        occurred_at = None
+        job_id = trigger_id = None
+        bindings = None
+        for attempt in range(3):
+            snapshot = self._repository.read_snapshot(command.case_id,
+                request_key=f"RestartGenericDiagnosis:{command.idempotency_key}")
+            replay = self._idempotency_result(snapshot, command)
+            if replay is not None:
+                cancel_pending = False
+                try:
+                    self._dispatcher.cancel(command.source_job_id)
+                except Exception:
+                    cancel_pending = True
+                if cancel_pending:
+                    return self._saved_response_without_projection(replay, dispatch_pending=True)
+                response = self._respond(snapshot, replay, 0)
+                return response.model_copy(update={"dispatch_pending": response.dispatch_pending or cancel_pending})
+            aggregate = self._require_case(snapshot, command.case_id)
+            source = aggregate.jobs.get(command.source_job_id)
+            if (aggregate.case.status is not CaseStatus.RUNNING
+                or aggregate.case.active_job_id != command.source_job_id
+                or source is None or source.diagnosis_mode is not DiagnosisMode.GENERIC
+                or source.status not in {JobStatus.PENDING, JobStatus.RUNNING}
+                or command.expected_case_revision > aggregate.case.case_revision):
+                _raise_port_error(ErrorCode.INVALID_CASE_STATE, "本次分析已结束或发生变化，请刷新后重新提交。")
+            if occurred_at is None:
+                occurred_at = self._clock.now()
+                trigger_id, job_id = self._ids.new("trigger"), self._ids.new("job")
+                bindings = runtime_bindings_from_job(source)
+                if bindings.logparse_tool_ref is None:
+                    logs = _validated_catalog_bindings(JobType.DIAGNOSE,
+                        self._asset_catalog.generic_diagnose_bindings(with_logs=True), expected_skill_ref=None)
+                    bindings = RuntimeBindings.model_validate({**bindings.model_dump(mode="python"),
+                        "logparse_tool_ref": logs.logparse_tool_ref, "logparse_product": logs.logparse_product})
+                if bindings.logparse_tool_ref is None:
+                    _raise_port_error(ErrorCode.CONFIG_INVALID, "尚未配置通用定位的日志解析服务。")
+                refs = [*fixed_asset_refs(source), bindings.logparse_tool_ref]
+                if not self._asset_catalog.check(refs).available:
+                    _raise_port_error(ErrorCode.ASSET_VERSION_UNAVAILABLE, "本次诊断固定的配置已不可用，请重新发起。")
+            trigger = ValidatedTrigger(trigger_id=trigger_id, trigger_type=TriggerType.RESTART_GENERIC_DIAGNOSIS,
+                case_id=command.case_id, expected_case_revision=aggregate.case.case_revision,
+                idempotency_key=command.idempotency_key,
+                payload=RestartGenericDiagnosisTriggerPayload(source_job_id=command.source_job_id,
+                    supplement_text=command.supplement_text),
+                continuation_resources=empty_continuation_resources(),
+                runtime_bindings_by_job_type={JobType.DIAGNOSE: bindings}, occurred_at=occurred_at)
+            plan = self._plan(build_case_snapshot(snapshot, command.case_id), trigger)
+            self._validate_external_plan(plan, trigger.runtime_bindings_by_job_type)
+            try:
+                committed = self._commit_case_plan(snapshot, command, plan,
+                    occurred_at=occurred_at, next_job_id=job_id, cancel_job_id=command.source_job_id)
+            except ApplicationPortError as error:
+                if self._retry_revision_conflict(error, attempt):
+                    continue
+                raise
+            return self._after_commit(committed, wait_seconds=0)
+        raise AssertionError("three-attempt retry loop exhausted unexpectedly")
+
     def _cancel_case(self, command: CancelCase) -> ApplicationResponse:
         occurred_at: str | None = None
         trigger_id: str | None = None
@@ -940,7 +1068,7 @@ class ExternalCommandHandler:
     def _commit_case_plan(
         self,
         snapshot: StateFile,
-        command: SubmitSupplement | ResumeCase | CancelCase,
+        command: SubmitSupplement | ResumeCase | CancelCase | RestartGenericDiagnosis,
         plan: TransitionPlan,
         *,
         occurred_at: str,
@@ -1030,6 +1158,7 @@ class ExternalCommandHandler:
             SubmitSupplement: "case.supplement.applied",
             ResumeCase: "case.resumed",
             CancelCase: "case.cancelled",
+            RestartGenericDiagnosis: "case.generic.restarted",
         }[type(command)]
         return _CommittedCommand(
             receipt=receipt,
@@ -1309,6 +1438,7 @@ class ExternalCommandHandler:
             status=CaseStatus.NEW,
             case_revision=1,
             raw_problem_text=payload.raw_problem_text,
+            initial_log_archive_expected=payload.initial_log_archive_expected,
             diagnosis_state=diagnosis_state,
             active_job_id=None,
             selected_skill_ref=None,
@@ -1677,11 +1807,29 @@ class ExternalCommandHandler:
             pass
 
         dispatch_pending = False
-        if committed.submit_job is not None:
+        if committed.cancel_job is not None:
+            cancel_job = committed.cancel_job
+            try:
+                cancel = self._dispatcher.cancel(cancel_job.job_id)
+                record_journey_event(
+                    "job.cancel.signalled", timestamp=committed.occurred_at,
+                    request_id=committed.request_id, case_id=cancel_job.case_id,
+                    job_id=cancel_job.job_id, job_type=cancel_job.job_type,
+                    data={"signalled": cancel.signalled},
+                )
+            except Exception as exc:
+                dispatch_pending = committed.receipt.operation == "RestartGenericDiagnosis"
+                record_journey_event(
+                    "job.cancel.signal_failed", level=logging.WARNING,
+                    timestamp=committed.occurred_at, request_id=committed.request_id,
+                    case_id=cancel_job.case_id, job_id=cancel_job.job_id,
+                    job_type=cancel_job.job_type, data={"exception_type": type(exc).__name__},
+                )
+        if committed.submit_job is not None and not dispatch_pending:
             submit_job = committed.submit_job
             try:
                 dispatch = self._dispatcher.submit(submit_job.job_id)
-                dispatch_pending = not (dispatch.accepted or dispatch.duplicate)
+                dispatch_pending = dispatch_pending or not (dispatch.accepted or dispatch.duplicate)
                 record_journey_event(
                     "job.queued" if dispatch.accepted else "job.queue.duplicate",
                     timestamp=committed.occurred_at,
@@ -1704,30 +1852,6 @@ class ExternalCommandHandler:
                     case_id=submit_job.case_id,
                     job_id=submit_job.job_id,
                     job_type=submit_job.job_type,
-                    data={"exception_type": type(exc).__name__},
-                )
-        if committed.cancel_job is not None:
-            cancel_job = committed.cancel_job
-            try:
-                cancel = self._dispatcher.cancel(cancel_job.job_id)
-                record_journey_event(
-                    "job.cancel.signalled",
-                    timestamp=committed.occurred_at,
-                    request_id=committed.request_id,
-                    case_id=cancel_job.case_id,
-                    job_id=cancel_job.job_id,
-                    job_type=cancel_job.job_type,
-                    data={"signalled": cancel.signalled},
-                )
-            except Exception as exc:
-                record_journey_event(
-                    "job.cancel.signal_failed",
-                    level=logging.WARNING,
-                    timestamp=committed.occurred_at,
-                    request_id=committed.request_id,
-                    case_id=cancel_job.case_id,
-                    job_id=cancel_job.job_id,
-                    job_type=cancel_job.job_type,
                     data={"exception_type": type(exc).__name__},
                 )
         try:
@@ -1768,7 +1892,8 @@ class ExternalCommandHandler:
                     self._dispatcher.cancel(receipt.job_id)
                 except Exception:
                     pass
-            elif job is not None and job.status is JobStatus.PENDING:
+            elif (receipt.operation != "MarkInitialLogArchiveExpected"
+                  and job is not None and job.status is JobStatus.PENDING):
                 try:
                     dispatch = self._dispatcher.submit(receipt.job_id)
                     dispatch_pending = not (dispatch.accepted or dispatch.duplicate)

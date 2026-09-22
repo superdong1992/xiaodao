@@ -79,6 +79,9 @@ EXPECTED_ERRORS_BY_TRIGGER = {
     TriggerType.CANCEL_CASE: frozenset(
         {ErrorCode.INVALID_CASE_STATE, ErrorCode.VALIDATION_ERROR}
     ),
+    TriggerType.RESTART_GENERIC_DIAGNOSIS: frozenset(
+        {ErrorCode.INVALID_CASE_STATE, ErrorCode.VALIDATION_ERROR}
+    ),
     TriggerType.RESUME_INTERRUPTED: frozenset(
         {
             ErrorCode.INVALID_CASE_STATE,

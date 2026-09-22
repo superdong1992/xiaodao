@@ -203,10 +203,21 @@ def build_case_snapshot(state: StateFile, case_id: str) -> CaseSnapshot:
                 key=lambda job: (job.finished_at or job.created_at, job.created_at, job.job_id),
             )
 
+    waiting_source_ids = {
+        item.requested_by_job_id
+        for item in aggregate.case.diagnosis_state.pending_requirements
+        if item.status is RequirementStatus.OPEN
+    }
+    waiting_source = (
+        aggregate.jobs.get(next(iter(waiting_source_ids)))
+        if aggregate.case.status in {CaseStatus.WAITING_INPUT, CaseStatus.WAITING_ATTACHMENT}
+        and len(waiting_source_ids) == 1 else None
+    )
     return CaseSnapshot(
         case=aggregate.case,
         active_job=_active_job(aggregate),
         resume_source_job=resume_source,
+        waiting_source_job=waiting_source,
         replacement_job_ids_by_source={
             source_id: replacements[source_id] for source_id in sorted(replacements)
         },

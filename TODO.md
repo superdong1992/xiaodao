@@ -35,6 +35,7 @@
 
 ## P0：Generic V2 最终集成与生产验收
 
+- **2026-09-22 通用日志接入上线验收**：部署前核对 Linux 实际 Logparse 的解析目录、日志格式及 `GENERIC_LOGPARSE_PRODUCT`。在局域网通用 Skill 中应用只读清单与补充描述适配，用“问题中没有、只在日志里出现”的线索验证实际文件读取、关键摘录与报告结论，并覆盖大日志按需读取。先审阅对应真实模型入口 `--plan-only` 的身份、调用数、token/cost 预算及 blocker，再执行获准的验收；仓库确定性测试或输出协议握手不替代真实日志分析。实现的 Dev 验证单独记录于 PL-FIX-071，不将其登记为生产验收完成。
 - C 变更集提供 V1 兼容、完整 Markdown V2、服务端 `GENERIC_REPORT` 产物和局域网适配 Skill；最终发布前仍须与其他并行变更合一，并由主控对合并后的同一源码快照执行 fresh `release.full`。不得复用 C 的 Dev verdict 冒充 Release。
 - 局域网管理员须在私有通用定位 Skill 内应用最小 framework-mode 适配，并在同一 Linux 服务账号、Agent、settings、模型和工具身份下运行本地 A/B 验收。收据只保留 Skill tree 摘要与显式版本、输入/结果的 size/hash/状态、两次相同的运行身份 manifest 摘要和本地人工语义 verdict，不保存或上传私有 Skill、报告正文、prompt、路径或执行输出；不得把两个随机模型调用的报告 hash 相等作为默认门槛。
 - 只有合并后的 Release verdict 与局域网生产验收都完成后，才在 `FIXED_ISSUES.md` 登记本问题的最终修复记录与权威 verdict；本并行任务不写“已修复”或占位 verdict。

@@ -453,8 +453,6 @@ def _validate_role_bindings(
         if (
             generic_skill_name is None
             or skill_ref is not None
-            or logparse_tool_ref is not None
-            or logparse_product is not None
         ):
             raise ValueError(
                 "GENERIC DIAGNOSE requires only a preinstalled generic Skill name"
@@ -1359,6 +1357,7 @@ class Case(ContractModel):
     case_revision: PositiveInt
     archive_status: ArchiveStatus = "NOT_REQUIRED"
     raw_problem_text: NonEmptyText
+    initial_log_archive_expected: bool = Field(default=False, exclude_if=lambda value: not value)
     diagnosis_state: DiagnosisState
     active_job_id: OpaqueId | None
     selected_skill_ref: VersionedRef | None
@@ -1501,6 +1500,8 @@ class Job(ContractModel):
     review_policy: ReviewPolicy | None = None
     generic_skill_name: SkillName | None
     generic_problem_text: NonEmptyText | None
+    generic_log_archive_expected: bool = Field(default=False, exclude_if=lambda value: not value)
+    generic_supplement_texts: list[NonEmptyText] = Field(default_factory=list, exclude_if=lambda value: not value)
     status: JobStatus
     goal: NonEmptyText
     base_state_revision: PositiveInt
@@ -1531,6 +1532,10 @@ class Job(ContractModel):
 
     @model_validator(mode="after")
     def validate_job(self) -> Job:
+        if self.diagnosis_mode is not DiagnosisMode.GENERIC and (
+            self.generic_log_archive_expected or self.generic_supplement_texts
+        ):
+            raise ValueError("generic log intent and supplement text require GENERIC mode")
         _validate_specialized_direct_bindings(self)
         generic = (
             self.job_type is JobType.DIAGNOSE
@@ -1571,14 +1576,15 @@ class Job(ContractModel):
                 if any(
                     (
                         self.evidence_refs,
-                        self.attachment_refs,
                         self.previous_outcome_refs,
                         self.artifact_refs,
                     )
                 ):
                     raise ValueError(
-                        "GENERIC DIAGNOSE forbids Evidence, Attachments, Artifacts, and history"
+                        "GENERIC DIAGNOSE forbids Evidence, Artifacts, and history"
                     )
+                if len(self.attachment_refs) > 1:
+                    raise ValueError("GENERIC DIAGNOSE accepts at most one log archive")
             else:
                 if self.generic_problem_text is not None:
                     raise ValueError("SPECIALIZED DIAGNOSE forbids generic problem text")
@@ -2283,6 +2289,12 @@ class ResolvedLogparsePlanInput(ContractModel):
         return self
 
 
+class ResolvedLogparseParseOnlyPlanInput(ContractModel):
+    schema_version: Literal[1]
+    operation: Literal["parse-only"]
+    attachment_id: OpaqueId
+
+
 class ReviewCausalAssertion(ContractModel):
     rule_id: NonEmptyText
     statement: NonEmptyText
@@ -2404,7 +2416,7 @@ class WorkspaceInputManifest(ContractModel):
     logparse_tool_ref: VersionedRef | None
     logparse_product: NonEmptyText | None
     entries: list[WorkspaceInputEntry]
-    resolved_logparse_plan: ResolvedLogparsePlanInput | None = None
+    resolved_logparse_plan: ResolvedLogparsePlanInput | ResolvedLogparseParseOnlyPlanInput | None = None
     review_subject: ReviewSubjectV2 | None = None
     methods_reviewer_input: MethodsReviewerInputV2 | None = Field(
         default=None,
@@ -2527,9 +2539,13 @@ def validate_workspace_manifest_for_job(
         raise ValueError("Methods V2 REVIEW Job requires Methods reviewer input")
     if manifest.resolved_logparse_plan is not None:
         plan = manifest.resolved_logparse_plan
+        if isinstance(plan, ResolvedLogparseParseOnlyPlanInput) and job.diagnosis_mode is not DiagnosisMode.GENERIC:
+            raise ValueError("parse-only plans require a GENERIC Job")
+        if job.diagnosis_mode is DiagnosisMode.GENERIC and not isinstance(plan, ResolvedLogparseParseOnlyPlanInput):
+            raise ValueError("GENERIC Jobs require parse-only log preparation")
         if plan.attachment_id is not None and plan.attachment_id not in job.attachment_refs:
             raise ValueError("resolved logparse attachment must belong to its Job")
-        if plan.artifact_id is not None and plan.artifact_id not in job.artifact_refs:
+        if isinstance(plan, ResolvedLogparsePlanInput) and plan.artifact_id is not None and plan.artifact_id not in job.artifact_refs:
             raise ValueError("resolved logparse artifact must belong to its Job")
     return manifest
 
@@ -4294,6 +4310,7 @@ class CaseSnapshot(ContractModel):
     case: Case
     active_job: Job | None
     resume_source_job: Job | None
+    waiting_source_job: Job | None = Field(default=None, exclude_if=lambda value: value is None)
     replacement_job_ids_by_source: dict[OpaqueId, OpaqueId]
 
     @model_validator(mode="after")
@@ -4305,6 +4322,13 @@ class CaseSnapshot(ContractModel):
             raise ValueError("active_job must resolve case.active_job_id")
         if self.active_job is not None and self.active_job.case_id != self.case.case_id:
             raise ValueError("active_job belongs to a different case")
+        if self.waiting_source_job is not None:
+            open_sources = {item.requested_by_job_id for item in self.case.diagnosis_state.pending_requirements
+                if item.status is RequirementStatus.OPEN}
+            if (self.case.status not in {CaseStatus.WAITING_INPUT, CaseStatus.WAITING_ATTACHMENT}
+                or self.waiting_source_job.case_id != self.case.case_id
+                or open_sources != {self.waiting_source_job.job_id}):
+                raise ValueError("waiting_source_job must match the waiting Case requirements")
         if self.case.status is CaseStatus.REVIEWING:
             active = self.active_job
             if active is None or active.job_type is not JobType.REVIEW:
@@ -4426,6 +4450,8 @@ class JobSpec(ContractModel):
     review_policy: ReviewPolicy | None = None
     generic_skill_name: SkillName | None
     generic_problem_text: NonEmptyText | None
+    generic_log_archive_expected: bool = Field(default=False, exclude_if=lambda value: not value)
+    generic_supplement_texts: list[NonEmptyText] = Field(default_factory=list, exclude_if=lambda value: not value)
     goal: NonEmptyText
     target_state_revision: PositiveInt
     evidence_bindings: list[PlannedResourceBinding]
@@ -4450,6 +4476,10 @@ class JobSpec(ContractModel):
 
     @model_validator(mode="after")
     def validate_spec(self) -> JobSpec:
+        if self.diagnosis_mode is not DiagnosisMode.GENERIC and (
+            self.generic_log_archive_expected or self.generic_supplement_texts
+        ):
+            raise ValueError("generic log intent and supplement text require GENERIC mode")
         _validate_specialized_direct_bindings(self)
         _unique(
             [
@@ -4486,14 +4516,15 @@ class JobSpec(ContractModel):
                 if any(
                     (
                         self.evidence_bindings,
-                        self.attachment_refs,
                         self.previous_outcome_refs,
                         self.artifact_bindings,
                     )
                 ):
                     raise ValueError(
-                        "GENERIC JobSpec forbids Evidence, Attachments, Artifacts, and history"
+                        "GENERIC JobSpec forbids Evidence, Artifacts, and history"
                     )
+                if len(self.attachment_refs) > 1:
+                    raise ValueError("GENERIC JobSpec accepts at most one log archive")
             else:
                 if self.generic_problem_text is not None:
                     raise ValueError("SPECIALIZED JobSpec forbids generic problem text")
@@ -4565,6 +4596,7 @@ class JobSpec(ContractModel):
 
 class CreateCaseTriggerPayload(ContractModel):
     raw_problem_text: NonEmptyText
+    initial_log_archive_expected: bool = Field(default=False, exclude_if=lambda value: not value)
     problem_spec: ProblemSpec
     initial_user_facts: Annotated[
         list[DiagnosisItem], Field(max_length=MAX_INITIAL_USER_FACTS)
@@ -4629,6 +4661,7 @@ class SubmitSupplementTriggerPayload(ContractModel):
     user_facts: list[DiagnosisItem]
     ready_attachment_ids: list[OpaqueId]
     stable_target_changed: Annotated[bool, Field(strict=True)]
+    generic_supplement_text: str = Field(default="", exclude_if=lambda value: not value)
 
     @model_validator(mode="after")
     def validate_payload(self) -> SubmitSupplementTriggerPayload:
@@ -4653,6 +4686,11 @@ class SubmitSupplementTriggerPayload(ContractModel):
 class CancelCaseTriggerPayload(ContractModel):
     reason: Literal["USER_CANCEL"]
     active_job_id: OpaqueId | None
+
+
+class RestartGenericDiagnosisTriggerPayload(ContractModel):
+    source_job_id: OpaqueId
+    supplement_text: str = Field(default="", exclude_if=lambda value: not value)
 
 
 class ResumeInterruptedTriggerPayload(ContractModel):
@@ -4708,6 +4746,7 @@ TriggerPayload: TypeAlias = (
     | ReviewOutcomeTriggerPayload
     | SubmitSupplementTriggerPayload
     | CancelCaseTriggerPayload
+    | RestartGenericDiagnosisTriggerPayload
     | ResumeInterruptedTriggerPayload
     | ExecutionFailedTriggerPayload
     | AssetUnavailableTriggerPayload
@@ -4736,6 +4775,7 @@ class ValidatedTrigger(ContractModel):
             TriggerType.REVIEW_OUTCOME: ReviewOutcomeTriggerPayload,
             TriggerType.SUBMIT_SUPPLEMENT: SubmitSupplementTriggerPayload,
             TriggerType.CANCEL_CASE: CancelCaseTriggerPayload,
+            TriggerType.RESTART_GENERIC_DIAGNOSIS: RestartGenericDiagnosisTriggerPayload,
             TriggerType.RESUME_INTERRUPTED: ResumeInterruptedTriggerPayload,
             TriggerType.EXECUTION_FAILED: ExecutionFailedTriggerPayload,
             TriggerType.ASSET_VERSION_UNAVAILABLE: AssetUnavailableTriggerPayload,
@@ -5336,6 +5376,11 @@ class CaseAggregate(ContractModel):
                 raise ValueError("Job attachments must resolve READY resources")
             if any(ref not in self.artifacts for ref in job.artifact_refs):
                 raise ValueError("Job contains a dangling Artifact reference")
+            if job.diagnosis_mode is DiagnosisMode.GENERIC and any(
+                self.attachments[ref].content_type not in {"application/gzip", "application/zip", "application/x-tar"}
+                for ref in job.attachment_refs
+            ):
+                raise ValueError("GENERIC Job attachments must be supported product log archives")
             if any(ref not in self.outcomes for ref in job.previous_outcome_refs):
                 raise ValueError("Job contains a dangling previous Outcome reference")
             if job.replacement_for_job_id is not None:
@@ -6258,6 +6303,7 @@ class CreateCase(ContractModel):
 
     idempotency_key: NonEmptyText
     raw_problem_text: NonEmptyText
+    initial_log_archive_expected: bool = Field(default=False, exclude_if=lambda value: not value)
     problem_spec: ProblemSpecInput
     initial_user_facts: Annotated[
         list[UserFactInput], Field(max_length=MAX_INITIAL_USER_FACTS)
@@ -6322,6 +6368,7 @@ class SubmitSupplement(ContractModel):
     expected_case_revision: PositiveInt
     inputs: dict[ContractName, NonEmptyText]
     attachment_ids: list[OpaqueId]
+    generic_supplement_text: str = Field(default="", exclude_if=lambda value: not value)
     wait_seconds: WaitSeconds
 
     @model_validator(mode="after")
@@ -6349,8 +6396,27 @@ class CancelCase(ContractModel):
     expected_case_revision: PositiveInt
 
 
+class RestartGenericDiagnosis(ContractModel):
+    model_config = ConfigDict(json_schema_extra={"hash_excluded_fields": []})
+
+    idempotency_key: NonEmptyText
+    case_id: OpaqueId
+    expected_case_revision: PositiveInt
+    source_job_id: OpaqueId
+    supplement_text: str = Field(default="", exclude_if=lambda value: not value)
+
+
+class MarkInitialLogArchiveExpected(ContractModel):
+    model_config = ConfigDict(json_schema_extra={"hash_excluded_fields": []})
+
+    idempotency_key: NonEmptyText
+    case_id: OpaqueId
+    expected_case_revision: PositiveInt
+    source_job_id: OpaqueId
+
+
 ApplicationCommand: TypeAlias = (
-    CreateCase | PrepareAttachment | UploadAttachmentContent | SubmitSupplement | ResumeCase | CancelCase
+    CreateCase | PrepareAttachment | UploadAttachmentContent | SubmitSupplement | ResumeCase | CancelCase | RestartGenericDiagnosis | MarkInitialLogArchiveExpected
 )
 
 

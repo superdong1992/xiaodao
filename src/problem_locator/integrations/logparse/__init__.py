@@ -11,11 +11,13 @@ from .broker import (
     PinnedLogparseBrokerSession,
     build_logparse_runtime,
 )
-from .requests import Anchor, ParseTargetsRequest, TargetLogsRequest
+from .requests import Anchor, ParseOnlyRequest, ParseTargetsRequest, ResolvedParseOnlyPlan, TargetLogsRequest
 
 __all__ = [
     "Anchor",
     "ParseTargetsRequest",
+    "ParseOnlyRequest",
+    "ResolvedParseOnlyPlan",
     "PinnedLogparseBrokerFactory",
     "PinnedLogparseBrokerSession",
     "TargetLogsRequest",

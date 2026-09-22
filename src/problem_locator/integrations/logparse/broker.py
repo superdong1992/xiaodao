@@ -34,6 +34,7 @@ from problem_locator.contracts import (
     LogparseRunMetadata,
     ResolvedAsset,
     ResourceKind,
+    ResolvedLogparseParseOnlyPlanInput,
     WorkspaceInputManifest,
     canonical_json_bytes,
     parse_canonical_json_bytes,
@@ -48,6 +49,7 @@ from .fingerprint import (
 )
 from .outputs import (
     aggregate_target_results,
+    generic_parse_result,
     inspect_controlled_run,
     normalize_target_result,
 )
@@ -60,8 +62,10 @@ from .process import ProcessResult, SubprocessExecutor, terminate_process_tree
 from .requests import (
     Anchor,
     BrokerEnvelope,
+    ParseOnlyRequest,
     ParseTargetsRequest,
     ResolvedLogparsePlan,
+    ResolvedParseOnlyPlan,
     TargetLogsRequest,
 )
 from .workspace import (
@@ -79,6 +83,10 @@ _MAX_ENVELOPE_BYTES: Final = 3_000_000
 _MAX_REQUEST_BYTES: Final = 2_000_000
 _SAFE_CAPABILITY = re.compile(r"^[A-Za-z0-9_-]{8,512}$")
 ExecutorFactory = Callable[..., SubprocessExecutor]
+
+
+class _OutputInspectionCancelled(Exception):
+    """Return through the same cancellation path as the parser process."""
 
 
 def _product_argv(product: str) -> list[str]:
@@ -146,12 +154,18 @@ def _plain_workspace_root(value: Path) -> Path:
 
 def _resolved_plan_from_manifest(
     manifest: WorkspaceInputManifest,
-) -> ResolvedLogparsePlan:
+) -> ResolvedLogparsePlan | ResolvedParseOnlyPlan:
     """Convert the frozen public Workspace value into the broker-private plan."""
 
     plan = manifest.resolved_logparse_plan
     if plan is None:
         raise ValueError("logparse Workspace is missing its resolved plan")
+    if isinstance(plan, ResolvedLogparseParseOnlyPlanInput):
+        return ResolvedParseOnlyPlan(
+            schema_version=1,
+            operation="parse-only",
+            attachment_id=plan.attachment_id,
+        )
     return ResolvedLogparsePlan(
         schema_version=1,
         attachment_id=plan.attachment_id,
@@ -464,7 +478,7 @@ class PinnedLogparseBrokerSession:
         request_path: str,
         result_path: str,
     ) -> ExecutionFailure | None:
-        """Execute the Runtime-owned Methods preprocessing request directly."""
+        """Execute one Runtime-owned preprocessing request directly."""
 
         request_bytes = _read_exact_request(self._workspace_root, request_path)
         envelope = BrokerEnvelope(
@@ -597,6 +611,7 @@ class PinnedLogparseBrokerSession:
             proposal_key = validate_proposal_io_paths(
                 envelope.request_path,
                 envelope.result_path,
+                operation=envelope.operation,
             )
             request_bytes = base64.b64decode(
                 envelope.request_base64,
@@ -657,9 +672,10 @@ class PinnedLogparseBrokerSession:
         manifest: WorkspaceInputManifest,
     ) -> tuple[int, bytes]:
 
-        if operation == "parse-targets":
+        if operation in {"parse-targets", "parse-only"}:
             try:
-                request = parse_canonical_json_bytes(request_bytes, ParseTargetsRequest)
+                request_model = ParseOnlyRequest if operation == "parse-only" else ParseTargetsRequest
+                request = parse_canonical_json_bytes(request_bytes, request_model)
                 self._resolved_plan.validate_request(request)
             except ValueError:
                 failure = _tool_failure(ErrorCode.LOGPARSE_FAILED)
@@ -667,7 +683,7 @@ class PinnedLogparseBrokerSession:
             if proposal_key != request.artifact_proposal_key:
                 failure = _tool_failure(ErrorCode.LOGPARSE_FAILED)
                 return HTTPStatus.UNPROCESSABLE_ENTITY, canonical_json_bytes(failure)
-            status, result = self._parse_targets(request, request_bytes, manifest)
+            status, result = self._parse(request, request_bytes, manifest)
             self._record_operation(
                 operation,
                 request_bytes,
@@ -827,12 +843,13 @@ class PinnedLogparseBrokerSession:
             False,
         )
 
-    def _parse_targets(
+    def _parse(
         self,
-        request: ParseTargetsRequest,
+        request: ParseTargetsRequest | ParseOnlyRequest,
         request_bytes: bytes,
         manifest: WorkspaceInputManifest,
     ) -> tuple[int, bytes]:
+        operation = "parse-only" if isinstance(request, ParseOnlyRequest) else "parse-targets"
         with self._state_lock:
             already_accepted = self._accepted_parse_request_bytes is not None
         if already_accepted or has_logparse_run(manifest) or not _claim_area_is_empty(
@@ -930,7 +947,7 @@ class PinnedLogparseBrokerSession:
             )
         result, failure = self._run_process(
             argv,
-            operation="parse-targets",
+            operation=operation,
             phase="PARSE",
             ordinal=1,
         )
@@ -938,14 +955,35 @@ class PinnedLogparseBrokerSession:
             return HTTPStatus.SERVICE_UNAVAILABLE, canonical_json_bytes({})
         if failure is not None:
             return HTTPStatus.UNPROCESSABLE_ENTITY, canonical_json_bytes(failure)
+        def check_output_abort() -> None:
+            if self._stopping.is_set() or self._cancellation.is_cancelled():
+                raise _OutputInspectionCancelled
+
         try:
             run = inspect_controlled_run(
                 tree_root,
                 product=manifest.logparse_product,
+                check_abort=check_output_abort,
             )
+        except _OutputInspectionCancelled:
+            return HTTPStatus.SERVICE_UNAVAILABLE, canonical_json_bytes({})
         except ValueError:
             failure = _tool_failure(ErrorCode.LOGPARSE_OUTPUT_INVALID)
             return HTTPStatus.UNPROCESSABLE_ENTITY, canonical_json_bytes(failure)
+        if isinstance(request, ParseOnlyRequest):
+            try:
+                payload = generic_parse_result(
+                    run,
+                    source_attachment_id=attachment.entry.resource_id,
+                    source_attachment_sha256=attachment.entry.sha256,
+                    check_abort=check_output_abort,
+                )
+            except _OutputInspectionCancelled:
+                return HTTPStatus.SERVICE_UNAVAILABLE, canonical_json_bytes({})
+            except (OSError, ValueError):
+                failure = _tool_failure(ErrorCode.LOGPARSE_OUTPUT_INVALID)
+                return HTTPStatus.UNPROCESSABLE_ENTITY, canonical_json_bytes(failure)
+            return HTTPStatus.OK, payload
         payload, failure, cancelled = self._target_results(
             task_id=run.task_id,
             output_root=run.root,

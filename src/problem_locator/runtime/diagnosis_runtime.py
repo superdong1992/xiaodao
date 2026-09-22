@@ -60,6 +60,7 @@ from problem_locator.contracts import (
     RuntimeInfrastructureError,
     ResolvedLogparseAnchor,
     ResolvedLogparsePlanInput,
+    ResolvedLogparseParseOnlyPlanInput,
     StagedResourceRef,
     StateRepository,
     SupplementPolicy,
@@ -97,6 +98,7 @@ from problem_locator.diagnostics import log_event
 from problem_locator.integrations.logparse.requests import (
     Anchor,
     ParseTargetsRequest,
+    ParseOnlyRequest,
     TargetLogsRequest,
 )
 from problem_locator.journey import (
@@ -118,7 +120,10 @@ from .failures import RuntimeExecutionError, runtime_failure
 from .final_response import parse_route_response, parse_specialist_response, specialist_prompt
 from .generic_locator import GenericLocatorExecutor
 from .skill_direct import parse_skill_direct_response
-from .input_profile import expand_profile_requirements
+from .input_profile import expand_profile_requirements, load_builtin_input_profile
+from .generic_logs import freeze_generic_logs
+from problem_locator.integrations.logparse.outputs import validate_generic_parse_result
+from problem_locator.integrations.logparse.paths import resolve_workspace_path
 from .outcome_finalizer import (
     AgentOutcomeDraftSealWriteError,
     DRAFT_FINALIZATION_MARKER_RELATIVE_PATH,
@@ -1204,12 +1209,23 @@ class DiagnosisRuntime:
         )
         if job.diagnosis_mode is DiagnosisMode.GENERIC:
             aggregate = self._read_case(job)
+            if job.generic_log_archive_expected and not job.attachment_refs:
+                return self._publish_generic_preflight(job)
+            prepared_workspace = None
+            log_manifest_bytes = None
+            if job.attachment_refs:
+                prepared_workspace, log_manifest_bytes = self._prepare_generic_logs(
+                    job, aggregate, cancellation,
+                )
+                self._announce(job, "DIAGNOSING")
             execution = self._generic_locator_executor.execute(
                 job=job,
                 aggregate=aggregate,
                 assets=assets,
                 resource_store=self._resource_store,
                 cancellation=cancellation,
+                **({"prepared_workspace": prepared_workspace, "log_manifest_bytes": log_manifest_bytes}
+                   if prepared_workspace is not None else {}),
             )
             publishing = record_stage_started(
                 ExecutionStage.EXECUTION_RECORD,
@@ -3574,6 +3590,132 @@ class DiagnosisRuntime:
             repair_rejected=repair_record,
             cancellation=cancellation,
         )
+    def _publish_generic_preflight(self, job: Job) -> RuntimeExecutionReceipt:
+        """Hand off the selected web upload before any Generic model invocation."""
+        template = load_builtin_input_profile()["log_archive_requirement"]
+        requirement_id = self._id_generator.derive("pending_requirement", (job.job_id, "ATTACHMENT", "log_archive"))
+        requirement = PendingRequirement(
+            requirement_id=requirement_id, kind=RequirementKind.ATTACHMENT,
+            name="log_archive", prompt="正在准备本轮选择的日志归档。", required=True,
+            constraints=AttachmentRequirementConstraints.model_validate(template["constraints"]),
+            status=RequirementStatus.OPEN, requested_by_job_id=job.job_id,
+            fulfilled_by_refs=[], supplement_policy=SupplementPolicy.MISSING_ONLY,
+        )
+        outcome = JobOutcome(
+            outcome_id=self._id_generator.new("job_outcome"), job_id=job.job_id,
+            case_id=job.case_id, job_type=job.job_type, base_state_revision=job.base_state_revision,
+            result_type=OutcomeResultType.NEED_ATTACHMENT,
+            payload=DiagnosisOutcome(
+                findings=[], state_delta=DiagnosisStateDelta(
+                    problem_spec_patch=None, add_user_facts=[], proposed_facts=[],
+                    add_active_hypotheses=[], update_hypotheses=[], reject_hypotheses=[],
+                    add_open_questions=[], resolve_questions=[], add_pending_requirements=[requirement],
+                    fulfill_requirements=[], add_evidence_bindings=[],
+                ), requested_input=[], requested_attachments=[requirement_id],
+                candidate_conclusion_draft=None, recommended_next_step="导入并提交本轮选择的日志归档。",
+            ), consumed_evidence_refs=[], proposed_evidence=[], proposed_artifacts=[],
+            error=None, produced_at=self._clock.now(), decision_audit=None,
+        )
+        receipt = self._publisher.publish_success(job, outcome)
+        self._record_produced_outcome(receipt)
+        return receipt
+
+    def _prepare_generic_logs(
+        self, job: Job, aggregate: CaseAggregate, cancellation: CancellationSignal,
+    ) -> tuple[PreparedWorkspace, bytes]:
+        if self._logparse_broker_factory is None or job.logparse_product is None:
+            raise runtime_failure(stage=ExecutionStage.ASSET_RESOLUTION,
+                code=ErrorCode.ASSET_VERSION_UNAVAILABLE, message="通用定位的日志解析配置不可用。")
+        self._announce(job, "LOGPARSE")
+        plan = ResolvedLogparseParseOnlyPlanInput(
+            schema_version=1, operation="parse-only", attachment_id=job.attachment_refs[0],
+        )
+        preprocessing = self._workspace_manager.prepare(
+            job, aggregate, self._resource_store, resolved_logparse_plan=plan,
+            workspace_phase="logparse-preprocess",
+        )
+        request_bytes = canonical_json_bytes(ParseOnlyRequest(
+            schema_version=1, attachment_id=plan.attachment_id,
+            artifact_proposal_key="generic-preprocess",
+        ))
+        request_path, result_path = self._workspace_manager.write_logparse_preprocessing_request(
+            preprocessing, request_bytes=request_bytes, operation="parse-only",
+        )
+        limited = _DirectPreprocessingCancellation(source=cancellation, workspace=preprocessing,
+            limits=self._backend_test_limits or BackendExecutionLimits.from_resource_limits(job.resource_limits))
+        initial = limited.failure(force_workspace_scan=True)
+        if initial is not None:
+            raise RuntimeExecutionError(initial)
+        try:
+            session = self._logparse_broker_factory.open(job, preprocessing.root, preprocessing.manifest, limited)
+        except LogparseBrokerError as exc:
+            raise RuntimeExecutionError(exc.failure) from None
+        started = record_stage_started(ExecutionStage.TOOL_EXECUTE, data={"tool": "logparse", "operation": "parse-only"})
+        primary = None
+        try:
+            primary = session.execute_preprocessing("parse-only", request_path, result_path)
+        except RuntimeExecutionError as exc:
+            primary = exc.failure
+        except Exception:
+            primary = _broker_failure()
+        finally:
+            primary = limited.failure(force_workspace_scan=True) or primary
+            primary, accepted, audit_bytes = self._close_and_audit_broker(session, primary)
+        if audit_bytes is not None:
+            self._publish_audit_bytes(job, "logparse_broker_audit.json", audit_bytes)
+        self._publish_audit_bytes(job, "generic_logparse_request.json", request_bytes)
+        if primary is not None:
+            raise RuntimeExecutionError(primary)
+        try:
+            claim = self._workspace_manager.read_claim(preprocessing)
+            if claim is None or accepted != request_bytes or audit_bytes is None:
+                raise ValueError("generic parse claim is missing")
+            validate_logparse_claim_for_job(claim, job, preprocessing.manifest, accepted)
+            result_file = resolve_workspace_path(preprocessing.root, result_path, must_exist=True)
+            if result_file.stat().st_size > 2_000_000:
+                raise ValueError("generic log result exceeds its byte budget")
+            with result_file.open("rb") as stream:
+                result_bytes = stream.read(2_000_001)
+            audit = parse_canonical_json_bytes(audit_bytes)
+            expected = {"schema_version": 1, "job_id": job.job_id, "operations": [{
+                "operation": "parse-only", "request_sha256": bytes_sha256(request_bytes),
+                "request": parse_canonical_json_bytes(request_bytes), "http_status": 200,
+                "result_sha256": bytes_sha256(result_bytes), "result": parse_canonical_json_bytes(result_bytes),
+            }]}
+            if audit != expected:
+                raise ValueError("generic preprocessing audit differs from its exact result")
+            tree_root = resolve_workspace_path(preprocessing.root,
+                "output/proposals/generic-preprocess/tree", must_exist=True)
+            attachment = preprocessing.attachments[0]
+            def check_parse_validation_abort() -> None:
+                failure = limited.failure()
+                if failure is not None:
+                    raise RuntimeExecutionError(failure)
+
+            parsed = validate_generic_parse_result(result_bytes, controlled_root=tree_root,
+                product=job.logparse_product, source_attachment_id=attachment.attachment_id,
+                source_attachment_sha256=attachment.sha256, check_abort=check_parse_validation_abort)
+            workspace = self._workspace_manager.prepare_generic_main_metadata_only(
+                job, aggregate, resolved_logparse_plan=plan,
+            )
+            receipt_bytes = freeze_generic_logs(workspace, controlled_root=tree_root,
+                parsed=parsed, cancellation=limited)
+            limit_failure = limited.failure(force_workspace_scan=True)
+            if limit_failure is not None:
+                raise RuntimeExecutionError(limit_failure)
+        except RuntimeExecutionError:
+            limit_failure = limited.failure()
+            if limit_failure is not None:
+                raise RuntimeExecutionError(limit_failure) from None
+            raise
+        except (OSError, TypeError, ValueError):
+            raise runtime_failure(stage=ExecutionStage.TOOL_EXECUTE,
+                code=ErrorCode.LOGPARSE_OUTPUT_INVALID, message="日志解析结果或文件校验失败。") from None
+        self._publish_audit_bytes(job, "generic_logs.json", receipt_bytes)
+        record_stage_completed(ExecutionStage.TOOL_EXECUTE, started,
+            data={"tool": "logparse", "operation": "parse-only", "log_count": len(parsed["logs"])})
+        return workspace, receipt_bytes
+
     def _publish_methods_preflight(
         self,
         job: Job,
