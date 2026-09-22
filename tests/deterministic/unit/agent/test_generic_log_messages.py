@@ -261,8 +261,11 @@ def test_restart_payloads_follow_run_cleanup(generic_web, cleanup):
         store.request_stop(cid, "stop", run_id)
         store.finish_stop(cid, run_id)
         store.submit_message(cid, "another-run", "下一轮问题")
+        retention = HistoryRetentionService(
+            store.repository, store, quarantine=None, usage_guard=None, clock=None,
+        )
         with store.repository.database_transaction() as db:
-            assert HistoryRetentionService._prune_run(db, cid, run_id, "2999-01-01T00:00:00Z")
+            assert retention._prune_run(db, cid, run_id, "2999-01-01T00:00:00Z")
     with store.repository.database_read() as db:
         assert db.execute("SELECT count(*) FROM agent_generic_restarts WHERE run_id=?", (run_id,)).fetchone()[0] == 0
 

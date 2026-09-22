@@ -12,6 +12,8 @@
 
 网站后端负责用户登录、为同一用户生成稳定的 `owner_key`，并转发下载请求；Problem Locator 服务端检查会话是否属于该用户。部署方须限制哪些来源可以访问 xiaodao，浏览器不得直接指定会话所属用户。会话详情格式已升级为 v3，事件格式已升级为 v2，网站与服务端需一起升级。底层独立 Case 和七个 MCP 工具继续保留。
 
+通用定位可选开启“点赞 → 经验卡 → 后续诊断参考”闭环，默认关闭。网站负责赞踩按钮，小刀提供指定报告轮次的反馈接口和调用封装。接入、保留策略与验收要求见[通用定位经验库](docs/generic-feedback-memory.md)。
+
 ## Methods V1 专用定位报告
 
 本次预览版使用以下固定版本：
@@ -107,6 +109,7 @@ uv lock --check
 | `SKILL_DIR` | 是 | 无 | 由部署方维护的产品注册目录；每个子目录包含一个 `registration-template.json` 及对应的 Methods 包。须填写实际存在的目录的绝对路径；只使用通用定位时，目录可以为空。生产环境不接受 `TEST_ONLY` 注册，也不得使用 Agent 的个人 Skill 目录 |
 | `GENERIC_SKILL_NAME` | 是 | 无 | Agent 环境中预装的通用定位 Skill 名称；仅允许标准的小写字母和连字符命名格式。启动时不调用 Skill 检查是否已安装 |
 | `GENERIC_LOGPARSE_PRODUCT` | 否 | `default` | 通用定位解析日志时使用的 Logparse 产品标识；由部署方配置，用户无需填写时间、槽位或进程 |
+| `GENERIC_MEMORY_ENABLED` | 否 | `false` | 开启通用 V2 报告赞踩、后台经验提炼和召回；启用前完成实际 Skill 与脱敏验收 |
 | `LOGPARSE_REPO` | 是 | 无 | 由部署方维护的 Logparse 源码目录；支持 Git 检出目录和源码压缩包解压目录，启动时按实际内容生成指纹 |
 | `LOGPARSE_CONFIG_PATH` | 是 | 无 | Logparse 工作区内的配置文件 |
 | `BIND_HOST` | 否 | `127.0.0.1` | Uvicorn 监听地址 |

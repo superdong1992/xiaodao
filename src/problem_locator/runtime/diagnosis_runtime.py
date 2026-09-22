@@ -1056,6 +1056,7 @@ class DiagnosisRuntime:
         context_builder: ContextBuilder | None = None,
         backend_test_limits: BackendExecutionLimits | None = None,
         generic_locator_executor: GenericLocatorExecutor | None = None,
+        experience_retriever: Any | None = None,
         specialized_reviewer_enabled: bool = False,
         methods_evidence_validation: str = "advisory",
         public_progress: Callable[[str, str, str], None] | None = None,
@@ -1087,6 +1088,7 @@ class DiagnosisRuntime:
             clock=clock,
             id_generator=id_generator,
             backend_test_limits=backend_test_limits,
+            experience_retriever=experience_retriever,
         )
 
     def _backend_for_job(self, job: Job) -> AgentBackend:

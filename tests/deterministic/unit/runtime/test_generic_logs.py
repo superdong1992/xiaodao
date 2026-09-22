@@ -175,7 +175,8 @@ class _ReadingBackend(_GenericRuntimeBackend):
         return super().execute(**kwargs)
 
 
-def _runtime(tmp_path: Path, asset, backend, *, marker: bytes = b"VALID", mode: str = "normal", limits=None, ready: bool = True):
+def _runtime(tmp_path: Path, asset, backend, *, marker: bytes = b"VALID", mode: str = "normal", limits=None,
+             ready: bool = True, supplements=(), experience_retriever=None):
     skill_dir = tmp_path / "skills"
     skill_dir.mkdir()
 
@@ -196,7 +197,8 @@ def _runtime(tmp_path: Path, asset, backend, *, marker: bytes = b"VALID", mode: 
     base_job = _running_generic_job(catalog)
     payload = base_job.model_dump(mode="json")
     payload.update(catalog.generic_diagnose_bindings(with_logs=True).model_dump(mode="json"))
-    payload.update(attachment_refs=[ATTACHMENT_ID] if ready else [], generic_log_archive_expected=True)
+    payload.update(attachment_refs=[ATTACHMENT_ID] if ready else [], generic_log_archive_expected=True,
+        generic_supplement_texts=list(supplements))
     job = Job.model_validate(payload)
     digest = hashlib.sha256(marker).hexdigest()
     key = f"resources/cases/{job.case_id}/attachments/{ATTACHMENT_ID}/input.zip"
@@ -215,7 +217,8 @@ def _runtime(tmp_path: Path, asset, backend, *, marker: bytes = b"VALID", mode: 
     records = InMemoryExecutionRecordStore()
     runtime = DiagnosisRuntime(state_repository=state, resource_store=resources, asset_catalog=catalog,
         logparse_broker_factory=factory, execution_records=records, clock=_Clock(), id_generator=DeterministicIdGenerator(),
-        workspace_manager=WorkspaceManager(tmp_path / "data"), backend=backend, backend_test_limits=limits)
+        workspace_manager=WorkspaceManager(tmp_path / "data"), backend=backend, backend_test_limits=limits,
+        experience_retriever=experience_retriever)
     return runtime, job, records
 
 
@@ -230,6 +233,44 @@ def test_generic_runtime_report_depends_on_actual_logs_without_required_paramete
     assert isinstance(receipt.job_outcome.payload, GenericDiagnosisOutcomeV2)
     assert expected in receipt.job_outcome.payload.report_markdown
     assert len(backend.calls) == 1
+
+
+@pytest.mark.parametrize("memory_fits", [True, False], ids=["memory-fits", "memory-exceeds-budget"])
+def test_generic_logs_supplements_and_memory_share_one_bounded_skill_invocation(
+    tmp_path: Path, pinned_asset, monkeypatch: pytest.MonkeyPatch, memory_fits: bool,
+) -> None:
+    from problem_locator.runtime.generic_locator import GenericLocatorExecutor
+
+    reference = '历史参考（未经验证）\n{"card_id":"card-1","steps":["检查连接释放逻辑"]}'
+    supplement = "补充：异常发生前刚调整了连接池配置。"
+    selections = []
+
+    def select(skill_name, problem_text):
+        selections.append((skill_name, problem_text))
+        return SimpleNamespace(reference_text=reference)
+
+    backend = _ReadingBackend()
+    runtime, job, records = _runtime(tmp_path, pinned_asset, backend, supplements=[supplement],
+        experience_retriever=SimpleNamespace(select=select))
+    if not memory_fits:
+        build_prompt = GenericLocatorExecutor.build_prompt
+        assets = runtime._resolve_assets(job)
+        padding = " " * (job.resource_limits.context_bytes - len(build_prompt(job, assets).encode("utf-8")) - 1)
+        monkeypatch.setattr(GenericLocatorExecutor, "build_prompt", staticmethod(
+            lambda *args, **kwargs: padding + build_prompt(*args, **kwargs)))
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+    assert receipt.job_outcome.error is None
+    assert "connection pool wait 2800ms" in receipt.job_outcome.payload.report_markdown
+    assert len(backend.calls) == 1 and backend.observed
+    assert selections == [(job.generic_skill_name, job.generic_problem_text)]
+    prompt = backend.calls[0]["prompt"]
+    assert f"{job.generic_problem_text}\n<<<END_RAW_PROBLEM_TEXT>>>" in prompt
+    assert f"{supplement}\n<<<END_SUPPLEMENT_TEXT>>>" in prompt
+    assert "inputs/generic_logs.json" in prompt
+    assert (reference in prompt) is memory_fits
+    assert len(prompt.encode("utf-8")) <= job.resource_limits.context_bytes
+    assert records.read_audit_bytes(job.job_id, "context.txt") == prompt.encode("utf-8")
 
 
 def test_generic_runtime_empty_parsed_logs_resolves_without_backend(tmp_path: Path, pinned_asset) -> None:

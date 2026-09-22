@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 import stat
@@ -29,6 +30,7 @@ from problem_locator.contracts import (
     ResourceStore,
     parse_canonical_json_bytes,
 )
+from problem_locator.diagnostics import log_event
 from problem_locator.journey import (
     record_stage_completed,
     record_stage_started,
@@ -266,6 +268,7 @@ class GenericLocatorExecutor:
         clock: Clock,
         id_generator: IdGenerator,
         backend_test_limits: BackendExecutionLimits | None = None,
+        experience_retriever=None,
     ) -> None:
         self._backend = backend
         self._workspace_manager = workspace_manager
@@ -273,9 +276,10 @@ class GenericLocatorExecutor:
         self._clock = clock
         self._id_generator = id_generator
         self._backend_test_limits = backend_test_limits
+        self._experience_retriever = experience_retriever
 
     @staticmethod
-    def build_prompt(job: Job, assets: ResolvedJobAssets) -> str:
+    def build_prompt(job: Job, assets: ResolvedJobAssets, *, experience_reference: str = "") -> str:
         if (
             job.diagnosis_mode is not DiagnosisMode.GENERIC
             or job.generic_skill_name is None
@@ -309,7 +313,8 @@ class GenericLocatorExecutor:
             f"{job.generic_problem_text}\n"
             "<<<END_RAW_PROBLEM_TEXT>>>\n\n"
             f"{extra}"
-            f"{assets.output_contract_text.rstrip()}\n"
+            + (experience_reference + "\n\n" if experience_reference else "")
+            + f"{assets.output_contract_text.rstrip()}\n"
         )
 
     def execute(
@@ -350,6 +355,20 @@ class GenericLocatorExecutor:
                 message="The generic locator prompt exceeds the fixed context budget.",
                 retryable=False,
             )
+        # Optional memory never displaces the original problem or output contract.
+        # context.txt records the exact immutable input used by this invocation.
+        if self._experience_retriever is not None:
+            try:
+                selection = self._experience_retriever.select(
+                    job.generic_skill_name, job.generic_problem_text,
+                )
+                if selection is not None and len(selection.reference_text.encode("utf-8")) <= 4096:
+                    candidate = self.build_prompt(job, assets, experience_reference=selection.reference_text)
+                    if len(candidate.encode("utf-8")) <= job.resource_limits.context_bytes:
+                        prompt = candidate
+            except Exception:
+                # Do not log the query, card, exception text, or another user's data.
+                log_event("generic_memory.retrieval_failed", level=logging.WARNING)
         self._workspace_manager.write_context(workspace, prompt)
         self._publish_audit(job, "context.txt", prompt.encode("utf-8"))
         record_stage_completed(

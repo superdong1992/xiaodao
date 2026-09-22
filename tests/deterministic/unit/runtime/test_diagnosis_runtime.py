@@ -899,6 +899,8 @@ def _runtime_fixture(
 def _generic_runtime_fixture(
     tmp_path: Path,
     backend: _GenericRuntimeBackend,
+    *,
+    experience_retriever=None,
 ) -> tuple[DiagnosisRuntime, Job, _StateView, InMemoryExecutionRecordStore]:
     catalog = _make_route_catalog(tmp_path)
     job = _running_generic_job(catalog)
@@ -914,8 +916,62 @@ def _generic_runtime_fixture(
         id_generator=_Ids(),
         workspace_manager=WorkspaceManager(tmp_path / "generic-data"),
         backend=backend,  # type: ignore[arg-type]
+        experience_retriever=experience_retriever,
     )
     return runtime, job, state, records
+
+
+def test_generic_memory_is_separate_from_problem_and_preserved_in_execution_audit(tmp_path):
+    reference = '历史参考（未经验证）\n{"card_id":"card-1","card_sha256":"hash-1","steps":["先检查连接池"]}'
+    calls = []
+
+    def select(skill_name, problem_text):
+        calls.append((skill_name, problem_text))
+        return SimpleNamespace(reference_text=reference)
+
+    report = "# 正式报告\n\n只保留本轮报告原文。\n"
+    backend = _GenericRuntimeBackend(None, v2_result_bytes=_generic_v2_result_bytes(report))
+    runtime, job, _, records = _generic_runtime_fixture(
+        tmp_path, backend, experience_retriever=SimpleNamespace(select=select))
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+    prompt = backend.calls[0]["prompt"]
+    assert calls == [(job.generic_skill_name, job.generic_problem_text)]
+    assert f"{job.generic_problem_text}\n<<<END_RAW_PROBLEM_TEXT>>>\n\n{reference}" in prompt
+    assert records.read_audit_bytes(job.job_id, "context.txt") == prompt.encode("utf-8")
+    assert receipt.job_outcome.payload.report_markdown == report
+    assert receipt.job_outcome.payload.report_sha256 == hashlib.sha256(report.encode()).hexdigest()
+
+
+@pytest.mark.parametrize("kind", ["failure", "oversized", "budget"])
+def test_generic_memory_failure_or_budget_never_removes_problem(tmp_path, kind, monkeypatch):
+    (tmp_path / "baseline").mkdir()
+    (tmp_path / "with-memory").mkdir()
+    baseline_backend = _GenericRuntimeBackend(_generic_result_bytes())
+    baseline, baseline_job, _, _ = _generic_runtime_fixture(tmp_path / "baseline", baseline_backend)
+    if kind == "budget":
+        # Simulate large mandatory Skill instructions within the fixed role budget.
+        from problem_locator.runtime.generic_locator import GenericLocatorExecutor
+        build_prompt = GenericLocatorExecutor.build_prompt
+        assets = baseline._resolve_assets(baseline_job)
+        padding = " " * (baseline_job.resource_limits.context_bytes
+                         - len(build_prompt(baseline_job, assets).encode("utf-8")))
+        monkeypatch.setattr(GenericLocatorExecutor, "build_prompt", staticmethod(
+            lambda *args, **kwargs: padding + build_prompt(*args, **kwargs)))
+    baseline.execute(baseline_job, InMemoryCancellationSignal())
+    original = baseline_backend.calls[0]["prompt"]
+
+    def select(*args):
+        if kind == "failure":
+            raise RuntimeError("私密查询内容不能进入日志")
+        return SimpleNamespace(reference_text="x" * (4097 if kind == "oversized" else 100))
+
+    backend = _GenericRuntimeBackend(_generic_result_bytes())
+    runtime, job, _, records = _generic_runtime_fixture(
+        tmp_path / "with-memory", backend, experience_retriever=SimpleNamespace(select=select))
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+    assert receipt.job_outcome.result_type is OutcomeResultType.COMPLETED, receipt.job_outcome.error
+    assert backend.calls[0]["prompt"] == original
+    assert records.read_audit_bytes(job.job_id, "context.txt") == original.encode("utf-8")
 
 
 def test_extra_user_fact_keeps_registered_route_candidate_for_semantic_router(
@@ -2813,6 +2869,7 @@ def _public_fake_claiming_runtime(
     *,
     accept_request: bool = True,
     emit_claim: bool = True,
+    experience_retriever=None,
 ) -> tuple[
     DiagnosisRuntime,
     Job,
@@ -2854,19 +2911,23 @@ def _public_fake_claiming_runtime(
         id_generator=_Ids(),
         workspace_manager=WorkspaceManager(tmp_path / "public-fake-logparse-data"),
         backend=backend,  # type: ignore[arg-type]
+        experience_retriever=experience_retriever,
     )
     return runtime, job, factory, backend, resources
 
 
 def test_methods_v1_specialist_publishes_json_and_durable_archive_plan() -> None:
     temporary = tempfile.TemporaryDirectory(prefix="pl-v1-")
+    recall_calls = []
     runtime, job, factory, backend, resources = _public_fake_claiming_runtime(
-        Path(temporary.name), "success"
+        Path(temporary.name), "success", experience_retriever=SimpleNamespace(
+            select=lambda *args: recall_calls.append(args))
     )
 
     receipt = runtime.execute(job, InMemoryCancellationSignal())
 
     outcome = receipt.job_outcome
+    assert recall_calls == []
     assert outcome.result_type is OutcomeResultType.COMPLETED
     assert outcome.payload is not None
     assert outcome.payload.candidate_conclusion_draft is not None

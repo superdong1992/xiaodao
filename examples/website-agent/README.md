@@ -8,6 +8,8 @@
 
 部署和联调步骤见[快速接入清单](../../docs/website-agent-quickstart.md)，请求、响应和 SSE 的详细说明见 [Agent API 参考](../../docs/website-agent-api.md)。
 
+通用报告赞踩接口及经验复用规则见[经验库接入说明](../../docs/generic-feedback-memory.md)。按钮由网站实现，本示例提供调用封装和后端转发。
+
 ## 1. 先打开离线报告预览
 
 从仓库根目录启动：
@@ -96,6 +98,8 @@ JSON 报告使用 `conversation.result.report` 的固定字段填充组件。下
 | `conversations.get(id)` | 一次恢复状态、追问、进度、消息、附件、报告和下载信息 |
 | `conversations.get(id, {include: []})` | 仅读取基本状态，不加载历史、报告或产物列表 |
 | `conversations.get(id, {include: ["report"]})` | 从同一会话读取报告；也可选择 `history`、`artifacts` 或组合 |
+| `conversations.getFeedback(id, runId, {signal})` | 读取指定报告的评价资格和当前投票，`signal` 可选 |
+| `conversations.setFeedback(id, runId, {request_id, rating})` | 提交 `LIKE` 或 `DISLIKE`；重试保留原 ID 和内容，换票使用新 ID |
 | `conversations.eventsUrl(id)` | 返回会话 SSE 路径，交给订阅和游标处理代码 |
 | `attachments.prepare(id, metadata)` | 预约上传日志附件，提供会话、文件名、类型、大小和 SHA-256 |
 | `attachments.upload(prepared, file)` | 上传原始 Blob/File，返回附件记录 |

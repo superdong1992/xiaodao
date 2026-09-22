@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,8 @@ from problem_locator.agent.models import AgentStoreError
 from problem_locator.agent.store import AgentStore
 from problem_locator.agent.usage import ConversationUsageGuard
 from problem_locator.contracts import ApplicationPortError, Attachment, AttachmentStatus, Case, CaseStatus, ErrorCode, StateFile
+from problem_locator.memory.models import FeedbackSource
+from problem_locator.memory.store import MemoryStore
 from problem_locator.storage.coordination import AttachmentUploadRegistry, StorageCoordinationLock
 from problem_locator.storage.history_retention import HistoryRetentionService
 from problem_locator.storage.quarantine import QuarantineMover
@@ -83,6 +86,123 @@ def _old_and_new_runs(stack):
     stack.clock.value = NOW
     newer = stack.store.submit_message(created.conversation_id, "new", "新问题")
     return created, original, newer
+
+
+def _memory_history(stack, status="READY", *, source_created_at=OLD):
+    memory = MemoryStore(stack.repository, stack.clock)
+    stack.store.memory_store = memory
+    owner = "a" * 64
+    created = stack.store.create_conversation("memory-history", owner_key=owner)
+    stack.store.submit_message(created.conversation_id, "question", "请求排队")
+    stack.store.bind_case(created.conversation_id, CASE_ID)
+    paths = _completed(stack)
+    report = "# 诊断报告\n业务原文仅供后台提炼。\n"
+    source = FeedbackSource(case_id=CASE_ID, source_job_id=JOB_ID, skill_name="generic-test",
+        problem_text="请求排队，请检查。", report_markdown=report,
+        report_sha256=hashlib.sha256(report.encode()).hexdigest())
+    card = json.dumps({"problem_features": ["请求排队"], "applicability": ["服务繁忙"],
+        "steps": ["核对队列长度"], "limitations": ["需要当前日志支持"]}, ensure_ascii=False)
+    stack.clock.value = source_created_at
+    memory.put_feedback(created.conversation_id, created.run_id, owner_key=owner,
+        request_id="like", rating="LIKE", source=source)
+    if status in {"RUNNING", "READY"}:
+        task_id = memory.claim_task()["task_id"]
+        if status == "READY":
+            assert memory.finish_task(task_id, card)
+    else:
+        with stack.repository.database_read() as db:
+            task_id = db.execute("SELECT task_id FROM memory_tasks").fetchone()[0]
+    return SimpleNamespace(memory=memory, created=created, owner=owner, paths=paths,
+        source=source, task_id=task_id, card=card)
+
+
+def _memory_task(stack, task_id):
+    with stack.repository.database_read() as db:
+        return db.execute("SELECT status,problem_text,report_markdown,card_json,active "
+                          "FROM memory_tasks WHERE task_id=?", (task_id,)).fetchone()
+
+
+def test_natural_conversation_expiry_keeps_ready_memory_until_card_ttl(stack):
+    history = _memory_history(stack)
+    cards = history.memory.active_cards(history.source.skill_name)
+    assert len(cards) == 1
+    stack.clock.value = BOUNDARY
+    assert stack.history.run_once()
+    assert history.memory.active_cards(history.source.skill_name) == cards
+    assert stack.cleanup.run_once()
+    assert all(not path.exists() for path in history.paths)
+    history.memory.prune()
+    assert history.memory.active_cards(history.source.skill_name) == cards
+    # The conversation tombstone expires too; the completed card keeps its own age.
+    stack.clock.value = "2026-08-14T00:01:00.000Z"
+    assert stack.history.run_once()
+    with stack.repository.database_read() as db:
+        assert db.execute("SELECT 1 FROM agent_conversations WHERE conversation_id=?",
+                          (history.created.conversation_id,)).fetchone() is None
+    assert history.memory.active_cards(history.source.skill_name) == cards
+    stack.clock.value = "2026-10-29T00:00:59.999Z"
+    assert history.memory.active_cards(history.source.skill_name) == cards
+    stack.clock.value = "2026-10-29T00:01:00.000Z"
+    assert history.memory.active_cards(history.source.skill_name) == []
+    history.memory.prune()
+    assert _memory_task(stack, history.task_id) is None
+
+
+@pytest.mark.parametrize("status", ["PENDING", "RUNNING"])
+def test_natural_conversation_expiry_erases_unfinished_memory_and_fences_late_result(stack, status):
+    # The source report is seven days old while the extraction request is fresh.
+    history = _memory_history(stack, status, source_created_at="2026-08-06T00:01:00.000Z")
+    stack.clock.value = BOUNDARY
+    assert stack.history.run_once()
+    assert _memory_task(stack, history.task_id) == ("DELETED", None, None, None, 0)
+    assert history.memory.claim_task() is None
+    assert not history.memory.finish_task(history.task_id, history.card)
+    assert stack.cleanup.run_once()
+    history.memory.prune()
+    assert _memory_task(stack, history.task_id) is None
+    assert not history.memory.finish_task(history.task_id, history.card)
+
+
+@pytest.mark.parametrize("cleanup_finished", [False, True])
+def test_explicit_delete_after_natural_expiry_revokes_ready_memory(stack, cleanup_finished):
+    history = _memory_history(stack)
+    stack.clock.value = BOUNDARY
+    assert stack.history.run_once()
+    if cleanup_finished:
+        assert stack.cleanup.run_once()
+        history.memory.prune()
+    with pytest.raises(AgentStoreError) as denied:
+        stack.store.request_delete(history.created.conversation_id, owner_key="b" * 64)
+    assert denied.value.status_code == 404
+    assert len(history.memory.active_cards(history.source.skill_name)) == 1
+    receipt = stack.store.request_delete(history.created.conversation_id, owner_key=history.owner)
+    assert receipt.status == ("DELETED" if cleanup_finished else "DELETING")
+    assert _memory_task(stack, history.task_id) == ("DELETED", None, None, None, 0)
+    assert history.memory.active_cards(history.source.skill_name) == []
+    assert not history.memory.finish_task(history.task_id, history.card)
+
+
+@pytest.mark.parametrize("status", ["PENDING", "RUNNING", "READY"])
+def test_natural_run_expiry_preserves_completed_memory_and_leaves_new_run_untouched(stack, status):
+    history = _memory_history(stack, status, source_created_at="2026-08-06T00:01:00.000Z")
+    stack.clock.value = NOW
+    newer = stack.store.submit_message(history.created.conversation_id, "newer", "新的问题")
+    new_source = replace(history.source, case_id="00000000-0000-0000-0000-000000000099")
+    stack.store.bind_case(history.created.conversation_id, new_source.case_id)
+    history.memory.put_feedback(history.created.conversation_id, newer.run_id, owner_key=history.owner,
+        request_id="new-like", rating="LIKE", source=new_source)
+    with stack.repository.database_read() as db:
+        new_task_id = db.execute("SELECT task_id FROM memory_tasks WHERE run_id=?", (newer.run_id,)).fetchone()[0]
+    assert stack.history.run_once()
+    assert stack.store.get_run(history.created.conversation_id)["run_id"] == newer.run_id
+    assert _memory_task(stack, new_task_id)[:3] == ("PENDING", new_source.problem_text, new_source.report_markdown)
+    if status == "READY":
+        assert _memory_task(stack, history.task_id)[0] == "READY"
+        assert len(history.memory.active_cards(history.source.skill_name)) == 1
+    else:
+        assert _memory_task(stack, history.task_id) == ("DELETED", None, None, None, 0)
+        assert not history.memory.finish_task(history.task_id, history.card)
+    assert all(not path.exists() for path in history.paths)
 
 
 def test_core_report_and_owned_resources_expire_at_seven_days_only(stack):

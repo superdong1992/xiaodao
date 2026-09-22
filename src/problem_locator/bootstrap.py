@@ -24,6 +24,9 @@ from problem_locator.application import ApplicationService, build_application_se
 from problem_locator.agent.intake import ClaudeIntakeEngine
 from problem_locator.agent.service import AgentConversationService
 from problem_locator.agent.store import AgentStore
+from problem_locator.memory.store import MemoryStore
+from problem_locator.memory.extraction import MemoryExtractionWorker
+from problem_locator.memory.retrieval import ExperienceRetriever
 from problem_locator.contracts import (
     ERROR_SPECS,
     ApplicationError,
@@ -813,6 +816,7 @@ class ServiceComposition:
     archive: ArchiveService
     agent: AgentConversationService
     state_admin: ServiceStateAdmin
+    memory_worker: MemoryExtractionWorker | None = None
     _lifecycle_lock: threading.Lock = field(
         default_factory=threading.Lock,
         init=False,
@@ -868,6 +872,8 @@ class ServiceComposition:
                 self.agent.start(result.runtime_epoch)
                 self.archive.start()
                 self.retention.start()
+                if self.memory_worker is not None:
+                    self.memory_worker.start()
         finally:
             with self._lifecycle_condition:
                 self._start_in_progress = False
@@ -892,6 +898,9 @@ class ServiceComposition:
 
         try:
             deadline = time.monotonic() + timeout_seconds
+            memory_stopped = self.memory_worker is None or self.memory_worker.shutdown(
+                max(0.0, deadline - time.monotonic())
+            )
             agent_stopped = self.agent.shutdown(max(0.0, deadline - time.monotonic()))
             scheduler_stopped = self.scheduler.shutdown(max(0.0, deadline - time.monotonic()))
             retention_stopped = self.retention.shutdown(
@@ -909,6 +918,7 @@ class ServiceComposition:
                     and agent_stopped
                     and retention_stopped
                     and archive_stopped
+                    and memory_stopped
                     and not self._start_in_progress
                 )
 
@@ -1246,9 +1256,15 @@ def _assemble(
             settings.diagnose_claude_command or settings.claude_command
         )
         agent_store = AgentStore(repository, clock, ids)
+        memory_store = MemoryStore(repository, clock)
         agent = AgentConversationService(agent_store, application,
             ClaudeIntakeEngine(settings.intake_claude_command or settings.route_claude_command
-                or settings.claude_command, workspace_root=layout.workspaces), layout)
+                or settings.claude_command, workspace_root=layout.workspaces), layout,
+            memory_store=memory_store, memory_enabled=settings.generic_memory_enabled)
+        memory_worker = MemoryExtractionWorker(
+            memory_store, settings.diagnose_claude_command or settings.claude_command,
+            workspace_root=layout.workspaces, enabled=settings.generic_memory_enabled,
+        )
         runtime = DiagnosisRuntime(
             state_repository=repository,
             resource_store=resource_store,
@@ -1264,6 +1280,7 @@ def _assemble(
             specialized_reviewer_enabled=settings.specialized_reviewer_enabled,
             methods_evidence_validation=settings.methods_evidence_validation,
             public_progress=agent_store.append_case_progress,
+            experience_retriever=ExperienceRetriever(memory_store) if settings.generic_memory_enabled else None,
         )
         scheduler = SchedulerService(
             repository,
@@ -1333,6 +1350,7 @@ def _assemble(
             archive=archive,
             agent=agent,
             state_admin=state_admin,
+            memory_worker=memory_worker,
         )
     except Exception as exc:
         raise _CompositionFailure(

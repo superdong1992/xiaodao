@@ -91,6 +91,7 @@ def test_all_fixed_configuration_defaults_are_exact(tmp_path: Path) -> None:
     assert settings.specialized_reviewer_enabled is False
     assert settings.methods_evidence_validation == "off"
     assert settings.generic_logparse_product == "default"
+    assert settings.generic_memory_enabled is False
 
 
 def test_generic_logparse_product_is_a_deployment_setting(tmp_path: Path) -> None:
@@ -102,6 +103,18 @@ def test_generic_logparse_product_is_a_deployment_setting(tmp_path: Path) -> Non
 def test_generic_logparse_product_rejects_noncanonical_values(tmp_path: Path, product: str) -> None:
     with pytest.raises(SettingsError, match="GENERIC_LOGPARSE_PRODUCT"):
         Settings.load(environ={**environment(tmp_path), "GENERIC_LOGPARSE_PRODUCT": product})
+
+
+@pytest.mark.parametrize("value,enabled", [("true", True), ("false", False)])
+def test_generic_memory_requires_explicit_enablement(tmp_path, value, enabled):
+    settings = Settings.load(environ={**environment(tmp_path), "GENERIC_MEMORY_ENABLED": value})
+    assert settings.generic_memory_enabled is enabled
+
+
+@pytest.mark.parametrize("value", ["1", "yes", "TRUE", "", " false "])
+def test_generic_memory_rejects_ambiguous_flags(tmp_path, value):
+    with pytest.raises(SettingsError, match="GENERIC_MEMORY_ENABLED"):
+        Settings.load(environ={**environment(tmp_path), "GENERIC_MEMORY_ENABLED": value})
 
 
 @pytest.mark.parametrize("mode", ["off", "advisory", "strict"])
