@@ -175,6 +175,9 @@ const PUBLIC_CODES = new Set([
     "AGENT_CONVERSATION_CLOSED",
     "AGENT_IDEMPOTENCY_CONFLICT",
     "AGENT_ATTACHMENT_NOT_READY",
+    "AGENT_LOG_SELECTION_INVALID",
+    "AGENT_LOG_ALREADY_SELECTED",
+    "AGENT_RESTART_PENDING",
     "AGENT_MESSAGE_LIMIT",
     "AGENT_INVALID_CURSOR",
     "AGENT_EVENT_CURSOR_EXPIRED",
@@ -285,6 +288,9 @@ function safeError(value, terminal = false) {
         AGENT_CANCELLING: "正在停止本轮诊断，请稍后再发送。",
         AGENT_IDEMPOTENCY_CONFLICT: "同一 request_id 的内容不能更改。",
         AGENT_ATTACHMENT_NOT_READY: "附件未上传完成或不属于本会话。",
+        AGENT_LOG_SELECTION_INVALID: "当前仅支持一份日志归档，请合并后上传，或重新选择一个附件。",
+        AGENT_LOG_ALREADY_SELECTED: "这份日志已用于当前定位，无需重复提交。",
+        AGENT_RESTART_PENDING: "日志正在接入，请稍后重试同一请求。",
         INTAKE_OUTPUT_INVALID: "补充信息整理失败，请核对输入后新建任务。",
         INTAKE_CONTEXT_LIMIT: "会话内容过长，请新建任务并精简输入。",
         AGENT_INTERRUPTED: "本次任务已中断，请重新发起。",
@@ -534,13 +540,13 @@ export function createAgentBackend(options) {
         }
         return response;
     }
-    async function verifiedReport(ownerKey, artifact) {
+    async function verifiedReport(ownerKey, artifact, signal) {
         if (artifact.size > MAX_REPORT_BYTES) throw new HttpError(502, "报告超出接入限制。");
-        const response = await downloadResponse(ownerKey, artifact);
+        const response = await downloadResponse(ownerKey, artifact, signal);
         const content = Buffer.alloc(artifact.size);
         const hash = createHash("sha256");
         let size = 0;
-        for await (const chunk of Readable.fromWeb(response.body)){
+        for await (const chunk of Readable.fromWeb(response.body, { signal })){
             if (chunk.length > artifact.size - size) throw new HttpError(502, "下载内容大小不匹配。");
             content.set(chunk, size);
             hash.update(chunk);
@@ -551,7 +557,7 @@ export function createAgentBackend(options) {
         }
         return content;
     }
-    async function verifiedDownload(ownerKey, artifact, clientResponse, use) {
+    async function withDownloadCancellation(clientResponse, use) {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(new HttpError(504, "下载超时，请重新下载。")), DOWNLOAD_TOTAL_TIMEOUT_MS);
         timeout.unref();
@@ -559,9 +565,20 @@ export function createAgentBackend(options) {
             if (!clientResponse.writableFinished) controller.abort(new HttpError(499, "下载连接已断开。"));
         };
         clientResponse.once("close", disconnected);
+        if (clientResponse.destroyed) disconnected();
+        try {
+            return await use(controller.signal);
+        } catch (error) {
+            throw controller.signal.aborted ? controller.signal.reason : error;
+        } finally {
+            clearTimeout(timeout);
+            clientResponse.removeListener("close", disconnected);
+        }
+    }
+    async function verifiedDownload(ownerKey, artifact, signal, use) {
         let directory;
         try {
-            const response = await downloadResponse(ownerKey, artifact, controller.signal);
+            const response = await downloadResponse(ownerKey, artifact, signal);
             directory = await mkdtemp(join(tmpdir(), `xiaodao-website-p${process.pid}-`));
             activeDownloads.add(directory);
             const file = join(directory, "payload");
@@ -582,16 +599,12 @@ export function createAgentBackend(options) {
             await pipeline(Readable.fromWeb(response.body), verifier, createWriteStream(file, {
                 flags: "wx",
                 mode: 0o600
-            }), { signal: controller.signal });
+            }), { signal });
             if (size !== artifact.size || hash.digest("hex") !== artifact.sha256) {
                 throw new HttpError(502, "下载内容的大小或 SHA-256 校验失败。");
             }
-            await use(file, controller.signal);
-        } catch (error) {
-            throw controller.signal.aborted ? controller.signal.reason : error;
+            await use(file, signal);
         } finally{
-            clearTimeout(timeout);
-            clientResponse.removeListener("close", disconnected);
             if (directory) {
                 activeDownloads.delete(directory);
                 try { await removeDownloadDirectory(directory); }
@@ -842,19 +855,21 @@ export function createAgentBackend(options) {
                     "Cache-Control": "no-store",
                     "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(artifact.name)}`
                 };
-                if ([
-                    "USER_RESULT",
-                    "GENERIC_REPORT"
-                ].includes(artifact.kind) && artifact.size <= MAX_REPORT_BYTES) {
-                    const content = await verifiedReport(ownerKey, artifact);
-                    response.writeHead(200, downloadHeaders);
-                    response.end(content);
-                } else {
-                    await verifiedDownload(ownerKey, artifact, response, async (path, signal)=>{
+                await withDownloadCancellation(response, async (signal) => {
+                    if ([
+                        "USER_RESULT",
+                        "GENERIC_REPORT"
+                    ].includes(artifact.kind) && artifact.size <= MAX_REPORT_BYTES) {
+                        const content = await verifiedReport(ownerKey, artifact, signal);
                         response.writeHead(200, downloadHeaders);
-                        await pipeline(createReadStream(path), response, { signal });
-                    });
-                }
+                        await pipeline(Readable.from([content]), response, { signal });
+                    } else {
+                        await verifiedDownload(ownerKey, artifact, signal, async (path, signal)=>{
+                            response.writeHead(200, downloadHeaders);
+                            await pipeline(createReadStream(path), response, { signal });
+                        });
+                    }
+                });
                 return;
             }
             const mutation = (action === "messages" || action === "stop") && method === "POST" || !action && !artifactId && [

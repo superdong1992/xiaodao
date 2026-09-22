@@ -1456,7 +1456,7 @@ latestCaseRevision = ready.case_revision;
 | `WebUploadDescriptor` | `required_headers` | `WebUploadRequiredHeaders` | 浏览器脚本必须原样设置的三个头。 |
 | `WebUploadDescriptor` | `expected_content_length` | `integer >= 0` | Chrome 应自动产生的字节数。 |
 | `WebUploadDescriptor` | `max_bytes` | literal `2684354560` | 单附件上限。 |
-| `WebUploadDescriptor` | `expires_at` | literal `null` | 当前没有服务端过期时间；不能据此假设临时内容永久保留。 |
+| `WebUploadDescriptor` | `expires_at` | literal `null` | 接口未提供独立的到期时间；内容仍受[服务端保留与清理策略](storage-retention.md)约束，不能理解为永久保留。 |
 | `WebUploadRequiredHeaders` | `Idempotency-Key` | `uuid` | 等于 `attachment_id`。 |
 | `WebUploadRequiredHeaders` | `Content-Type` | `content_type` | 已准备类型。 |
 | `WebUploadRequiredHeaders` | `X-Content-SHA256` | `sha256` | 已声明散列。 |

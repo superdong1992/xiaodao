@@ -216,10 +216,10 @@ class AgentConversationService:
                             if changed.code != "AGENT_ROUTE_CHANGED":
                                 raise
                             if route_rechecked:
-                                raise AgentStoreError("AGENT_RESTART_PENDING", "定位策略正在更新，请稍后重试同一请求。", 503) from changed
+                                raise AgentStoreError("AGENT_RESTART_PENDING", "定位策略正在更新，请稍后重试同一请求。", 503, retryable=True) from changed
                             return self._dispatch_generic_restart(pending, request, route_rechecked=True)
                     if job is not None and job.job_type.value == "ROUTE":
-                        raise AgentStoreError("AGENT_RESTART_PENDING", "定位策略正在更新，请稍后重试同一请求。", 503)
+                        raise AgentStoreError("AGENT_RESTART_PENDING", "定位策略正在更新，请稍后重试同一请求。", 503, retryable=True)
                 self.store.finish_generic_restart(command.idempotency_key, rejected=True)
                 raise AgentStoreError("AGENT_RUN_CHANGED", "本次定位已结束或发生变化，请刷新会话。", 409) from error
             raise
@@ -232,7 +232,7 @@ class AgentConversationService:
                 attachment_ids=pending["message"]["attachment_ids"])
         receipt, _ = self.store.message_request(cid, request)
         if receipt is None:
-            raise AgentStoreError("AGENT_RESTART_PENDING", "日志接入尚未完成，请稍后重试同一请求。", 503)
+            raise AgentStoreError("AGENT_RESTART_PENDING", "日志接入尚未完成，请稍后重试同一请求。", 503, retryable=True)
         return receipt
 
     def get_feedback(self, conversation_id, run_id, *, owner_key=None):

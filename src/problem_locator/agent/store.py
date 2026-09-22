@@ -363,7 +363,7 @@ class AgentStore:
                     raise AgentStoreError("AGENT_IDEMPOTENCY_CONFLICT", "同一 request_id 的内容不能更改。", 409)
                 if (routed_request_key != restart[1] or restart[2] != "PENDING"
                         or json.loads(restart[3]).get("operation") != "MarkInitialLogArchiveExpected"):
-                    raise AgentStoreError("AGENT_RESTART_PENDING", "日志接入尚未完成，请稍后重试同一请求。", 409)
+                    raise AgentStoreError("AGENT_RESTART_PENDING", "日志接入尚未完成，请稍后重试同一请求。", 409, retryable=True)
                 # The ROUTE marker lost to a specialized route. Resolve its
                 # frozen request as the ordinary supplement it always was,
                 # atomically with message acceptance and without a new run.
@@ -446,7 +446,7 @@ class AgentStore:
                     raise AgentStoreError("AGENT_IDEMPOTENCY_CONFLICT", "同一 request_id 的内容不能更改。", 409)
                 return {**json.loads(existing[2]), "status": existing[1]}
             if db.execute("SELECT 1 FROM agent_generic_restarts WHERE run_id=? AND status IN ('PENDING','COMMITTED')", (run_id,)).fetchone():
-                raise AgentStoreError("AGENT_RESTART_PENDING", "上一份日志正在接入，请稍后重试。", 409)
+                raise AgentStoreError("AGENT_RESTART_PENDING", "上一份日志正在接入，请稍后重试。", 409, retryable=True)
             if (type(command).__name__ == "RestartGenericDiagnosis" and archive_sha256 is not None
                     and body.get("generic_archive_sha256") == archive_sha256):
                 raise AgentStoreError("AGENT_LOG_ALREADY_SELECTED", "这份日志已用于当前定位，无需重复提交。", 409)

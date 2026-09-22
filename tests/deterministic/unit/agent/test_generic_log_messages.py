@@ -15,6 +15,7 @@ from problem_locator.contracts import (
     RestartGenericDiagnosis, MarkInitialLogArchiveExpected,
 )
 from tests.deterministic.unit.storage.test_state_repository import CASE_ID, JOB_ID, _open
+from tests.deterministic.unit.interfaces.test_agent_http import OWNER, run_request
 
 
 class _RestartApplication:
@@ -53,7 +54,7 @@ class _RestartApplication:
 def generic_web(tmp_path, monkeypatch):
     repository = _open(tmp_path)
     store = AgentStore(repository, runtime_epoch="generic-web")
-    conversation = store.create_conversation("create")
+    conversation = store.create_conversation("create", owner_key=OWNER)
     cid = conversation.conversation_id
     initial = store.submit_message(cid, "problem", "设备偶发重启")
     store.set_message_status(cid, initial.message_id, "APPLIED")
@@ -82,6 +83,60 @@ def _ready(store, cid, key="archive", digest="a" * 64):
 
 def _accepted(store, cid):
     return [event for event in store.list_events(cid) if event.type == "message.accepted"]
+
+
+@pytest.mark.parametrize("boundary", ["previous-request", "route-updating", "missing-projection", "receipt-pending"])
+def test_pending_log_requests_are_retryable_over_http(generic_web, monkeypatch, boundary):
+    store, service, app, cid, run_id = generic_web
+    attachment = _ready(store, cid)
+    request = SendMessageRequest(request_id="retry-original", text="追加日志", attachment_ids=[attachment])
+    expected_status = 503
+    if boundary == "previous-request":
+        command = RestartGenericDiagnosis(idempotency_key="previous", case_id=CASE_ID,
+            expected_case_revision=1, source_job_id=JOB_ID)
+        previous = request.model_copy(update={"request_id": "previous"})
+        store.freeze_generic_restart(cid, previous, command, run_id=run_id, archive_sha256="a" * 64)
+        expected_status = 409
+    elif boundary == "receipt-pending":
+        monkeypatch.setattr(app, "execute", lambda command: SimpleNamespace(dispatch_pending=True))
+    else:
+        job = app.aggregate.jobs[JOB_ID]
+        job.diagnosis_mode = DiagnosisMode.SPECIALIZED if boundary == "missing-projection" else None
+        job.job_type = SimpleNamespace(value="DIAGNOSE" if boundary == "missing-projection" else "ROUTE")
+        app.aggregate.case.selected_skill_ref = object() if boundary == "missing-projection" else None
+        if boundary == "missing-projection":
+            with store.repository.database_transaction() as db:
+                body = store._load(db, cid)
+                body.pop("case_has_selected_skill", None)
+                store._save(db, body)
+        command = MarkInitialLogArchiveExpected(idempotency_key="route-marker", case_id=CASE_ID,
+            expected_case_revision=1, source_job_id=JOB_ID)
+        store.freeze_generic_restart(cid, request, command, run_id=run_id, archive_sha256="a" * 64)
+        def reject_marker(command):
+            raise ApplicationPortError(ApplicationError(code=ErrorCode.INVALID_CASE_STATE,
+                message="路由正在更新。", retryable=False, details=[]))
+        monkeypatch.setattr(app, "execute", reject_marker)
+    for _ in range(2):
+        response = run_request(service, "POST", f"/api/v1/agent/conversations/{cid}/messages",
+            json=request.model_dump(mode="json"))
+        assert response.status_code == expected_status
+        assert response.json()["error"]["code"] == "AGENT_RESTART_PENDING"
+        assert response.json()["error"]["retryable"] is True
+        assert len(_accepted(store, cid)) == 1
+    assert len(store.pending_generic_restarts()) == 1
+
+
+def test_pending_restart_cannot_be_accepted_as_ordinary_message_and_remains_retryable(generic_web):
+    store, _, _, cid, run_id = generic_web
+    attachment = _ready(store, cid)
+    request = SendMessageRequest(request_id="retry-original", attachment_ids=[attachment])
+    command = RestartGenericDiagnosis(idempotency_key="restart", case_id=CASE_ID,
+        expected_case_revision=1, source_job_id=JOB_ID)
+    store.freeze_generic_restart(cid, request, command, run_id=run_id, archive_sha256="a" * 64)
+    with pytest.raises(AgentStoreError) as error:
+        store.submit_message(cid, request.request_id, request.text, request.attachment_ids)
+    assert error.value.code == "AGENT_RESTART_PENDING" and error.value.status_code == 409
+    assert error.value.retryable is True and len(_accepted(store, cid)) == 1
 
 
 def test_restart_keeps_case_and_run_and_accepts_only_with_core_projection(generic_web):

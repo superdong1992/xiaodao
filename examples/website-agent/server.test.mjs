@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { request as httpRequest } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
 import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
@@ -10,6 +10,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import timers from "node:timers";
 import test from "node:test";
 import { createAgentBackend, HttpError } from "./server.ts";
+import { AgentApiError, createAgentClient } from "./browser-client.js";
 import { createAgentBackend as createPureJsBackend, DOWNLOAD_TEMP_TTL_MS,
   DOWNLOAD_TOTAL_TIMEOUT_MS, sweepDownloadSpools } from "./server.mjs";
 // 与后端示例同一 Gate 执行，保证浏览器模块变化后重新验证。
@@ -119,6 +120,44 @@ function artifactFixture({ kind = "USER_RESULT", payload = Buffer.from(JSON.stri
     assert.fail("不应额外读取 Case、产物列表或旧报告接口。");
   };
   return { calls, artifact, fetchImpl };
+}
+
+for (const [code, status, retryable, message] of [
+  ["AGENT_LOG_SELECTION_INVALID", 409, false, "当前仅支持一份日志归档，请合并后上传，或重新选择一个附件。"],
+  ["AGENT_LOG_ALREADY_SELECTED", 409, false, "这份日志已用于当前定位，无需重复提交。"],
+  ["AGENT_RESTART_PENDING", 409, true, "日志正在接入，请稍后重试同一请求。"],
+  ["AGENT_RESTART_PENDING", 503, true, "日志正在接入，请稍后重试同一请求。"],
+]) {
+  test(`native HTTP ${code} ${status} reaches the browser SDK without automatic retry`, async () => {
+    let calls = 0;
+    const messageBody = { request_id: "logs-original", text: "补充日志", attachment_ids: [artifactId] };
+    const upstream = createServer(async (request, response) => {
+      calls += 1;
+      assert.equal(request.url, `/api/v1/agent/conversations/${conversation}/messages`);
+      assert.equal(request.headers["x-agent-owner-key"], ownerKey);
+      const chunks = []; for await (const chunk of request) chunks.push(chunk);
+      assert.deepEqual(JSON.parse(Buffer.concat(chunks)), messageBody);
+      response.writeHead(status, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ ok: false, data: null, error: {
+        code, message: "private /srv/path", retryable, details: [],
+      } }));
+    });
+    upstream.listen(0, "127.0.0.1"); await once(upstream, "listening");
+    try {
+      await withServer({ access, upstream: `http://127.0.0.1:${upstream.address().port}` }, async (origin) => {
+        const client = createAgentClient({ fetchImpl: (path, init) => fetch(origin + path, init) });
+        await assert.rejects(client.conversations.send(conversation, messageBody), (error) => {
+          assert.ok(error instanceof AgentApiError);
+          assert.equal(error.status, status); assert.equal(error.code, code);
+          assert.equal(error.retryable, retryable); assert.equal(error.message, message);
+          return true;
+        });
+        assert.equal(calls, 1);
+      });
+    } finally {
+      const closed = once(upstream, "close"); upstream.close(); upstream.closeAllConnections(); await closed;
+    }
+  });
 }
 
 test("full conversation uses one native read and returns history, result and authorized file links", async () => {
@@ -500,6 +539,78 @@ test("small report downloads perform no temporary-file IO", async (context) => {
     }); assert.equal(directory.mock.callCount(), 0); assert.equal(writing.mock.callCount(), 0); assert.equal(fixture.calls.length, 2);
   } finally { context.mock.restoreAll(); syncBuiltinESMExports(); }
 });
+async function withStalledReport(kind, exercise) {
+  const payload = Buffer.from("report bytes");
+  let signalStarted, signalClosed;
+  const started = new Promise((resolveStarted) => { signalStarted = resolveStarted; });
+  const sourceClosed = new Promise((resolveClosed) => { signalClosed = resolveClosed; });
+  const upstream = createServer((request, response) => {
+    assert.equal(request.headers["x-agent-owner-key"], ownerKey);
+    if (new URL(request.url, base).pathname === `/api/v1/agent/conversations/${conversation}`) {
+      const artifact = publicArtifact(kind, payload);
+      artifact.download_url = `http://127.0.0.1:${upstream.address().port}/api/v1/agent/conversations/${conversation}/files/${artifactId}/content?run_id=${runId}`;
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ ok: true, data: nativeDetail(["artifacts"], { artifacts: [artifact] }), error: null }));
+    } else {
+      const artifact = publicArtifact(kind, payload);
+      assert.equal(request.url, `/api/v1/agent/conversations/${conversation}/files/${artifactId}/content?run_id=${runId}`);
+      response.once("close", signalClosed);
+      response.writeHead(200, { "Content-Type": artifact.content_type,
+        "Content-Length": payload.length, "X-Content-SHA256": artifact.sha256 });
+      response.write(payload.subarray(0, 1));
+      signalStarted();
+    }
+  });
+  upstream.listen(0, "127.0.0.1"); await once(upstream, "listening");
+  try {
+    await withServer({ access, upstream: `http://127.0.0.1:${upstream.address().port}` },
+      (origin) => exercise(origin, started, sourceClosed));
+  } finally {
+    const closed = once(upstream, "close"); upstream.close(); upstream.closeAllConnections(); await closed;
+  }
+}
+
+for (const kind of ["USER_RESULT", "GENERIC_REPORT"]) {
+  test(`${kind} total timeout closes the actual HTTP source before returning 504`, { timeout: 5000 }, async (context) => {
+    const originalSetTimeout = timers.setTimeout;
+    let expire;
+    context.mock.method(timers, "setTimeout", (callback, delay, ...args) => {
+      if (delay === DOWNLOAD_TOTAL_TIMEOUT_MS) {
+        expire = callback;
+        return originalSetTimeout(() => {}, delay);
+      }
+      return originalSetTimeout(callback, delay, ...args);
+    });
+    syncBuiltinESMExports();
+    try {
+      await withStalledReport(kind, async (origin, started, sourceClosed) => {
+        const pending = fetch(origin + reportDownloadPath);
+        await started;
+        assert.equal(typeof expire, "function"); expire();
+        const response = await pending;
+        assert.equal(response.status, 504);
+        assert.match((await response.json()).error.message, /下载超时/);
+        await sourceClosed;
+      });
+    } finally { context.mock.restoreAll(); syncBuiltinESMExports(); }
+  });
+
+  test(`${kind} browser disconnect closes the actual HTTP source`, { timeout: 5000 }, async () => {
+    await withStalledReport(kind, async (origin, started, sourceClosed) => {
+      let unexpectedResponse = false;
+      const request = httpRequest(origin + reportDownloadPath, (response) => {
+        unexpectedResponse = true; response.resume();
+      });
+      request.on("error", () => {});
+      request.end();
+      await started;
+      request.destroy();
+      await sourceClosed;
+      assert.equal(unexpectedResponse, false, "校验未完成时不得提前返回报告。");
+    });
+  });
+}
+
 test("chunked Generic bytes retain Unicode and CRLF", async () => {
   const markdown = "# 诊断结果\r\n采用 \"rpc_timeout\" 方法 🧭\r\n", payload = Buffer.from(markdown); let offset = 0;
   const receivedPayload = new ReadableStream({ pull(controller) {
