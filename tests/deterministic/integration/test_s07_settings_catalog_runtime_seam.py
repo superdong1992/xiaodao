@@ -25,13 +25,13 @@ FAKE_LOGPARSE_REPO = ROOT / "tests/fixtures/components/logparse/fake/repo"
 FAKE_LOGPARSE_CONFIG = FAKE_LOGPARSE_REPO / "config.yaml"
 RPC_SKILL_ID = "diagnosis-skill/rpc-log-analysis"
 RPC_REGISTRATION_SHA256 = (
-    "a1f8f59d5c3904ed545c5ae54b4d9a3b5e80e80bdd74e4cc51dff2b7adb8bcde"
+    "ccfc11f6bb29d48a9028971912ce86bead5347ed3752a3aae1fb7549fdc6d830"
 )
 RPC_PACKAGE_TREE_SHA256 = (
     "5cdcdcc0e8fef4262ba85183000751471a86f535332209f7168b373f91b6332a"
 )
 RPC_COMBINED_SHA256 = (
-    "810fec1e5cf1877b1396adb4439ce4b5b1411296cba524a448adf06229b7e6aa"
+    "62ef16a13cae19a9d13c4f03085e66ada7d18dde54a7657df2b9f84326f7abcd"
 )
 
 

@@ -84,6 +84,9 @@ _REGISTRATION_FIELDS = frozenset(
         "runtime",
     }
 )
+_REGISTRATION_V2_FIELDS = _REGISTRATION_FIELDS | {"routing"}
+_ROUTING_FIELDS = frozenset({"applicability", "exclusions"})
+_ROUTING_CONDITION_FIELDS = frozenset({"id", "description"})
 _PACKAGE_BINDING_FIELDS = frozenset(
     {"relative_path", "skill_name", "source_wiki_sha256"}
 )
@@ -455,6 +458,18 @@ class PreprocessingBindingV1:
 
 
 @dataclass(frozen=True, slots=True)
+class RoutingConditionV1:
+    id: str
+    description: str
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingScopeV1:
+    applicability: tuple[RoutingConditionV1, ...]
+    exclusions: tuple[RoutingConditionV1, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class RegistrationTemplateV1:
     registration_id: str
     version: str
@@ -467,6 +482,7 @@ class RegistrationTemplateV1:
     diagnose: RuntimeRoleBindingV1
     review: RuntimeRoleBindingV1
     preprocessing: PreprocessingBindingV1
+    routing: RoutingScopeV1 | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -836,6 +852,42 @@ def _preprocessing(value: Any, methods: MethodsManifestV1) -> PreprocessingBindi
     )
 
 
+def _routing_scope(value: Any) -> RoutingScopeV1:
+    if not isinstance(value, dict):
+        raise ValueError("registration.routing 必须是对象。")
+    _exact_fields(value, _ROUTING_FIELDS, "registration routing")
+    identifiers: set[str] = set()
+    conditions: dict[str, tuple[RoutingConditionV1, ...]] = {}
+    for name, minimum in (("applicability", 1), ("exclusions", 0)):
+        items = value[name]
+        label = f"registration routing.{name}"
+        if not isinstance(items, list) or not minimum <= len(items) <= 16:
+            raise ValueError(f"{label} 必须包含 {minimum} 至 16 个条件。")
+        parsed: list[RoutingConditionV1] = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise ValueError(f"{label} 中的条件必须是对象。")
+            _exact_fields(item, _ROUTING_CONDITION_FIELDS, f"{label} condition")
+            identifier = item["id"]
+            if (
+                not isinstance(identifier, str)
+                or len(identifier) > 64
+                or _KEBAB.fullmatch(identifier) is None
+            ):
+                raise ValueError(f"{label} 的条件 ID 必须使用小写 kebab-case，且不能超过 64 个字符。")
+            if identifier in identifiers:
+                raise ValueError("registration.routing 中的条件 ID 不得重复。")
+            description = item["description"]
+            if not isinstance(description, str) or not description.strip() or len(description) > 1024:
+                raise ValueError(f"{label} 的条件说明必须是非空文本，且不能超过 1024 个字符。")
+            identifiers.add(identifier)
+            parsed.append(RoutingConditionV1(id=identifier, description=description))
+        conditions[name] = tuple(parsed)
+    return RoutingScopeV1(
+        applicability=conditions["applicability"], exclusions=conditions["exclusions"]
+    )
+
+
 def load_specialized_skill_registration(registration_root: Path) -> ResolvedSpecializedSkillV1:
     """Resolve one product-owned registration and its closed generated package."""
 
@@ -866,9 +918,15 @@ def load_specialized_skill_registration(registration_root: Path) -> ResolvedSpec
     raw, registration_bytes = _json_object(
         root / "registration-template.json", label="registration-template.json"
     )
-    _exact_fields(raw, _REGISTRATION_FIELDS, "registration-template.json")
-    if type(raw["schema_version"]) is not int or raw["schema_version"] != 1:
-        raise ValueError("registration-template.json schema_version must equal integer 1")
+    schema_version = raw.get("schema_version")
+    if type(schema_version) is not int or schema_version not in (1, 2):
+        raise ValueError("registration-template.json 的 schema_version 必须是整数 1 或 2。")
+    _exact_fields(
+        raw,
+        _REGISTRATION_FIELDS if schema_version == 1 else _REGISTRATION_V2_FIELDS,
+        "registration-template.json",
+    )
+    routing = None if schema_version == 1 else _routing_scope(raw["routing"])
     registration_id = raw["registration_id"]
     if (
         not isinstance(registration_id, str)
@@ -937,6 +995,7 @@ def load_specialized_skill_registration(registration_root: Path) -> ResolvedSpec
         diagnose=diagnose,
         review=review,
         preprocessing=preprocessing,
+        routing=routing,
     )
     return ResolvedSpecializedSkillV1(
         registration_root=root.resolve(),
@@ -964,6 +1023,8 @@ __all__ = [
     "PreprocessingBindingV1",
     "RegistrationTemplateV1",
     "ResolvedSpecializedSkillV1",
+    "RoutingConditionV1",
+    "RoutingScopeV1",
     "RuntimeRoleBindingV1",
     "load_methods_package",
     "load_registered_skill_from_package",

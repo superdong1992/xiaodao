@@ -101,6 +101,19 @@
       "platforms": ["windows", "macos", "linux"]
     },
     {
+      "id": "real.report-followup",
+      "kind": "isolated-real",
+      "depends_on": ["deterministic.full"],
+      "gates": ["real.agent.report-followup"],
+      "identity_set": "real-report-followup",
+      "real_cap_id": "isolated.report-followup",
+      "estimated_tokens": 40000,
+      "timeout_seconds": 720,
+      "progress_class": "real",
+      "reuse": {"dev": "identity", "release": "never"},
+      "platforms": ["windows", "macos", "linux"]
+    },
+    {
       "id": "real.skill-generation",
       "kind": "isolated-real",
       "depends_on": ["deterministic.full"],
@@ -207,7 +220,7 @@
       "depends_on": ["real.agent-backend"],
       "gates": ["real.agent.route"],
       "identity_set": "real-route",
-      "timeout_seconds": 1200,
+      "timeout_seconds": 4800,
       "progress_class": "real",
       "reuse": {"dev": "identity", "release": "never"},
       "platforms": ["windows", "macos", "linux"]

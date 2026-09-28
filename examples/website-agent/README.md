@@ -12,6 +12,8 @@
 
 通用报告赞踩接口及经验复用规则见[经验库接入说明](../../docs/generic-feedback-memory.md)。按钮由网站实现，本示例提供调用封装和后端转发。
 
+报告后连续解释、质疑和文字补充见[报告追问接入说明](../../docs/website-report-followup.md)。本示例提供真实请求 controller、独立问答视图和离线模拟；功能默认关闭，服务端启用后才可提交。追问使用独立接口，不改正式报告和赞踩；独立定位请新建对话。
+
 ## 1. 先打开离线报告预览
 
 从仓库根目录启动：
@@ -20,7 +22,7 @@
 node examples/website-agent/preview.mjs
 ```
 
-打开 [http://127.0.0.1:8788/](http://127.0.0.1:8788/)。预览只使用本地示例数据，不连接 xiaodao、不创建任务，也不调用模型。可以查看等待、完整报告、部分结果、尚无定论和失败等状态，还可试用重命名、停止、删除、开始新一轮诊断和切换历史报告等操作。这些操作只修改浏览器内的模拟数据，刷新后即可恢复。
+打开 [http://127.0.0.1:8788/](http://127.0.0.1:8788/)。预览只使用本地示例数据，不连接 xiaodao、不创建任务，也不调用模型。可以查看等待、完整报告、部分结果、尚无定论和失败等状态，还可试用重命名、停止、删除、新建对话和切换历史报告。选择“通用 Markdown”或“旧报告追问”可体验连续问答、停止回答和只依据报告的提示。这些操作只修改浏览器内的模拟数据，刷新整个页面会重置模拟服务。
 
 | 文件 | 作用 | 接入网站时怎么用 |
 | --- | --- | --- |
@@ -28,12 +30,17 @@ node examples/website-agent/preview.mjs
 | `report-view.js` | 按固定字段生成报告界面 | 复制到网站静态资源目录，调用 `renderReport` |
 | `report-view.css` | 报告区样式 | 与渲染模块一起复制，也可替换为网站自己的样式 |
 | `browser-client.js` | 封装浏览器对网站同源 API 的调用 | 复制后使用，或按相同接口接入现有请求库 |
+| `followup-contract.js` | SDK 和 BFF 共用的追问 DTO 校验 | 与 browser-client.js 一起复制 |
+| `conversation-input.js` | 新网站共用输入框的诊断补充/报告追问分流 | 调用 sendConversationInput；诊断中固定 target_run_id，完成竞态先刷新再转追问 |
+| `followup-controller.js` | 草稿、请求 ID、快照和独立 SSE 恢复 | 每份报告创建实例，切换报告时销毁 |
+| `followup-view.js` | 可复用的连续问答界面 | 调用 mountFollowupView，或订阅 controller 接入自己的组件 |
+| `followup-bff.mjs` | 四个追问路由及响应校验 | 与 server.mjs 一起部署，复用登录和 CSRF / Origin 校验 |
 | [server.mjs](server.mjs) | 统一实现网站后端的权限校验、上游请求、SSE 和产物下载 | Node.js 18+ 可导入 `createAgentBackend`，集成到现有后端 |
 | [server.ts](server.ts) | 类型声明和兼容启动入口 | 使用 Node.js 24+ 执行下文启动命令，与 `server.mjs` 共用实现 |
 
 ## 2. 用最少代码显示已有报告
 
-把 `report-view.js`、`report-view.css` 和 `browser-client.js` 放进网站的同一个静态资源目录，例如 `/xiaodao/`。后端接入同源 `/api/agent/` 接口后，在现有页面加入以下代码：
+把 `report-view.js`、`report-view.css`、`browser-client.js` 和它依赖的 `followup-contract.js` 放进网站的同一个静态资源目录，例如 `/xiaodao/`。后端接入同源 `/api/agent/` 接口后，在现有页面加入以下代码：
 
 ```html
 <link rel="stylesheet" href="/xiaodao/report-view.css">
@@ -141,7 +148,7 @@ async function submitProblem() {
 
 收到非空的问题文本后，服务端按 MCP 客户端的固定中性模板创建 Case，初始事实为空。网站不应要求用户先提供预期行为、范围或日志，才允许创建 Case；创建前也不调用 INTAKE。Case 创建后，按原文展示 OPEN requirements 中的追问。没有 OPEN requirements 时不额外追问，前端也无需生成 `problem_spec`。
 
-附件按“预约上传 → PUT 原始字节 → 发消息引用 `attachment_ids`”的顺序提交。上传状态变为 `READY` 只表示文件可用；是否已用于诊断，需查看消息的 `APPLIED` / `notice`。以下代码中的 `file` 是用户选中的原始 File，`conversationId` 是已有会话 ID：
+附件按“预约上传 → PUT 原始字节 → 发消息引用 `attachment_ids`”的顺序提交。上传状态变为 `READY` 只表示文件可用；是否已用于诊断，需查看消息的 `APPLIED` / `notice`。以下代码中的 `file` 是用户选中的原始 File，`conversationId` 是已有会话 ID，`selectedRunId` 是用户开始补充时选中的活动轮次，须连同消息 ID 保存：
 
 ```javascript
 const lowercaseName = file.name.toLowerCase();
@@ -168,7 +175,7 @@ async function submitLogs() {
   prepared ??= await client.attachments.prepare(conversationId, metadata);
   uploaded ??= await client.attachments.upload(prepared, file);
   return client.conversations.send(conversationId, {
-    request_id: attachmentMessageId, attachment_ids: [uploaded.attachment_id],
+    request_id: attachmentMessageId, attachment_ids: [uploaded.attachment_id], target_run_id: selectedRunId,
   });
 }
 ```
@@ -179,11 +186,13 @@ async function submitLogs() {
 
 上传预约的元数据、原文件、消息 ID 和已收到的回执，也应保存在按钮回调及重试函数之外。同一次上传失败后，沿用这些数据调用 `submitLogs()`，不能更换文件或重新生成 ID。
 
+新网站的诊断补充必须携带保存的 `target_run_id`。收到 `409 / AGENT_RUN_CHANGED` 后先刷新原轮次；如果报告已生成，文字补充改走追问接口，附件不能自动带入报告追问。`conversation-input.js` 的 `sendConversationInput` 已实现这套分流，调用方式见[报告追问指南](../../docs/website-report-followup.md)。追问失败不能退回 `conversations.send`。
+
 ### 目录、历史与重新诊断
 
 使用 `conversations.get(id, {include: ["history"], history_before, history_limit: 50})` 加载历史记录，`history_before` 取上一页返回的 `history_next_cursor`。按 `history[].id` 去重，将更早的记录插入顶部。点击结果卡片后，调用 `conversations.get(id, {include: ["report", "artifacts"], run_id: entry.run_id})`；`current_run` 仍表示当前轮，报告正文则属于 `selected_run_id`。
 
-根据 `capabilities` 控制操作按钮。停止时保存原 `request_id` 和 `current_run.run_id`，在 `CANCELLING` 状态下等待当前轮停止。当前轮结束后，用户使用普通 `conversations.send` 提交新问题和需要复用的附件 ID，即可开始新一轮诊断，且不会继承旧结论。新一轮开始后重新订阅 SSE，历史结果按 `run_id` 缓存；旧轮次的完成事件不能关闭新轮次的订阅。
+根据 `capabilities` 控制操作按钮。停止时保存原 `request_id` 和 `current_run.run_id`，在 `CANCELLING` 状态下等待当前轮停止。新页面在报告后使用 followups 连续问答；独立定位调用 create 新建对话，再发送问题。旧 `conversations.send` 的同会话新轮行为仅保留兼容。历史结果按 `run_id` 缓存；旧轮次的完成事件不能关闭新轮次的订阅。
 
 `diagnosis.result` 也包含因失败、取消或中断而没有报告的诊断轮次。此时 `result.report_state=UNAVAILABLE`，应展示 `status` 和可选的 `failure`。点击卡片仍可读取该轮详情，不能显示为“结果仍在生成”。
 

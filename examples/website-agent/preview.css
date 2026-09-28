@@ -15,3 +15,9 @@ body { margin: 0; }
 .preview__contract pre { overflow: auto; max-height: 420px; font-size: 12px; padding: 16px; background: #f4f7f8; }
 .preview footer { margin-top: 28px; font-size: 13px; line-height: 1.8; color: #536769; }
 @media (max-width: 600px) { .preview { padding: 24px 16px; } }
+/* 追问与正式报告相邻展示，输入区在状态更新时保留焦点。 */
+.xiaodao-followup { margin-block: 2rem; padding: 1.5rem; border: 1px solid #d5dce4; border-radius: 12px; background: #fff; }
+.xiaodao-followup textarea { display: block; width: 100%; box-sizing: border-box; margin-block: .6rem; padding: .75rem; font: inherit; }
+.xiaodao-followup button { margin: .4rem .5rem .4rem 0; padding: .55rem .9rem; }
+.xiaodao-followup li { margin-block: 1.5rem; }
+.xiaodao-followup [role="alert"] { color: #a12622; }

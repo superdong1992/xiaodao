@@ -76,6 +76,25 @@ test("Methods registration ids map to the frozen diagnosis-skill namespace", () 
   }
 });
 
+test("release registration requires explicit v2 routing conditions", () => {
+  for (const mutate of [
+    (value) => { value.schema_version = 1; },
+    (value) => { delete value.routing; },
+    (value) => { value.routing.applicability = []; },
+    (value) => { value.routing.applicability[0].description = " "; },
+    (value) => { value.routing.applicability[0].id = "rpc\n"; },
+    (value) => { value.routing.exclusions = [...value.routing.applicability]; },
+  ]) {
+    const root = cloneCase("release-routing-");
+    const template = path.join(root, "registration/rpc-timeout-methods-v1/registration-template.json");
+    const value = JSON.parse(fs.readFileSync(template, "utf8"));
+    mutate(value);
+    fs.writeFileSync(template, canonicalJson(value));
+    refreshManifest(root);
+    assert.throws(() => loadReleaseCaseInputs(root), (error) => ["RELEASE_CASE_REGISTRATION_VERSION", "RELEASE_CASE_REGISTRATION_FIELDS", "RELEASE_CASE_REGISTRATION_ROUTING"].includes(error.code));
+  }
+});
+
 test("release case directory ordering is ordinal and independent of host collation", () => {
   const entries = [{ name: "registration-template.json" }, { name: "SKILL.md" }];
   assert.deepEqual(entries.sort(compareReleaseCaseEntries).map((entry) => entry.name), ["SKILL.md", "registration-template.json"]);
@@ -90,6 +109,8 @@ test("v2 loader exposes only Wiki, registration, driver, and frozen attachments"
   assert.equal(verified.manifest.schema_version, 2);
   assert.equal(loaded.journey_scenario, "multiple-rpc-timeouts");
   assert.equal(inputs.registration_template.deployment_scope, "PRODUCTION");
+  assert.equal(inputs.registration_template.schema_version, 2);
+  assert.equal(inputs.registration_template.routing.applicability[0].id, "rpc-call-timeout");
   assert.equal(inputs.product_registration.registration_id, "rpc-timeout-methods-v1");
   assert.equal(inputs.product_registration.runtime_ref_id, "diagnosis-skill/rpc-timeout-methods-v1");
   assert.equal(inputs.product_registration.skill_name, "diagnose-rpc-timeout");

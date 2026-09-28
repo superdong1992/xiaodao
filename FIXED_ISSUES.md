@@ -1,9 +1,46 @@
 # 已修复问题台账
 
-更新时间：2026-09-15
+更新时间：2026-09-28
 
 本文件记录已经在当前工作区验证、修复并由专项回归测试保护的问题。活跃待办仍只写入
 [`TODO.md`](TODO.md)；同一问题再次回归时更新原条目，不另建一个缺少历史关联的条目。
+
+## PL-FIX-073：路由仅凭有效 Skill ID 放行，缺少专用定位准入门槛
+
+- **状态**：实现及专项回归完成；正式验证结论以本条最终 Test Flow 元数据为准。确定性验证不等于真实模型语义准确率或线上验收。
+- **症状、受影响版本与确认**：`c37c4f5` / 8.2.0 当前源码中，合法 Skill ID 配合 `confidence=0`，或 `confidence=1` 但理由明确否定适用，均可经 `parse_route_response → DomainCoordinator.plan` 进入 `SPECIALIZED`。已在当前版本以纯内存输入复现；服务端只检查 ID、数值范围及字段类型，没有适用性准入。
+- **根因**：注册和索引没有独立的适用／排除条件，三字段响应无法检查逐项审核；`confidence` 仅作数值校验，任意目录内 ID 都转换为 `MATCHED`。
+- **修复历史（2026-09-28）**：注册 V2 新增范围声明，V1 保留加载但不允许自动选用；完整注册生成器、发布模板和校验器同步更新。索引 V3 保留全部候选。一次 ROUTE 返回四字段逐项审核，服务端核对条件覆盖、冻结输入引文和候选唯一性；最终发布再次核对准入记录与 Job、输入和草稿哈希。新增私有审计文件及存储白名单，原始响应在解析前保存。
+- **不可回归行为**：只有唯一候选全部适用条件成立、排除条件不成立、其他候选均可明确排除且置信度至少 0.95 才准入。低分、未知、无效引文、范围冲突或歧义转通用；明确适用但缺诊断材料仍可专用补齐。旧无声明候选全部存在时零模型回退。不得按事实名预过滤、不得因唯一候选自动命中，也不得受诊断证据校验模式或 Reviewer 开关影响。非法 JSON、未知 ID、缺少审核项保持 `OUTCOME_INVALID`，不重试模型、不转通用；审计写入失败不能无记录放行。
+- **历史关联与边界**：保留 PL-FIX-001 的全候选可见和补参行为。按本次用户明确选择，新审核协议停止 PL-FIX-042 的根 reason 语法恢复，仅保留合法展示格式提取；旧帮助器与历史恢复证据继续保留。模型负责语义判断，服务端只核对完整性、引用与准入规则，不把真实引文或高分等同于语义正确。
+- **专项回归测试**：`test_route_admission.py` 覆盖置信度边界、条件否定／未知、伪造引文、非法来源、多候选、旧注册和协议错误；`test_server_outcome_finalizer.py` 覆盖缺少准入和篡改草稿不得发布；`test_methods_skill.py`、`test_route_legacy_catalog.py` 覆盖新旧注册、严格字段、冻结范围和零模型回退；`test_route_admission_delivery.py` 贯穿真实 Web/Application/Runtime/存储与通用交付，验证回退不产生专用需求、协议错误不启动诊断和明确适用仍补材料；`test_route_quote_delivery.py` 验证合法转义交付、非法根 reason 报错、审计故障中断。生成校验专项与既有合同、MCP 输入、重启及完整确定性旅程一并回归。真实 `real.route` Gate 改用生产最终响应入口并声明五次独立场景调用，本轮未调用真实模型。
+- **最新 Test Flow verdict（2026-09-28）**：中央 Linux `dev.default` [run-20260928T021949Z-549ed227](.tmp/route-admission-dev/run-20260928T021949Z-549ed227/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:88d62a734706236490883fb47e2cf09654fae5afae4dffccdcca6e8038ff7224`（926 文件），verdict digest `056c20a9d6311dabc5dbd41119fe91ff4a9d5a93c6f53fde9daa8f916daf2e29`。与并行追问任务采用完全相同的源码快照，复制完整证据及复用来源后，以当前扫描器重新核验为 PASS；回填前工作区摘要与验证摘要完全一致。affected 由编排器交完整套件覆盖：Core 32、合同 592、单元 3453、集成 196、SameJob 5、MCP 2、Web API 2 项通过，单元 2 项平台跳过，网站示例 Gate 通过；完整轨 295.279 秒，模型调用、token 和费用为 0。先前 Windows 两轮分别因系统入站键遗漏和并行源码漂移中止；Linux 首轮的注册固定哈希与模拟 Agent 清单遗漏已按实际文件更新，原断言保留，全部历史证据保留。本行是验证后的引用元数据，不宣称被所引用快照覆盖；不代表真实路由模型、Release 或部署环境验收。
+- **最新 Test Flow verdict（推送分支，2026-09-28）**：中央 [run-20260928T070708Z-ec40d743](.tmp/report-followup-evidence/run-20260928T070708Z-ec40d743/verdict.json)，源码快照 `a93a36d59662ed4e20a92e9d546a27b16cf150f1133dc7824f0a2b295f2d2498`（926 文件），`PASS_WITH_WARNINGS`；functional、operation、verification 均为 PASS，performance 为 `NOT_CALIBRATED`，verdict digest `1c9ede0f034f38e2a16c7bc7fcc96563e2410bf2965673910a58610bac7530de`。推送分支保留 Git 原有脚本执行位，产品字节与此前通过版本一致；中央完整确定性回归重新执行通过。本次真实模型仅验证报告追问，不代表真实路由或部署验收。本行是验证后的引用元数据，不属于所引用快照。
+
+## PL-FIX-074：Windows 自动补入 WINDIR 导致隔离测试进程误拒绝
+
+- **状态**：实现及专项回归完成；正式验证结论以本条最终 Test Flow 元数据为准。
+- **症状、受影响版本与确认**：8.2.0 工作区、Node 24.16.0 / libuv 1.52.1 下，正式 Dev `run-20260928T020234Z-830ba059` 的报告追问包装器测试报 `ISOLATED_AGENT_INBOUND_KEY_FORBIDDEN:WINDIR`，未进入待验证的策略分支。以当前 Node 和显式空 `env` 启动子进程仍出现 `WINDIR`，已直接复现。
+- **根因**：Windows 的 libuv 进程启动代码会补入 `WINDIR`，隔离入站白名单未覆盖这一系统行为。
+- **修复历史（2026-09-28）**：仅在 Windows 入站接受该键，按平台既有规则忽略大小写；环境构造器仍不主动继承它，也不允许显式指定。策略版本升级为 `isolated-agent-env-allowlist-v4`，旧策略证据不能冒充新策略验证。
+- **不可回归行为**：Linux 和 macOS 仍拒绝 `WINDIR`；未知键、认证信息和代理变量的拒绝边界不变。构造器过滤与操作系统再次补入系统键是不同动作，不宣称后续子进程内该键一定不存在。
+- **专项回归测试**：`tools/test-flow/tests/isolated-agent-env.test.mjs` 直接验证真实 Windows 空环境子进程、大小写、其他平台拒绝和构造器过滤；`report-followup-gate.test.mjs` 的生产包装器用例继续验证缺少策略被拒绝，以及具备策略时的完整执行与审计。
+- **最新 Test Flow verdict（2026-09-28）**：与 PL-FIX-073 同一中央 Dev [run-20260928T021949Z-549ed227](.tmp/route-admission-dev/run-20260928T021949Z-549ed227/verdict.json)，源码快照 `88d62a734706236490883fb47e2cf09654fae5afae4dffccdcca6e8038ff7224`，`PASS_WITH_WARNINGS`，仅 performance 为 `NOT_CALIBRATED`，functional、operation、verification 均为 PASS；当前扫描器重审通过。此前 Windows 环境及包装器专项 56 项通过，正式 Windows 框架 Gate 464 项通过、30 项平台跳过；该 Windows 整轮随后因并行源码漂移为 ERROR，不能视作整轮通过。平台规则的确定性检查纳入最终 Linux Gate，真实 Windows 子进程专项在 Linux 明确跳过。零模型调用。本行仅为验证后的引用元数据，不属于所引用快照。
+- **最新 Test Flow verdict（推送分支，2026-09-28）**：中央 [run-20260928T070708Z-ec40d743](.tmp/report-followup-evidence/run-20260928T070708Z-ec40d743/verdict.json)，源码快照 `a93a36d59662ed4e20a92e9d546a27b16cf150f1133dc7824f0a2b295f2d2498`（926 文件），`PASS_WITH_WARNINGS`；functional、operation、verification 均为 PASS，performance 为 `NOT_CALIBRATED`，verdict digest `1c9ede0f034f38e2a16c7bc7fcc96563e2410bf2965673910a58610bac7530de`。推送分支保留 Git 原有脚本执行位，产品字节与此前通过版本一致；中央完整确定性回归重新执行通过。Linux 平台验证通过，不外推为 Windows 完整流程通过。本行是验证后的引用元数据，不属于所引用快照。
+
+## PL-FIX-062：报告交付后继续提问会误开新诊断，缺少独立问答与恢复能力
+
+- **状态**：实现完成；是否通过正式验证，以本条最终 Test Flow 元数据为准。功能默认关闭，实际网站与部署环境须单独验收。
+- **症状与受影响版本**：`c37c4f5` / 8.2.0 的消息入口在报告完成后创建新诊断轮次，没有报告追问接口。当前版本代码路径与改动前中央 Dev 基线均已核对；原有诊断 SSE 已支持回放，但没有独立追问记录、游标和停止目标。
+- **根因**：原消息接口同时承担补充与开启新诊断，报告解释不能复用其状态机；原日志临时工作区与报告保留期限也不相同。
+- **不可回归行为**：会话详情 schema 3、诊断 SSE schema 2、Agent 存储 v2 和旧网站行为保留。追问仅写入独立 `agent_followup_*` 表，不改 Case、正式报告字节、赞踩和旧事件序列。新网站诊断补充携带 `target_run_id`，完成竞争返回 409；追问失败不得回退到旧消息接口。查询和事件订阅不调用模型；同一请求只执行一次，停止、删除和重启后的不确定结果不能迟到发布。快照复制在报告成功之后异步执行，失败不撤销报告；问答和快照按原报告 7 天期限清理，不因追问续期。
+- **修复历史**：2026-09-24 新增独立提交、分页查询、停止与回放接口，以及生产 worker、限定输入目录的 Read/Grep、快照校验和独立容量配置。默认关闭 `REPORT_FOLLOWUP_ENABLED`；关闭后仍能查询、取消和清理已保存记录。网站 SDK、BFF、控制器、问答视图和离线预览增量适配。交叉审阅补齐报告发布后立即切轮的快照通知竞争，以及页面销毁后迟到响应覆盖新草稿和请求 ID 的竞争。
+- **专项回归测试**：`tests/deterministic/unit/agent/test_report_followup.py` 覆盖连续问答、日志快照、降级、幂等、并发、停止、恢复、写入失败、漂移和长历史；`test_target_run_guard.py` 覆盖新旧消息分流与通用日志重启的幂等保护；`tests/deterministic/unit/interfaces/test_followup_http.py` 覆盖严格输入、归属、分页与独立 SSE；`tests/deterministic/unit/storage/test_followup_retention.py` 和 `test_retention_cleaner.py` 覆盖清理和临时工作区保护；`tests/deterministic/integration/test_report_followups.py` 验证生产报告与追问链路。网站竞态专项在 `examples/website-agent/followup.test.mjs`，纳入原网站示例 Gate。独立真实 Gate 为 `real.report-followup`，不加入现有 Release 旅程。
+- **改动前基线**：中央 `dev.default` [run-20260924T041237Z-5a410efa](.tmp/test-flow-evidence/run-20260924T041237Z-5a410efa/verdict.json)，源码快照 `a2f1d5921bf084824e20436f815b9388af24d3bcebd5b09ed85c8e9e4ff4b9da`（891 文件）。functional、operation、verification 均为 PASS；overall 为 FAIL，唯一失败项为 Windows 完整确定性轨超过 300 秒性能上限。基线全部功能 Gate 通过，零模型调用，未放宽性能门槛。此前因沙箱 Python 权限和重试意图缺失产生的两轮 BLOCKED 证据一并保留。
+- **最新 Test Flow verdict（追问完整 Dev，2026-09-28）**：中央 Linux `dev.default` [run-20260928T021949Z-549ed227](.tmp/report-followup-evidence/run-20260928T021949Z-549ed227/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:88d62a734706236490883fb47e2cf09654fae5afae4dffccdcca6e8038ff7224`（926 文件），verdict digest `056c20a9d6311dabc5dbd41119fe91ff4a9d5a93c6f53fde9daa8f916daf2e29`。affected 由编排器交完整套件覆盖；Core 32、合同 592、单元 3453、集成 196、SameJob 5、MCP 2、Web API 2、网站示例 200 项通过，单元 2 项平台跳过，零模型调用。最终快照包含共享工作区的并行改动；夹具更新后的固定摘要和清单已同步，原断言与性能上限未放宽，先前失败证据保留。本行是验证后的引用元数据，不属于所引用源码快照。
+- **最新 Test Flow verdict（两轮真实追问，2026-09-28）**：中央 `dev.real --stage real.report-followup` [run-20260928T022649Z-b3305ce6](.tmp/report-followup-evidence/run-20260928T022649Z-b3305ce6/verdict.json)，同一源码快照 `88d62a734706236490883fb47e2cf09654fae5afae4dffccdcca6e8038ff7224`，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`，真实 Gate 两项均通过。verdict digest `9708b811d4ea92d202d6b26f7ae1eb6680ac90f8f280f6c2d4dbcc816f20f529`。执行前已审阅身份、Proof、Stage、Gate、复用决定与预算；Claude Code 2.1.89 / `deepseek-v4-flash[1m]` 共两次调用，44346 token、0.160554 美元。仅使用新建临时数据根中的合成报告与日志；生产 worker 的限定目录 Read/Grep、日志独有证据、前轮语境、文字补充和原报告／诊断／反馈不变断言全部通过。专用 Linux 运行时仅补齐固定官方包内 rg 的执行权限，文件内容逐一核对未变；包树身份 `7d396487a1f6758a4abf7a726db2dc5ac37cea738d794e0efa8fc093a6c40471` 已纳入计划。前两轮工具失败证据保留，已确认并修正显式 ask 覆盖目录检查器允许结果的冲突，未放宽工具审计。本行是验证后的引用元数据；不代表实际网站、部署环境、真实业务日志效果或 Release 旅程已验收。
+- **最新 Test Flow verdict（推送分支，2026-09-28）**：中央 [run-20260928T070708Z-ec40d743](.tmp/report-followup-evidence/run-20260928T070708Z-ec40d743/verdict.json)，源码快照 `a93a36d59662ed4e20a92e9d546a27b16cf150f1133dc7824f0a2b295f2d2498`（926 文件），`PASS_WITH_WARNINGS`；functional、operation、verification 均为 PASS，performance 为 `NOT_CALIBRATED`，verdict digest `1c9ede0f034f38e2a16c7bc7fcc96563e2410bf2965673910a58610bac7530de`。推送分支保留 Git 原有脚本执行位，产品字节与此前通过版本一致；中央完整确定性回归重新执行通过。两轮合成日志真实追问重新验证通过，实际 43732 token、0.157924 美元；原报告、诊断、反馈不变。该快照不包含主工作区后续 PostgreSQL 与鉴权改动。生产网站和部署环境仍需适配验收。本行是验证后的引用元数据，不属于所引用快照。
+
 
 ## PL-FIX-060：调度暂停后继续接单，结果提交失败使任务状态长期不明
 

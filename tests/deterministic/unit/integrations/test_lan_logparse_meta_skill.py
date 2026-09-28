@@ -138,12 +138,16 @@ supporting_event_refs 和 reason。
 
 def _registration_template(registration_id: str, wiki_sha256: str) -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "registration_id": registration_id,
         "version": "1.0.0",
         "capability": "Diagnose RPC timeout evidence in frozen client and server logs.",
         "deployment_scope": "PRODUCTION",
         "summary": "使用 Wiki 派生方法分析 Server 冻结的 RPC 双端日志。",
+        "routing": {
+            "applicability": [{"id": "rpc-call-timeout", "description": "RPC 调用超时，需要定位原因。"}],
+            "exclusions": [],
+        },
         "package": {
             "relative_path": "package/diagnose-rpc-timeout",
             "skill_name": "diagnose-rpc-timeout",
@@ -739,9 +743,67 @@ def test_valid_production_registration_loads_in_server(tmp_path: Path) -> None:
 
     assert loaded.registration.registration_id == registration.name
     assert loaded.registration.version == "1.0.0"
+    assert loaded.registration.routing is not None
+    assert loaded.registration.routing.applicability[0].id == "rpc-call-timeout"
     assert loaded.registration.deployment_scope == "PRODUCTION"
     assert loaded.registration.preprocessing.logparse_product == "default"
     assert loaded.methods.required_user_inputs[:7] == tuple(REQUIRED_INPUTS[:7])
+
+
+@pytest.mark.parametrize("schema_version", [1, True, "2", 3])
+def test_generated_registration_requires_v2(tmp_path: Path, schema_version: object) -> None:
+    registration, wiki, _ = _write_valid_registration(tmp_path)
+    payload = json.loads(_registration_path(registration).read_text(encoding="utf-8"))
+    payload["schema_version"] = schema_version
+    _write_json(_registration_path(registration), payload)
+
+    result = _validate(registration, wiki)
+
+    assert result["ok"] is False
+    assert "新生成的 registration schema_version 必须是 2" in _errors(result)
+
+
+@pytest.mark.parametrize(
+    "routing",
+    [
+        None,
+        {},
+        {"applicability": [], "exclusions": []},
+        {"applicability": "rpc", "exclusions": []},
+        {"applicability": [{"id": "rpc", "description": "RPC timeout"}], "exclusions": None},
+        {"applicability": [{"id": "rpc", "description": "RPC timeout", "extra": True}], "exclusions": []},
+        {"applicability": [{"id": "Rpc", "description": "RPC timeout"}], "exclusions": []},
+        {"applicability": [{"id": "x" * 65, "description": "RPC timeout"}], "exclusions": []},
+        {"applicability": [{"id": "rpc", "description": "  "}], "exclusions": []},
+        {"applicability": [{"id": "rpc", "description": "x" * 1025}], "exclusions": []},
+        {"applicability": [{"id": "rpc", "description": "RPC timeout"}] * 2, "exclusions": []},
+        {"applicability": [{"id": "rpc", "description": "RPC timeout"}], "exclusions": [{"id": "rpc", "description": "Excluded"}]},
+        {"applicability": [{"id": f"rpc-{index}", "description": "RPC timeout"} for index in range(17)], "exclusions": []},
+        {"applicability": [{"id": "rpc", "description": "RPC timeout"}], "exclusions": [{"id": f"exclude-{index}", "description": "Excluded"} for index in range(17)]},
+    ],
+)
+def test_generated_registration_rejects_invalid_routing(tmp_path: Path, routing: object) -> None:
+    registration, wiki, _ = _write_valid_registration(tmp_path)
+    payload = json.loads(_registration_path(registration).read_text(encoding="utf-8"))
+    payload["routing"] = routing
+    _write_json(_registration_path(registration), payload)
+
+    result = _validate(registration, wiki)
+
+    assert result["ok"] is False
+    assert "registration routing" in _errors(result)
+
+
+def test_generated_registration_requires_explicit_routing(tmp_path: Path) -> None:
+    registration, wiki, _ = _write_valid_registration(tmp_path)
+    payload = json.loads(_registration_path(registration).read_text(encoding="utf-8"))
+    del payload["routing"]
+    _write_json(_registration_path(registration), payload)
+
+    result = _validate(registration, wiki)
+
+    assert result["ok"] is False
+    assert "registration routing" in _errors(result)
 
 
 @pytest.mark.parametrize("name", ("logparse.json", "pack_result_zip.py", "result.zip"))

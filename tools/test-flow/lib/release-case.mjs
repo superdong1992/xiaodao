@@ -7,7 +7,7 @@ const CASE_FIELDS = ["allowed_actions", "case_id", "input_wiki", "journey_scenar
 const SCENARIO_FIELDS = ["driver", "oracle", "scenario_id"];
 const DRIVER_FIELDS = ["attachment_anchor_names", "attachment_files", "initial_user_fact_names", "initial_user_fact_values", "problem", "scenario_id", "supplement_input_names", "supplement_input_values"];
 const PROBLEM_FIELDS = ["actual_behavior", "completion_criteria", "constraints", "expected_behavior", "goals", "non_goals", "raw_problem_text", "scope", "statement"];
-const REGISTRATION_FIELDS = ["capability", "deployment_scope", "package", "registration_id", "runtime", "schema_version", "summary", "version"];
+const REGISTRATION_FIELDS = ["capability", "deployment_scope", "package", "registration_id", "routing", "runtime", "schema_version", "summary", "version"];
 const PACKAGE_FIELDS = ["relative_path", "skill_name", "source_wiki_sha256"];
 const RUNTIME_FIELDS = ["diagnose", "preprocessing", "review"];
 const ROLE_BINDING_FIELDS = ["agent_profile_id", "context_policy_id", "output_contract_id", "tool_bundle_id"];
@@ -152,7 +152,19 @@ function validateBinding(value, label, { nullable = false } = {}) {
 function loadRegistrationTemplate(loaded) {
   const value = readJson(loaded.registration_template_path);
   exactKeys(value, REGISTRATION_FIELDS, "RELEASE_CASE_REGISTRATION_FIELDS", "Release registration template");
-  assertFlow(value.schema_version === 1, "RELEASE_CASE_REGISTRATION_VERSION", "Release registration schema_version must be 1");
+  assertFlow(value.schema_version === 2, "RELEASE_CASE_REGISTRATION_VERSION", "Release registration schema_version 必须是 2");
+  exactKeys(value.routing, ["applicability", "exclusions"], "RELEASE_CASE_REGISTRATION_ROUTING", "Release registration routing");
+  const conditionIds = new Set();
+  for (const [group, minimum] of [["applicability", 1], ["exclusions", 0]]) {
+    const conditions = value.routing[group];
+    assertFlow(Array.isArray(conditions) && conditions.length >= minimum && conditions.length <= 16, "RELEASE_CASE_REGISTRATION_ROUTING", `routing.${group} 必须包含 ${minimum}–16 项条件`);
+    for (const condition of conditions) {
+      exactKeys(condition, ["description", "id"], "RELEASE_CASE_REGISTRATION_ROUTING", `routing.${group} 条件`);
+      assertFlow(typeof condition.id === "string" && condition.id.length <= 64 && condition.id.trim() === condition.id && REGISTRATION_ID.test(condition.id) && !conditionIds.has(condition.id), "RELEASE_CASE_REGISTRATION_ROUTING", "路由条件 id 必须是最多 64 个字符的小写 kebab-case，且在整个 routing 中唯一");
+      assertFlow(typeof condition.description === "string" && condition.description.trim() && [...condition.description].length <= 1024, "RELEASE_CASE_REGISTRATION_ROUTING", "路由条件 description 必须是最多 1024 个字符的非空文本");
+      conditionIds.add(condition.id);
+    }
+  }
   assertFlow(typeof value.registration_id === "string" && REGISTRATION_ID.test(value.registration_id), "RELEASE_CASE_REGISTRATION_ID", "Release registration_id is invalid");
   assertFlow(path.basename(path.dirname(loaded.registration_template_path)) === value.registration_id, "RELEASE_CASE_REGISTRATION_DIRECTORY", "Release registration_id must match its directory");
   assertFlow(typeof value.version === "string" && SEMVER.test(value.version), "RELEASE_CASE_REGISTRATION_SEMVER", "Release registration version is invalid");

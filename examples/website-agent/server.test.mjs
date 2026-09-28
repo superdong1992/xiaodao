@@ -18,6 +18,7 @@ import "./report-view.test.mjs";
 import "./browser-client.test.mjs";
 import "./preview.test.mjs";
 import "./onboarding.test.mjs";
+import "./followup.test.mjs";
 
 test("TypeScript compatibility entry exports the same BFF implementation", () => {
   assert.equal(createAgentBackend, createPureJsBackend);

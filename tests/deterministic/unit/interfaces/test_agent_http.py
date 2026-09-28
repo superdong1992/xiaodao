@@ -139,6 +139,9 @@ def test_conversation_and_attachment_routes_have_typed_contracts():
         f"{BASE}/conversations/{{conversation_id}}/stop",
         f"{BASE}/conversations/{{conversation_id}}/files/{{artifact_id}}/content",
         f"{BASE}/conversations/{{conversation_id}}/runs/{{run_id}}/feedback",
+        f"{BASE}/conversations/{{conversation_id}}/runs/{{run_id}}/followups",
+        f"{BASE}/conversations/{{conversation_id}}/runs/{{run_id}}/followups/events",
+        f"{BASE}/conversations/{{conversation_id}}/runs/{{run_id}}/followups/{{followup_id}}/stop",
     }
     response = schema["paths"][f"{BASE}/conversations/{{conversation_id}}/events"]["get"]["responses"]["200"]
     assert set(response["content"]) == {"text/event-stream"}

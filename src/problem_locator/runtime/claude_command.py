@@ -69,7 +69,7 @@ def apply_final_response_policy(invocation: ClaudeCommand, *, file_access: str |
     """Pin native Claude's tools; custom launchers receive the same explicit policy."""
     if file_access is None:
         return invocation
-    if file_access not in {'none', 'read-only'}:
+    if file_access not in {'none', 'read-only', 'read-search'}:
         raise ClaudeCommandError('Invalid Agent file access policy.')
     environment = dict(invocation.environment)
     environment['PROBLEM_LOCATOR_AGENT_FILE_ACCESS'] = file_access
@@ -83,14 +83,28 @@ def apply_final_response_policy(invocation: ClaudeCommand, *, file_access: str |
     }
     native = native or (executable in {'node', 'node.exe'} and len(argv) > 1
         and Path(argv[1]).name == 'cli.js')
+    if file_access == 'read-search' and not native and not _followup_wrapper(argv):
+        raise ClaudeCommandError('The launcher cannot enforce report follow-up tool access.')
+    followup_policy = phase == 'REPORT_FOLLOWUP' and (native or _followup_wrapper(argv))
+    if followup_policy:
+        from .followup_access import prepare_settings
+        settings_path = prepare_settings(argv, environment, workspace_root)
+        if not native:
+            environment['PROBLEM_LOCATOR_FOLLOWUP_SETTINGS'] = str(settings_path)
     if native:
         # The task owns output/tool policy. Model, endpoint, settings and budget
         # options remain configured by the operator.
         rewritten = []
         index = 0
         owned = {'--tools', '--allowedTools', '--allowed-tools', '--output-format', '--permission-mode'}
+        if followup_policy:
+            owned.update({'--settings', '--setting-sources', '--mcp-config', '--plugin-dir'})
         while index < len(argv):
             token = argv[index]
+            if followup_policy and token in {
+                    '--dangerously-skip-permissions', '--allow-dangerously-skip-permissions', '--chrome'}:
+                index += 1
+                continue
             if token.split('=', 1)[0] not in owned:
                 rewritten.append(token)
                 index += 1
@@ -104,11 +118,32 @@ def apply_final_response_policy(invocation: ClaudeCommand, *, file_access: str |
         if '--verbose' not in rewritten:
             rewritten.append('--verbose')
         rewritten.extend(['--output-format', 'stream-json', '--permission-mode', 'dontAsk',
-            '--tools', '' if file_access == 'none' else 'Read'])
+            '--tools', '' if file_access == 'none' else 'Read,Grep' if file_access == 'read-search' else 'Read'])
         if file_access == 'read-only':
             rewritten.extend(['--allowedTools', f'Read({workspace_root.as_posix()}/inputs/**)'])
+        if followup_policy:
+            rewritten.extend(['--setting-sources', '', '--settings', str(settings_path),
+                '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+                '--disable-slash-commands', '--no-chrome', '--no-session-persistence'])
         argv = tuple(rewritten)
     return ClaudeCommand(argv, environment)
+
+
+def _followup_wrapper(argv):
+    return (any(Path(token).name == 'isolated-agent-wrapper.mjs' for token in argv)
+        and any(argv[index:index + 2] == ('--workflow', 'report-followup') for index in range(len(argv) - 1)))
+
+
+def supports_read_search(command: str) -> bool:
+    """Only known policy-enforcing launchers may receive original log inputs."""
+    try:
+        argv, _ = parse_command_tokens(command)
+    except ClaudeCommandError:
+        return False
+    executable = Path(argv[0]).name.lower()
+    return (executable in {'claude', 'claude.exe', 'claude.cmd', 'codeagent', 'codeagent.exe', 'codeagent.cmd'}
+        or executable in {'node', 'node.exe'} and len(argv) > 1 and Path(argv[1]).name == 'cli.js'
+        or _followup_wrapper(argv))
 
 
 def _is_reserved_logparse_key(name: str) -> bool:

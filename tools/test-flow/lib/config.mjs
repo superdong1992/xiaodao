@@ -39,7 +39,7 @@ const REPOSITORY_CHECKS = new Set(["python-compileall", "uv-lock", "git-diff-che
 const CAPABILITY_ADAPTERS = new Set(["host-capability", "server-linux-capability", "macos-codex-luna-methods", "macos-codex-luna-e2e", "macos-claude-deepseek-methods", "macos-claude-deepseek-e2e", "evidence-v2-release-verdict"]);
 const CROSS_JOB_PHASES = new Set(["environment", "route", "upload", "diagnose", "publish-restart"]);
 const OBSERVATIONS = new Set(["review-state-transition"]);
-const ENVIRONMENT_PROFILES = new Set(["real-logparse", "real-agent-backend", "real-generic-locator", "real-skill-generation", "real-route", "real-review"]);
+const ENVIRONMENT_PROFILES = new Set(["real-logparse", "real-agent-backend", "real-generic-locator", "real-report-followup", "real-skill-generation", "real-route", "real-review"]);
 const RELEASE_SETTINGS_ENVIRONMENT = Object.freeze([
   "ANTHROPIC_AUTH_TOKEN",
   "ANTHROPIC_BASE_URL",
@@ -455,7 +455,7 @@ function validateRuntimeProfiles(runtimeProfiles) {
     for (const [name, commit] of Object.entries(profile.external_sources)) assertFlow(/^[a-f0-9]{40}$/.test(commit), "CONFIG_RUNTIME_EXTERNAL_COMMIT", `${profileId}.external_sources.${name} must be a commit SHA`);
     stringArray(profile.settings_environment_allowlist, "CONFIG_RUNTIME_SETTINGS_ENV", `${profileId}.settings_environment_allowlist`, { nonEmpty: true });
     assertFlow(canonicalJson([...profile.settings_environment_allowlist].sort()) === canonicalJson([...RELEASE_SETTINGS_ENVIRONMENT].sort()), "CONFIG_RUNTIME_SETTINGS_ENV", `${profileId} has an unsupported settings environment allowlist`);
-    exactKeys(profile.real_caps, ["isolated", "isolated.skill-generation", "codex.macos-methods", "codex.macos-e2e", "claude.macos-methods", "claude.macos-e2e", "service_agent", "service_intake", "journey.route", "journey.diagnose", "journey.publish-restart"], "CONFIG_RUNTIME_CAPS_FIELDS", `${profileId}.real_caps`);
+    exactKeys(profile.real_caps, ["isolated", "isolated.report-followup", "isolated.skill-generation", "codex.macos-methods", "codex.macos-e2e", "claude.macos-methods", "claude.macos-e2e", "service_agent", "service_intake", "journey.route", "journey.diagnose", "journey.publish-restart"], "CONFIG_RUNTIME_CAPS_FIELDS", `${profileId}.real_caps`);
     for (const [capId, cap] of Object.entries(profile.real_caps)) {
       exactKeys(cap, ["max_turns", "max_total_tokens", "max_output_tokens", "max_budget_usd", "hard_timeout_seconds"], "CONFIG_RUNTIME_CAP_FIELDS", `${profileId}.real_caps.${capId}`);
       positiveInteger(cap.max_turns, "CONFIG_RUNTIME_MAX_TURNS", `${capId}.max_turns`);

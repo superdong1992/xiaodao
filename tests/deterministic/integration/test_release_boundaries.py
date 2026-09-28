@@ -18,6 +18,9 @@ EXPECTED_ENV_KEYS = {
     "GENERIC_SKILL_NAME",
     "GENERIC_LOGPARSE_PRODUCT",
     "GENERIC_MEMORY_ENABLED",
+    "REPORT_FOLLOWUP_ENABLED",
+    "REPORT_FOLLOWUP_SNAPSHOT_BYTES",
+    "REPORT_FOLLOWUP_STORAGE_BYTES",
     "DFX_LOG_DIR",
     "SPECIALIZED_REVIEWER_ENABLED",
     "METHODS_EVIDENCE_VALIDATION",
@@ -103,6 +106,9 @@ def test_env_example_contains_only_the_public_settings() -> None:
     assert assignments["GENERIC_LOGPARSE_PRODUCT"] == "default"
     assert assignments["METHODS_EVIDENCE_VALIDATION"] == "off"
     assert assignments["GENERIC_MEMORY_ENABLED"] == "false"
+    assert assignments["REPORT_FOLLOWUP_ENABLED"] == "false"
+    assert assignments["REPORT_FOLLOWUP_SNAPSHOT_BYTES"] == "1073741824"
+    assert assignments["REPORT_FOLLOWUP_STORAGE_BYTES"] == "5368709120"
     forbidden_fragments = (
         "JOB_CONCURRENCY",
         "_LIMIT_",

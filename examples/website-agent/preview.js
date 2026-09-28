@@ -1,11 +1,13 @@
 import { renderReport } from "./report-view.js";
 import { createAgentClient } from "./browser-client.js";
 import { createPreviewApi } from "./preview-model.js";
+import { createFollowupController } from "./followup-controller.js";
+import { mountFollowupView } from "./followup-view.js";
 
 const element = (selector) => document.querySelector(selector);
 const report = element("#report"), directory = element("#scenarios"), note = element("#scenario-note");
 const history = element("#history"), responseText = element("#response");
-let client, currentId, current, before = null;
+let client, currentId, current, before = null, disposeFollowups, selection = 0, newRequest;
 const busy = async (work) => { try { await work(); } catch (error) { note.textContent = error.message; } };
 
 function showHistory(entries, prepend = false) {
@@ -34,14 +36,22 @@ async function refreshDirectory() {
   return page.items;
 }
 async function select(id, run_id) {
-  currentId = id; current = await client.conversations.get(id, { run_id, history_limit: 3 });
+  const selected = ++selection;
+  disposeFollowups?.(); disposeFollowups = null;
+  element("#followups").replaceChildren();
+  const view = await client.conversations.get(id, { run_id, history_limit: 3 });
+  if (selected !== selection) return;
+  currentId = id; current = view;
   before = current.history_next_cursor;
   element("#conversation-title").textContent = current.title;
   note.textContent = `第 ${current.current_run.ordinal} 轮 · ${current.current_run.status}。所有操作仅修改浏览器内的合成样例。`;
   element("#stop").disabled = !current.capabilities.can_stop;
-  element("#rediagnose").disabled = !current.capabilities.can_rediagnose;
   element("#older").disabled = before === null;
   renderReport(report, current.result); showHistory(current.history);
+  const controller = createFollowupController({ client, conversationId: id, runId: current.selected_run_id,
+    storageNamespace: "xiaodao-preview-followup" });
+  disposeFollowups = mountFollowupView(element("#followups"), controller);
+  void controller.start().catch(() => {});
   responseText.textContent = JSON.stringify({ ok: true, data: current, error: null }, null, 2);
   await refreshDirectory();
 }
@@ -57,6 +67,7 @@ element("#stop").onclick = () => busy(async () => {
 element("#delete").onclick = () => busy(async () => {
   if (!confirm("删除这个预览会话及其历史？刷新页面即可恢复合成样例。")) return;
   await client.conversations.delete(currentId);
+  disposeFollowups?.();
   const items = await refreshDirectory();
   if (items.length) await select(items[0].conversation_id);
   else { history.replaceChildren(); report.replaceChildren(); responseText.textContent = "";
@@ -64,12 +75,16 @@ element("#delete").onclick = () => busy(async () => {
 });
 element("#rediagnose").onclick = () => busy(async () => {
   const text = element("#new-problem").value;
-  if (!text.trim()) throw new Error("请先填写新一轮的问题。");
-  await client.conversations.send(currentId, { request_id: crypto.randomUUID(), text, attachment_ids: [] });
-  await select(currentId);
+  if (!text.trim()) throw new Error("请先填写新对话的问题。");
+  newRequest ??= { createId: crypto.randomUUID(), messageId: crypto.randomUUID(), text, conversationId: null };
+  if (!newRequest.conversationId) newRequest.conversationId = (await client.conversations.create(newRequest.createId)).conversation_id;
+  await client.conversations.send(newRequest.conversationId, { request_id: newRequest.messageId, text: newRequest.text, attachment_ids: [] });
+  const id = newRequest.conversationId; newRequest = null; await select(id);
 });
 element("#older").onclick = () => busy(async () => {
-  const page = await client.conversations.get(currentId, { include: ["history"], history_before: before, history_limit: 3 });
+  const selected = selection, id = currentId;
+  const page = await client.conversations.get(id, { include: ["history"], history_before: before, history_limit: 3 });
+  if (selected !== selection || id !== currentId) return;
   showHistory(page.history, true); before = page.history_next_cursor; element("#older").disabled = before === null;
 });
 await busy(async () => {

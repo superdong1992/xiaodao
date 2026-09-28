@@ -175,6 +175,11 @@ class HistoryRetentionService:
             "AND c.deleted_at IS NULL", (cid, run_id)).fetchone()
         if row is None or row[1] == run_id or not HistoryRetentionService._expired(json.loads(row[0]), cutoff):
             return False
+        followup_store = getattr(self.store, "followup_store", None)
+        if followup_store is not None:
+            if followup_store.busy(db, cid, run_id=run_id):
+                return False
+            followup_store.purge(db, cid, run_id=run_id)
         memory_store = getattr(self.store, "memory_store", None)
         if memory_store is not None:
             memory_store.expire_sources(db, cid, run_id=run_id)
@@ -196,6 +201,10 @@ class HistoryRetentionService:
             if lease is None:
                 return False
             leases.enter_context(lease)
+            followup_store = getattr(self.store, "followup_store", None)
+            with self.repository.database_read() as db:
+                if followup_store is not None and followup_store.busy(db, cid, run_id=run_id):
+                    return False
             if case_id is not None:
                 lease = self.repository.case_cleanup_if_idle(case_id)
                 if lease is None or not self._idle([case_id]):
@@ -213,6 +222,8 @@ class HistoryRetentionService:
                     workspaces = [row[0] for row in db.execute("SELECT json_extract(payload,'$.workspace_id') "
                         "FROM agent_dispatches WHERE run_id=? AND json_extract(payload,'$.workspace_id') IS NOT NULL", (run_id,))]
                     body = db.execute("SELECT body FROM agent_conversation_runs WHERE run_id=?", (run_id,)).fetchone()
+                    if followup_store is not None:
+                        workspaces.extend(followup_store.workspace_ids(db, cid, run_id=run_id))
                 if body is None:
                     return False
                 workspaces.extend(json.loads(body[0]).get("legacy_workspace_ids", []))
@@ -238,6 +249,9 @@ class HistoryRetentionService:
             with self.repository.database_read() as db:
                 row = db.execute("SELECT deleted_at FROM agent_conversations WHERE conversation_id=?", (cid,)).fetchone()
                 if row is None or row[0] is not None:
+                    return False
+                followup_store = getattr(self.store, "followup_store", None)
+                if followup_store is not None and followup_store.busy(db, cid):
                     return False
                 runs = [(case_id, json.loads(raw)) for case_id, raw in db.execute(
                     "SELECT case_id,body FROM agent_conversation_runs WHERE conversation_id=?", (cid,))]

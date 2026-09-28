@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { normalizeUsage, TOKEN_USAGE_FORMULA } from "../lib/usage.mjs";
+import { auditReportFollowupTrace, reportFollowupInputManifest, reportFollowupPermissionArguments } from "./report-followup-tool-audit.mjs";
 import {
   auditSkillGenerationTrace,
   discoverLinkedSkillReferences,
@@ -56,13 +57,28 @@ const outputCapValid = hasMaxOutputTokens === hasMaxOutputTokensUpperLimit
     && caps.max_output_tokens <= maxOutputTokensUpperLimit
     && caps.max_output_tokens <= caps.max_total_tokens
   ));
-if (!values.claude_entry || !values.settings || !values.model || !values.usage_root || !["job", "skill-generation"].includes(workflow) || (workflow === "skill-generation" && (!values.skill_root || !values.source_root)) || !Number.isSafeInteger(caps.max_turns) || caps.max_turns <= 0 || !Number.isSafeInteger(caps.max_total_tokens) || caps.max_total_tokens <= 0 || !outputCapValid || !Number.isFinite(caps.max_budget_usd) || caps.max_budget_usd <= 0 || !Number.isSafeInteger(caps.hard_timeout_seconds) || caps.hard_timeout_seconds <= 0) {
+if (!values.claude_entry || !values.settings || !values.model || !values.usage_root || !["job", "skill-generation", "report-followup"].includes(workflow) || (workflow === "skill-generation" && (!values.skill_root || !values.source_root)) || !Number.isSafeInteger(caps.max_turns) || caps.max_turns <= 0 || !Number.isSafeInteger(caps.max_total_tokens) || caps.max_total_tokens <= 0 || !outputCapValid || !Number.isFinite(caps.max_budget_usd) || caps.max_budget_usd <= 0 || !Number.isSafeInteger(caps.hard_timeout_seconds) || caps.hard_timeout_seconds <= 0) {
   throw new Error("WRAPPER_REQUIRED_INPUT_INVALID");
 }
 
 let linkedReferences = [];
 let toolArguments;
-if (workflow === "skill-generation") {
+let followupInputs = null;
+let configurationArguments = ["--setting-sources", "user", "--settings", values.settings];
+if (workflow === "report-followup") {
+  if (process.env.PROBLEM_LOCATOR_AGENT_FILE_ACCESS !== "read-search"
+      || process.env.PROBLEM_LOCATOR_AGENT_PHASE !== "REPORT_FOLLOWUP") throw new Error("WRAPPER_FOLLOWUP_POLICY_REQUIRED");
+  const policySettings = process.env.PROBLEM_LOCATOR_FOLLOWUP_SETTINGS;
+  if (!policySettings || !path.isAbsolute(policySettings) || !fs.statSync(policySettings).isFile()) {
+    throw new Error("WRAPPER_FOLLOWUP_SETTINGS_REQUIRED");
+  }
+  // The production backend owns this restricted settings file and its
+  // PreToolUse guard. Do not load ambient user/project hooks or permissions.
+  configurationArguments = ["--setting-sources", "", "--settings", policySettings,
+    "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--disable-slash-commands", "--no-chrome"];
+  followupInputs = reportFollowupInputManifest(process.cwd());
+  toolArguments = reportFollowupPermissionArguments();
+} else if (workflow === "skill-generation") {
   linkedReferences = discoverLinkedSkillReferences(values.skill_root);
   const permissionRules = skillGenerationPermissionRules({
     workspaceRoot: process.cwd(),
@@ -104,8 +120,7 @@ const child = spawn(process.execPath, [
   "--output-format", "stream-json",
   "--verbose",
   "--no-session-persistence",
-  "--setting-sources", "user",
-  "--settings", values.settings,
+  ...configurationArguments,
   "--model", values.model,
   "--max-turns", String(caps.max_turns),
   "--max-budget-usd", String(caps.max_budget_usd),
@@ -175,6 +190,15 @@ if (workflow === "skill-generation" && terminalSucceeded) {
   }
 }
 const invocationId = `isolated-agent:${process.pid}:${crypto.randomUUID()}`;
+if (workflow === "report-followup" && terminalSucceeded) {
+  try {
+    toolTraceAudit = auditReportFollowupTrace({ events, workspaceRoot: process.cwd(), before: followupInputs });
+  } catch (error) {
+    wrapperFailureCode ??= "WRAPPER_FOLLOWUP_TRACE_INVALID";
+    toolTraceAudit = { schema_version: 1, status: "FAIL", workflow: "report-followup",
+      code: /^FOLLOWUP_TRACE_[A-Z0-9_]+$/.test(error?.code ?? "") ? error.code : "FOLLOWUP_TRACE_AUDIT_FAILED" };
+  }
+}
 writeNew(path.join(values.usage_root, `${invocationId.replaceAll(":", "-")}.json`), {
   schema_version: 3,
   invocation_id: invocationId,

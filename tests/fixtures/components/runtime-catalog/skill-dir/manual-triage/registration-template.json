@@ -1,10 +1,16 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "registration_id": "manual-triage",
   "version": "1.0.0",
   "capability": "manual-service-triage",
   "deployment_scope": "PRODUCTION",
   "summary": "Diagnose a service incident from structured facts and existing evidence.",
+  "routing": {
+    "applicability": [
+      {"id": "service-incident", "description": "问题是服务故障，需要定位发生故障的服务边界。"}
+    ],
+    "exclusions": []
+  },
   "package": {
     "relative_path": "package/manual-triage",
     "skill_name": "manual-triage",

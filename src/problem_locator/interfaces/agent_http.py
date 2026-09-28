@@ -73,6 +73,8 @@ class SendMessageBody(_AgentHttpModel):
     request_id: NonEmptyText = Field(description="同一条消息重试时保持不变。")
     text: NonEmptyText | None = None
     attachment_ids: list[OpaqueId] = Field(default_factory=list, max_length=20)
+    target_run_id: OpaqueId | None = Field(default=None,
+        description="诊断中补充的目标轮次；该轮已结束或改变时返回 409，防止误开新诊断。旧网站可省略。")
 
     @model_validator(mode="after")
     def validate_content(self) -> SendMessageBody:
@@ -254,6 +256,8 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
     # HTTP helpers are imported at registration time to avoid the composition
     # module's import cycle. Upload cancellation follows the established port.
     from .http_app import _port_call, parse_upload_headers
+    from .followup_http import register_followup_routes
+    register_followup_routes(app, service)
 
     errors = {
         status: {"model": AgentErrorEnvelope}
@@ -406,6 +410,7 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
         return await respond(
             "send_message", request, conversation_id=conversation_id,
             request_id=body.request_id, text=body.text or "", attachment_ids=body.attachment_ids,
+            **({"target_run_id": body.target_run_id} if body.target_run_id is not None else {}),
         )
 
     @app.get(

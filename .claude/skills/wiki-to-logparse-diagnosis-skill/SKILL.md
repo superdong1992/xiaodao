@@ -38,9 +38,12 @@ registration root。生成物只包含产品 registration 和闭合 Methods pack
 3. `log_archive` 是唯一受支持的附件。Wiki 明确要求其他附件时停止并报告当前 Server 不支持，
    不得生成无法运行的 registration。Wiki 的其他标量参数按源顺序保留；同义的时间、slot、
    进程、服务或 API 信息映射到合同中的稳定名称，不生成别名。
-4. registration 固定为 `version=1.0.0`、`deployment_scope=PRODUCTION`，内部
+4. registration 使用 `schema_version=2`，固定为 `version=1.0.0`、`deployment_scope=PRODUCTION`，内部
    `logparse_product=default`。client/server 的 `module` 使用相同 `SKILL_FIXED` 值；slot、
    process name 和可选 PID 使用各自的 `USER_FACT` 绑定。diagnose/review 使用产品固定绑定。
+   必须从 Wiki 写出 `routing.applicability` 和 `routing.exclusions`，明确领域、场景、症状及排除边界。
+   不把日志、附件或参数是否齐全写成路由条件；明确适用但缺少材料的 Case 仍由专用流程补充材料。
+   不编造 Wiki 未给出的适用限制；没有明确排除条件时使用空数组。旧版注册可加载，但不能自动进入专用路由。
 5. 按 Wiki 明确列出的原因拆分方法。保留字段含义、计算、单位、阈值、观测限制和安全提醒，
    不增加经验规则。
 6. source identity 提取版本 2 同时识别 `text` fence 和无语言标记的裸 fence。按清单顺序逐字

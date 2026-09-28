@@ -360,7 +360,7 @@ class AgentStreamTelemetry:
         with self._lock:
             if self._internal_failure or self._output_limited or self._malformed:
                 return False
-            allowed = set() if policy == 'none' else {'Read'}
+            allowed = set() if policy == 'none' else {'Read', 'Grep'} if policy == 'read-search' else {'Read'}
             return set(self._tool_counts).issubset(allowed)
 
     def snapshot(

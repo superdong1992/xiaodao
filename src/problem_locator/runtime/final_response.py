@@ -5,12 +5,12 @@ import json
 from pathlib import Path
 
 from problem_locator.contracts import (
-    AgentJobOutcomeDraftV2, ErrorCode, ExecutionStage, Job, RouteDecision,
-    RouteKind, OutcomeResultType, canonical_json_bytes,
+    AgentJobOutcomeDraftV2, ErrorCode, ExecutionStage, Job,
+    RouteKind, OutcomeResultType, bytes_sha256, canonical_json_bytes,
 )
 from .failures import runtime_failure
 from .model_json import parse_model_json_response
-from .route_json import parse_route_json_bytes
+from .route_admission import evaluate_route_admission
 from .methods_grounding import (
     MethodDiagnosisDraftV1, SkillLoadReceiptV1,
 )
@@ -130,39 +130,34 @@ def _document(text: str | None, secrets=()):
     return parsed
 
 
-def parse_route_response(text: str | None, job: Job) -> ValidatedAgentDraft:
+def parse_route_response(text: str | None, job: Job, *, skill_index: str) -> ValidatedAgentDraft:
     try:
         if not isinstance(text, str) or not text.strip():
             raise ValueError("CLI final result is missing")
-        parsed = parse_route_json_bytes(text.encode("utf-8"))
-        value = parsed.document.value
-        if not isinstance(value, dict) or set(value) != {"skill_id", "reason", "confidence"}:
-            raise ValueError("ROUTE response must contain exactly three fields")
-        skill_id = value["skill_id"]
-        if skill_id is not None and not isinstance(skill_id, str):
-            raise ValueError("skill_id must be a string or null")
-        ref = next((ref for ref in job.available_skill_refs if ref.id == skill_id), None)
-        if skill_id is not None and ref is None:
-            raise ValueError("unknown frozen Skill")
-        if isinstance(value["confidence"], bool) or not isinstance(value["confidence"], (float, int)):
-            raise ValueError("confidence must be a JSON number")
-        if not isinstance(value["reason"], str) or not value["reason"].strip() or len(value["reason"]) > 1024:
-            raise ValueError("reason must be short non-empty text")
+        parsed = parse_model_json_response(text.encode("utf-8"))
+        admission = evaluate_route_admission(parsed.document.value, job, skill_index=skill_index)
+        matched = admission.decision.kind is RouteKind.MATCHED
         draft = AgentJobOutcomeDraftV2(
             schema_version=2, job_id=job.job_id, case_id=job.case_id,
             job_type=job.job_type, base_state_revision=job.base_state_revision,
-            result_type=OutcomeResultType.COMPLETED if ref else OutcomeResultType.NO_CAPABILITY,
-            payload=RouteDecision(kind=RouteKind.MATCHED if ref else RouteKind.NO_CAPABILITY,
-                skill_ref=ref, reason=value["reason"], confidence=value["confidence"]),
+            result_type=OutcomeResultType.COMPLETED if matched else OutcomeResultType.NO_CAPABILITY,
+            payload=admission.decision,
             consumed_evidence_refs=[], proposed_evidence_drafts=[],
             proposed_artifact_drafts=[], rule_claims=[], error=None,
         )
-        return ValidatedAgentDraft(draft=draft, canonical_bytes=canonical_json_bytes(draft),
+        draft_bytes = canonical_json_bytes(draft)
+        audit = {
+            **admission.audit,
+            "raw_response_sha256": bytes_sha256(text.encode("utf-8")),
+            "draft_sha256": bytes_sha256(draft_bytes),
+        }
+        return ValidatedAgentDraft(draft=draft, canonical_bytes=draft_bytes,
             proposal_resources=(), authoritative_targets=None, target_logs=(),
-            route_recovery=parsed.recovery, model_json_extraction=parsed.extraction)
+            model_json_extraction=parsed.extraction,
+            route_admission=audit)
     except (TypeError, ValueError):
         raise runtime_failure(stage=ExecutionStage.OUTCOME_VALIDATE, code=ErrorCode.OUTCOME_INVALID,
-            message="ROUTE 最终响应无效，必须返回目录中的 skill_id、reason 和 confidence。") from None
+            message="ROUTE 最终响应无效，必须返回 skill_id、reason、confidence 和完整的 assessments。") from None
 
 
 def parse_specialist_response(

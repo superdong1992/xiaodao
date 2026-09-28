@@ -1265,6 +1265,14 @@ def _assemble(
             memory_store, settings.diagnose_claude_command or settings.claude_command,
             workspace_root=layout.workspaces, enabled=settings.generic_memory_enabled,
         )
+        from problem_locator.followup.service import ReportFollowupService
+        agent.followups = ReportFollowupService(
+            agent, settings.diagnose_claude_command or settings.claude_command,
+            enabled=settings.report_followup_enabled,
+            snapshot_max_bytes=settings.report_followup_snapshot_bytes,
+            snapshot_total_bytes=settings.report_followup_storage_bytes,
+        )
+        agent_store.followup_store = agent.followups.store
         runtime = DiagnosisRuntime(
             state_repository=repository,
             resource_store=resource_store,
@@ -1304,6 +1312,7 @@ def _assemble(
             file_sync=file_sync,
             replacer=replacer,
         )
+        retention.cleaner.workspace_in_use = agent.followups.store.workspace_in_use
         state_admin = ServiceStateAdmin(
             layout=layout,
             instance_lock=instance_lock,

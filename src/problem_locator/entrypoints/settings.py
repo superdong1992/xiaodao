@@ -60,6 +60,9 @@ class Settings:
     methods_evidence_validation: str = "off"
     generic_logparse_product: str = "default"
     generic_memory_enabled: bool = False
+    report_followup_enabled: bool = False
+    report_followup_snapshot_bytes: int = 1024 ** 3
+    report_followup_storage_bytes: int = 5 * 1024 ** 3
 
     @classmethod
     def load(
@@ -190,6 +193,20 @@ class Settings:
         raw_memory_enabled = values.get("GENERIC_MEMORY_ENABLED", "false")
         if raw_memory_enabled not in {"true", "false"}:
             raise SettingsError("GENERIC_MEMORY_ENABLED 必须是 true 或 false")
+        raw_followup_enabled = values.get("REPORT_FOLLOWUP_ENABLED", "false")
+        if raw_followup_enabled not in {"true", "false"}:
+            raise SettingsError("REPORT_FOLLOWUP_ENABLED 必须是 true 或 false")
+        followup_sizes = {}
+        for key, default in (("REPORT_FOLLOWUP_SNAPSHOT_BYTES", 1024 ** 3),
+                             ("REPORT_FOLLOWUP_STORAGE_BYTES", 5 * 1024 ** 3)):
+            raw = values.get(key, str(default))
+            if re.fullmatch(r"[1-9][0-9]{0,18}", raw) is None or int(raw) > 2 ** 63 - 1:
+                raise SettingsError(f"{key} 必须是有效的正整数字节数")
+            followup_sizes[key.lower()] = int(raw)
+        if followup_sizes["report_followup_snapshot_bytes"] > 1024 ** 3:
+            raise SettingsError("REPORT_FOLLOWUP_SNAPSHOT_BYTES 不能超过 1 GiB")
+        if followup_sizes["report_followup_snapshot_bytes"] > followup_sizes["report_followup_storage_bytes"]:
+            raise SettingsError("追问快照总量不能小于单份上限")
 
         workers = {}
         for key, default in (("ROUTE_WORKERS", 1), ("DIAGNOSE_WORKERS", 2), ("LOGPARSE_CONCURRENCY", 1), ("ARCHIVE_WORKERS", 1)):
@@ -200,6 +217,7 @@ class Settings:
 
         return cls(
             **workers,
+            **followup_sizes,
             data_root=paths["DATA_ROOT"],
             public_base_url=base_url.rstrip("/"),
             bind_host=bind_host,
@@ -216,6 +234,7 @@ class Settings:
             specialized_reviewer_enabled=(raw_reviewer_enabled == "true" and methods_evidence_validation != "off"),
             methods_evidence_validation=methods_evidence_validation,
             generic_memory_enabled=raw_memory_enabled == "true",
+            report_followup_enabled=raw_followup_enabled == "true",
             route_claude_command=route_claude_command,
             diagnose_claude_command=diagnose_claude_command,
             intake_claude_command=intake_claude_command,

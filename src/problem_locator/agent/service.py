@@ -51,6 +51,7 @@ class AgentConversationService:
         self.uploads = ConversationUploads(store, application, layout)
         self.usage_guard = ConversationUsageGuard()
         self.cleanup = None
+        self.followups = None
         self.dispatcher = None
         self._run_lock = threading.Lock()
         self._message_guard = threading.Lock()
@@ -72,6 +73,12 @@ class AgentConversationService:
     def _changed(self, _conversation_id):
         self._wake.set()
         self._control_wake.set()
+        if self.followups is not None:
+            try:
+                self.followups.schedule_observe(_conversation_id)
+            except Exception as error:
+                # A side snapshot must never revoke a committed diagnosis.
+                log_event("agent.followup.snapshot_schedule_failed", error=error)
 
     def start(self, runtime_epoch=None):
         with self._lifecycle:
@@ -80,12 +87,15 @@ class AgentConversationService:
             if runtime_epoch is not None:
                 self.store.runtime_epoch = runtime_epoch
             self.store.recover()
+            if self.followups is not None:
+                self.followups.start()
             self._thread = threading.Thread(target=self._run, name="agent-intake", daemon=True)
             self._control_thread = threading.Thread(target=self._run_control, name="agent-management", daemon=True)
             self._thread.start()
             self._control_thread.start()
 
     def shutdown(self, timeout_seconds=30):
+        deadline = time.monotonic() + timeout_seconds
         self._stop.set()
         self._wake.set()
         self._control_wake.set()
@@ -94,11 +104,12 @@ class AgentConversationService:
         with self._run_lock:
             for signal in self._active_runs.values():
                 signal.cancel(CancellationReason.SERVICE_SHUTDOWN)
-        deadline = time.monotonic() + timeout_seconds
+        followups_stopped = self.followups is None or self.followups.shutdown(
+            max(0.0, deadline - time.monotonic()))
         for thread in (self._thread, self._control_thread):
             if thread is not None:
                 thread.join(max(0.0, deadline - time.monotonic()))
-        return all(thread is None or not thread.is_alive() for thread in (self._thread, self._control_thread))
+        return followups_stopped and all(thread is None or not thread.is_alive() for thread in (self._thread, self._control_thread))
 
     def _available(self):
         if self._stop.is_set() or self._failure is not None:
@@ -117,16 +128,19 @@ class AgentConversationService:
             self.store.require_owner(conversation_id, owner_key)
             yield
 
-    def send_message(self, conversation_id, request_id, text="", attachment_ids=None, *, owner_key=None):
+    def send_message(self, conversation_id, request_id, text="", attachment_ids=None, *, owner_key=None, target_run_id=None):
         self._available()
         with self.operation_lease(conversation_id, owner_key=owner_key), self._message_lock(conversation_id):
             request = SendMessageRequest(request_id=request_id, text=text or "", attachment_ids=attachment_ids or [])
-            receipt, pending = self.store.message_request(conversation_id, request)
+            receipt, pending = self.store.message_request(conversation_id, request, target_run_id=target_run_id)
             if receipt is not None:
                 return receipt
             if pending is not None:
                 return self._dispatch_generic_restart(pending, request)
             view = self.store.get_status(conversation_id)
+            if target_run_id is not None and (view.run_id != target_run_id or view.status in _CLOSED
+                                               or view.report_state == "READY"):
+                raise AgentStoreError("AGENT_RUN_CHANGED", "本次诊断已结束或发生变化，请刷新会话。", 409)
             if (request.attachment_ids and view.case_id is not None and view.status not in _CLOSED
                     and view.report_state != "READY"):
                 snapshot = self.store.repository.read_snapshot(view.case_id)
@@ -155,9 +169,11 @@ class AgentConversationService:
                         supplement_text=request.text, **fields) if self._is_generic_job(job) else
                         MarkInitialLogArchiveExpected(idempotency_key="agent-route-logs-" + identity, **fields))
                     pending = self.store.freeze_generic_restart(conversation_id, request, command,
-                        run_id=view.run_id, archive_sha256=record.sha256 if record is not None else None)
+                        run_id=view.run_id, archive_sha256=record.sha256 if record is not None else None,
+                        target_run_id=target_run_id)
                     return self._dispatch_generic_restart(pending, request)
-            return self.store.submit_message(conversation_id, request_id, request.text, request.attachment_ids)
+            return self.store.submit_message(conversation_id, request_id, request.text, request.attachment_ids,
+                                             target_run_id=target_run_id)
 
     def _message_lock(self, conversation_id):
         with self._message_guard:
@@ -211,7 +227,8 @@ class AgentConversationService:
                         message = pending["message"]
                         try:
                             return self.store.submit_message(cid, message["request_id"], message["text"],
-                                message["attachment_ids"], routed_request_key=command.idempotency_key)
+                                message["attachment_ids"], routed_request_key=command.idempotency_key,
+                                target_run_id=pending.get("target_run_id"))
                         except AgentStoreError as changed:
                             if changed.code != "AGENT_ROUTE_CHANGED":
                                 raise
@@ -230,7 +247,7 @@ class AgentConversationService:
         if request is None:
             request = SendMessageRequest(request_id=pending["message"]["request_id"], text=pending["message"]["text"],
                 attachment_ids=pending["message"]["attachment_ids"])
-        receipt, _ = self.store.message_request(cid, request)
+        receipt, _ = self.store.message_request(cid, request, target_run_id=pending.get("target_run_id"))
         if receipt is None:
             raise AgentStoreError("AGENT_RESTART_PENDING", "日志接入尚未完成，请稍后重试同一请求。", 503, retryable=True)
         return receipt
@@ -284,6 +301,8 @@ class AgentConversationService:
     def delete_conversation(self, conversation_id, *, owner_key=None):
         # Store performs authorization even for the minimal deletion receipt.
         receipt = self.store.request_delete(conversation_id, owner_key=owner_key)
+        if self.followups is not None:
+            self.followups.cancel_conversation(conversation_id)
         with self._run_lock:
             for (cid, _run_id), signal in self._active_runs.items():
                 if cid == conversation_id:

@@ -72,6 +72,10 @@
       "producer": ["product.source", "source.agent", "source.diagnose", "skill.generic-adapter", "skill.generic-parity", "runtime.support", "runtime.claude", "runtime.settings", "runtime.release"],
       "proof": ["proof.real", "framework.runner"]
     },
+    "real-report-followup": {
+      "producer": ["product.source", "source.agent", "runtime.support", "runtime.claude", "runtime.settings", "runtime.release"],
+      "proof": ["proof.real", "framework.runner"]
+    },
     "real-route": {
       "producer": ["source.agent", "source.route", "runtime.support", "runtime.claude", "runtime.settings", "runtime.release"],
       "proof": ["proof.real", "framework.runner"]

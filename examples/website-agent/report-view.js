@@ -7,6 +7,14 @@ const ARRAY_FIELDS = ["findings", "causal_factors", "candidate_factors", "exclud
   "supporting_evidence_bindings", "completion_criteria_mapping", "verification_rules",
   "evidence_gaps", "limitations", "recommendations", "safety_notes"];
 
+/** 正式报告和追问共用的安全原文显示；不解析 HTML，也不自动打开链接。 */
+export function createMarkdownBlock(doc, text) {
+  const element = doc.createElement("pre");
+  element.className = "xiaodao-report__raw";
+  element.textContent = String(text);
+  return element;
+}
+
 function object(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -76,7 +84,7 @@ export function renderReport(container, data) {
     }
     return element;
   };
-  const raw = (value) => node("pre", "raw", typeof value === "string" ? value : JSON.stringify(value, null, 2));
+  const raw = (value) => createMarkdownBlock(doc, typeof value === "string" ? value : JSON.stringify(value, null, 2));
   const list = (values, empty, render = (item) => paragraph(item)) => {
     if (!values.length) return paragraph(empty, true);
     const element = node("ul", "list");

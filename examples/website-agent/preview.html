@@ -27,11 +27,12 @@
       <h3>历史记录</h3>
       <button id="older" type="button">加载更早记录</button>
       <ol id="history"></ol>
-      <label for="new-problem">新一轮问题</label>
+      <label for="new-problem">独立定位的新问题</label>
       <textarea id="new-problem" rows="3">请使用新的日志重新定位付款请求超时问题。</textarea>
-      <button id="rediagnose" type="button">开始新一轮</button>
+      <button id="rediagnose" type="button">新建对话并开始定位</button>
     </section>
     <section id="report" aria-label="诊断报告"></section>
+    <div id="followups"></div>
     <details class="preview__contract">
       <summary>查看这个场景的完整会话响应</summary>
       <p>会话同时返回状态、追问和报告。browser-client.js 已解包 data，将 conversation.result 传给 renderReport。</p>

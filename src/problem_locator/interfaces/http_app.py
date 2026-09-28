@@ -121,6 +121,7 @@ _UUID_PATH_SCHEMA = {
     "pattern": _UUID_PATTERN,
 }
 _UUID_PARAMETER_NAMES = {
+    "followup_id",
     "conversation_id",
     "run_id",
     "case_id",
@@ -712,6 +713,39 @@ _SUCCESS_RESPONSE_DESCRIPTIONS = {
 }
 
 _REST_MODEL_FIELD_DESCRIPTIONS = {
+    "FollowupRequest": {
+        "request_id": "本次追问的幂等标识，1 到 128 个字符；重试保留原 ID 和原文。",
+        "text": "本次追问或文字补充，不能为空，最多 65536 UTF-8 字节；不接受附件。",
+    },
+    "FollowupStopRequest": {
+        "request_id": "本次停止操作的幂等标识，1 到 128 个字符；重试保留原 ID 和停止目标。",
+    },
+    "FollowupItem": {
+        "ordinal": "该报告内从 1 开始递增的追问序号。",
+        "status": "追问排队、执行、停止或结束状态；仅 COMPLETED 带有回答正文。",
+        "text": "这次追问的用户原文，包含本次文字补充。",
+        "failure": "追问失败或中断的受控说明；其余状态为 null。",
+    },
+    "FollowupView": {
+        "schema_version": "独立追问查询合同版本，固定为 1。",
+        "items": "当前页的问答记录，按该报告内的追问序号升序排列。",
+        "next_cursor": "读取更早问答的不透明游标；没有更早记录时为 null。",
+        "last_event_id": "该报告追问流的最新事件序号；不能用作诊断 SSE 游标。",
+    },
+    "FollowupReceipt": {
+        "event_id": "本次追问接收事件在独立追问流中的序号。",
+        "status": "ACCEPTED 表示已持久接收，尚不表示回答完成。",
+    },
+    "FollowupStopReceipt": {
+        "event_id": "停止操作返回时该报告追问流的最新事件序号。",
+        "status": "CANCELLING 表示正在停止，CANCELLED 表示已停止，ALREADY_FINISHED 表示此前已经结束。",
+    },
+    "FollowupEvent": {
+        "schema_version": "独立追问事件合同版本，固定为 1。",
+        "sequence": "该报告追问流内从 1 开始连续递增的事件序号，与诊断 SSE 独立。",
+        "type": "followup.accepted 表示已接收，followup.updated 表示状态或回答更新。",
+        "data": "对应追问的完整状态和回答；按 followup_id 更新页面，按 sequence 去重。",
+    },
     "FeedbackRequest": {
         "request_id": "本次评价的幂等标识，1 到 128 个 Unicode 字符，不能全为空白；重试保留原 ID 和内容，换票使用新 ID。",
         "rating": "LIKE 表示有帮助，DISLIKE 表示没帮助；首版不支持取消评价。",
@@ -745,6 +779,14 @@ _REST_MODEL_FIELD_DESCRIPTIONS = {
 }
 
 _REST_FIELD_DESCRIPTIONS.update({
+    "target_run_id": "诊断中补充的目标轮次；该轮已结束或改变时返回 409。省略时保持原消息行为。",
+    "followup_id": "独立追问的 UUID；不能用作诊断轮次或诊断事件游标。",
+    "can_ask": "当前是否允许提交追问，由开关、报告类型、有效期和会话忙碌状态决定。",
+    "reason": "当前不可追问的原因码，例如 DISABLED、UNSUPPORTED、EXPIRED 或 BUSY；可追问时为 null。",
+    "snapshot_status": "原日志快照状态；未就绪时本次追问仅依据报告和问答记录。",
+    "active_followup": "会话内当前排队或执行的追问，可能属于其他诊断轮次；没有时为 null。",
+    "context_mode": "REPORT_AND_LOGS 表示本次可读取原日志；REPORT_ONLY 表示仅依据报告和问答。",
+    "answer_markdown": "完整追问回答的 Markdown 正文；未完成时为 null。",
     "rating": "报告评价：LIKE 有帮助，DISLIKE 没帮助；尚未评价时为 null。",
     "can_rate": "当前是否允许评价；只支持已交付的通用定位 V2 正式报告，功能关闭或报告不适用时为 false。",
     "run_id": "独立诊断轮次的 UUID；同一会话可包含多轮。",
@@ -770,6 +812,10 @@ _REST_FIELD_DESCRIPTIONS.update({
     "history_limit": "历史分页条数，默认 50，最大 100。",
 })
 _SUCCESS_RESPONSE_DESCRIPTIONS.update({
+    "submit_agent_followup": "追问已持久接收；同一 request_id 重试返回原收据，不重复调用模型。",
+    "list_agent_followups": "返回分页问答、会话内活跃追问、可用能力和独立事件游标；读取不启动模型。",
+    "stop_agent_followup": "返回指定追问的停止收据；终态不受迟到答案影响。",
+    "subscribe_agent_followup_events": "回放独立追问游标之后的 data JSON，按 sequence 去重；每 15 秒发送注释心跳，终态且回放完毕后关闭。",
     "get_agent_feedback": "返回指定报告的评价资格和当前投票，不运行模型；尚未评价时 rating 和 updated_at 均为 null。",
     "put_agent_feedback": "评价已持久保存，返回当前投票；重复同票不累计，旧请求重放不会恢复旧投票。",
     "list_agent_conversations": "返回当前归属键的会话目录和下一页游标。",
@@ -780,11 +826,13 @@ _SUCCESS_RESPONSE_DESCRIPTIONS.update({
 })
 
 _REQUEST_BODY_DESCRIPTIONS = {
+    "submit_agent_followup": "只接受 request_id 和 text。重试保留 ID 与原文，不接受附件；只追加回答，不改正式结论。",
+    "stop_agent_followup": "稳定的 request_id；同一次停止重试保持不变，停止目标由路径指定。",
     "put_agent_feedback": "只接受 request_id 和 rating。request_id 为 1 到 128 个 Unicode 字符；rating 为 LIKE 或 DISLIKE。重试保留 ID 与内容，换票使用新 ID。",
     "rename_agent_conversation": "新的会话标题，1 到 80 个字符；赋值操作可安全重复。",
     "stop_agent_conversation": "稳定 request_id 和目标 run_id；重试不能改为停止另一轮。",
     "create_agent_conversation": "稳定 request_id；相同内容重试不创建新会话。",
-    "send_agent_message": "用户原话和已上传附件 ID 至少一项非空；无需生成结构化问题或命名事实。",
+    "send_agent_message": "用户原话和已上传附件 ID 至少一项非空；新网站补充诊断时携带 target_run_id，报告已完成则返回 409，刷新后转入独立追问。旧网站可省略。",
     "prepare_agent_attachment": "声明会话归属、原始文件名、类型、字节数及 SHA-256。",
     "upload_agent_attachment": "原始归档字节；四个请求头必须与预约完全一致。",
     "create_case": "Strict JSON body defining one new Case.",

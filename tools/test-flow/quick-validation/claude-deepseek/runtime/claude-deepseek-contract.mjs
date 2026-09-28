@@ -36,12 +36,12 @@ import {
 
 const RUNTIME_ROOT = path.dirname(fileURLToPath(import.meta.url));
 
-export const CLAUDE_DEEPSEEK_CONTRACT_VERSION = 3;
+export const CLAUDE_DEEPSEEK_CONTRACT_VERSION = 4;
 export const CLAUDE_DEEPSEEK_MODEL = RELEASE_MODEL;
 export const CLAUDE_DEEPSEEK_VERSION = RELEASE_CLAUDE_VERSION;
 export const CLAUDE_DEEPSEEK_VERSION_OUTPUT = RELEASE_CLAUDE_VERSION_OUTPUT;
 export const CLAUDE_DEEPSEEK_CLI_SHA256 = RELEASE_CLAUDE_CLI_SHA256;
-export const CLAUDE_DEEPSEEK_METHODS_PROMPT_VERSION = 3;
+export const CLAUDE_DEEPSEEK_METHODS_PROMPT_VERSION = 4;
 export const CLAUDE_DEEPSEEK_CLIENT_PROMPT_VERSION = 3;
 export const CLAUDE_DEEPSEEK_METHODS_CALLS = 1;
 export const CLAUDE_DEEPSEEK_E2E_CALLS = 5;
@@ -211,7 +211,20 @@ export function validateRegistrationRoot(registrationRoot, { module = CLAUDE_DEE
   const rootEntries = fs.readdirSync(root, { withFileTypes: true });
   requireContract(rootEntries.length === 2 && rootEntries.some((item) => item.name === "registration-template.json" && item.isFile()) && rootEntries.some((item) => item.name === "package" && item.isDirectory()), "CLAUDE_DEEPSEEK_REGISTRATION_TREE_INVALID", "Registration root must contain exactly registration-template.json and package");
   const registration = readJson(path.join(root, "registration-template.json"), "generated registration template");
-  requireContract(registration.schema_version === 1 && registration.registration_id === path.basename(root) && registration.registration_id === CLAUDE_DEEPSEEK_REGISTRATION_ID && registration.version === "1.0.0" && registration.deployment_scope === "PRODUCTION", "CLAUDE_DEEPSEEK_REGISTRATION_INVALID", "Generated registration identity is invalid");
+  requireContract(registration.schema_version === 2 && registration.registration_id === path.basename(root) && registration.registration_id === CLAUDE_DEEPSEEK_REGISTRATION_ID && registration.version === "1.0.0" && registration.deployment_scope === "PRODUCTION", "CLAUDE_DEEPSEEK_REGISTRATION_INVALID", "Generated registration identity is invalid");
+  const routing = registration.routing;
+  requireContract(routing && typeof routing === "object" && !Array.isArray(routing) && Object.keys(routing).sort().join(",") === "applicability,exclusions", "CLAUDE_DEEPSEEK_REGISTRATION_ROUTING_INVALID", "生成的 registration 必须声明 applicability 和 exclusions");
+  const conditionIds = new Set();
+  for (const [group, minimum] of [["applicability", 1], ["exclusions", 0]]) {
+    const conditions = routing[group];
+    requireContract(Array.isArray(conditions) && conditions.length >= minimum && conditions.length <= 16, "CLAUDE_DEEPSEEK_REGISTRATION_ROUTING_INVALID", `routing.${group} 必须包含 ${minimum}–16 项条件`);
+    for (const condition of conditions) {
+      requireContract(condition && typeof condition === "object" && !Array.isArray(condition) && Object.keys(condition).sort().join(",") === "description,id", "CLAUDE_DEEPSEEK_REGISTRATION_ROUTING_INVALID", "路由条件只能包含 id 和 description");
+      requireContract(typeof condition.id === "string" && condition.id.length <= 64 && condition.id.trim() === condition.id && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(condition.id) && !conditionIds.has(condition.id), "CLAUDE_DEEPSEEK_REGISTRATION_ROUTING_INVALID", "路由条件 id 必须是最多 64 个字符的小写 kebab-case，且在整个 routing 中唯一");
+      requireContract(typeof condition.description === "string" && condition.description.trim() && [...condition.description].length <= 1024, "CLAUDE_DEEPSEEK_REGISTRATION_ROUTING_INVALID", "路由条件 description 必须是最多 1024 个字符的非空文本");
+      conditionIds.add(condition.id);
+    }
+  }
   requireContract(registration.package?.relative_path === `package/${CLAUDE_DEEPSEEK_SKILL_NAME}` && registration.package?.skill_name === CLAUDE_DEEPSEEK_SKILL_NAME, "CLAUDE_DEEPSEEK_REGISTRATION_PACKAGE_INVALID", "Generated registration package binding is invalid");
   const packageParent = path.join(root, "package");
   const packageChildren = fs.readdirSync(packageParent, { withFileTypes: true });
@@ -270,7 +283,7 @@ export function buildRegistrationProducerIdentity({ wiki, metaSkillRoot, claudeI
       max_output_tokens: CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS,
     },
     generation_prompt_version: CLAUDE_DEEPSEEK_METHODS_PROMPT_VERSION,
-    runner: { contract: "claude-deepseek-registration-generation-v2", sha256: sha256File(runner), size: fs.statSync(runner).size },
+    runner: { contract: "claude-deepseek-registration-generation-v3", sha256: sha256File(runner), size: fs.statSync(runner).size },
   };
   return Object.freeze({ schema_version: 1, producer_identity: sha256Bytes(canonicalJson(inputs)), inputs });
 }

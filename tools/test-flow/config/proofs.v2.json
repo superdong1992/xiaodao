@@ -35,6 +35,7 @@
         "proof.real-logparse",
         "proof.real-agent-backend",
         "proof.real-generic-locator",
+        "proof.real-report-followup",
         "proof.real-skill-generation",
         "proof.real-route",
         "proof.real-review",
@@ -172,6 +173,11 @@
       "description": "The isolated real Agent loads the preinstalled generic locator Skill, preserves its exact Unicode input, and writes the strict result file.",
       "acceptance": "all",
       "stages": ["real.generic-locator"]
+    },
+    "proof.real-report-followup": {
+      "description": "两次真实模型调用经生产追问 worker 完成日志查证和连续追问，保留原报告、Case、反馈与诊断事件。",
+      "acceptance": "all",
+      "stages": ["real.report-followup"]
     },
     "proof.real-skill-generation": {
       "description": "Claude Code with the pinned DeepSeek Flash model loads the identity-bound Wiki conversion Skill and directly produces one valid Methods diagnosis package; no GenerationSpec, compiled manifest, approved package, compatibility layer or oracle is exposed to the Agent.",

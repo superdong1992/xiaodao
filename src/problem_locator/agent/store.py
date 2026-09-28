@@ -273,6 +273,11 @@ class AgentStore:
         if body.get("_deleted") or body.get("stop_requested") or body["status"] in _CLOSED or body.get("report_available"):
             raise AgentStoreError("AGENT_CONVERSATION_CLOSED", "本次任务已经结束，请另建任务。", 409)
 
+    @staticmethod
+    def _ensure_target_run(body, target_run_id):
+        if target_run_id is not None and (target_run_id != body["run_id"] or body["status"] in _CLOSED or body.get("report_available")):
+            raise AgentStoreError("AGENT_RUN_CHANGED", "本次诊断已结束或发生变化，请刷新会话。", 409)
+
     def _append(self, db, body, event_type, data, dedupe_key):
         legacy_key = dedupe_key if body["run_id"] == body["conversation_id"] else None
         dedupe_key = body["run_id"] + ":" + dedupe_key
@@ -356,6 +361,7 @@ class AgentStore:
                 if previous[0] != fingerprint:
                     raise AgentStoreError("AGENT_IDEMPOTENCY_CONFLICT", "同一 request_id 的内容不能更改。", 409)
                 return MessageReceipt.model_validate({**json.loads(previous[1]), "run_id": previous[2]})
+            self._ensure_target_run(body, target_run_id)
             restart = db.execute("SELECT fingerprint,command_key,status,payload,run_id FROM agent_generic_restarts WHERE conversation_id=? AND request_id=?",
                 (conversation_id, request_id)).fetchone()
             if restart is not None:
@@ -376,8 +382,6 @@ class AgentStore:
                     raise AgentStoreError("AGENT_ROUTE_CHANGED", "定位策略已更新，正在接入日志，请稍后重试同一请求。", 409)
             elif routed_request_key is not None:
                 raise AgentStoreError("AGENT_RUN_CHANGED", "日志接入请求已失效，请刷新会话。", 409)
-            if target_run_id is not None and (target_run_id != body["run_id"] or body["status"] in _CLOSED or body.get("report_available")):
-                raise AgentStoreError("AGENT_RUN_CHANGED", "本次诊断已结束或发生变化，请刷新会话。", 409)
             if body["status"] in _CLOSED or body.get("report_available"):
                 if not request.text.strip():
                     raise AgentStoreError("VALIDATION_ERROR", "再次诊断时请提供问题描述。", 400)
@@ -416,9 +420,12 @@ class AgentStore:
         self._notify(conversation_id)
         return receipt
 
-    def message_request(self, conversation_id, request):
+    def message_request(self, conversation_id, request, *, target_run_id=None):
         """Read either the public receipt or a frozen, not-yet-accepted restart."""
-        fingerprint = hashlib.sha256(_json(request.model_dump()).encode()).hexdigest()
+        payload = request.model_dump()
+        if target_run_id is not None:
+            payload["target_run_id"] = target_run_id
+        fingerprint = hashlib.sha256(_json(payload).encode()).hexdigest()
         with self.repository.database_read() as db:
             self._load(db, conversation_id)
             previous = db.execute("SELECT fingerprint,receipt,run_id FROM agent_messages WHERE conversation_id=? AND request_id=?",
@@ -431,11 +438,15 @@ class AgentStore:
             pending = None if restart is None else {**json.loads(restart[2]), "status": restart[1]}
             return receipt, pending
 
-    def freeze_generic_restart(self, conversation_id, request, command, *, run_id, archive_sha256):
+    def freeze_generic_restart(self, conversation_id, request, command, *, run_id, archive_sha256, target_run_id=None):
         """Persist intent before the Case commit; this does not accept the message."""
-        fingerprint = hashlib.sha256(_json(request.model_dump()).encode()).hexdigest()
+        request_payload = request.model_dump()
+        if target_run_id is not None:
+            request_payload["target_run_id"] = target_run_id
+        fingerprint = hashlib.sha256(_json(request_payload).encode()).hexdigest()
         with self.repository.database_transaction() as db:
             body = self._load(db, conversation_id)
+            self._ensure_target_run(body, target_run_id)
             self._ensure_open(body)
             if body["run_id"] != run_id or body.get("case_id") != command.case_id:
                 raise AgentStoreError("AGENT_RUN_CHANGED", "本次定位已结束或发生变化，请刷新会话。", 409)
@@ -466,6 +477,8 @@ class AgentStore:
                 "operation": type(command).__name__, "command": command.model_dump(mode="json"),
                 "message": message.model_dump(mode="json"),
                 "archive_sha256": archive_sha256}
+            if target_run_id is not None:
+                payload["target_run_id"] = target_run_id
             db.execute("INSERT INTO agent_generic_restarts VALUES (?,?,?,?,?,'PENDING',?)",
                 (conversation_id, request.request_id, run_id, fingerprint, command.idempotency_key, _json(payload)))
             return {**payload, "status": "PENDING"}
@@ -788,6 +801,9 @@ class AgentStore:
             self.require_owner(conversation_id, owner_key, deleted=True)
             head = db.execute("SELECT deleted_at,cleanup_status FROM agent_conversations WHERE conversation_id=?", (conversation_id,)).fetchone()
             memory_store = getattr(self, "memory_store", None)
+            followup_store = getattr(self, "followup_store", None)
+            if followup_store is not None:
+                followup_store.revoke(db, conversation_id)
             # A user can delete a naturally expired conversation before its
             # tombstone disappears. That still revokes its surviving cards.
             if memory_store is not None and not preserve_completed_memory:
@@ -814,14 +830,16 @@ class AgentStore:
         self._notify(conversation_id)
         return DeleteReceipt(conversation_id=conversation_id, status="DELETING")
 
-    @staticmethod
-    def _cleanup_context(db, conversation_id):
+    def _cleanup_context(self, db, conversation_id):
         runs = db.execute("SELECT run_id,case_id,body FROM agent_conversation_runs WHERE conversation_id=?", (conversation_id,)).fetchall()
         bodies = [json.loads(row[2]) for row in runs]
         jobs = {body.get("job_id") for body in bodies}
         jobs.update(row[0] for row in db.execute("SELECT DISTINCT json_extract(body,'$.job_id') FROM agent_events WHERE conversation_id=?", (conversation_id,)))
         workspaces = {row[0] for row in db.execute("SELECT DISTINCT json_extract(payload,'$.workspace_id') FROM agent_dispatches WHERE conversation_id=? AND json_extract(payload,'$.workspace_id') IS NOT NULL", (conversation_id,))}
         workspaces.update(workspace for body in bodies for workspace in body.get("legacy_workspace_ids", []))
+        followup_store = getattr(self, "followup_store", None)
+        if followup_store is not None:
+            workspaces.update(followup_store.workspace_ids(db, conversation_id))
         return {"run_ids": [row[0] for row in runs], "case_ids": [row[1] for row in runs if row[1] is not None],
             "job_ids": sorted(job for job in jobs if job is not None),
             "workspace_ids": sorted(workspaces),
@@ -858,6 +876,9 @@ class AgentStore:
                 raise AgentStoreError("AGENT_DELETE_REQUIRED", "只能清理已经删除的会话。", 409)
             if row[2] == "DELETED":
                 return
+            followup_store = getattr(self, "followup_store", None)
+            if followup_store is not None:
+                followup_store.purge(db, conversation_id)
             db.execute("DELETE FROM agent_attachment_imports WHERE run_id IN (SELECT run_id FROM agent_conversation_runs WHERE conversation_id=?)", (conversation_id,))
             for table in ("agent_message_adoptions", "agent_messages", "agent_events", "agent_dispatches", "agent_attachments", "agent_stop_requests", "agent_generic_restarts", "agent_conversation_runs"):
                 db.execute(f"DELETE FROM {table} WHERE conversation_id=?", (conversation_id,))

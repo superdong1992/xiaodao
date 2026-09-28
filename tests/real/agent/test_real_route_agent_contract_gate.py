@@ -23,8 +23,7 @@ from problem_locator.contracts import (
 from problem_locator.runtime.agent_backend import AgentBackend, BackendExecutionLimits
 from problem_locator.runtime.context_builder import ContextBuilder, ContextMaterials
 from problem_locator.runtime.failures import RuntimeExecutionError
-from problem_locator.runtime.outcome_finalizer import seal_agent_outcome_draft
-from problem_locator.runtime.output_reader import read_agent_output
+from problem_locator.runtime.final_response import parse_route_response
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -61,17 +60,98 @@ class _Sink:
         self.closed = True
 
 
+_SCENARIOS = (
+    "explicit-match",
+    "generic-symptom",
+    "out-of-scope",
+    "ambiguous-candidates",
+    "missing-diagnostic-materials",
+)
+
+
+def _route_scenario(scenario: str) -> tuple[Job, str, RouteKind, list[str]]:
+    value = json.loads(ROUTE_JOB.read_bytes())
+    value["goal"] = "审核冻结问题是否明确符合唯一专用 Skill 的适用范围。"
+    statement = (
+        "支付服务 payment 通过网络向库存服务 inventory 发出的 RPC 请求超时；"
+        "问题发生在两个独立进程之间，不涉及进程内调用。"
+    )
+    scope = "payment 到 inventory 的跨进程网络 RPC"
+    expected_kind = RouteKind.MATCHED
+    expected_candidates = ["match"]
+    if scenario == "generic-symptom":
+        statement = "系统很慢，有时卡住，尚不清楚涉及哪个组件或调用方式。"
+        scope = "业务系统响应速度"
+        expected_kind = RouteKind.NO_CAPABILITY
+        expected_candidates = ["uncertain"]
+    elif scenario == "out-of-scope":
+        statement = "图片编辑器进程内的本地滤镜函数执行很慢，已确认没有 RPC 或网络调用。"
+        scope = "图片编辑器的进程内滤镜函数"
+        expected_kind = RouteKind.NO_CAPABILITY
+        expected_candidates = ["ruled_out"]
+    elif scenario == "ambiguous-candidates":
+        expected_kind = RouteKind.NO_CAPABILITY
+        expected_candidates = ["match", "match"]
+    elif scenario == "missing-diagnostic-materials":
+        statement += "还没有提供日志、问题时间和进程名。"
+    else:
+        assert scenario == "explicit-match"
+    value["context_snapshot"]["problem_spec"] = {
+        "revision": 1,
+        "statement": statement,
+        "scope": scope,
+        "actual_behavior": statement,
+        "expected_behavior": "相关操作正常完成。",
+        "goals": ["定位当前问题的原因。"],
+        "non_goals": [],
+        "constraints": [],
+        "completion_criteria": ["给出有依据的定位结论。"],
+    }
+    value["available_skill_refs"][0]["id"] = "diagnosis-skill/payment-rpc-timeout"
+    if scenario == "ambiguous-candidates":
+        value["available_skill_refs"].append({
+            "id": "diagnosis-skill/payment-rpc-timeout-alternative",
+            "version": "1.0.0",
+            "content_hash": "f" * 64,
+        })
+    job = Job.model_validate(value)
+    skills = []
+    for ref in job.available_skill_refs:
+        skills.append({
+            "capability": "payment 到 inventory 的跨进程 RPC 超时定位",
+            "logparse_product": None,
+            "ref": ref.model_dump(mode="json"),
+            "required_artifacts": ["log_archive"] if scenario == "missing-diagnostic-materials" else [],
+            "required_user_inputs": ["problem_time", "client_process", "server_process"]
+                if scenario == "missing-diagnostic-materials" else [],
+            "requires_logparse": False,
+            "summary": "诊断 payment 到 inventory 的网络 RPC 超时。",
+            "routing": {
+                "applicability": [{
+                    "id": "payment-inventory-rpc-timeout",
+                    "description": "问题明确涉及 payment 服务向 inventory 服务发出的跨进程网络 RPC 请求超时。",
+                }],
+                "exclusions": [{
+                    "id": "local-only-operation",
+                    "description": "问题仅发生在同一进程内的本地操作中，不涉及网络 RPC。",
+                }],
+            },
+        })
+    return job, canonical_json_bytes({"schema_version": 3, "skills": skills}).decode("utf-8"), expected_kind, expected_candidates
+
+
+@pytest.mark.parametrize("scenario", _SCENARIOS)
 def test_real_route_agent_synthesizes_valid_outcome_from_production_contract(
     tmp_path: Path,
+    scenario: str,
 ) -> None:
     if os.environ.get("S08_REAL_ROUTE_AGENT_GATE") != "1":
         pytest.skip("requires the explicitly configured real ROUTE Agent gate")
     command = os.environ.get("S08_REAL_ROUTE_AGENT_COMMAND")
     assert command, "S08_REAL_ROUTE_AGENT_COMMAND is required for the real ROUTE gate"
 
-    job = Job.model_validate_json(ROUTE_JOB.read_bytes())
+    job, skill_index, expected_kind, expected_candidates = _route_scenario(scenario)
     assert job.job_type is JobType.ROUTE
-    assert len(job.available_skill_refs) == 1
     skill_ref = job.available_skill_refs[0]
     manifest = WorkspaceInputManifest(
         schema_version=2,
@@ -84,22 +164,6 @@ def test_real_route_agent_synthesizes_valid_outcome_from_production_contract(
         resolved_logparse_plan=None,
         review_subject=None,
     )
-    skill_index = canonical_json_bytes(
-        {
-            "schema_version": 2,
-            "skills": [
-                {
-                    "capability": "rpc-timeout",
-                    "logparse_product": None,
-                    "ref": skill_ref.model_dump(mode="json"),
-                    "required_artifacts": [],
-                    "required_user_inputs": [],
-                    "requires_logparse": False,
-                    "summary": "Diagnose a payment-to-inventory RPC timeout.",
-                }
-            ],
-        }
-    ).decode("utf-8")
     materials = ContextMaterials(
         profile=(ASSET_ROOT / "profiles/router/profile.md").read_text(encoding="utf-8"),
         tool_bundle=(
@@ -137,6 +201,8 @@ def test_real_route_agent_synthesizes_valid_outcome_from_production_contract(
                 combined_limit_bytes=JOB_STDOUT_STDERR_BYTES,
             ),
             resource_limits=default_resource_limits(JobType.ROUTE),
+            backend_phase="ROUTE",
+            file_access="none",
             test_limits=BackendExecutionLimits(
                 wall_time_seconds=float(
                     os.environ["TEST_FLOW_AGENT_BACKEND_WALL_TIME_SECONDS"]
@@ -156,15 +222,16 @@ def test_real_route_agent_synthesizes_valid_outcome_from_production_contract(
 
     assert execution.returncode == 0
     assert list((runtime / "tool-state").iterdir()) == []
-    seal_agent_outcome_draft(workspace)
-    validated = read_agent_output(workspace, job, manifest)
-    assert validated.canonical_bytes == (
-        output / "job_outcome.draft.json"
-    ).read_bytes()
-    assert validated.draft.result_type is OutcomeResultType.COMPLETED
+    validated = parse_route_response(execution.final_result, job, skill_index=skill_index)
+    assert validated.draft.result_type is (
+        OutcomeResultType.COMPLETED if expected_kind is RouteKind.MATCHED
+        else OutcomeResultType.NO_CAPABILITY
+    )
     assert isinstance(validated.draft.payload, RouteDecision)
-    assert validated.draft.payload.kind is RouteKind.MATCHED
-    assert validated.draft.payload.skill_ref == skill_ref
+    assert validated.draft.payload.kind is expected_kind
+    assert validated.draft.payload.skill_ref == (skill_ref if expected_kind is RouteKind.MATCHED else None)
+    assert validated.route_admission is not None
+    assert [item["status"] for item in validated.route_admission["candidate_results"]] == expected_candidates
     assert validated.draft.consumed_evidence_refs == []
     assert validated.draft.proposed_evidence_drafts == []
     assert validated.draft.proposed_artifact_drafts == []
@@ -175,10 +242,7 @@ def test_real_route_agent_synthesizes_valid_outcome_from_production_contract(
         "output",
         "runtime",
     ]
-    assert [path.name for path in (runtime / "tool-state").iterdir()] == [
-        "agent-job-outcome-draft.finalized"
-    ]
-    assert json.loads(validated.canonical_bytes)["payload"]["skill_ref"] == json.loads(
-        canonical_json_bytes(skill_ref)
-    )
+    assert list((runtime / "tool-state").iterdir()) == []
+    assert list((output / "proposals").iterdir()) == []
+    assert list(output.iterdir()) == [output / "proposals"]
     assert stdout.closed is True and stderr.closed is True

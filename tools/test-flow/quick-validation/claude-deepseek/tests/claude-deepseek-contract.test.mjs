@@ -15,6 +15,7 @@ import {
   CLAUDE_DEEPSEEK_CLIENT_PROMPT_VERSION,
   CLAUDE_DEEPSEEK_CONTRACT_VERSION,
   CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS,
+  CLAUDE_DEEPSEEK_METHODS_PROMPT_VERSION,
   CLAUDE_DEEPSEEK_MODEL,
   CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_ENFORCEMENT,
   CLAUDE_DEEPSEEK_MODEL_CERT_MAX_CALLS,
@@ -38,6 +39,7 @@ import {
   publishRegistrationCacheAtomically,
   registrationCachePath,
   validateRegistrationCache,
+  validateRegistrationRoot,
 } from "../runtime/claude-deepseek-contract.mjs";
 
 function fixture() {
@@ -54,12 +56,13 @@ function fixture() {
   fs.mkdirSync(path.join(registrationRoot, "package"), { recursive: true });
   const registration = path.join(registrationRoot, "registration-template.json");
   fs.writeFileSync(registration, `${JSON.stringify({
-    schema_version: 1,
+    schema_version: 2,
     registration_id: "rpc-timeout-methods-v1",
     version: "1.0.0",
     capability: "test",
     deployment_scope: "PRODUCTION",
     summary: "test",
+    routing: { applicability: [{ id: "rpc-call-timeout", description: "RPC 调用超时，需要定位原因。" }], exclusions: [] },
     package: { relative_path: "package/diagnose-rpc-timeout", skill_name: "diagnose-rpc-timeout", source_wiki_sha256: crypto.createHash("sha256").update(fs.readFileSync(wiki)).digest("hex") },
     runtime: { diagnose: {}, review: {}, preprocessing: {
       requires_logparse: true,
@@ -114,7 +117,8 @@ function invocations(phases, workflow = "e2e") {
 }
 
 test("Claude identity constants freeze 2.1.89, CLI hash, DeepSeek model, and 64k output", () => {
-  assert.equal(CLAUDE_DEEPSEEK_CONTRACT_VERSION, 3);
+  assert.equal(CLAUDE_DEEPSEEK_CONTRACT_VERSION, 4);
+  assert.equal(CLAUDE_DEEPSEEK_METHODS_PROMPT_VERSION, 4);
   assert.equal(CLAUDE_DEEPSEEK_CLIENT_PROMPT_VERSION, 3);
   assert.equal(CLAUDE_DEEPSEEK_VERSION, "2.1.89");
   assert.equal(CLAUDE_DEEPSEEK_CLI_SHA256, "a9950ef6407fdc750bddb673852485500387e524a99d42385cb81e7d17128e01");
@@ -151,6 +155,7 @@ test("registration producer identity includes settings and cache freezes the com
   assert.equal(producer.inputs.claude.settings_fingerprint, "c".repeat(64));
   assert.equal(producer.inputs.module, "rpc");
   assert.equal(producer.inputs.source_identity.log_template_extraction_version, 2);
+  assert.equal(producer.inputs.generation_prompt_version, 4);
   assert.match(producer.inputs.meta_skill.tree_sha256, /^[a-f0-9]{64}$/);
   assert.match(producer.inputs.validator.sha256, /^[a-f0-9]{64}$/);
   assert.match(producer.inputs.runner.sha256, /^[a-f0-9]{64}$/);
@@ -166,6 +171,31 @@ test("registration producer identity includes settings and cache freezes the com
   assert.equal(identical.published, false);
   fs.appendFileSync(path.join(destination, "registration", "rpc-timeout-methods-v1", "package", "diagnose-rpc-timeout", "SKILL.md"), "tamper\n");
   assert.throws(() => validateRegistrationCache({ cacheRoot, producer }), (error) => error.code === "CLAUDE_DEEPSEEK_REGISTRATION_CACHE_IDENTITY_MISMATCH");
+});
+
+test("registration generation requires v2 and rejects missing or invalid routing conditions", () => {
+  const f = fixture();
+  const original = JSON.parse(fs.readFileSync(f.registration, "utf8"));
+  assert.equal(validateRegistrationRoot(f.registrationRoot).registration.schema_version, 2);
+  for (const mutate of [
+    (value) => { value.schema_version = 1; },
+    (value) => { delete value.routing; },
+    (value) => { value.routing.applicability = []; },
+    (value) => { value.routing.exclusions = null; },
+    (value) => { value.routing.applicability[0].description = " "; },
+    (value) => { value.routing.applicability[0].description = "x".repeat(1025); },
+    (value) => { value.routing.applicability[0].id = "x".repeat(65); },
+    (value) => { value.routing.applicability[0].id = "RPC"; },
+    (value) => { value.routing.applicability[0].id = "rpc\n"; },
+    (value) => { value.routing.applicability[0].extra = true; },
+    (value) => { value.routing.exclusions = [...value.routing.applicability]; },
+    (value) => { value.routing.applicability = Array.from({ length: 17 }, (_, index) => ({ id: `rpc-${index}`, description: "RPC timeout" })); },
+  ]) {
+    const changed = structuredClone(original);
+    mutate(changed);
+    fs.writeFileSync(f.registration, JSON.stringify(changed));
+    assert.throws(() => validateRegistrationRoot(f.registrationRoot), (error) => ["CLAUDE_DEEPSEEK_REGISTRATION_INVALID", "CLAUDE_DEEPSEEK_REGISTRATION_ROUTING_INVALID"].includes(error.code));
+  }
 });
 
 test("registration receipt detects post-validation tampering", () => {

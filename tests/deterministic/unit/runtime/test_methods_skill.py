@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -26,7 +27,7 @@ from problem_locator.runtime.authoritative_targets import (
     AuthoritativeTargetSet,
 )
 from problem_locator.runtime.catalog import BUILTIN_ASSET_ROOT, VersionedAssetCatalog, hash_product_directory
-from problem_locator.runtime.context_policy import _load_entry_text, _skill_index_entry
+from problem_locator.runtime.context_policy import RuntimeAssetResolver, _load_entry_text, _skill_index_entry
 from problem_locator.runtime.methods_grounding import (
     FrozenTargetLogV1,
     SkillLoadReceiptV1,
@@ -35,6 +36,8 @@ from problem_locator.runtime.methods_grounding import (
     verify_method_review,
 )
 from problem_locator.runtime.methods_skill import (
+    RoutingConditionV1,
+    RoutingScopeV1,
     load_methods_package,
     load_registered_skill_from_package,
     load_specialized_skill_registration,
@@ -276,8 +279,27 @@ def _diagnosis(*, line: str) -> dict[str, Any]:
     }
 
 
+def _routing() -> dict[str, Any]:
+    return {
+        "applicability": [
+            {"id": "rpc-timeout", "description": "问题明确涉及客户端到服务端的 RPC 超时。"},
+        ],
+        "exclusions": [
+            {"id": "local-operation", "description": "问题仅涉及进程内调用，不涉及 RPC。"},
+        ],
+    }
+
+
+def _add_routing(root: Path, routing: Any) -> None:
+    path = root / "registration-template.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value.update(schema_version=2, routing=routing)
+    _write_json(path, value)
+
+
 def test_registration_resolves_closed_package_and_three_bound_digests(tmp_path: Path) -> None:
     root = _write_registration(tmp_path / "skills")
+    registration_bytes = (root / "registration-template.json").read_bytes()
     resolved = load_specialized_skill_registration(root)
 
     assert resolved.registration_id == "test-timeout"
@@ -288,11 +310,118 @@ def test_registration_resolves_closed_package_and_three_bound_digests(tmp_path: 
         "server_process",
     )
     assert len({resolved.registration_sha256, resolved.package_tree_sha256, resolved.combined_sha256}) == 3
+    assert resolved.registration.routing is None
+    assert (root / "registration-template.json").read_bytes() == registration_bytes
+    assert resolved.registration_sha256 == hashlib.sha256(registration_bytes).hexdigest()
+    assert resolved.combined_sha256 == hashlib.sha256(canonical_json_bytes({
+        "schema_version": 1,
+        "registration_id": resolved.registration_id,
+        "registration_sha256": resolved.registration_sha256,
+        "package_tree_sha256": resolved.package_tree_sha256,
+    })).hexdigest()
     assert load_registered_skill_from_package(root) == (
         "test-timeout",
         resolved.package_root,
         resolved.combined_sha256,
     )
+
+
+def test_registration_v2_preserves_explicit_immutable_routing_scope(tmp_path: Path) -> None:
+    root = _write_registration(tmp_path / "skills")
+    scope = _routing()
+    scope["applicability"][0]["description"] += "\n不能仅凭“慢”推断发生 RPC 超时。"
+    _add_routing(root, scope)
+
+    resolved = load_specialized_skill_registration(root)
+
+    assert resolved.registration.routing == RoutingScopeV1(
+        applicability=tuple(RoutingConditionV1(**item) for item in scope["applicability"]),
+        exclusions=tuple(RoutingConditionV1(**item) for item in scope["exclusions"]),
+    )
+    assert _skill_index_entry(resolved, VersionedRef(
+        id="diagnosis-skill/test-timeout", version="1.0.0", content_hash=resolved.combined_sha256
+    ))["routing"] == scope
+    with pytest.raises(FrozenInstanceError):
+        resolved.registration.routing.applicability = ()
+    with pytest.raises(FrozenInstanceError):
+        resolved.registration.routing.applicability[0].description = "changed"
+
+
+@pytest.mark.parametrize("exclusion_count", [0, 16])
+def test_registration_v2_accepts_routing_bounds(tmp_path: Path, exclusion_count: int) -> None:
+    root = _write_registration(tmp_path / "skills")
+    scope = {
+        "applicability": [{"id": "a" * 64, "description": "适" * 1024}] + [
+            {"id": f"include-{index}", "description": "明确适用条件。"} for index in range(15)
+        ],
+        "exclusions": [
+            {"id": f"exclude-{index}", "description": "明确排除条件。"}
+            for index in range(exclusion_count)
+        ],
+    }
+    _add_routing(root, scope)
+
+    routing = load_specialized_skill_registration(root).registration.routing
+
+    assert routing is not None
+    assert len(routing.applicability) == 16
+    assert len(routing.exclusions) == exclusion_count
+    assert routing.applicability[0].description == "适" * 1024
+
+
+@pytest.mark.parametrize("mutate", [
+    pytest.param(lambda value: value.pop("routing"), id="missing-routing"),
+    pytest.param(lambda value: value.update(routing=None), id="null-routing"),
+    pytest.param(lambda value: value.update(routing=[]), id="routing-array"),
+    pytest.param(lambda value: value["routing"].pop("applicability"), id="missing-applicability"),
+    pytest.param(lambda value: value["routing"].pop("exclusions"), id="missing-exclusions"),
+    pytest.param(lambda value: value["routing"].update(extra=[]), id="extra-routing-field"),
+    pytest.param(lambda value: value["routing"].update(applicability=[]), id="empty-applicability"),
+    pytest.param(lambda value: value["routing"].update(applicability=None), id="null-applicability"),
+    pytest.param(lambda value: value["routing"].update(exclusions="none"), id="string-exclusions"),
+    pytest.param(lambda value: value["routing"].update(applicability=[
+        {"id": f"include-{index}", "description": "适用条件。"} for index in range(17)
+    ]), id="too-many-applicability"),
+    pytest.param(lambda value: value["routing"].update(exclusions=[
+        {"id": f"exclude-{index}", "description": "排除条件。"} for index in range(17)
+    ]), id="too-many-exclusions"),
+    pytest.param(lambda value: value["routing"]["applicability"].append("rpc"), id="non-object-condition"),
+    pytest.param(lambda value: value["routing"]["applicability"][0].pop("description"), id="missing-description"),
+    pytest.param(lambda value: value["routing"]["applicability"][0].update(extra=True), id="extra-condition-field"),
+    pytest.param(lambda value: value["routing"]["applicability"][0].update(id=""), id="empty-id"),
+    pytest.param(lambda value: value["routing"]["applicability"][0].update(id=None), id="null-id"),
+    pytest.param(lambda value: value["routing"]["applicability"][0].update(id="rpc_timeout"), id="snake-id"),
+    pytest.param(lambda value: value["routing"]["applicability"][0].update(id="RPC-timeout"), id="uppercase-id"),
+    pytest.param(lambda value: value["routing"]["applicability"][0].update(id="x" * 65), id="long-id"),
+    pytest.param(lambda value: value["routing"]["applicability"][0].update(description=" \n\t"), id="empty-description"),
+    pytest.param(lambda value: value["routing"]["applicability"][0].update(description=1), id="non-text-description"),
+    pytest.param(lambda value: value["routing"]["exclusions"][0].update(description="界" * 1025), id="long-exclusion-description"),
+    pytest.param(lambda value: value["routing"]["applicability"].append(value["routing"]["applicability"][0]), id="duplicate-applicability-id"),
+    pytest.param(lambda value: value["routing"]["exclusions"][0].update(id="rpc-timeout"), id="cross-list-duplicate-id"),
+])
+def test_registration_v2_rejects_incomplete_or_invalid_routing(tmp_path: Path, mutate) -> None:
+    root = _write_registration(tmp_path / "skills")
+    _add_routing(root, _routing())
+    path = root / "registration-template.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    mutate(value)
+    _write_json(path, value)
+
+    with pytest.raises(ValueError, match="routing|registration-template.json fields"):
+        load_specialized_skill_registration(root)
+
+
+@pytest.mark.parametrize("schema_version", [1, 0, 3, "2", True, None])
+def test_registration_routing_does_not_relax_closed_schema_versions(tmp_path: Path, schema_version) -> None:
+    root = _write_registration(tmp_path / "skills")
+    _add_routing(root, _routing())
+    path = root / "registration-template.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["schema_version"] = schema_version
+    _write_json(path, value)
+
+    with pytest.raises(ValueError, match="schema_version|registration-template.json fields"):
+        load_specialized_skill_registration(root)
 
 
 def test_logparse_registration_accepts_default_product_id(tmp_path: Path) -> None:
@@ -1016,11 +1145,15 @@ class _BrokerFactory:
         raise AssertionError("catalog construction must not open Logparse")
 
 
+@pytest.mark.parametrize("schema_version", [1, 2])
 def test_catalog_routes_registered_methods_skill_for_empty_partial_and_extra_facts(
     tmp_path: Path,
+    schema_version: int,
 ) -> None:
     store = tmp_path / "skills"
-    _write_registration(store)
+    root = _write_registration(store)
+    if schema_version == 2:
+        _add_routing(root, _routing())
     logparse_root = tmp_path / "logparse"
     logparse_root.mkdir()
     (logparse_root / "identity.txt").write_text("test\n", encoding="utf-8")
@@ -1066,11 +1199,16 @@ def test_catalog_routes_registered_methods_skill_for_empty_partial_and_extra_fac
     index = _skill_index_entry(resolved_specialized, skill_ref)
     assert "registration_id" not in index
     assert index["ref"] == skill_ref.model_dump(mode="json")
+    assert index["routing"] == (None if schema_version == 1 else _routing())
     assert index["required_user_inputs"] == [
         "problem_time",
         "client_process",
         "server_process",
     ]
+    job_value = json.loads((Path(__file__).parents[3] / "fixtures/contracts/positive/job-route.json").read_bytes())
+    job_value.update(routes[0].model_dump(mode="json"))
+    assets = RuntimeAssetResolver(catalog).resolve_job(Job.model_validate(job_value))
+    assert json.loads(assets.skill_index_text) == {"schema_version": 3, "skills": [index]}
     diagnose = catalog.diagnose_bindings(skill_ref)
     assert diagnose.diagnosis_mode is DiagnosisMode.SPECIALIZED
     assert diagnose.logparse_product == "test-timeout"
@@ -1146,9 +1284,12 @@ def test_product_hash_rejects_links_and_detects_content_drift(tmp_path: Path) ->
         hash_product_directory(root)
 
 
-def test_catalog_keeps_startup_bytes_until_restart(tmp_path: Path) -> None:
+@pytest.mark.parametrize("changed_asset", ["package", "routing"])
+def test_catalog_keeps_startup_bytes_until_restart(tmp_path: Path, changed_asset: str) -> None:
     store = tmp_path / "skills"
     root = _write_registration(store)
+    if changed_asset == "routing":
+        _add_routing(root, _routing())
     logparse_root = tmp_path / "logparse"
     logparse_root.mkdir()
     (logparse_root / "identity.txt").write_text("test\n", encoding="utf-8")
@@ -1170,17 +1311,33 @@ def test_catalog_keeps_startup_bytes_until_restart(tmp_path: Path) -> None:
     )
     ref = catalog.route_bindings().available_skill_refs[0]
     package_entry = root / "package/diagnose-test-timeout/SKILL.md"
-    package_entry.write_text(package_entry.read_text(encoding="utf-8") + "\ndrift\n", encoding="utf-8")
+    before = catalog.resolved_specialized_skill(ref)
+    if changed_asset == "routing":
+        scope = _routing()
+        scope["applicability"][0]["description"] = "修改后的明确适用条件。"
+        _add_routing(root, scope)
+    else:
+        package_entry.write_text(package_entry.read_text(encoding="utf-8") + "\ndrift\n", encoding="utf-8")
     assert catalog.check([ref]).available
     frozen = catalog.resolve(ref)
     assert "\ndrift\n" not in _load_entry_text(frozen, ref, AssetKind.DIAGNOSIS_SKILL)
+    if changed_asset == "routing":
+        assert _skill_index_entry(catalog.resolved_specialized_skill(ref), ref)["routing"] == _routing()
+        assert load_specialized_skill_registration(Path(frozen.root_path)).registration.routing == before.registration.routing
     restarted = VersionedAssetCatalog(
         skill_dir=store, assets_root=BUILTIN_ASSET_ROOT, logparse_tool=logparse,
         logparse_broker_factory=_BrokerFactory(), generic_skill_name="generic-problem-locator-smoke",
     )
     assert restarted.check([ref]).missing_refs == [ref]
     current_ref = restarted.route_bindings().available_skill_refs[0]
-    assert "\ndrift\n" in _load_entry_text(restarted.resolve(current_ref), current_ref, AssetKind.DIAGNOSIS_SKILL)
+    if changed_asset == "routing":
+        after = restarted.resolved_specialized_skill(current_ref)
+        assert _skill_index_entry(after, current_ref)["routing"] == scope
+        assert after.package_tree_sha256 == before.package_tree_sha256
+        assert after.registration_sha256 != before.registration_sha256
+        assert after.combined_sha256 != before.combined_sha256
+    else:
+        assert "\ndrift\n" in _load_entry_text(restarted.resolve(current_ref), current_ref, AssetKind.DIAGNOSIS_SKILL)
 
 
 def test_runtime_catalog_fixture_manifest_matches_methods_layout() -> None:

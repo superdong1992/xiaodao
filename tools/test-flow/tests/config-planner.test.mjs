@@ -137,6 +137,25 @@ test("Release is fresh, binds an immutable source snapshot and exposes exact per
   ]);
 });
 
+test("report follow-up is an opt-in two-call proof outside the Release journey", () => {
+  const built = buildIsolatedRunPlan({ track: "dev", goal: "dev.real", stage: "real.report-followup", planOnly: true });
+  assert.equal(built.plan.admission.status, "BLOCKED");
+  assert.ok(built.plan.admission.blockers.some((blocker) => blocker.code === "DEV_REAL_OPT_IN_REQUIRED"));
+  const stages = built.plan.stages.filter((stage) => stage.kind === "isolated-real");
+  assert.deepEqual(stages.map((stage) => stage.id), ["real.report-followup"]);
+  assert.deepEqual([built.plan.budget.normal_model_calls, built.plan.budget.repair_model_calls_max,
+    built.plan.budget.hard_max_model_calls], [2, 0, 2]);
+  assert.deepEqual(stages[0].invocation_caps, [{ class: "isolated-agent", min_count: 2, max_count: 2,
+    caps: { max_turns: 8, max_total_tokens: 120000, max_budget_usd: 1, hard_timeout_seconds: 300 } }]);
+  assert.equal(built.plan.budget.hard_cap_tokens, 240000);
+  assert.equal(built.plan.budget.hard_cap_usd, 2);
+  const config = loadConfiguration(REPO_ROOT);
+  for (const [goal, definition] of Object.entries(config.proofs.goals)) {
+    if (!goal.startsWith("release.")) continue;
+    assert.equal(definition.required_proofs.includes("proof.real-report-followup"), false, goal);
+  }
+});
+
 test("formal Evidence V2 certification defaults both providers to one Specialist call and one repair", () => {
   const built = buildIsolatedRunPlan({
     track: "release",

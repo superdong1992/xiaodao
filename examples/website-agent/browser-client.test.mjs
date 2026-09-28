@@ -67,7 +67,7 @@ test("browser methods use website paths, unchanged request bodies and unwrapped 
   assert.deepEqual(JSON.parse(calls[0].init.body), { request_id: "create-original" });
   assert.deepEqual(JSON.parse(calls[1].init.body), message);
   assert.deepEqual(JSON.parse(calls[5].init.body), { ...metadata, conversation_id: conversationId });
-  assert.deepEqual(Object.keys(client).sort(), ["attachments", "conversations"]);
+  assert.deepEqual(Object.keys(client).sort(), ["attachments", "conversations", "followups"]);
   assert.deepEqual(Object.keys(client.conversations).sort(), ["create", "delete", "eventsUrl", "get", "getFeedback", "list", "rename", "send", "setFeedback", "stop"]);
   assert.deepEqual(Object.keys(client.attachments).sort(), ["prepare", "upload"]);
   for (const { init } of calls) {

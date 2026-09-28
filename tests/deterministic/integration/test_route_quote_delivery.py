@@ -1,4 +1,4 @@
-"""A recoverable ROUTE explanation must reach durable website delivery once."""
+"""Valid route strings survive delivery; malformed strings remain failures."""
 from __future__ import annotations
 
 import hashlib
@@ -16,7 +16,7 @@ from tests.deterministic.integration.test_website_agent import (
 )
 
 
-def _inject_route_quotes(stack, monkeypatch):
+def _inject_route_quotes(stack, monkeypatch, *, broken=False):
     backend = stack.runtime._route_backend
     execute = backend.execute
     observed = {"phases": []}
@@ -28,7 +28,9 @@ def _inject_route_quotes(stack, monkeypatch):
             return result
         value = json.loads(result.final_result)
         value["reason"] = '选择 "rpc_timeout"；保留路径 C:\\logs\\new 和字面量 \\n。'
-        text = json.dumps(value, ensure_ascii=False).replace(r'\"rpc_timeout\"', '"rpc_timeout"')
+        text = json.dumps(value, ensure_ascii=False)
+        if broken:
+            text = text.replace(r'\"rpc_timeout\"', '"rpc_timeout"')
         raw = "\ufeff```json\r\n" + text + "\r\n```"
         event = json.dumps({"type": "result", "subtype": "success", "is_error": False,
                             "result": raw}, ensure_ascii=False).encode() + b"\r\n"
@@ -44,7 +46,7 @@ def _inject_route_quotes(stack, monkeypatch):
 
 
 @pytest.mark.parametrize("review", [False, True])
-def test_recovered_route_reaches_report_archive_and_replay_once(website, monkeypatch, caplog, review):
+def test_valid_route_quotes_reach_report_archive_and_replay_once(website, monkeypatch, caplog, review):
     stack, store, engine, service, client = website
     stack.catalog._specialized_review_policy = ReviewPolicy.INDEPENDENT if review else ReviewPolicy.NONE
     observed = _inject_route_quotes(stack, monkeypatch)
@@ -61,33 +63,21 @@ def test_recovered_route_reaches_report_archive_and_replay_once(website, monkeyp
     assert route.status.value == "SUCCEEDED"
     records = stack.runtime._execution_records
     raw = records.read_audit_bytes(route.job_id, "route-response.raw.txt")
-    effective = records.read_audit_bytes(route.job_id, "route-response.effective.txt")
-    receipt = json.loads(records.read_audit_bytes(route.job_id, "route-json-recovery.json"))
+    receipt = json.loads(records.read_audit_bytes(route.job_id, "route-admission.json"))
     assert raw == observed["raw"]
     assert receipt["case_id"] == view.case_id and receipt["job_id"] == route.job_id
-    assert receipt["phase"] == "ROUTE" and receipt["diagnostic_id"]
-    assert parse_model_json_bytes(effective).value == observed["expected"]
-    assert receipt["raw_sha256"] == hashlib.sha256(raw).hexdigest()
-    assert receipt["effective_sha256"] == hashlib.sha256(effective).hexdigest()
-    assert receipt["raw_size_bytes"] == len(raw)
-    assert receipt["effective_size_bytes"] == len(effective)
-    reconstructed = bytearray(raw)
-    for offset in reversed(receipt["inserted_escape_offsets"]):
-        assert raw[offset:offset + 1] == b'"'
-        reconstructed[offset:offset] = b"\\"
-    assert bytes(reconstructed) == effective
+    assert parse_model_json_bytes(raw).value == observed["expected"]
+    assert receipt["reason_code"] == "ADMITTED"
+    assert receipt["raw_response_sha256"] == hashlib.sha256(raw).hexdigest()
     outcome = records.read_published_outcome(route.job_id).job_outcome
     assert outcome.payload.reason == observed["expected"]["reason"]
     assert outcome.payload.skill_ref.id == observed["expected"]["skill_id"]
     assert outcome.payload.confidence == observed["expected"]["confidence"]
     events = [record for record in caplog.records
-              if getattr(record, "dfx_event", None) == "runtime.route.reason_quotes_recovered"]
+              if getattr(record, "dfx_event", None) == "runtime.route.admission"]
     assert len(events) == 1
     fields = events[0].dfx_fields
-    assert fields["diagnostic_id"] == receipt["diagnostic_id"]
-    assert fields["raw_response_sha256"] == hashlib.sha256(raw).hexdigest()
-    assert fields["effective_response_sha256"] == hashlib.sha256(effective).hexdigest()
-    assert fields["inserted_escape_count"] == 2
+    assert fields["reason_code"] == "ADMITTED"
     assert "rpc_timeout" not in json.dumps(fields)
 
     artifacts = client.get(f"/api/v1/cases/{view.case_id}/artifacts").json()["data"]["artifacts"]
@@ -107,9 +97,9 @@ def test_recovered_route_reaches_report_archive_and_replay_once(website, monkeyp
 
 
 @pytest.mark.parametrize("failed_file", [
-    "route-response.raw.txt", "route-response.effective.txt", "route-json-recovery.json",
+    "route-response.raw.txt", "route-admission.json",
 ])
-def test_route_recovery_cannot_succeed_without_durable_audit(website, monkeypatch, failed_file):
+def test_route_cannot_succeed_without_durable_audit(website, monkeypatch, failed_file):
     stack, store, engine, service, client = website
     observed = _inject_route_quotes(stack, monkeypatch)
     records = stack.runtime._execution_records
@@ -137,3 +127,21 @@ def test_route_recovery_cannot_succeed_without_durable_audit(website, monkeypatc
     assert b"conversation.interrupted" in client.get(prefix + "/events").content
     assert observed["phases"] == ["ROUTE"] and engine.calls == []
     assert not any(event.type == "result.available" for event in store.list_events(conversation))
+
+
+def test_unescaped_root_reason_is_not_repaired_or_sent_to_generic(website, monkeypatch):
+    stack, store, engine, service, client = website
+    observed = _inject_route_quotes(stack, monkeypatch, broken=True)
+    cid = _post(client, "/api/v1/agent/conversations", {"request_id": "create:bad-json"})["conversation_id"]
+    prefix = f"/api/v1/agent/conversations/{cid}"
+    _post(client, prefix + "/messages", {"request_id": "message:bad-json", "text": "RPC timeout"})
+    assert service.run_once(cid)
+    assert stack.scheduler.wait_until_idle(15)
+    view = service.get_conversation(cid)
+    assert view.case_status == "FAILED"
+    aggregate = stack.repository.read_case(view.case_id)
+    assert aggregate.case.failure.code.value == "OUTCOME_INVALID"
+    assert len(aggregate.jobs) == 1
+    route = next(iter(aggregate.jobs.values()))
+    assert stack.records.read_audit_bytes(route.job_id, "route-response.raw.txt") == observed["raw"]
+    assert observed["phases"] == ["ROUTE"] and engine.calls == []

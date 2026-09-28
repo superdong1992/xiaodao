@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 
 
-export const ISOLATED_AGENT_ENV_POLICY_VERSION = "isolated-agent-env-allowlist-v3";
+export const ISOLATED_AGENT_ENV_POLICY_VERSION = "isolated-agent-env-allowlist-v4";
 export const ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY = "CLAUDE_CODE_MAX_OUTPUT_TOKENS";
 export const ISOLATED_AGENT_OUTPUT_CAP_ENFORCEMENT = "identity-bound-wrapper-arg+child-only-env+pinned-cli-upper-limit+sealed-runtime-implementation";
 
@@ -25,6 +25,9 @@ const ISOLATED_AGENT_INBOUND_ONLY_KEYS = Object.freeze([
   "__CF_USER_TEXT_ENCODING",
   "PYTEST_CURRENT_TEST",
   "PYTEST_VERSION",
+  "PROBLEM_LOCATOR_AGENT_FILE_ACCESS",
+  "PROBLEM_LOCATOR_AGENT_PHASE",
+  "PROBLEM_LOCATOR_FOLLOWUP_SETTINGS",
   "HOMEDRIVE",
   "HOMEPATH",
   "SystemDrive",
@@ -36,6 +39,10 @@ const ISOLATED_AGENT_CLAUDE_CHILD_ONLY_KEYS = Object.freeze([
   ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY,
 ]);
 
+// libuv adds WINDIR to Windows child processes even with an explicit env.
+// Accept that runtime injection only inbound; never add it to the child env.
+const ISOLATED_AGENT_WINDOWS_INBOUND_ONLY_KEYS = Object.freeze(["WINDIR"]);
+
 export const ISOLATED_AGENT_EXPLICIT_KEYS = Object.freeze([
   "PYTHONNOUSERSITE",
   "PYTHONPYCACHEPREFIX",
@@ -44,6 +51,9 @@ export const ISOLATED_AGENT_EXPLICIT_KEYS = Object.freeze([
   "TEST_FLOW_AGENT_BACKEND_WALL_TIME_SECONDS",
   "S08_REAL_AGENT_COMMAND",
   "S08_REAL_GENERIC_LOCATOR_AGENT_COMMAND",
+  "S08_REAL_REPORT_FOLLOWUP_AGENT_COMMAND",
+  "S08_REAL_REPORT_FOLLOWUP_GATE",
+  "S08_REAL_REPORT_FOLLOWUP_AUDIT_PATH",
   "S08_REAL_SKILL_GENERATION_AGENT_COMMAND",
   "S08_REAL_SKILL_GENERATION_AUDIT_PATH",
   "S08_REAL_SKILL_GENERATION_OUTPUT_ROOT",
@@ -123,6 +133,7 @@ export function assertIsolatedAgentInboundEnvironment(environment, { allowSessio
     ...ISOLATED_AGENT_AMBIENT_KEYS,
     ...ISOLATED_AGENT_EXPLICIT_KEYS,
     ...ISOLATED_AGENT_INBOUND_ONLY_KEYS,
+    ...(platform === "win32" ? ISOLATED_AGENT_WINDOWS_INBOUND_ONLY_KEYS : []),
   ]);
   if (allowSessionCredentials) SESSION_CREDENTIAL_KEYS.forEach((name) => allowed.add(name));
   const allowedNames = platform === "win32"

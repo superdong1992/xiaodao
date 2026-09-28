@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from contextlib import contextmanager
@@ -1253,6 +1254,24 @@ class DiagnosisRuntime:
             return receipt
         if job.job_type is JobType.ROUTE and not job.available_skill_refs:
             return self._publish_no_capability(job)
+        if job.job_type is JobType.ROUTE:
+            assert assets.skill_index_text is not None
+            index = json.loads(assets.skill_index_text)
+            if not any(item["routing"] is not None for item in index["skills"]):
+                self._publish_audit_bytes(job, "route-admission.json", canonical_json_bytes({
+                    "schema_version": 1, "policy": "strict_route_admission_v1",
+                    "job_id": job.job_id, "case_id": job.case_id,
+                    "base_state_revision": job.base_state_revision,
+                    "reason_code": "NO_ELIGIBLE_SKILL", "model_called": False,
+                    "model_skill_id": None, "effective_skill_id": None,
+                    "input_hashes": {
+                        "skill_index_sha256": bytes_sha256(assets.skill_index_text.encode("utf-8")),
+                        "context_snapshot_sha256": bytes_sha256(canonical_json_bytes(job.context_snapshot)),
+                    },
+                }))
+                return self._publish_no_capability(
+                    job, reason="已注册的专用 Skill 均未声明路由适用范围，转入通用定位。",
+                )
         aggregate = self._read_case(job)
         prior_methods_diagnosis: VerifiedMethodDiagnosisV1 | None = None
         prior_methods_diagnosis_bytes: bytes | None = None
@@ -1488,6 +1507,8 @@ class DiagnosisRuntime:
             self._publish_audit_bytes(job, "broker_audit.json", broker_audit_bytes)
         if job.job_type is JobType.DIAGNOSE and isinstance(final_response, str):
             self._publish_audit_bytes(job, "method-diagnosis.raw.txt", final_response.encode("utf-8"))
+        if job.job_type is JobType.ROUTE and isinstance(final_response, str):
+            self._publish_audit_bytes(job, "route-response.raw.txt", final_response.encode("utf-8"))
         if is_specialized_direct(job):
             validating = record_stage_started(ExecutionStage.OUTCOME_VALIDATE)
             payload = parse_skill_direct_response(
@@ -1521,7 +1542,9 @@ class DiagnosisRuntime:
         validating = record_stage_started(ExecutionStage.OUTCOME_VALIDATE)
         try:
             if job.job_type is JobType.ROUTE:
-                validated_draft = parse_route_response(final_response, job)
+                validated_draft = parse_route_response(
+                    final_response, job, skill_index=assets.skill_index_text,
+                )
             elif job.job_type is JobType.DIAGNOSE:
                 validated_draft = parse_specialist_response(final_response, secrets=secrets,
                     preserve_evidence_items=(job.review_policy is ReviewPolicy.NONE
@@ -1536,6 +1559,15 @@ class DiagnosisRuntime:
         except RejectedAgentOutputError as exc:
             self._archive_rejected_agent_output(job, exc)
             raise
+        if job.job_type is JobType.ROUTE:
+            assert isinstance(validated_draft, ValidatedAgentDraft)
+            assert validated_draft.route_admission is not None
+            self._publish_audit_bytes(job, "route-admission.json",
+                canonical_json_bytes(validated_draft.route_admission))
+            log_event("runtime.route.admission", case_id=job.case_id, job_id=job.job_id,
+                reason_code=validated_draft.route_admission["reason_code"],
+                model_skill_id=validated_draft.route_admission["model_skill_id"],
+                effective_skill_id=validated_draft.route_admission["effective_skill_id"])
         extraction = validated_draft.model_json_extraction
         if extraction is not None:
             diagnostic_id = self._id_generator.new("diagnostic")
@@ -1544,9 +1576,9 @@ class DiagnosisRuntime:
                 JobType.DIAGNOSE: "method-diagnosis.raw.txt",
                 JobType.REVIEW: "method-review.raw.txt",
             }[job.job_type]
-            # DIAGNOSE already persists the original before parsing. Other
-            # phases persist it here; no extra audit I/O for plain JSON.
-            if job.job_type is not JobType.DIAGNOSE:
+            # ROUTE and DIAGNOSE already persist the original before parsing.
+            # Other phases only save it here when extraction was necessary.
+            if job.job_type not in {JobType.DIAGNOSE, JobType.ROUTE}:
                 self._publish_audit_bytes(job, raw_name, extraction.raw_bytes)
             self._publish_audit_bytes(job, "model-response.extracted.txt", extraction.effective_bytes)
             extraction_receipt = {
@@ -1568,8 +1600,6 @@ class DiagnosisRuntime:
                 **recovery.to_receipt(), "diagnostic_id": diagnostic_id,
                 "case_id": job.case_id, "job_id": job.job_id, "phase": "ROUTE",
             }
-            if extraction is None:
-                self._publish_audit_bytes(job, "route-response.raw.txt", recovery.raw_bytes)
             self._publish_audit_bytes(job, "route-response.effective.txt", recovery.effective_bytes)
             self._publish_audit_bytes(job, "route-json-recovery.json", canonical_json_bytes(recovery_receipt))
             log_event("runtime.route.reason_quotes_recovered", case_id=job.case_id,
@@ -1740,6 +1770,8 @@ class DiagnosisRuntime:
             verification=verification,
             authoritative_targets=authoritative_targets,
             target_logs=target_logs,
+            route_admission=(validated_draft.route_admission
+                if isinstance(validated_draft, ValidatedAgentDraft) else None),
         )
         self._publish_audit_bytes(
             job,
@@ -3903,7 +3935,9 @@ class DiagnosisRuntime:
         self._record_produced_outcome(receipt)
         return receipt
 
-    def _publish_no_capability(self, job: Job) -> RuntimeExecutionReceipt:
+    def _publish_no_capability(
+        self, job: Job, *, reason: str = "生产目录中没有可用的专用 Skill，转入通用定位。",
+    ) -> RuntimeExecutionReceipt:
         outcome = JobOutcome(
             outcome_id=self._id_generator.new("job_outcome"),
             job_id=job.job_id,
@@ -3914,7 +3948,7 @@ class DiagnosisRuntime:
             payload=RouteDecision(
                 kind=RouteKind.NO_CAPABILITY,
                 skill_ref=None,
-                reason="No diagnosis skill is available in the production catalog.",
+                reason=reason,
                 confidence=1.0,
             ),
             consumed_evidence_refs=[],

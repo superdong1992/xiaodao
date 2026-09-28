@@ -54,6 +54,7 @@ import {
   validSkillGenerationTraceAuditReceipt,
 } from "../runtime-support/isolated-agent-tool-audit.mjs";
 import { projectEvidenceV2ProviderTerminalFailure } from "../runtime-support/evidence-v2-provider-terminal.mjs";
+import { validReportFollowupTraceReceipt } from "../runtime-support/report-followup-tool-audit.mjs";
 import {
   auditNoSecretLeak,
   buildPosthocBudgetReceipt,
@@ -1765,7 +1766,8 @@ export function collectIsolatedModelUsage(context, profile) {
     || !validEnvironmentKeySummary(invocation.environment_policy?.claude_process)
     || !validIsolatedOutputCapReceipt(invocation)
   ))) throw new Error("ISOLATED_MODEL_ENVIRONMENT_POLICY_RECEIPT_INVALID");
-  const expectedWorkflow = profile === "real-skill-generation" ? "skill-generation" : "job";
+  const expectedWorkflow = profile === "real-skill-generation" ? "skill-generation"
+    : profile === "real-report-followup" ? "report-followup" : "job";
   if (invocations.some((invocation) => invocation.workflow !== expectedWorkflow)) throw new Error("ISOLATED_MODEL_WORKFLOW_RECEIPT_INVALID");
   if (invocations.some((invocation) => (
     typeof invocation.terminal?.subtype !== "string"
@@ -1787,6 +1789,12 @@ export function collectIsolatedModelUsage(context, profile) {
     return invocation.wrapper_outcome.status === "PASS" ? !passedAudit : !(passedAudit || failedAudit);
   })) throw new Error("ISOLATED_MODEL_TOOL_TRACE_AUDIT_INVALID");
   if (expectedWorkflow === "job" && invocations.some((invocation) => invocation.tool_trace_audit !== null)) throw new Error("ISOLATED_MODEL_TOOL_TRACE_AUDIT_UNEXPECTED");
+  if (expectedWorkflow === "report-followup" && invocations.some((invocation) => {
+    const audit = invocation.tool_trace_audit;
+    if (audit === null) return invocation.wrapper_outcome.status === "PASS";
+    return !validReportFollowupTraceReceipt(audit)
+      || (invocation.wrapper_outcome.status === "PASS" && audit.status !== "PASS");
+  })) throw new Error("ISOLATED_MODEL_FOLLOWUP_TRACE_AUDIT_INVALID");
   const usage = sumUsage(invocations.map((invocation) => invocation.usage));
   const summary = {
     schema_version: 3,
@@ -4116,7 +4124,8 @@ function realEnvironment(context, profile) {
   }
   const command = agentCommand(
     context,
-    profile === "real-skill-generation" ? "skill-generation" : "job",
+    profile === "real-skill-generation" ? "skill-generation"
+      : profile === "real-report-followup" ? "report-followup" : "job",
   );
   if (!command) return { error: "CLAUDE_COMMAND_OR_HARD_CAP_MISSING" };
   const runtime = preparedClaudeRuntime(context);
@@ -4134,6 +4143,11 @@ function realEnvironment(context, profile) {
     S08_REAL_REVIEW_AGENT_COMMAND: command,
   };
   if (profile === "real-agent-backend") return { env: { ...common, S08_REAL_AGENT_GATE: "1" } };
+  if (profile === "real-report-followup") return { env: { ...common,
+    S08_REAL_REPORT_FOLLOWUP_GATE: "1",
+    S08_REAL_REPORT_FOLLOWUP_AGENT_COMMAND: command,
+    S08_REAL_REPORT_FOLLOWUP_AUDIT_PATH: path.join(context.gateRoot, "report-followup-audit.json"),
+  } };
   if (profile === "real-generic-locator") {
     const skillName = "generic-problem-locator-dual-mode";
     const skillPath = path.join(

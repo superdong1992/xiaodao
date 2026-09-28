@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 import {
@@ -46,7 +47,7 @@ test("isolated Agent environment keeps only runtime necessities and explicit Tes
     S08_REAL_AGENT_COMMAND: "/isolated/wrapper",
     S08_REAL_AGENT_GATE: "1",
   });
-  assert.equal(ISOLATED_AGENT_ENV_POLICY_VERSION, "isolated-agent-env-allowlist-v3");
+  assert.equal(ISOLATED_AGENT_ENV_POLICY_VERSION, "isolated-agent-env-allowlist-v4");
   assert.equal(JSON.stringify(environment).includes("secret-canary"), false);
   assert.equal(Object.hasOwn(environment, ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY), false);
 });
@@ -193,4 +194,35 @@ test("Windows-injected inbound keys are accepted case-insensitively but never re
     PATH: "C:\\runtime",
     SystemRoot: "C:\\Windows",
   });
+});
+
+test("WINDIR is Windows-only inbound metadata and is not forwarded in the child environment", () => {
+  for (const name of ["WINDIR", "windir", "WinDir"]) {
+    const inbound = { PATH: "C:\\runtime", [name]: "C:\\Windows" };
+    assert.deepEqual(assertIsolatedAgentInboundEnvironment(inbound, { platform: "win32" }).key_names,
+      Object.keys(inbound).sort());
+    assert.deepEqual(buildIsolatedAgentEnvironment({ ambient: inbound, platform: "win32" }),
+      { PATH: "C:\\runtime" });
+    assert.throws(() => buildIsolatedAgentEnvironment({ ambient: {}, explicit: { [name]: "C:\\Windows" }, platform: "win32" }),
+      /ISOLATED_AGENT_EXPLICIT_KEY_FORBIDDEN/);
+    for (const platform of ["linux", "darwin"]) {
+      assert.throws(() => assertIsolatedAgentInboundEnvironment(inbound, { platform }),
+        /ISOLATED_AGENT_INBOUND_KEY_FORBIDDEN/);
+    }
+  }
+});
+
+test("a Windows Node child with explicit empty env accepts libuv-injected WINDIR", { skip: process.platform !== "win32" }, () => {
+  const moduleUrl = new URL("../runtime-support/isolated-agent-env.mjs", import.meta.url).href;
+  const source = `
+    import { assertIsolatedAgentInboundEnvironment, buildIsolatedAgentEnvironment } from ${JSON.stringify(moduleUrl)};
+    const inbound = assertIsolatedAgentInboundEnvironment(process.env);
+    const child = buildIsolatedAgentEnvironment({ ambient: process.env });
+    process.stdout.write(JSON.stringify({ inbound: inbound.key_names, child: Object.keys(child) }));
+  `;
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], { env: {}, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || String(result.error));
+  const keys = JSON.parse(result.stdout);
+  assert.ok(keys.inbound.some((name) => name.toUpperCase() === "WINDIR"));
+  assert.equal(keys.child.some((name) => name.toUpperCase() === "WINDIR"), false);
 });

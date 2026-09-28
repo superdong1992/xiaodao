@@ -20,6 +20,31 @@ def environment(tmp_path: Path) -> dict[str, str]:
     }
 
 
+def test_report_followup_is_disabled_and_has_separate_snapshot_caps(tmp_path):
+    values = environment(tmp_path)
+    settings = Settings.load(environ=values)
+    assert settings.report_followup_enabled is False
+    assert settings.report_followup_snapshot_bytes == 1024 ** 3
+    assert settings.report_followup_storage_bytes == 5 * 1024 ** 3
+    settings = Settings.load(environ={**values, "REPORT_FOLLOWUP_ENABLED": "true",
+        "REPORT_FOLLOWUP_SNAPSHOT_BYTES": "1024", "REPORT_FOLLOWUP_STORAGE_BYTES": "2048"})
+    assert settings.report_followup_enabled is True
+    assert settings.report_followup_snapshot_bytes == 1024
+    assert settings.report_followup_storage_bytes == 2048
+
+
+@pytest.mark.parametrize("overrides", [
+    {"REPORT_FOLLOWUP_ENABLED": "1"}, {"REPORT_FOLLOWUP_ENABLED": "True"},
+    {"REPORT_FOLLOWUP_SNAPSHOT_BYTES": "0"}, {"REPORT_FOLLOWUP_SNAPSHOT_BYTES": "01"},
+    {"REPORT_FOLLOWUP_SNAPSHOT_BYTES": "1073741825"},
+    {"REPORT_FOLLOWUP_STORAGE_BYTES": "1024"}, {"REPORT_FOLLOWUP_STORAGE_BYTES": "-1"},
+    {"REPORT_FOLLOWUP_STORAGE_BYTES": "9999999999999999999"},
+])
+def test_report_followup_rejects_invalid_flag_and_caps(tmp_path, overrides):
+    with pytest.raises(SettingsError):
+        Settings.load(environ={**environment(tmp_path), **overrides})
+
+
 def test_process_environment_overrides_utf8_env_file(tmp_path: Path) -> None:
     env_file = tmp_path / "service.env"
     env_file.write_text(
