@@ -13,6 +13,8 @@ dependencies = [
   "fastapi==0.139.2",
   "uvicorn==0.49.0",
   "python-dotenv==1.2.2",
+  "psycopg[binary]==3.3.6",
+  "psycopg-pool==3.3.3",
   "redis==8.1.0",
 ]
 
@@ -20,6 +22,7 @@ dependencies = [
 problem-locator-logparse = "problem_locator.integrations.logparse.cli:main"
 problem-locator-seal-outcome-draft = "problem_locator.runtime.outcome_finalizer:main"
 problem-locator-data-upgrade = "problem_locator.entrypoints.data_upgrade:main"
+problem-locator-postgres-import = "problem_locator.entrypoints.postgres_import:main"
 
 [dependency-groups]
 dev = [

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import FrozenInstanceError
+import traceback
+from dataclasses import FrozenInstanceError, fields
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from problem_locator.entrypoints.settings import Settings, SettingsError
 def environment(tmp_path: Path) -> dict[str, str]:
     return {
         "DATA_ROOT": str(tmp_path / "data"),
+        "DATABASE_URL": "postgresql://locator:database-secret@127.0.0.1:5432/locator_test",
         "PUBLIC_BASE_URL": "http://127.0.0.1:8000/service",
         "SKILL_DIR": str(tmp_path / "skills"),
         "GENERIC_SKILL_NAME": "generic-problem-locator-smoke",
@@ -49,12 +51,77 @@ def test_website_mode_and_redis_numeric_settings(tmp_path, key, value):
 
 
 
+@pytest.mark.parametrize("scheme", ["postgresql", "postgres"])
+def test_database_url_accepts_postgres_schemes_and_pool_bounds(tmp_path, scheme):
+    for size in (2, 8, 32):
+        values = {**environment(tmp_path),
+                  "DATABASE_URL": f"{scheme}://locator:encoded%40password@db.example:5432/locator?sslmode=require",
+                  "DATABASE_POOL_SIZE": str(size)}
+        settings = Settings.load(environ=values)
+        assert settings.database_url == values["DATABASE_URL"]
+        assert settings.database_pool_size == size
+
+
+@pytest.mark.parametrize("database_url", [
+    "", "sqlite:///completed.sqlite3", "mysql://locator:database-secret@db/locator",
+    "postgresql://locator:database-secret@db", "postgresql:///locator",
+    "postgresql://locator:database-secret@[invalid/locator",
+    "postgresql://locator:database-secret@db:secret-port/locator",
+    "postgresql://locator:database-secret@db:0/locator",
+    "postgresql://locator:database-secret@db:65536/locator",
+    " postgresql://locator:database-secret@db/locator",
+    "postgresql://locator:database-secret@db/locator\n",
+    "postgresql://locator:database-secret@db/locator#fragment",
+])
+def test_invalid_database_url_is_rejected_without_exposing_credentials(tmp_path, database_url):
+    with pytest.raises(SettingsError, match="DATABASE_URL") as captured:
+        Settings.load(environ={**environment(tmp_path), "DATABASE_URL": database_url})
+    rendered = "".join(traceback.format_exception(captured.value))
+    assert "database-secret" not in str(captured.value)
+    assert captured.value.__cause__ is None
+    # The exception message and its chained context cannot expose the DSN.
+    assert "database-secret" not in rendered
+
+
+@pytest.mark.parametrize("value", ["", "0", "1", "33", "08", "-2", "+8", "8.0", "secret", "999999"])
+def test_invalid_database_pool_size_is_rejected(tmp_path, value):
+    with pytest.raises(SettingsError, match="DATABASE_POOL_SIZE") as captured:
+        Settings.load(environ={**environment(tmp_path), "DATABASE_POOL_SIZE": value})
+    assert "database-secret" not in str(captured.value)
+
+
+def test_report_followup_is_disabled_and_has_separate_snapshot_caps(tmp_path):
+    values = environment(tmp_path)
+    settings = Settings.load(environ=values)
+    assert settings.report_followup_enabled is False
+    assert settings.report_followup_snapshot_bytes == 1024 ** 3
+    assert settings.report_followup_storage_bytes == 5 * 1024 ** 3
+    settings = Settings.load(environ={**values, "REPORT_FOLLOWUP_ENABLED": "true",
+        "REPORT_FOLLOWUP_SNAPSHOT_BYTES": "1024", "REPORT_FOLLOWUP_STORAGE_BYTES": "2048"})
+    assert settings.report_followup_enabled is True
+    assert settings.report_followup_snapshot_bytes == 1024
+    assert settings.report_followup_storage_bytes == 2048
+
+
+@pytest.mark.parametrize("overrides", [
+    {"REPORT_FOLLOWUP_ENABLED": "1"}, {"REPORT_FOLLOWUP_ENABLED": "True"},
+    {"REPORT_FOLLOWUP_SNAPSHOT_BYTES": "0"}, {"REPORT_FOLLOWUP_SNAPSHOT_BYTES": "01"},
+    {"REPORT_FOLLOWUP_SNAPSHOT_BYTES": "1073741825"},
+    {"REPORT_FOLLOWUP_STORAGE_BYTES": "1024"}, {"REPORT_FOLLOWUP_STORAGE_BYTES": "-1"},
+    {"REPORT_FOLLOWUP_STORAGE_BYTES": "9999999999999999999"},
+])
+def test_report_followup_rejects_invalid_flag_and_caps(tmp_path, overrides):
+    with pytest.raises(SettingsError):
+        Settings.load(environ={**environment(tmp_path), **overrides})
+
+
 def test_process_environment_overrides_utf8_env_file(tmp_path: Path) -> None:
     env_file = tmp_path / "service.env"
     env_file.write_text(
         "\n".join(
             (
                 f"DATA_ROOT={tmp_path / 'file-data'}",
+                "DATABASE_URL=postgresql://locator:database-secret@127.0.0.1:5432/locator_test",
                 "PUBLIC_BASE_URL=https://env.example.test/base",
                 f"SKILL_DIR={tmp_path / 'skills'}",
                 "GENERIC_SKILL_NAME=generic-problem-locator-smoke",
@@ -97,6 +164,9 @@ def test_settings_are_frozen_and_sensitive_paths_are_redacted(tmp_path: Path) ->
     assert values["ROUTE_CLAUDE_COMMAND"] not in rendered
     assert values["DIAGNOSE_CLAUDE_COMMAND"] not in rendered
     assert values["INTAKE_CLAUDE_COMMAND"] not in rendered
+    assert values["DATABASE_URL"] not in rendered
+    assert "database-secret" not in rendered
+    assert next(item for item in fields(Settings) if item.name == "database_url").repr is False
 
 
 def test_all_fixed_configuration_defaults_are_exact(tmp_path: Path) -> None:
@@ -104,6 +174,8 @@ def test_all_fixed_configuration_defaults_are_exact(tmp_path: Path) -> None:
     settings = Settings.load(environ=values)
 
     assert settings.data_root == Path(values["DATA_ROOT"])
+    assert settings.database_url == values["DATABASE_URL"]
+    assert settings.database_pool_size == 8
     assert settings.public_base_url == values["PUBLIC_BASE_URL"]
     assert settings.bind_host == "127.0.0.1"
     assert settings.port == 8000
@@ -316,6 +388,7 @@ def test_invalid_or_fake_runtime_configuration_is_rejected(
 def test_every_required_setting_is_enforced(tmp_path: Path) -> None:
     for key in (
         "DATA_ROOT",
+        "DATABASE_URL",
         "PUBLIC_BASE_URL",
         "SKILL_DIR",
         "GENERIC_SKILL_NAME",

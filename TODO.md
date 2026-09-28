@@ -4,15 +4,11 @@
 
 本文件是仓库活跃待办的唯一清单。已完成事项由代码、当前设计与 Git 历史证明，不在这里保留关闭项。
 
-2026-09-05 仓库分析的核对基线为 `main@443ca21` / Problem Locator `6.0.0` / State V9。
-本次补充记录已由代码路径确认的实现边界及待评估风险，尚未执行性能压测或新的 Test Flow。
-后续是否修复、采用何种方案，仍需结合届时的当前版本、复现证据和实际使用需求决定。
-
 ## 网站 Redis 生产接入验收（2026-09-28）
 
 - 按[生产适配步骤](docs/website-redis-deployment.md)更新后端和 BFF，补充 `WEBSITE_REDIS_HOST` 内网 IP，以及实际端口、DB 和登录凭据。
 - 用真实 Cookie 验证 `sessionid → airobot2-session:{session_id} → user.userid`，核对工号和历史会话归属。当前没有生产 Redis 地址，真实联调待部署时完成。
-- `/ready` 不检查 Redis，验收须带真实 Cookie 请求网站 API；不需要重建 `DATA_ROOT`。
+- `/ready` 不检查 Redis，验收须带真实 Cookie 请求网站 API。Redis 身份接入本身不改变业务数据格式；当前累计版本的 PostgreSQL 配置与历史数据迁移仍须按[生产升级清单](docs/production-upgrade-2026-09-23.md)完成，不能据此跳过迁移。
 
 
 ## P0：8.0 网站 Agent 真实 Release 与内部网站联调

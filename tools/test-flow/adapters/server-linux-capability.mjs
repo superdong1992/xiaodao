@@ -15,6 +15,9 @@ import {
   dockerContextArgs,
 } from "../lib/release-inputs.mjs";
 import { runSync } from "../lib/util.mjs";
+import {
+  startPostgresSidecar, assertPostgresSidecar, postgresSecretMount,
+} from "../runtime-support/postgres-sidecar.mjs";
 
 function argument(name) {
   const index = process.argv.indexOf(name);
@@ -53,6 +56,9 @@ function docker(context, args) {
 }
 
 const outputRoot = path.resolve(argument("--output-root") ?? ".");
+const attemptRoot = path.resolve(argument("--attempt-root") ?? ".");
+const runId = argument("--run-id");
+const resourceRegistry = argument("--resource-registry");
 const context = argument("--docker-context");
 const repoRoot = path.resolve(argument("--repo-root") ?? ".");
 const logparseSource = path.resolve(argument("--logparse-source") ?? ".");
@@ -69,7 +75,7 @@ fs.mkdirSync(outputRoot, { recursive: true, mode: 0o700 });
 terminationRoot = outputRoot;
 
 if (process.platform === "darwin" && context !== RELEASE_DOCKER_CONTEXT) blocked("SERVER_CAPABILITY_CONTEXT", "the macOS Release server is bound to Docker context colima");
-if (!/^sha256:[a-f0-9]{64}$/.test(image ?? "") || !runtimeProfileDigest || !model || !serviceMaxTurns || !serviceMaxTotalTokens || !serviceMaxBudgetUsd || !serviceHardTimeoutSeconds || !fs.existsSync(path.join(repoRoot, "pyproject.toml")) || !fs.existsSync(path.join(logparseSource, "config.yaml")) || !containerName || !/^problem-locator\.test-flow\.run=run-[A-Za-z0-9-]+$/.test(resourceLabel ?? "")) {
+if (!/^sha256:[a-f0-9]{64}$/.test(image ?? "") || !runtimeProfileDigest || !model || !serviceMaxTurns || !serviceMaxTotalTokens || !serviceMaxBudgetUsd || !serviceHardTimeoutSeconds || !fs.existsSync(path.join(repoRoot, "pyproject.toml")) || !fs.existsSync(path.join(logparseSource, "config.yaml")) || !containerName || !/^problem-locator\.test-flow\.run=run-[A-Za-z0-9-]+$/.test(resourceLabel ?? "") || !/^run-[A-Za-z0-9-]+$/.test(runId ?? "") || resourceLabel !== `problem-locator.test-flow.run=${runId}` || !resourceRegistry || !path.isAbsolute(resourceRegistry)) {
   failed("SERVER_CAPABILITY_ARGUMENTS", "image, registered container name, and exact run label are required");
 }
 
@@ -91,8 +97,21 @@ if (imageMetadata.Os !== RELEASE_DOCKER_OS || imageMetadata.Architecture !== REL
 }
 if (imageMetadata.Id !== image) failed("SERVER_CAPABILITY_IMAGE_IDENTITY", "the inspected image differs from the frozen planning identity");
 
+let postgres;
+let postgresReceipt;
+try {
+  postgres = startPostgresSidecar({
+    attemptRoot, runId, scope: "capability", dockerContext: context ?? "default",
+    resourceRegistry, resourceLabel, databaseName: "problem_locator_test_admin",
+  });
+  postgresReceipt = assertPostgresSidecar(postgres, { dockerContext: context ?? "default" });
+} catch (error) {
+  blocked("SERVER_CAPABILITY_POSTGRES", `PostgreSQL 测试实例不可用：${error?.code ?? error?.name ?? "Error"}`);
+}
+
 const capabilityCommand = [
   "export UV_CACHE_DIR=/root/.cache/uv UV_LINK_MODE=copy UV_NO_PROGRESS=1",
+  'export PROBLEM_LOCATOR_TEST_DATABASE_URL="$(cat /run/test-flow-postgres/database-url)"',
   "uv pip install --offline --no-deps --no-build-isolation --reinstall --python /opt/venvs/xiaodao/bin/python /opt/src/xiaodao >/dev/null || exit 72",
   "/opt/venvs/xiaodao/bin/python -I -c 'import problem_locator; assert problem_locator.__version__' || exit 72",
   "test -z \"$(find /opt/venvs/xiaodao/lib/python3.12/site-packages/problem_locator/runtime/assets -xdev -type f -links +1 -print -quit)\" || exit 72",
@@ -111,11 +130,12 @@ const run = docker(context, [
   "--name", containerName,
   "--label", resourceLabel,
   "--pull", "never",
-  "--network", "none",
+  "--network", postgres.network,
   "--platform", "linux/amd64",
   "--mount", `type=bind,src=${repoRoot},dst=/opt/src/xiaodao,readonly`,
   "--mount", `type=bind,src=${logparseSource},dst=/opt/src/logparse,readonly`,
   "--mount", `type=bind,src=${outputRoot},dst=/evidence`,
+  "--mount", postgresSecretMount(postgres),
   "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=2g",
   "--env", "PYTHONNOUSERSITE=1",
   "--env", "PYTHONPYCACHEPREFIX=/tmp/pycache",
@@ -138,6 +158,11 @@ process.stdout.write(run.stdout);
 process.stderr.write(run.stderr);
 if (run.status === 72) blocked("SERVER_CAPABILITY_OFFLINE_INSTALL", "the sealed offline Linux runtime could not install the immutable source snapshot");
 if (run.status !== 0) failed("SERVER_CAPABILITY_CONTRACT", "the offline Linux capability tests failed");
+try {
+  postgresReceipt = assertPostgresSidecar(postgres, { dockerContext: context ?? "default" });
+} catch {
+  failed("SERVER_CAPABILITY_POSTGRES_IDENTITY", "PostgreSQL 测试实例的身份在运行中发生变化。");
+}
 const lines = run.stdout.split(/\r?\n/).filter(Boolean);
 const hashedRuntime = lines.slice(2, 5).map((line) => /^(?<sha>[a-f0-9]{64})\s+(?<file>\S+)$/.exec(line)?.groups ?? null);
 if (lines[0] !== RELEASE_CLAUDE_VERSION_OUTPUT
@@ -176,7 +201,7 @@ if (createdMetadata.Config?.Labels?.[labelName] !== labelValue || createdMetadat
 }
 
 fs.writeFileSync(path.join(outputRoot, "server-linux-capability-result.json"), `${JSON.stringify({
-  schema_version: 3,
+  schema_version: 4,
   runtime_profile_digest: runtimeProfileDigest,
   status: "PASS",
   claims: {
@@ -194,7 +219,8 @@ fs.writeFileSync(path.join(outputRoot, "server-linux-capability-result.json"), `
   runtime_identity_sha256: crypto.createHash("sha256").update(runtimeIdentityBytes).digest("hex"),
   claude_version: RELEASE_CLAUDE_VERSION_OUTPUT,
   node_architecture: "x64",
-  network: "none",
+  network: postgres.network,
+  postgres: postgresReceipt,
   pull_policy: "never",
   model,
   service_agent_caps: {

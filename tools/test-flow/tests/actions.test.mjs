@@ -39,6 +39,8 @@ import {
   RELEASE_CLAUDE_CLI_SHA256,
   RELEASE_CLAUDE_VERSION_OUTPUT,
   RELEASE_PYTHON_VERSION,
+  RELEASE_POSTGRES_IMAGE,
+  RELEASE_POSTGRES_IMAGE_ID,
   RELEASE_UV_SHA256,
   RELEASE_UV_VERSION,
   RELEASE_UV_VERSION_OUTPUT,
@@ -1649,10 +1651,15 @@ test("dual Linux CrossJob PASS receipts bind exact topology, images, Client runt
     source_wiki_sha256: sha,
     generation_receipt_sha256: sha,
   };
+  const runId = "run-dual-runtime-boundary";
+  const suffix = crypto.createHash("sha256").update(`${runId}:crossjob`).digest("hex").slice(0, 24);
+  const resource = (prefix, suffix = "") => `${prefix}-${crypto.createHash("sha256").update(`${runId}:${suffix}`).digest("hex").slice(0, 16)}${suffix ? `-${suffix}` : ""}`;
   const plan = {
+    run_id: runId,
     release_inputs: {
       topology: "darwin-orchestrated-dual-linux-containers",
       image: {
+        postgres: { image_id: RELEASE_POSTGRES_IMAGE_ID },
         server: { image_id: serverImageId },
         client: { image_id: clientImageId },
       },
@@ -1682,14 +1689,21 @@ test("dual Linux CrossJob PASS receipts bind exact topology, images, Client runt
   };
   const receipt = {
     status: "PASS",
+    stage_id: "journey.cross-job.route",
+    postgres: {
+      schema_version: 1, run_id: runId, scope: "crossjob",
+      container: `pltf-pg-${suffix}`, volume: `pltf-pgdata-${suffix}`, network: `pltf-pgnet-${suffix}`,
+      image: RELEASE_POSTGRES_IMAGE, image_id: RELEASE_POSTGRES_IMAGE_ID,
+      database: "problem_locator_release_test", user: "pl_test_admin", initial_database: "EMPTY",
+    },
     topology: "dual-linux-containers",
     runtime_images: { server_image_id: serverImageId, client_image_id: clientImageId },
     runtime_resources: {
-      client_container: "client-1",
-      server_container: "server-1",
+      client_container: resource("pltf-client"),
+      server_container: resource("pltf-server", "initial"),
       client_image_id: clientImageId,
       server_image_id: serverImageId,
-      network: "network-1",
+      network: resource("pltf-net"),
       selected_client_runtime: runtime,
     },
     generated_skill: {

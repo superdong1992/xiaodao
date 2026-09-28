@@ -1,10 +1,14 @@
 # Problem Locator 8.2 预览版
 
+框架开发与维护请从 [xiaodao 框架设计](design/framework/README.md) 开始阅读，其中包含整体架构、模块详细设计、全部框架文件的职责与接口，以及[逐文件索引](design/framework/file-index.md)。
+
 ## 内部网站 Agent 接入
 
 已有网站升级到 8.2 时，请先看[前端必改清单与开发提示词](docs/website-agent-upgrade-8.2.md)，逐项完成接口替换、轮次状态、历史记录和 SSE 的适配。
 
 已接入 8.2 的网站请看 [2026-09-21～22 增量适配清单](docs/website-agent-changes-2026-09-22.md)，其中列出通用日志、报告赞踩、七天保留和下载处理的具体变化。
+
+升级 2026-09-23 以来的版本，请按[生产环境累计升级清单](docs/production-upgrade-2026-09-23.md)同步适配 PostgreSQL、Redis 登录、专用路由注册和报告追问。软件包仍标记为 `8.2.0`，部署时须记录实际提交。
 
 网站后端可以直接提交用户原话和日志附件，无需生成 `problem_spec`。网站只需接入会话和附件两类 API。会话接口统一返回状态、追问、历史、报告和下载信息；只需更新状态时，可使用 `include=none` 减少返回内容。
 
@@ -12,7 +16,9 @@
 
 部署后先看[网站 Agent 快速接入与联调清单](docs/website-agent-quickstart.md)，再查[完整 API 参考](docs/website-agent-api.md)和[TypeScript 后端示例](examples/website-agent/README.md)。服务的 `/docs` 提供在线接口说明，`/openapi.json` 提供接口定义文件。
 
-网站后端负责用户登录、为同一用户生成稳定的 `owner_key`，并转发下载请求；Problem Locator 服务端检查会话是否属于该用户。部署方须限制哪些来源可以访问 xiaodao，浏览器不得直接指定会话所属用户。会话详情格式已升级为 v3，事件格式已升级为 v2，网站与服务端需一起升级。底层独立 Case 和七个 MCP 工具继续保留。
+报告完成后继续解释、质疑或补充分析，按[报告追问接入说明](docs/website-report-followup.md)适配网站。追问使用独立接口、数据表和可回放事件流，默认关闭；原有诊断、报告、下载和赞踩保持原有行为。
+
+网站负责用户登录，BFF 默认透传 Cookie，由 Problem Locator 从 Redis 的 `user.userid` 计算稳定的 `owner_key` 并检查会话归属；显式使用 `trusted_header` 时才由原 BFF 登录模块计算身份。部署方须限制哪些来源可以访问 xiaodao，浏览器不得直接指定会话所属用户。会话详情格式已升级为 v3，事件格式已升级为 v2，网站与服务端需一起升级。底层独立 Case 和七个 MCP 工具继续保留。
 
 通用定位可选开启“点赞 → 经验卡 → 后续诊断参考”闭环，默认关闭。网站负责赞踩按钮，小刀提供指定报告轮次的反馈接口和调用封装。接入、保留策略与验收要求见[通用定位经验库](docs/generic-feedback-memory.md)。
 
@@ -35,9 +41,9 @@
 | 默认 Skill 直接输出所用配置 | `agent-profile/skill-direct` / `output-contract/skill-direct` |
 | Router / Diagnose / Review 工具包 | `3.0.0` / `4.0.0` / `3.0.0` |
 
-State、Job 和服务端确认的 Outcome 使用 V11。8.0 / 8.1 数据须按[离线升级说明](docs/data-upgrade-v11-r2.md)复制并校验，再切换到 8.2。网站历史记录所属用户的信息须从旧归属库显式导入，无法确定所属用户的记录不会自动分配。源目录和历史报告内容保持不变，新目录中的版本标记可防止旧服务误用。
+State、Job 和服务端确认的 Outcome 使用 V11。当前服务使用 PostgreSQL。新安装须使用独立的空数据库和新的空 `DATA_ROOT`；保留历史数据时，先按 [SQLite → PostgreSQL 迁移说明](docs/postgresql-migration.md)停服，再显式导入当前 V11 r2、会话 v2 格式。源数据库、目录和历史报告原样保留，不自动迁移。[8.0 / 8.1 离线升级说明](docs/data-upgrade-v11-r2.md)只处理历史 SQLite 格式，不能替代 PostgreSQL 导入。
 
-新安装使用空 `DATA_ROOT`，首次启动会写入 `data-format.json` 和 `completed.sqlite3`。V1–V10 旧目录原样保留，不迁移、不删除，也不兼容读取。活动 Case 只保存在内存中，服务退出后不会自动继续处理。未完成的诊断会标记为中断，用户可在原会话发起新一轮。已交付的报告和待归档任务继续保留。
+新安装首次启动会在 PostgreSQL 中建立表，并在 `DATA_ROOT` 写入独立的 PostgreSQL `data-format.json` 标记。新标记会绑定数据库与资源目录，含旧 SQLite 数据的目录会被拒绝。V1–V10 旧数据目录原样保留，不迁移、不删除，也不兼容读取。活动 Case 只保存在内存中，服务退出后不会自动继续处理。未完成的诊断会标记为中断，用户可在原会话发起新一轮。已交付的报告和待归档任务继续保留。
 
 本仓库将故障定位能力分为四层：
 
@@ -82,7 +88,7 @@ Release 制订计划时，会将 Git 可见的工作区文件保存为不可变�
 
 Problem Locator 是一个单实例故障诊断服务。它接收结构化问题，收集事实与附件，执行固定版本的路由和诊断任务。专用定位默认直接交付 Skill 的 Markdown 原文；Generic V2 继续使用原有 Markdown 交付方式。只有显式恢复 `advisory` 或 `strict` 时，专用定位才生成 `diagnosis-result.json` 并按原有格式要求归档。
 
-Problem Locator 8.2 将活动 Case、Job 和核心命令的幂等记录保存在内存中，每个 Case 有独立锁和修订版本（revision）。会话、轮次、消息、派发记录和公共事件存入 SQLite，继续使用 SQLite WAL + FULL 同步。最终结果与报告可用事件在同一事务中提交，归档状态与归档事件也在同一事务中提交，成功后才通知客户端。阶段事件不会增加 Case revision。历史 Case 按需读取，不在每次写操作中复制全库或重新读取历史附件。
+Problem Locator 8.2 将活动 Case、Job 和核心命令的幂等记录保存在内存中，每个 Case 有独立锁和修订版本（revision）。会话、轮次、消息、派发记录和公共事件存入 PostgreSQL，独立事务从连接池获取连接，让不同会话的数据库操作并行执行。最终结果与报告可用事件在同一事务中提交，归档状态与归档事件也在同一事务中提交，成功后才通知客户端。阶段事件不会增加 Case revision。历史 Case 按需读取，不在每次写操作中复制全库或重新读取历史附件。报告、日志和附件文件仍保存在 `DATA_ROOT`。
 
 ## 环境要求与安装
 
@@ -90,6 +96,7 @@ Problem Locator 8.2 将活动 Case、Job 和核心命令的幂等记录保存在
 
 - CPython 3.12（项目要求 `>=3.12,<3.13`）
 - `uv`，并使用仓库中已提交的 `uv.lock`
+- PostgreSQL 17，使用该主版本最新的小版本；建议独立数据库和专用账号。驱动与连接池已随 Python 依赖固定版本，无需客户端安装 PostgreSQL
 - 由部署方维护的 Logparse 源码目录、配置文件及 Python 启动器；源码目录可以来自 Git 检出，也可以由源码压缩包解压得到
 - 用于执行真实 Agent 任务、兼容 Claude 的命令行程序
 
@@ -104,16 +111,21 @@ uv lock --check
 
 ## 配置
 
-复制 [`.env.example`](.env.example) 作为私有配置文件，不要将其提交到版本库，并将所有占位值替换为绝对路径。`--env-file` 指定的文件按 UTF-8 dotenv 格式解析；如果进程环境中已有同名变量，则优先使用进程环境变量。
+复制 [`.env.example`](.env.example) 作为私有配置文件，不要将其提交到版本库。路径填写绝对路径，数据库连接地址替换为实际账号、密码、服务器地址和数据库名。`--env-file` 指定的文件按 UTF-8 dotenv 格式解析；如果进程环境中已有同名变量，则优先使用进程环境变量。
 
 | 环境变量 | 必填 | 默认值 | 说明 |
 |---|:---:|---|---|
-| `DATA_ROOT` | 是 | 无 | 当前服务独占的数据根目录，用于保存状态、资源和任务 |
+| `DATA_ROOT` | 是 | 无 | 当前服务独占的资源目录，保存报告、日志、附件、任务工作区和数据库绑定标记 |
+| `DATABASE_URL` | 是 | 无 | `postgresql://` 或 `postgres://` 连接地址，须包含服务器地址与数据库名；凭据保存在私有配置中，跨主机连接按部署要求设置 `sslmode`。缺少或无法连接时拒绝启动，不回退到 SQLite |
+| `DATABASE_POOL_SIZE` | 否 | `8` | 每个服务进程的连接池上限，只接受 2–32 的整数；结合 PostgreSQL 连接总量配置 |
 | `PUBLIC_BASE_URL` | 是 | 无 | 对外提供服务的 HTTP(S) 根地址，不得包含查询参数或片段 |
 | `SKILL_DIR` | 是 | 无 | 由部署方维护的产品注册目录；每个子目录包含一个 `registration-template.json` 及对应的 Methods 包。须填写实际存在的目录的绝对路径；只使用通用定位时，目录可以为空。生产环境不接受 `TEST_ONLY` 注册，也不得使用 Agent 的个人 Skill 目录 |
 | `GENERIC_SKILL_NAME` | 是 | 无 | Agent 环境中预装的通用定位 Skill 名称；仅允许标准的小写字母和连字符命名格式。启动时不调用 Skill 检查是否已安装 |
 | `GENERIC_LOGPARSE_PRODUCT` | 否 | `default` | 通用定位解析日志时使用的 Logparse 产品标识；由部署方配置，用户无需填写时间、槽位或进程 |
 | `GENERIC_MEMORY_ENABLED` | 否 | `false` | 开启通用 V2 报告赞踩、后台经验提炼和召回；启用前完成实际 Skill 与脱敏验收 |
+| `REPORT_FOLLOWUP_ENABLED` | 否 | `false` | 开启报告追问和报告发布后的异步日志快照；关闭后仍可读取、停止和清理已有追问 |
+| `REPORT_FOLLOWUP_SNAPSHOT_BYTES` | 否 | `1073741824` | 单份日志快照字节上限，最多 1 GiB，可调低；不计入原诊断资源额度 |
+| `REPORT_FOLLOWUP_STORAGE_BYTES` | 否 | `5368709120` | 日志快照总量字节上限，默认 5 GiB，不能小于单份上限 |
 | `LOGPARSE_REPO` | 是 | 无 | 由部署方维护的 Logparse 源码目录；支持 Git 检出目录和源码压缩包解压目录，启动时按实际内容生成指纹 |
 | `LOGPARSE_CONFIG_PATH` | 是 | 无 | Logparse 工作区内的配置文件 |
 | `BIND_HOST` | 否 | `127.0.0.1` | Uvicorn 监听地址 |
@@ -442,13 +454,13 @@ uv run python -m problem_locator replay-job \
 
 每次启动都会创建新的运行批次标识（epoch），不重放活动任务或未确认的 Outcome，也不重新投递旧 PENDING Job。服务退出后，活动 Case、Job、幂等记录和中间状态不恢复，需要重新创建 Case。已完成任务的报告、引用资源、查询索引和幂等记录会保存下来。
 
-服务运行期间，提交 Outcome 遇到允许重试的错误时，会继续使用同一份结果，不重新调用 Agent。最终结果未能提交到 SQLite 时，不会通知客户端报告已交付。已知存储故障会使就绪检查（readiness）失败，但不会撤销已经交付的报告。
+服务运行期间，提交 Outcome 遇到允许重试的错误时，会继续使用同一份结果，不重新调用 Agent。最终结果未能提交到 PostgreSQL 时，不会通知客户端报告已交付。已知存储故障会使就绪检查（readiness）失败，但不会撤销已经交付的报告。
 
 写操作响应中的回执表示请求已生效，但不保证服务重启后还能继续处理。只有已完成并保存的报告，才能保证重启后仍可读取。请求提交成功后，如果状态视图读取失败，响应可能包含回执和 `case_view=null`；客户端应保留请求 ID，稍后刷新。
 
 ## 校验、导出与备份
 
-以下管理命令获取与服务相同的独占实例锁，只能在对应 DATA_ROOT 的服务停止后执行：
+以下管理命令从进程环境读取 `DATABASE_URL` 和 `DATABASE_POOL_SIZE`，须与服务配置一致。命令获取与服务相同的独占实例锁，只能在对应 `DATA_ROOT` 的服务停止后执行：
 
 ```sh
 uv run python -m problem_locator validate-state \
@@ -461,11 +473,11 @@ uv run python -m problem_locator export-state \
 
 `validate-state` 检查已完成任务的数据库记录及 DTO；`export-state` 加载这些历史记录，输出对象统计和资源清单。这些离线操作可以遍历历史记录，不受轻量就绪检查的范围限制。导出文件只用于审计和备份核对，不能替代资源备份，也不能导入旧格式。
 
-备份前先停止服务，保留完整 DATA_ROOT，包括 `completed.sqlite3`、仍存在的 `completed.sqlite3-wal`/`completed.sqlite3-shm`、`data-format.json`、`jobs/**` 和 `resources/**`。恢复使用相同版本的完整备份；不要只复制 SQLite 主文件或手工编辑数据库。旧数据目录原样保留，不进行原地迁移。
+备份前先停止服务，确认没有诊断、上传、追问或归档写入。使用 `pg_dump --format=custom` 导出专用 PostgreSQL 数据库，同时备份完整 `DATA_ROOT`，包括 `data-format.json`、`jobs/**` 和 `resources/**`。数据库与资源必须来自同一次停机备份，缺少任一部分都不能完整恢复。恢复时使用相同服务版本，以 `pg_restore` 恢复数据库，并恢复与其绑定的原资源目录；不要只复制数据库文件或手工编辑绑定标记。旧数据目录原样保留，不进行原地迁移。
 
 ## 后续扩展边界
 
-当前架构面向单进程 Linux 服务端。如果需要多实例、高可用或分布式持久队列，须另行设计数据库和调度方案。更新活动任务时，不再因历史 Case 增长而复制全库，因此不沿用旧版 500 Case 或 16 MiB state.json 的迁移门槛。
+当前架构面向单进程 Linux 服务端。PostgreSQL 解决不同会话的数据库并发访问，活动 Case 和调度状态仍在单进程内存中；一个资源目录及其数据库仍只供一个服务实例使用。多实例、高可用和分布式持久队列须另行设计，不能仅靠增加 Uvicorn worker 启用。更新活动任务时，不再因历史 Case 增长而复制全库，因此不沿用旧版 500 Case 或 16 MiB state.json 的迁移门槛。
 
 直接调用模型 API、使用常驻 CLI 进程池，以及 Logparse 多目标（target）批处理留到下一轮。当前改动减少了模型调用工具的往返次数、存储重复读写，以及不同 Case 之间的排队，但不能据此解释或保证消除客户端提交附件前的等待。后续应在目标 4 核、8 GB 机器上比较队列等待、模型轮次、上传吞吐和峰值内存。
 

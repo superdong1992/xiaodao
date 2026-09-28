@@ -542,3 +542,16 @@ test("website API exposes only conversation and attachment concepts with explici
   assert.match(subscriptionSource, /snapshot\.report_state === "READY"\) await loadReport\(snapshot\)/);
   assert.doesNotMatch(subscriptionSource, /conversations\/\$\{conversationId\}\/(?:status|report)/);
 });
+
+test("report followup guide preserves the old contracts and documents recovery boundaries", () => {
+  const followup = read("docs/website-report-followup.md");
+  for (const token of ["REPORT_FOLLOWUP_ENABLED", "target_run_id", "REPORT_ONLY", "REPORT_AND_LOGS", "Last-Event-ID",
+    "AGENT_FOLLOWUP_INVALID_CURSOR", "active_followup", "followup-controller.js", "65536", "262144"])
+    assert.ok(followup.includes(token), `missing followup guidance: ${token}`);
+  assert.match(followup, /默认关闭/); assert.match(followup, /提交追问会调用真实模型/);
+  assert.match(followup, /不会自动重试模型提交/); assert.match(followup, /未重新核对原日志/);
+  assert.match(followup, /旧页|较早页/); assert.match(followup, /回执可能比完成事件更晚/);
+  assert.ok(guide.includes("](website-report-followup.md)"));
+  assert.ok(example.includes("](../../docs/website-report-followup.md)"));
+  assert.match(read("examples/website-agent/server.test.mjs"), /import "\.\/followup\.test\.mjs"/);
+});

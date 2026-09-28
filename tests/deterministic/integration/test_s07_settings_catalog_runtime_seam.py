@@ -40,6 +40,7 @@ def test_settings_pin_one_s07_pair_into_s04_catalog_and_runtime(tmp_path: Path) 
     settings = Settings.load(
         environ={
             "DATA_ROOT": str(tmp_path / "data"),
+            "DATABASE_URL": "postgresql://locator:placeholder@127.0.0.1:5432/locator_test",
             "PUBLIC_BASE_URL": "http://127.0.0.1:8000",
             "SKILL_DIR": str(SKILL_DIR),
             "GENERIC_SKILL_NAME": "generic-problem-locator-smoke",

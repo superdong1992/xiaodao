@@ -14,6 +14,7 @@ import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { clearInterval, clearTimeout, setInterval, setTimeout } from "node:timers";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { handleFollowups } from "./followup-bff.mjs";
 export const denyAccess = {
     authenticate: async ()=>null
 };
@@ -195,7 +196,11 @@ const PUBLIC_CODES = new Set([
     "AGENT_CONVERSATION_DELETED",
     "AGENT_CANCELLING",
     "AGENT_FEEDBACK_UNSUPPORTED",
-    "AGENT_FEEDBACK_LIMIT_EXCEEDED"
+    "AGENT_FEEDBACK_LIMIT_EXCEEDED",
+    "AGENT_FOLLOWUP_DISABLED", "AGENT_FOLLOWUP_UNSUPPORTED", "AGENT_FOLLOWUP_EXPIRED",
+    "AGENT_FOLLOWUP_BUSY", "AGENT_FOLLOWUP_SOURCE_CHANGED", "AGENT_FOLLOWUP_LIMIT_EXCEEDED",
+    "AGENT_FOLLOWUP_CONTEXT_LIMIT", "AGENT_FOLLOWUP_INVALID_CURSOR",
+    "AGENT_FOLLOWUP_NOT_FOUND", "AGENT_FOLLOWUP_FAILED", "AGENT_FOLLOWUP_INTERRUPTED", "AGENT_FOLLOWUP_INPUT_CHANGED"
 ]);
 const PUBLIC_PHASES = new Set([
     "AGENT",
@@ -291,6 +296,15 @@ function safeError(value, terminal = false) {
         AGENT_RUN_NOT_FOUND: "诊断轮次不存在。",
         AGENT_FEEDBACK_UNSUPPORTED: "这份报告暂不支持评价。",
         AGENT_FEEDBACK_LIMIT_EXCEEDED: "评价请求已达上限，请联系管理员。",
+        AGENT_FOLLOWUP_DISABLED: "报告追问功能尚未启用。",
+        AGENT_FOLLOWUP_UNSUPPORTED: "这份报告暂不支持追问。",
+        AGENT_FOLLOWUP_EXPIRED: "这份报告已过保留期，无法继续追问。",
+        AGENT_FOLLOWUP_BUSY: "本会话仍有追问正在回答，请等待完成或停止后再发送。",
+        AGENT_FOLLOWUP_SOURCE_CHANGED: "报告依据已变化，请刷新后重新提问。",
+        AGENT_FOLLOWUP_LIMIT_EXCEEDED: "这份报告的追问已达上限，请新建对话。",
+        AGENT_FOLLOWUP_CONTEXT_LIMIT: "追问上下文已达上限，请新建对话。",
+        AGENT_FOLLOWUP_INVALID_CURSOR: "追问游标无效，请刷新记录后重试。",
+        AGENT_FOLLOWUP_NOT_FOUND: "追问不存在或已过保留期。",
         AGENT_RUN_CHANGED: "诊断轮次已变化，请刷新后重试。",
         AGENT_EVENT_CURSOR_EXPIRED: "历史事件已过保留期，请先刷新会话状态，再从 last_event_id 重新订阅。",
         AGENT_DELETE_REQUIRED: "会话正在删除，请稍后查看目录。",
@@ -645,6 +659,8 @@ export function createAgentBackend(options) {
                 ])).digest("hex");
             }
             const url = new URL(request.url ?? "/", "http://website.local");
+            if (await handleFollowups({ request, response, url, authContext, api, upstreamFetch, json,
+                jsonBody, HttpError, safeError, boundedResponseJson, validateQuery, checkLimit })) return;
             const creation = url.pathname === "/api/agent/conversations";
             const reservation = url.pathname === "/api/agent/attachments";
             const matched = url.pathname.match(/^\/api\/agent\/conversations\/([^/]+)(?:\/(messages|events|stop)|\/files\/([^/]+)\/content)?$/);

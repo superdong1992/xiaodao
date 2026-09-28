@@ -28,7 +28,10 @@ import {
   dockerContextArgs,
   validateClaudeDistribution,
 } from "../lib/release-inputs.mjs";
-import { extractCheckpointSourceArchive } from "../lib/checkpoint.mjs";
+import {
+  startPostgresSidecar, assertPostgresSidecar, attachPostgresServer,
+  postgresSecretMount,
+} from "../runtime-support/postgres-sidecar.mjs";
 import {
   fixedGetCasePollInput,
   fixedGetCasePollingInvariant,
@@ -2566,6 +2569,7 @@ async function initializeContainer(configuration, state, containerName, mode, st
 }
 
 async function createContainer(configuration, state, containerName, mode, stageId, register = true) {
+  assertPostgresSidecar(state.postgres, { dockerContext: configuration.dockerContext });
   if (register) appendResource(configuration.resourceRegistry, configuration.attemptRoot, "container", containerName, configuration.resourceLabel);
   const networkArguments = configuration.topology === DUAL_LINUX_TOPOLOGY
     ? ["--network", state.network, "--network-alias", "problem-locator-server"]
@@ -2599,9 +2603,11 @@ async function createContainer(configuration, state, containerName, mode, stageI
     "--mount", `type=bind,src=${configuration.generatedSkill.root},dst=/run/generated-specialized-skill,readonly`,
     "--mount", `type=bind,src=${path.join(configuration.attemptRoot, "payload")},dst=/evidence`,
     "--mount", `type=volume,src=${state.volume},dst=/var/lib/problem-locator`,
+    "--mount", postgresSecretMount(state.postgres),
     state.image_id,
     "sleep", "infinity",
   ]);
+  attachPostgresServer(state.postgres, containerName, { dockerContext: configuration.dockerContext });
   state.active_container = containerName;
   atomicState(configuration.statePath, state);
 }
@@ -2770,6 +2776,12 @@ async function createFreshEnvironment(configuration, stageRoot, runtimeIdentity)
     audited_service_job_ids: [],
     usage: zeroUsage(),
   };
+  state.postgres = startPostgresSidecar({
+    attemptRoot: configuration.attemptRoot, runId, scope: "crossjob",
+    dockerContext: configuration.dockerContext,
+    resourceRegistry: configuration.resourceRegistry, resourceLabel: configuration.resourceLabel,
+    databaseName: "problem_locator_release_test",
+  });
   if (dualLinuxContainers) {
     appendResource(configuration.resourceRegistry, configuration.attemptRoot, "network", state.network, configuration.resourceLabel);
     await docker(configuration.dockerContext, ["network", "create", "--label", configuration.resourceLabel, state.network]);
@@ -2831,6 +2843,8 @@ async function createFreshEnvironment(configuration, stageRoot, runtimeIdentity)
     schema_version: 1,
     status: "PASS",
     lineage_root: "GENESIS",
+    initial_database: state.postgres.initial_database,
+    postgres: assertPostgresSidecar(state.postgres, { dockerContext: configuration.dockerContext }),
     volume: state.volume,
     initial_data_root: "EMPTY",
     docker_context: configuration.dockerContext,
@@ -2848,165 +2862,6 @@ async function createFreshEnvironment(configuration, stageRoot, runtimeIdentity)
   await startService(configuration, state, "route", { allowEmptyJourney: true });
   const dfxProbe = await runServerDfxProbe(configuration, state);
   return { state, freshAdmission, dfxProbe, browserCapability };
-}
-
-function exportedJobs(exported) {
-  return Object.values(exported?.state?.cases ?? {}).flatMap((aggregate) => Object.values(aggregate.jobs ?? {}));
-}
-
-function jobCounts(exported) {
-  const jobs = exportedJobs(exported);
-  return {
-    running: jobs.filter((job) => job.status === "RUNNING").length,
-    queued: jobs.filter((job) => job.status === "PENDING").length,
-  };
-}
-
-async function createCheckpointSource(configuration, state, continuation) {
-  const checkpointPath = configuration.checkpointOutputSource;
-  requireCondition(checkpointPath && path.isAbsolute(checkpointPath) && path.resolve(checkpointPath).startsWith(`${path.resolve(configuration.attemptRoot)}${path.sep}`), "CHECKPOINT_OUTPUT_INVALID");
-  requireCondition(!state.current_instance, "CHECKPOINT_SERVICE_RUNNING");
-  const stageRoot = path.dirname(checkpointPath);
-  ensureDirectory(stageRoot);
-  const validation = await docker(configuration.dockerContext, [
-    "exec", state.active_container,
-    "runuser", "-u", "plagent", "--",
-    "/usr/bin/env", "-i",
-    "HOME=/run/plagent-claude", "LANG=C.UTF-8", "PATH=/opt/venvs/xiaodao/bin:/usr/local/bin:/usr/bin:/bin", "PYTHONNOUSERSITE=1",
-    "/opt/venvs/xiaodao/bin/python", "-I", "-m", "problem_locator", "validate-state", "--data-root", "/var/lib/problem-locator",
-  ], { forward: false });
-  const validationReport = JSON.parse(validation.stdout);
-  requireCondition(validationReport.valid === true && Array.isArray(validationReport.errors) && validationReport.errors.length === 0, "CHECKPOINT_STATE_INVALID", "FAIL", "PRODUCT");
-  writeNew(path.join(stageRoot, "state-validation.json"), validationReport);
-  const exportContainerPath = `/tmp/test-flow-state-export-${configuration.stage.replaceAll(".", "-")}.json`;
-  await docker(configuration.dockerContext, [
-    "exec", state.active_container,
-    "runuser", "-u", "plagent", "--",
-    "/usr/bin/env", "-i",
-    "HOME=/run/plagent-claude", "LANG=C.UTF-8", "PATH=/opt/venvs/xiaodao/bin:/usr/local/bin:/usr/bin:/bin", "PYTHONNOUSERSITE=1",
-    "/opt/venvs/xiaodao/bin/python", "-I", "-m", "problem_locator", "export-state", "--data-root", "/var/lib/problem-locator", "--output", exportContainerPath,
-  ], { forward: false });
-  const exportHostPath = path.join(stageRoot, "state-export.json");
-  await docker(configuration.dockerContext, ["cp", `${state.active_container}:${exportContainerPath}`, exportHostPath], { forward: false });
-  await docker(configuration.dockerContext, ["exec", state.active_container, "rm", "-f", exportContainerPath], { forward: false });
-  const exported = readJson(exportHostPath);
-  const counts = jobCounts(exported);
-  const workspaceProbe = await docker(configuration.dockerContext, [
-    "exec", state.active_container,
-    "find", "/var/lib/problem-locator/tmp/workspaces", "-mindepth", "1", "-maxdepth", "1", "-printf", "%y %f\\n",
-  ], { forward: false });
-  const workspaceEntries = workspaceProbe.stdout.split(/\r?\n/).filter(Boolean)
-    .map((line) => ({ kind: line.slice(0, 1), job_id: line.slice(2) }));
-  const workspaceIds = workspaceEntries.map((entry) => entry.job_id).sort();
-  const terminalJobs = new Set(exportedJobs(exported)
-    .filter((job) => ["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"].includes(job.status))
-    .map((job) => job.job_id));
-  const retainedWorkspacesAreTerminal = workspaceEntries.every((entry) => entry.kind === "d" && terminalJobs.has(entry.job_id));
-  const processes = await docker(configuration.dockerContext, ["exec", state.active_container, "ps", "-ww", "-eo", "args"], { forward: false });
-  const activeWorkers = processes.stdout.split(/\r?\n/).filter((line) => /test_service_launcher\.py|\/usr\/local\/bin\/claude|service-supervisor/.test(line)).length;
-  const receipt = {
-    schema_version: 1,
-    status: counts.running === 0 && counts.queued === 0 && activeWorkers === 0 && retainedWorkspacesAreTerminal ? "PASS" : "FAIL",
-    service_stopped: true,
-    running_jobs: counts.running,
-    queued_jobs: counts.queued,
-    active_workers: activeWorkers,
-    temporary_workspaces: 0,
-    excluded_terminal_workspaces: workspaceIds.length,
-    state_validation: "PASS",
-  };
-  requireCondition(receipt.status === "PASS", "CHECKPOINT_NOT_QUIESCENT", "ERROR", "HARNESS");
-  const scratchRoot = path.join(configuration.attemptRoot, "scratch", "checkpoint-sources");
-  ensureDirectory(scratchRoot);
-  const stateRoot = path.join(scratchRoot, configuration.stage);
-  const archiveHostPath = path.join(scratchRoot, `${configuration.stage}.stable-state.tar`);
-  const archiveContainerPath = `/tmp/test-flow-stable-state-${configuration.stage.replaceAll(".", "-")}.tar`;
-  const classificationContainerPath = `/tmp/test-flow-stable-state-${configuration.stage.replaceAll(".", "-")}-classification.json`;
-  const classificationHostPath = path.join(stageRoot, "checkpoint-temporary-classification.json");
-  requireCondition(!fs.existsSync(stateRoot) && !fs.existsSync(archiveHostPath), "CHECKPOINT_STAGING_EXISTS");
-  const exportResult = await run("docker", dockerArgs(configuration.dockerContext, [
-    "exec", state.active_container, "sh", "/test-flow-runtime/export-checkpoint.sh", archiveContainerPath, classificationContainerPath,
-  ]), { forward: false });
-  const classificationCopy = await run("docker", dockerArgs(configuration.dockerContext, [
-    "cp", `${state.active_container}:${classificationContainerPath}`, classificationHostPath,
-  ]), { forward: false });
-  const classification = classificationCopy.status === 0 ? readJson(classificationHostPath) : null;
-  if (exportResult.status !== 0) {
-    const code = classification?.status === "FAIL" && /^CHECKPOINT_[A-Z0-9_]+$/.test(classification.code)
-      ? classification.code
-      : "CHECKPOINT_STABLE_EXPORT_FAILED";
-    throw new StageError(code, "ERROR", "HARNESS");
-  }
-  requireCondition(classification?.schema_version === 1 && classification.status === "PASS" && classification.code === null && classification.outbox_clear === true, "CHECKPOINT_TEMPORARY_CLASSIFICATION_RECEIPT_INVALID");
-  try {
-    await docker(configuration.dockerContext, ["cp", `${state.active_container}:${archiveContainerPath}`, archiveHostPath], { forward: false });
-    const extraction = extractCheckpointSourceArchive({ archivePath: archiveHostPath, targetRoot: stateRoot });
-    const workspaces = path.join(stateRoot, "tmp", "workspaces");
-    requireCondition(fs.existsSync(workspaces) && fs.readdirSync(workspaces).length === 0 && !fs.existsSync(path.join(stateRoot, ".instance.lock")), "CHECKPOINT_STABLE_LAYOUT_INVALID");
-    writeNew(path.join(stageRoot, "checkpoint-stable-export.json"), {
-      schema_version: 1,
-      status: extraction.status,
-      entry_count: extraction.entry_count,
-      portable_digest: extraction.portable_digest,
-      excluded_instance_lock: true,
-      excluded_terminal_workspaces: workspaceIds.length,
-      excluded_completed_uploads: classification.excluded_completed_uploads,
-      excluded_processed_proposal_stages: classification.excluded_processed_proposal_stages,
-      outbox_clear: true,
-      temporary_layout_empty: true,
-    });
-  } finally {
-    try { await docker(configuration.dockerContext, ["exec", state.active_container, "rm", "-f", archiveContainerPath, classificationContainerPath], { forward: false }); } catch {}
-    try { fs.rmSync(archiveHostPath, { force: true }); } catch {}
-  }
-  const adapterContinuation = {
-    adapter_state_schema_version: 4,
-    adapter_case_input_digest: state.release_case?.input_digest ?? null,
-    adapter_case_scenario_id: state.release_case?.scenario_id ?? null,
-    adapter_case_skill_id: state.release_case?.skill_id ?? null,
-    adapter_case_id: state.case_id ?? null,
-    adapter_attachment_id: state.attachment_id ?? null,
-    adapter_prepared_case_revision: state.prepared_case_revision ?? null,
-    adapter_prepare_expected_case_revision: state.prepare_expected_case_revision ?? null,
-    adapter_case_revision: state.case_revision ?? null,
-    adapter_status: state.status ?? null,
-    adapter_resolved_case_revision: state.resolved_case_revision ?? null,
-    adapter_observed_statuses: state.observed_statuses ?? [],
-    adapter_audited_service_job_ids: state.audited_service_job_ids ?? [],
-    adapter_request_create: state.request_ids?.create ?? null,
-    adapter_request_prepare: state.request_ids?.prepare ?? null,
-    adapter_request_submit_attachment: state.request_ids?.submit_attachment ?? null,
-    adapter_request_submit_inputs: state.request_ids?.submit_inputs ?? null,
-    adapter_upload_method: state.upload_descriptor?.method ?? null,
-    adapter_upload_max_bytes: state.upload_descriptor?.max_bytes ?? null,
-    adapter_upload_expires_at: state.upload_descriptor?.expires_at ?? null,
-    adapter_upload_content_length: state.upload_descriptor?.required_headers?.["Content-Length"] ?? null,
-    adapter_upload_content_type: state.upload_descriptor?.required_headers?.["Content-Type"] ?? null,
-    adapter_upload_idempotency_key: state.upload_descriptor?.required_headers?.["Idempotency-Key"] ?? null,
-    adapter_upload_sha256: state.upload_descriptor?.required_headers?.["X-Content-SHA256"] ?? null,
-    adapter_public_artifact_id: state.public_artifact?.artifact_id ?? null,
-    adapter_public_artifact_kind: state.public_artifact?.kind ?? null,
-    adapter_public_artifact_name: state.public_artifact?.name ?? null,
-    adapter_public_artifact_content_type: state.public_artifact?.content_type ?? null,
-    adapter_public_artifact_size: state.public_artifact?.size ?? null,
-    adapter_public_artifact_sha256: state.public_artifact?.sha256 ?? null,
-    adapter_public_artifact_created_at: state.public_artifact?.created_at ?? null,
-    adapter_public_archive_id: state.public_result_archive?.artifact_id ?? null,
-    adapter_public_archive_kind: state.public_result_archive?.kind ?? null,
-    adapter_public_archive_name: state.public_result_archive?.name ?? null,
-    adapter_public_archive_content_type: state.public_result_archive?.content_type ?? null,
-    adapter_public_archive_size: state.public_result_archive?.size ?? null,
-    adapter_public_archive_sha256: state.public_result_archive?.sha256 ?? null,
-    adapter_public_archive_created_at: state.public_result_archive?.created_at ?? null,
-  };
-  requireCondition(Object.values(adapterContinuation).every((value) => value === null || ["string", "number", "boolean"].includes(typeof value) || (Array.isArray(value) && value.every((entry) => entry === null || ["string", "number", "boolean"].includes(typeof entry)))), "CHECKPOINT_CONTINUATION_NOT_FLAT");
-  writeNew(checkpointPath, {
-    schema_version: 1,
-    state_root: stateRoot,
-    continuation: { ...continuation, ...adapterContinuation },
-    quiescence_receipt: receipt,
-  });
-  return receipt;
 }
 
 function addUsage(state, usage) {
@@ -3384,6 +3239,9 @@ async function verifyRuntimeResources(configuration, state) {
   ]);
   const server = JSON.parse(inspections[0].stdout)[0];
   const serverImage = JSON.parse(inspections[1].stdout)[0];
+  requireCondition(server.NetworkSettings?.Networks?.[state.postgres?.network]
+    && server.Mounts?.some((mount) => mount.Destination === "/run/test-flow-postgres" && mount.Type === "bind" && mount.RW === false),
+  "POSTGRES_SERVER_CONNECTION_BOUNDARY_DRIFT", "BLOCKED", "INFRA");
   requireCondition(
     validServerRuntimeInspection({
       topology: configuration.topology,
@@ -3455,6 +3313,7 @@ async function verifyRuntimeResources(configuration, state) {
 async function stageReceipt(configuration, value) {
   const state = fs.existsSync(configuration.statePath) ? readJson(configuration.statePath) : null;
   const runtimeResources = state ? await verifyRuntimeResources(configuration, state) : null;
+  const postgres = state ? assertPostgresSidecar(state.postgres, { dockerContext: configuration.dockerContext }) : null;
   const receiptPath = path.join(configuration.stageRoot, "adapter-result.json");
   const invocations = value.invocations ?? [];
   requireCondition(
@@ -3475,6 +3334,7 @@ async function stageReceipt(configuration, value) {
       client_image_id: configuration.topology === DUAL_LINUX_TOPOLOGY ? configuration.expectedClientImageId : null,
     },
     runtime_resources: runtimeResources,
+    postgres,
     generated_skill: {
       registration_id: configuration.generatedSkill.registration_id,
       skill_name: configuration.generatedSkill.skill_name,
@@ -3494,93 +3354,6 @@ async function stageReceipt(configuration, value) {
   });
 }
 
-async function applyRestoredCheckpoint(configuration, state) {
-  requireCondition(configuration.track === "dev", "CHECKPOINT_RESTORE_RELEASE_FORBIDDEN", "BLOCKED", "INFRA");
-  requireCondition(configuration.restoredDataRoot && configuration.restoredContinuation && configuration.restoredCheckpointId, "CHECKPOINT_RESTORE_INPUT_MISSING");
-  const continuation = readJson(configuration.restoredContinuation);
-  requireCondition(
-    continuation?.schema_version === 1
-      && continuation.release_eligible === false
-      && continuation.next_stage === configuration.stage
-      && continuation.adapter_state_schema_version === 4
-      && continuation.adapter_case_input_digest === configuration.releaseCase.input_digest
-      && continuation.adapter_case_scenario_id === configuration.releaseCase.scenario_id
-      && continuation.adapter_case_skill_id === configuration.releaseCase.skill.id,
-    "CHECKPOINT_CONTINUATION_INVALID",
-  );
-  if (state.current_instance) {
-    const discarded = await stopService(configuration, state, { indexLabel: "restore-discarded-route" });
-    requireCondition(discarded.service_invocations.length === 0, "CHECKPOINT_RESTORE_FRESH_ENVIRONMENT_MODEL_ACTIVITY", "FAIL", "CONTRACT");
-    requireCondition(discarded.service_no_model_jobs.length === 0, "CHECKPOINT_RESTORE_FRESH_ENVIRONMENT_PREFLIGHT_ACTIVITY", "FAIL", "CONTRACT");
-  }
-  await docker(configuration.dockerContext, [
-    "exec", state.active_container,
-    "sh", "-eu", "-c",
-    'test "$1" = /var/lib/problem-locator; find "$1" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +',
-    "test-flow-checkpoint-restore", "/var/lib/problem-locator",
-  ]);
-  await docker(configuration.dockerContext, ["cp", `${configuration.restoredDataRoot}/.`, `${state.active_container}:/var/lib/problem-locator`]);
-  await docker(configuration.dockerContext, ["exec", state.active_container, "chown", "-R", "10001:10001", "/var/lib/problem-locator"]);
-  const validation = await docker(configuration.dockerContext, [
-    "exec", state.active_container,
-    "runuser", "-u", "plagent", "--",
-    "/usr/bin/env", "-i",
-    "HOME=/run/plagent-claude", "LANG=C.UTF-8", "PATH=/opt/venvs/xiaodao/bin:/usr/local/bin:/usr/bin:/bin", "PYTHONNOUSERSITE=1",
-    "/opt/venvs/xiaodao/bin/python", "-I", "-m", "problem_locator", "validate-state", "--data-root", "/var/lib/problem-locator",
-  ], { forward: false });
-  const validationReport = JSON.parse(validation.stdout);
-  requireCondition(validationReport.valid === true && Array.isArray(validationReport.errors) && validationReport.errors.length === 0, "CHECKPOINT_RESTORED_STATE_INVALID", "FAIL", "PRODUCT");
-
-  const caseId = continuation.adapter_case_id;
-  Object.assign(state, {
-    case_id: caseId,
-    attachment_id: continuation.adapter_attachment_id,
-    prepared_case_revision: continuation.adapter_prepared_case_revision,
-    prepare_expected_case_revision: continuation.adapter_prepare_expected_case_revision,
-    case_revision: continuation.adapter_case_revision,
-    status: continuation.adapter_status,
-    resolved_case_revision: continuation.adapter_resolved_case_revision,
-    observed_statuses: continuation.adapter_observed_statuses,
-    audited_service_job_ids: continuation.adapter_audited_service_job_ids,
-    request_ids: {
-      create: continuation.adapter_request_create,
-      prepare: continuation.adapter_request_prepare,
-      submit_attachment: continuation.adapter_request_submit_attachment,
-      submit_inputs: continuation.adapter_request_submit_inputs,
-    },
-    client_calls: [],
-    usage: zeroUsage(),
-  });
-  if (continuation.adapter_upload_method) {
-    state.upload_descriptor = {
-      attachment_id: state.attachment_id,
-      method: continuation.adapter_upload_method,
-      url: `${state.public_base_url}/api/v1/attachments/${state.attachment_id}/content`,
-      required_headers: {
-        "Content-Length": continuation.adapter_upload_content_length,
-        "Content-Type": continuation.adapter_upload_content_type,
-        "Idempotency-Key": continuation.adapter_upload_idempotency_key,
-        "X-Content-SHA256": continuation.adapter_upload_sha256,
-      },
-      max_bytes: continuation.adapter_upload_max_bytes,
-      expires_at: continuation.adapter_upload_expires_at,
-    };
-  }
-  state.public_artifact = restoredArtifact(continuation, "adapter_public_artifact", state.public_base_url, caseId);
-  state.public_result_archive = restoredArtifact(continuation, "adapter_public_archive", state.public_base_url, caseId);
-  atomicState(configuration.statePath, state);
-  if (configuration.stage === "journey.cross-job.upload") await startService(configuration, state, "upload");
-  else if (configuration.stage === "journey.cross-job.diagnose") await startService(configuration, state, "diagnose");
-  else requireCondition(configuration.stage === "journey.cross-job.publish-restart", "CHECKPOINT_RESTORE_STAGE_UNSUPPORTED");
-  writeNew(path.join(configuration.stageRoot, "adapter-restore-applied.json"), {
-    schema_version: 2,
-    status: "PASS",
-    checkpoint_id: configuration.restoredCheckpointId,
-    next_stage: configuration.stage,
-    restored_data_root: "VERIFIED",
-  });
-}
-
 async function execute(configuration) {
   requireCondition(process.platform === configuration.expectedHostPlatform && configuration.client === configuration.expectedClient, "CROSS_JOB_ADAPTER_HOST_REQUIRED", "BLOCKED", "INFRA");
   requireCondition(["host-client", DUAL_LINUX_TOPOLOGY].includes(configuration.topology), "CROSS_JOB_TOPOLOGY_INVALID", "BLOCKED", "INFRA");
@@ -3588,6 +3361,7 @@ async function execute(configuration) {
     requireCondition(process.platform === "darwin" && configuration.client === "linux" && configuration.dockerContext === "colima", "DUAL_LINUX_TOPOLOGY_HOST_INVALID", "BLOCKED", "INFRA");
   }
   requireCondition(["release", "dev"].includes(configuration.track), "CROSS_JOB_ADAPTER_TRACK_UNSUPPORTED", "BLOCKED", "INFRA");
+  requireCondition(!configuration.restoredDataRoot && !configuration.restoredContinuation && !configuration.restoredCheckpointId, "POSTGRES_CHECKPOINT_RESTORE_UNSUPPORTED", "BLOCKED", "INFRA");
   if (configuration.expectedDockerContext !== "default") requireCondition(configuration.dockerContext === configuration.expectedDockerContext, "CROSS_JOB_ADAPTER_DOCKER_CONTEXT", "BLOCKED", "INFRA");
   requireCondition(configuration.sourceSnapshotDigest && configuration.sourceSnapshotManifest && configuration.logparseSource && configuration.mcpSource && configuration.claudeEntry && configuration.claudeSettings, "CROSS_JOB_ADAPTER_INPUT_MISSING", "BLOCKED", "INFRA");
   if (configuration.track === "release") requireCondition(!configuration.restoredDataRoot && !configuration.restoredCheckpointId, "RELEASE_CHECKPOINT_RESTORE_FORBIDDEN", "BLOCKED", "INFRA");
@@ -3640,7 +3414,7 @@ async function execute(configuration) {
   );
   requireCondition(canonicalJson(state.runtime_identity) === canonicalJson(runtimeIdentity), "RELEASE_RUNTIME_IDENTITY_DRIFT", "BLOCKED", "INFRA");
   await verifyRuntimeResources(configuration, state);
-  if (configuration.restoredDataRoot) await applyRestoredCheckpoint(configuration, state);
+
 
   if (configuration.stage === "journey.cross-job.route") {
     const evidence = await websiteStep(configuration, state, "route", { driver: configuration.releaseCase.driver });
@@ -3771,7 +3545,6 @@ const configuration = {
   runtimeProfileDigest: values.runtime_profile_digest,
   expectedChromeVersion: values.chrome_version,
   expectedChromeSha256: values.chrome_sha256,
-  checkpointOutputSource: values.checkpoint_output_source && path.resolve(values.checkpoint_output_source),
   restoredDataRoot: values.restored_data_root && path.resolve(values.restored_data_root),
   restoredCheckpointId: values.restored_checkpoint_id,
   restoredContinuation: values.restored_continuation && path.resolve(values.restored_continuation),

@@ -36,6 +36,13 @@
       },
       "python": "3.12.13",
       "hatchling": "1.28.0",
+      "postgres": {
+        "version": "17.11",
+        "image": "postgres:17.11-bookworm@sha256:91eb910c44c7ed13f7f1a4ccadaa9ca72ef14cddc04cacb6e070e48eb44731a3",
+        "image_id": "sha256:248efd5e58cd743f2a0e0daec8ea4649e5580145ec2a12e2345bc710d4a77201",
+        "os": "linux",
+        "architecture": "amd64"
+      },
       "base_image": {
         "name": "problem-locator-test-flow-base:claude-2.1.89-uv-0.11.32-amd64-v2",
         "source": "ubuntu@sha256:3131b4cc82a783df6c9df078f86e01819a13594b865c2cad47bd1bca2b7063bb",
@@ -58,6 +65,7 @@
       ],
       "real_caps": {
         "isolated": {"max_turns": 12, "max_total_tokens": 1000000, "max_budget_usd": 3, "hard_timeout_seconds": 900},
+        "isolated.report-followup": {"max_turns": 8, "max_total_tokens": 120000, "max_budget_usd": 1, "hard_timeout_seconds": 300},
         "isolated.skill-generation": {"max_turns": 16, "max_total_tokens": 1000000, "max_output_tokens": 64000, "max_budget_usd": 10, "hard_timeout_seconds": 1800},
         "codex.macos-methods": {"max_turns": 1, "max_total_tokens": 1000000, "max_budget_usd": 2, "hard_timeout_seconds": 1800},
         "codex.macos-e2e": {"max_turns": 5, "max_total_tokens": 2000000, "max_budget_usd": 3, "hard_timeout_seconds": 600},

@@ -40,7 +40,7 @@ import {
   validLinuxClientBrowserFailureReceipt,
   validMethodsV2OracleEvidence,
 } from "../lib/actions.mjs";
-import { packageTreeIdentity, RELEASE_MODEL } from "../lib/release-inputs.mjs";
+import { packageTreeIdentity, RELEASE_MODEL, RELEASE_POSTGRES_IMAGE, RELEASE_POSTGRES_IMAGE_ID } from "../lib/release-inputs.mjs";
 import { canonicalJson, sha256Bytes, sha256File } from "../lib/util.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -1237,12 +1237,20 @@ function nativePassBoundary() {
     run_id: runId,
     release_inputs: {
       topology: "host-client-to-linux-server",
-      image: { server: { image_id: serverImageId }, client: null },
+      image: { server: { image_id: serverImageId }, client: null, postgres: { image_id: RELEASE_POSTGRES_IMAGE_ID } },
     },
   };
   const receipt = {
     status: "PASS",
     stage_id: "journey.cross-job.route",
+    postgres: {
+      schema_version: 1, run_id: runId, scope: "crossjob",
+      container: `pltf-pg-${sha256Bytes(`${runId}:crossjob`).slice(0, 24)}`,
+      volume: `pltf-pgdata-${sha256Bytes(`${runId}:crossjob`).slice(0, 24)}`,
+      network: `pltf-pgnet-${sha256Bytes(`${runId}:crossjob`).slice(0, 24)}`,
+      image: RELEASE_POSTGRES_IMAGE, image_id: RELEASE_POSTGRES_IMAGE_ID,
+      database: "problem_locator_release_test", user: "pl_test_admin", initial_database: "EMPTY",
+    },
     topology: "host-client",
     runtime_images: { server_image_id: serverImageId, client_image_id: null },
     runtime_resources: {
@@ -1280,6 +1288,10 @@ test("native CrossJob PASS receipt binds the planned server image and exact acti
   assert.equal(validCrossJobPassRuntimeBoundary(restarted.receipt, restarted), false);
 
   const mutations = [
+    (value) => { value.receipt.postgres = null; },
+    (value) => { value.receipt.postgres.database = "development"; },
+    (value) => { value.receipt.postgres.volume = "pltf-pgdata-wrong-attempt"; },
+    (value) => { value.receipt.postgres.image_id = `sha256:${"0".repeat(64)}`; },
     (value) => { value.receipt.runtime_images.server_image_id = `sha256:${"d".repeat(64)}`; },
     (value) => { value.receipt.runtime_resources.server_image_id = `sha256:${"d".repeat(64)}`; },
     (value) => { value.receipt.runtime_resources.server_container = "pltf-server-valid-looking-but-wrong-initial"; },

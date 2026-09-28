@@ -354,6 +354,7 @@ def test_render_journey_maps_bad_source_and_missing_case(
 def test_serve_uses_exactly_one_worker(monkeypatch, tmp_path: Path) -> None:
     values = {
         "DATA_ROOT": str(tmp_path / "data"),
+        "DATABASE_URL": "postgresql://locator:placeholder@127.0.0.1:5432/locator_test",
         "PUBLIC_BASE_URL": "http://127.0.0.1:8123",
         "SKILL_DIR": str(tmp_path / "skills"),
         "GENERIC_SKILL_NAME": "generic-problem-locator-smoke",
@@ -383,6 +384,7 @@ def test_serve_routes_debug_and_journey_to_configured_directory(
 ) -> None:
     values = {
         "DATA_ROOT": str(tmp_path / "data"),
+        "DATABASE_URL": "postgresql://locator:placeholder@127.0.0.1:5432/locator_test",
         "PUBLIC_BASE_URL": "http://127.0.0.1:8123",
         "SKILL_DIR": str(tmp_path / "skills"),
         "GENERIC_SKILL_NAME": "generic-problem-locator-smoke",

@@ -20,6 +20,8 @@ import {
   RELEASE_HATCHLING_VERSION,
   RELEASE_CLIENT_IMAGE,
   RELEASE_PYTHON_VERSION,
+  RELEASE_POSTGRES_IMAGE,
+  validateReleasePostgresImage,
   RELEASE_UV_ARCHIVE_SHA256,
   RELEASE_UV_SHA256,
   RELEASE_UV_VERSION,
@@ -186,6 +188,8 @@ function prepareChromeHeadlessShell(paths, stagingRoot) {
 }
 
 function prepareImage(repoRoot, paths, dockerContext) {
+  execute("docker", ["--context", dockerContext, "pull", "--platform", "linux/amd64", RELEASE_POSTGRES_IMAGE]);
+  validateReleasePostgresImage({ status: "PRESENT", context: dockerContext, docker_cli: "docker" });
   const logPath = path.join(paths.cacheRoot, "server-image-build.log");
   const build = runSync("docker", [
     "--context", dockerContext,

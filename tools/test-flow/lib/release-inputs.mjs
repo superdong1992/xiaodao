@@ -29,6 +29,9 @@ export const RELEASE_UVX_SHA256 = RELEASE_RUNTIME_PROFILE.uv.uvx_sha256;
 export const RELEASE_HATCHLING_VERSION = RELEASE_RUNTIME_PROFILE.hatchling;
 export const RELEASE_PYTHON_VERSION = RELEASE_RUNTIME_PROFILE.python;
 export const RELEASE_BASE_IMAGE = RELEASE_RUNTIME_PROFILE.base_image.name;
+export const RELEASE_POSTGRES_PROFILE = Object.freeze(RELEASE_RUNTIME_PROFILE.postgres);
+export const RELEASE_POSTGRES_IMAGE = RELEASE_POSTGRES_PROFILE.image;
+export const RELEASE_POSTGRES_IMAGE_ID = RELEASE_POSTGRES_PROFILE.image_id;
 export const RELEASE_BASE_IMAGE_SOURCE = RELEASE_RUNTIME_PROFILE.base_image.source;
 export const RELEASE_DOCKER_CONTEXT = RELEASE_RUNTIME_PROFILE.base_image.macos_docker_context;
 export const RELEASE_DOCKER_OS = RELEASE_RUNTIME_PROFILE.base_image.os;
@@ -722,6 +725,7 @@ export function dockerServerIdentity(contextName, {
 export function validatePortableReleaseServerImage(paths, dockerIdentity) {
   try {
     if (dockerIdentity?.status !== "PRESENT") throw new Error("DOCKER_IDENTITY_INVALID");
+    const postgres = validateReleasePostgresImage(dockerIdentity);
     const metadata = inspectReleaseImage(dockerIdentity, paths.baseImage);
     const labels = metadata.Config?.Labels ?? {};
     if (labels["problem-locator.e2e.claude"] !== `npm-${RELEASE_CLAUDE_VERSION}`
@@ -734,6 +738,7 @@ export function validatePortableReleaseServerImage(paths, dockerIdentity) {
       image: paths.baseImage,
       image_id: metadata.Id,
       server: { image: paths.baseImage, image_id: metadata.Id, platform: "linux/amd64" },
+      postgres,
       client: null,
       browser: null,
       platform: "linux/amd64",
@@ -754,6 +759,19 @@ export function validatePortableReleaseServerImage(paths, dockerIdentity) {
       code: String(error?.message ?? error),
     };
   }
+}
+
+export function validateReleasePostgresImage(dockerIdentity, commandRunner = runSync) {
+  if (dockerIdentity?.status !== "PRESENT") throw new Error("DOCKER_IDENTITY_INVALID");
+  const result = commandRunner(dockerIdentity.docker_cli ?? "docker",
+    dockerContextArgs(dockerIdentity.context, ["image", "inspect", RELEASE_POSTGRES_IMAGE]));
+  if (result.status !== 0) throw new Error("RELEASE_POSTGRES_IMAGE_MISSING");
+  let metadata;
+  try { metadata = JSON.parse(result.stdout)[0]; } catch { throw new Error("RELEASE_POSTGRES_IMAGE_INVALID"); }
+  if (metadata?.Id !== RELEASE_POSTGRES_IMAGE_ID || metadata.Os !== "linux" || metadata.Architecture !== "amd64") {
+    throw new Error("RELEASE_POSTGRES_IMAGE_IDENTITY_MISMATCH");
+  }
+  return { ...RELEASE_POSTGRES_PROFILE, platform: "linux/amd64", validation_level: "offline-exact-image-id" };
 }
 
 function inspectReleaseImage(dockerIdentity, image) {
@@ -841,6 +859,7 @@ export function probeReleaseClientHeadlessShell({
 export function validateReleaseImage(paths, dockerIdentity, { requireClientImage = false } = {}) {
   try {
     if (dockerIdentity?.status !== "PRESENT") throw new Error("DOCKER_IDENTITY_INVALID");
+    const postgres = validateReleasePostgresImage(dockerIdentity);
     if (!ordinaryFile(paths.releaseSeal)) throw new Error("RELEASE_CACHE_SEAL_MISSING");
     const seal = JSON.parse(fs.readFileSync(paths.releaseSeal, "utf8"));
     const metadata = inspectReleaseImage(dockerIdentity, paths.baseImage);
@@ -909,6 +928,7 @@ export function validateReleaseImage(paths, dockerIdentity, { requireClientImage
       image: paths.baseImage,
       image_id: metadata.Id,
       server: { image: paths.baseImage, image_id: metadata.Id, platform: "linux/amd64" },
+      postgres,
       client,
       browser,
       platform: "linux/amd64",

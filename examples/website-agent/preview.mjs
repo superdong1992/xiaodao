@@ -91,6 +91,8 @@ export function previewSamples() {
       ...base, format: "generic-v1", archive_status: "NOT_REQUIRED", report: { status: "RESOLVED", conclusion: "该请求在调用库存服务时超时。",
         root_cause_analysis: "从现有日志可确认 RPC 超过截止时间。", skill_name: "generic-problem-locator",
         source_job_id: id(3), source_outcome_id: id(5), occurred_at: now } }),
+    { ...sample("旧报告追问", "原日志副本不可用时，可以继续讨论报告；回答会明确说明依据范围。", published(
+      "# 已保存的通用诊断报告\n\n现有记录表明请求超时，尚不足以确认服务端根因。\n")), followup_snapshot_status: "UNAVAILABLE" },
   ];
 }
 
@@ -101,6 +103,7 @@ export function createPreviewServer() {
     ["/report-view.css", ["report-view.css", "text/css"]],
     ["/browser-client.js", ["browser-client.js", "text/javascript"]],
     ["/preview-model.js", ["preview-model.js", "text/javascript"]],
+    ...["followup-contract.js", "followup-controller.js", "followup-view.js", "followup-preview.js", "conversation-input.js"].map((name) => [`/${name}`, [name, "text/javascript"]]),
   ]);
   const samples = Buffer.from(JSON.stringify(previewSamples()));
   return createServer((request, response) => {

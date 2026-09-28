@@ -232,6 +232,7 @@ function releaseRuntimeIdentity({ profile, clientDistribution, selectedClientRun
       uv: profile.uv,
       python: profile.python,
       hatchling: profile.hatchling,
+      postgres: profile.postgres,
       base_image: profile.base_image,
       external_sources: profile.external_sources,
       real_caps: profile.real_caps,
@@ -259,6 +260,10 @@ function codexRuntimeIdentity({ profile, codexIdentity }) {
 function filterReusableChain(selected, reusable, track) {
   const byId = new Map(selected.map((stage) => [stage.id, stage]));
   for (const stage of selected) {
+    if (stage.id.startsWith("journey.cross-job.")) {
+      reusable.delete(stage.id);
+      continue;
+    }
     if (stage.reuse[track] === "never") reusable.delete(stage.id);
     if (stage.reuse[track] !== "checkpoint-chain") continue;
     const candidate = reusable.get(stage.id);
@@ -287,7 +292,7 @@ function filterReusableChain(selected, reusable, track) {
 }
 
 export function freshStageIdsForTrack(stages, track, { requireCurrentAttemptCore = false } = {}) {
-  const fresh = new Set(stages.filter((stage) => stage.reuse[track] === "never").map((stage) => stage.id));
+  const fresh = new Set(stages.filter((stage) => stage.reuse[track] === "never" || stage.id.startsWith("journey.cross-job.")).map((stage) => stage.id));
   if (requireCurrentAttemptCore) fresh.add("deterministic.full");
   return fresh;
 }
@@ -614,6 +619,12 @@ export function buildRunPlan(repoRoot, options = {}) {
 
   const blockers = [];
   const warnings = [];
+  if (crossJobSelected && options.resume && !["fresh", "auto"].includes(options.resume)) {
+    blockers.push({ code: "POSTGRES_CHECKPOINT_RESTORE_UNSUPPORTED", detail: "旧检查点只包含 DATA_ROOT，缺少 PostgreSQL 数据库快照；CrossJob 必须使用新空数据库。" });
+  }
+  if (crossJobSelected && (options.resume ?? defaults.resume) !== "fresh") {
+    warnings.push({ code: "POSTGRES_CHECKPOINT_REUSE_DISABLED", detail: "PostgreSQL 暂不支持检查点复用，本次 CrossJob 从 GENESIS、新空数据库和 DATA_ROOT 开始。" });
+  }
   for (const stage of closure.stages) {
     if (stage.admission_blocker !== undefined) {
       blockers.push({
@@ -786,7 +797,7 @@ export function buildRunPlan(repoRoot, options = {}) {
     runtime_profile_digest: config.digests.runtimeProfiles,
     config_digests: config.digests,
     config_bundle_digest: config.bundle_digest,
-    resume: track === "release" ? "fresh" : options.resume ?? defaults.resume,
+    resume: track === "release" || crossJobSelected ? "fresh" : options.resume ?? defaults.resume,
     source: {
       available: source.available,
       base_commit: source.head,
@@ -857,9 +868,10 @@ export function buildRunPlan(repoRoot, options = {}) {
               : "not-applicable",
     } : null,
     lineage: {
-      root: track === "release" ? "GENESIS" : options.resume === "fresh" ? "GENESIS" : "AUTO",
-      initial_data_root: track === "release" ? "EMPTY_REQUIRED" : "TRACK_POLICY",
-      checkpoint_reuse: track === "release" ? "FORBIDDEN" : "CONFIGURED_PER_STAGE",
+      root: track === "release" || crossJobSelected ? "GENESIS" : options.resume === "fresh" ? "GENESIS" : "AUTO",
+      initial_data_root: track === "release" || crossJobSelected ? "EMPTY_REQUIRED" : "TRACK_POLICY",
+      initial_database: crossJobSelected ? "EMPTY_REQUIRED" : "NOT_APPLICABLE",
+      checkpoint_reuse: track === "release" || crossJobSelected ? "FORBIDDEN" : "CONFIGURED_PER_STAGE",
     },
     proofs: proofPlan,
     scenario: selectedScenario,

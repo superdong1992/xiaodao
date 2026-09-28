@@ -1,7 +1,7 @@
 """Durable Agent conversations and transactionally published public events.
 
-All database access uses the core repository's connection and lock. Projection
-never reads the repository or obtains a Case lock while holding the DB lock.
+Each transaction leases a connection and serializes changes to its conversation.
+Projection never reads the repository or obtains a Case lock inside a transaction.
 """
 from __future__ import annotations
 
@@ -18,6 +18,10 @@ from contextlib import contextmanager
 from problem_locator.contracts import StateFile
 from problem_locator.application.projection import project_artifact_summaries
 from problem_locator.diagnostics import log_event
+from problem_locator.storage.database import (
+    dialect_for, index_definition, lock_conversation, lock_key,
+    table_columns, table_exists,
+)
 from .failures import interrupted_execution_failure, public_failure
 from .models import (AgentAttachment, AgentEvent, AgentMessage, AgentStoreError,
                      AttachmentRecord, CreateConversationRequest, ConversationReceipt, ConversationView,
@@ -67,32 +71,33 @@ _V2_TABLES = (
 
 def upgrade_agent_storage_v2(db, owner_map=None):
     """Explicit offline-copy migration; historical payload bytes stay untouched."""
+    d = dialect_for(db)
     additions = {"agent_conversations": [("owner_key", "TEXT"), ("title", "TEXT NOT NULL DEFAULT '新诊断'"),
         ("current_run_id", "TEXT"), ("updated_at", "TEXT"), ("deleted_at", "TEXT"), ("cleanup_status", "TEXT")],
-        "agent_messages": [("run_id", "TEXT"), ("event_sequence", "INTEGER")],
+        "agent_messages": [("run_id", "TEXT"), ("event_sequence", "BIGINT" if d.postgres else "INTEGER")],
         "agent_events": [("run_id", "TEXT")], "agent_dispatches": [("run_id", "TEXT")]}
     for table, columns in additions.items():
-        present = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+        present = table_columns(db, table)
         for name, kind in columns:
             if name not in present:
                 db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
     for statement in _V2_TABLES:
-        db.execute(statement)
+        db.execute(d.ordered_table(statement))
     for cid, epoch, status, raw, case_id, create_key, original_request in db.execute(
             "SELECT conversation_id,epoch,status,body,case_id,create_request_id,request_id FROM agent_conversations WHERE current_run_id IS NULL").fetchall():
         body = json.loads(raw)
         run_id = cid
         body.update(run_id=run_id, ordinal=1, stop_requested=False)
-        db.execute("INSERT INTO agent_conversation_runs VALUES (?,?,?,?,?,?,?,?)",
+        db.execute("INSERT INTO agent_conversation_runs(run_id,conversation_id,ordinal,case_id,create_request_id,epoch,status,body) VALUES (?,?,?,?,?,?,?,?)",
             (run_id, cid, 1, case_id, create_key, epoch, status, _json(body)))
-        first = db.execute("SELECT body FROM agent_messages WHERE conversation_id=? ORDER BY rowid LIMIT 1", (cid,)).fetchone()
+        first = db.execute(f"SELECT body FROM agent_messages WHERE conversation_id=? ORDER BY {d.order_column()} LIMIT 1", (cid,)).fetchone()
         title = "新诊断" if first is None else _title(json.loads(first[0]).get("text", ""))
         db.execute("UPDATE agent_conversations SET owner_key=?,title=?,current_run_id=?,updated_at=? WHERE conversation_id=?",
             ((owner_map or {}).get(cid), title, run_id, body["updated_at"], cid))
         # Preserve the original request bytes. A separately assigned owner gets
         # an explicit alias for that same native request, never a guessed owner.
         for owner in {None, (owner_map or {}).get(cid)}:
-            db.execute("INSERT OR IGNORE INTO agent_create_keys VALUES (?,?)",
+            db.execute("INSERT INTO agent_create_keys(request_hash,conversation_id) VALUES (?,?) ON CONFLICT DO NOTHING",
                 (_create_request_hash(owner, original_request), cid))
         for table in ("agent_messages", "agent_events", "agent_dispatches"):
             db.execute(f"UPDATE {table} SET run_id=? WHERE conversation_id=? AND run_id IS NULL", (run_id, cid))
@@ -101,30 +106,30 @@ def upgrade_agent_storage_v2(db, owner_map=None):
         for aid, attachment in db.execute("SELECT attachment_id,body FROM agent_attachments WHERE conversation_id=?", (cid,)).fetchall():
             bound = json.loads(attachment).get("case_attachment_id")
             if bound:
-                db.execute("INSERT OR IGNORE INTO agent_attachment_imports VALUES (?,?,?)", (run_id, aid, bound))
-    history_index = db.execute("SELECT sql FROM sqlite_master WHERE type='index' AND name='agent_history'").fetchone()
-    if history_index is not None and "conversation.completed" not in history_index[0]:
+                db.execute("INSERT INTO agent_attachment_imports(run_id,attachment_id,case_attachment_id) VALUES (?,?,?) ON CONFLICT DO NOTHING", (run_id, aid, bound))
+    history_index = index_definition(db, "agent_history")
+    if history_index is not None and "conversation.completed" not in history_index:
         db.execute("DROP INDEX agent_history")
     for statement in (
         "CREATE INDEX IF NOT EXISTS agent_directory ON agent_conversations(owner_key,deleted_at,updated_at DESC,conversation_id DESC)",
         "CREATE INDEX IF NOT EXISTS agent_messages_run ON agent_messages(conversation_id,run_id,event_sequence)",
-        "CREATE INDEX IF NOT EXISTS agent_events_run_progress ON agent_events(conversation_id,run_id,sequence) WHERE json_extract(body, '$.type')='agent.progress'",
-        "CREATE INDEX IF NOT EXISTS agent_history ON agent_events(conversation_id,sequence) WHERE json_extract(body, '$.type') IN ('message.accepted','assistant.question','result.available','conversation.completed')",
+        f"CREATE INDEX IF NOT EXISTS agent_events_run_progress ON agent_events(conversation_id,run_id,sequence) WHERE {d.json_text('body', '$.type')}='agent.progress'",
+        f"CREATE INDEX IF NOT EXISTS agent_history ON agent_events(conversation_id,sequence) WHERE {d.json_text('body', '$.type')} IN ('message.accepted','assistant.question','result.available','conversation.completed')",
         "CREATE INDEX IF NOT EXISTS agent_dispatches_run ON agent_dispatches(conversation_id,run_id,status,epoch)",
         "CREATE INDEX IF NOT EXISTS agent_dispatches_pending ON agent_dispatches(epoch,conversation_id,run_id) WHERE status='PENDING'",
         "CREATE INDEX IF NOT EXISTS agent_retention_runs ON agent_conversation_runs("
-        "coalesce(json_extract(body,'$.completed_at'),json_extract(body,'$.updated_at')))",
+        f"coalesce({d.json_text('body', '$.completed_at')},{d.json_text('body', '$.updated_at')}))",
         "CREATE INDEX IF NOT EXISTS agent_conversations_intake_work ON agent_conversations(conversation_id) "
         "WHERE deleted_at IS NULL AND status NOT IN ('COMPLETED','FAILED','INTERRUPTED','CANCELLED','CANCELLING') "
-        "AND coalesce(json_extract(body,'$.report_available'),0)=0 AND coalesce(json_extract(body,'$.stop_requested'),0)=0 "
-        "AND json_extract(body,'$.intake_pending')=1 "
-        "AND (case_id IS NULL OR json_extract(body,'$.case_status') IS NULL OR json_extract(body,'$.case_status') IN ('WAITING_INPUT','WAITING_ATTACHMENT'))",
+        f"AND coalesce({d.json_int('body', '$.report_available')},0)=0 AND coalesce({d.json_int('body', '$.stop_requested')},0)=0 "
+        f"AND {d.json_int('body', '$.intake_pending')}=1 "
+        f"AND (case_id IS NULL OR {d.json_text('body', '$.case_status')} IS NULL OR {d.json_text('body', '$.case_status')} IN ('WAITING_INPUT','WAITING_ATTACHMENT'))",
     ):
         db.execute(statement)
-    db.execute("INSERT OR IGNORE INTO agent_create_key_times SELECT k.request_hash,"
-        "coalesce(json_extract(c.body,'$.conversation_created_at'),json_extract(c.body,'$.created_at'),c.deleted_at,c.updated_at) "
-        "FROM agent_create_keys k JOIN agent_conversations c USING(conversation_id)")
-    db.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES ('agent_storage_version',?)", (AGENT_STORAGE_VERSION,))
+    db.execute("INSERT INTO agent_create_key_times(request_hash,created_at) SELECT k.request_hash,"
+        f"coalesce({d.json_text('c.body', '$.conversation_created_at')},{d.json_text('c.body', '$.created_at')},c.deleted_at,c.updated_at) "
+        "FROM agent_create_keys k JOIN agent_conversations c USING(conversation_id) WHERE true ON CONFLICT DO NOTHING")
+    db.execute("INSERT INTO metadata(key,value) VALUES ('agent_storage_version',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (AGENT_STORAGE_VERSION,))
 
 
 def _title(text):
@@ -158,12 +163,13 @@ class AgentStore:
         self.condition = threading.Condition()
         self.on_change: Callable[[str], None] = lambda conversation_id: None
         self._scope = threading.local()
-        with repository.database_read() as db:
-            exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_conversations'").fetchone()
+        with repository.database_transaction() as db:
+            d = dialect_for(db)
+            exists = table_exists(db, "agent_conversations")
             marker = db.execute("SELECT value FROM metadata WHERE key='agent_storage_version'").fetchone()
             if exists and (marker is None or marker[0] != AGENT_STORAGE_VERSION):
                 raise AgentStoreError("STATE_SCHEMA_UNSUPPORTED", "会话数据需要先离线升级，请保留原目录。", 503)
-            db.executescript("""
+            schema = f"""
                 CREATE TABLE IF NOT EXISTS agent_conversations (
                     conversation_id TEXT PRIMARY KEY, request_id TEXT UNIQUE NOT NULL,
                     epoch TEXT NOT NULL, status TEXT NOT NULL, body TEXT NOT NULL,
@@ -175,12 +181,12 @@ class AgentStore:
                     UNIQUE(conversation_id, request_id));
                 CREATE INDEX IF NOT EXISTS agent_messages_conversation ON agent_messages(conversation_id);
                 CREATE TABLE IF NOT EXISTS agent_events (
-                    conversation_id TEXT NOT NULL, sequence INTEGER NOT NULL,
+                    conversation_id TEXT NOT NULL, sequence {'BIGINT' if d.postgres else 'INTEGER'} NOT NULL,
                     dedupe_key TEXT NOT NULL, body TEXT NOT NULL,
                     PRIMARY KEY(conversation_id, sequence), UNIQUE(conversation_id, dedupe_key));
                 CREATE INDEX IF NOT EXISTS agent_events_progress
                     ON agent_events(conversation_id, sequence)
-                    WHERE json_extract(body, '$.type')='agent.progress';
+                    WHERE {d.json_text('body', '$.type')}='agent.progress';
                 CREATE TABLE IF NOT EXISTS agent_dispatches (
                     dispatch_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
                     epoch TEXT NOT NULL, status TEXT NOT NULL,
@@ -195,7 +201,10 @@ class AgentStore:
                     request_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
                     body TEXT NOT NULL, storage_path TEXT,
                     UNIQUE(conversation_id, request_id));
-            """)
+            """
+            for statement in schema.split(';'):
+                if statement.strip():
+                    db.execute(d.ordered_table(statement))
             upgrade_agent_storage_v2(db)
             db.execute("UPDATE agent_cleanup_jobs SET status='PENDING' WHERE status='RUNNING'")
         repository.on_case_projection = self._project_state
@@ -228,6 +237,7 @@ class AgentStore:
             self._scope.value = previous
 
     def _load(self, db, conversation_id, *, run_id=None, deleted=False):
+        lock_conversation(db, conversation_id)
         scope = getattr(self._scope, "value", None)
         if scope is not None and scope[0] == conversation_id and run_id is None:
             run_id, deleted = scope[1:]
@@ -273,6 +283,11 @@ class AgentStore:
         if body.get("_deleted") or body.get("stop_requested") or body["status"] in _CLOSED or body.get("report_available"):
             raise AgentStoreError("AGENT_CONVERSATION_CLOSED", "本次任务已经结束，请另建任务。", 409)
 
+    @staticmethod
+    def _ensure_target_run(body, target_run_id):
+        if target_run_id is not None and (target_run_id != body["run_id"] or body["status"] in _CLOSED or body.get("report_available")):
+            raise AgentStoreError("AGENT_RUN_CHANGED", "本次诊断已结束或发生变化，请刷新会话。", 409)
+
     def _append(self, db, body, event_type, data, dedupe_key):
         legacy_key = dedupe_key if body["run_id"] == body["conversation_id"] else None
         dedupe_key = body["run_id"] + ":" + dedupe_key
@@ -295,9 +310,15 @@ class AgentStore:
         with self.repository.database_transaction() as db:
             key = _create_request_key(owner_key, request_id)
             request_hash = _create_request_hash(owner_key, request_id)
+            lock_key(db, "create-request", request_hash)
             row = db.execute("SELECT c.conversation_id,c.current_run_id,c.deleted_at FROM agent_create_keys k "
                 "JOIN agent_conversations c ON c.conversation_id=k.conversation_id WHERE k.request_hash=?", (request_hash,)).fetchone()
             if row:
+                if dialect_for(db).postgres:
+                    lock_conversation(db, row[0])
+                    row = db.execute("SELECT conversation_id,current_run_id,deleted_at FROM agent_conversations WHERE conversation_id=?", (row[0],)).fetchone()
+                if row is None:
+                    raise AgentStoreError("AGENT_CONVERSATION_NOT_FOUND", "原会话已删除，请使用新的 request_id。", 404)
                 if row[2] is not None:
                     raise AgentStoreError("AGENT_CONVERSATION_NOT_FOUND", "原会话已删除，请使用新的 request_id。", 404)
                 first_run = db.execute("SELECT run_id FROM agent_conversation_runs WHERE conversation_id=? AND ordinal=1", (row[0],)).fetchone()[0]
@@ -309,9 +330,9 @@ class AgentStore:
                         intake_pending=False, intake_covered_message_ids=[], run_id=run_id, ordinal=1, stop_requested=False)
             db.execute("INSERT INTO agent_conversations(conversation_id,request_id,epoch,status,body,owner_key,title,current_run_id,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
                        (conversation_id, key, self.runtime_epoch, "INTAKE", _json(body), owner_key, _title(title or ""), run_id, now))
-            db.execute("INSERT INTO agent_conversation_runs VALUES (?,?,1,NULL,NULL,?,'INTAKE',?)", (run_id, conversation_id, self.runtime_epoch, _json(body)))
-            db.execute("INSERT INTO agent_create_keys VALUES (?,?)", (request_hash, conversation_id))
-            db.execute("INSERT INTO agent_create_key_times VALUES (?,?)", (request_hash, now))
+            db.execute("INSERT INTO agent_conversation_runs(run_id,conversation_id,ordinal,case_id,create_request_id,epoch,status,body) VALUES (?,?,1,NULL,NULL,?,'INTAKE',?)", (run_id, conversation_id, self.runtime_epoch, _json(body)))
+            db.execute("INSERT INTO agent_create_keys(request_hash,conversation_id) VALUES (?,?)", (request_hash, conversation_id))
+            db.execute("INSERT INTO agent_create_key_times(request_hash,created_at) VALUES (?,?)", (request_hash, now))
         return ConversationReceipt(conversation_id=conversation_id, request_id=request_id, run_id=run_id)
 
     @staticmethod
@@ -335,7 +356,7 @@ class AgentStore:
             events_pruned_through=previous.get("events_pruned_through", 0),
             conversation_created_at=previous.get("conversation_created_at", previous["created_at"]),
             draft={}, report_available=False, intake_pending=False, intake_covered_message_ids=[], stop_requested=False)
-        db.execute("INSERT INTO agent_conversation_runs VALUES (?,?,?,NULL,NULL,?,'INTAKE',?)", (run_id, cid, ordinal, self.runtime_epoch, _json(body)))
+        db.execute("INSERT INTO agent_conversation_runs(run_id,conversation_id,ordinal,case_id,create_request_id,epoch,status,body) VALUES (?,?,?,NULL,NULL,?,'INTAKE',?)", (run_id, cid, ordinal, self.runtime_epoch, _json(body)))
         db.execute("UPDATE agent_conversations SET current_run_id=?,create_request_id=NULL,epoch=? WHERE conversation_id=?", (run_id, self.runtime_epoch, cid))
         self._append(db, body, "run.started", {"ordinal": ordinal}, "started")
         return body
@@ -356,6 +377,7 @@ class AgentStore:
                 if previous[0] != fingerprint:
                     raise AgentStoreError("AGENT_IDEMPOTENCY_CONFLICT", "同一 request_id 的内容不能更改。", 409)
                 return MessageReceipt.model_validate({**json.loads(previous[1]), "run_id": previous[2]})
+            self._ensure_target_run(body, target_run_id)
             restart = db.execute("SELECT fingerprint,command_key,status,payload,run_id FROM agent_generic_restarts WHERE conversation_id=? AND request_id=?",
                 (conversation_id, request_id)).fetchone()
             if restart is not None:
@@ -376,8 +398,6 @@ class AgentStore:
                     raise AgentStoreError("AGENT_ROUTE_CHANGED", "定位策略已更新，正在接入日志，请稍后重试同一请求。", 409)
             elif routed_request_key is not None:
                 raise AgentStoreError("AGENT_RUN_CHANGED", "日志接入请求已失效，请刷新会话。", 409)
-            if target_run_id is not None and (target_run_id != body["run_id"] or body["status"] in _CLOSED or body.get("report_available")):
-                raise AgentStoreError("AGENT_RUN_CHANGED", "本次诊断已结束或发生变化，请刷新会话。", 409)
             if body["status"] in _CLOSED or body.get("report_available"):
                 if not request.text.strip():
                     raise AgentStoreError("VALIDATION_ERROR", "再次诊断时请提供问题描述。", 400)
@@ -416,9 +436,12 @@ class AgentStore:
         self._notify(conversation_id)
         return receipt
 
-    def message_request(self, conversation_id, request):
+    def message_request(self, conversation_id, request, *, target_run_id=None):
         """Read either the public receipt or a frozen, not-yet-accepted restart."""
-        fingerprint = hashlib.sha256(_json(request.model_dump()).encode()).hexdigest()
+        payload = request.model_dump()
+        if target_run_id is not None:
+            payload["target_run_id"] = target_run_id
+        fingerprint = hashlib.sha256(_json(payload).encode()).hexdigest()
         with self.repository.database_read() as db:
             self._load(db, conversation_id)
             previous = db.execute("SELECT fingerprint,receipt,run_id FROM agent_messages WHERE conversation_id=? AND request_id=?",
@@ -431,11 +454,15 @@ class AgentStore:
             pending = None if restart is None else {**json.loads(restart[2]), "status": restart[1]}
             return receipt, pending
 
-    def freeze_generic_restart(self, conversation_id, request, command, *, run_id, archive_sha256):
+    def freeze_generic_restart(self, conversation_id, request, command, *, run_id, archive_sha256, target_run_id=None):
         """Persist intent before the Case commit; this does not accept the message."""
-        fingerprint = hashlib.sha256(_json(request.model_dump()).encode()).hexdigest()
+        request_payload = request.model_dump()
+        if target_run_id is not None:
+            request_payload["target_run_id"] = target_run_id
+        fingerprint = hashlib.sha256(_json(request_payload).encode()).hexdigest()
         with self.repository.database_transaction() as db:
             body = self._load(db, conversation_id)
+            self._ensure_target_run(body, target_run_id)
             self._ensure_open(body)
             if body["run_id"] != run_id or body.get("case_id") != command.case_id:
                 raise AgentStoreError("AGENT_RUN_CHANGED", "本次定位已结束或发生变化，请刷新会话。", 409)
@@ -466,18 +493,23 @@ class AgentStore:
                 "operation": type(command).__name__, "command": command.model_dump(mode="json"),
                 "message": message.model_dump(mode="json"),
                 "archive_sha256": archive_sha256}
-            db.execute("INSERT INTO agent_generic_restarts VALUES (?,?,?,?,?,'PENDING',?)",
+            if target_run_id is not None:
+                payload["target_run_id"] = target_run_id
+            db.execute("INSERT INTO agent_generic_restarts(conversation_id,request_id,run_id,fingerprint,command_key,status,payload) VALUES (?,?,?,?,?,'PENDING',?)",
                 (conversation_id, request.request_id, run_id, fingerprint, command.idempotency_key, _json(payload)))
             return {**payload, "status": "PENDING"}
 
     def pending_generic_restarts(self):
         with self.repository.database_read() as db:
             return [{**json.loads(row[1]), "status": row[0]} for row in db.execute(
-                "SELECT status,payload FROM agent_generic_restarts WHERE status IN ('PENDING','COMMITTED') ORDER BY rowid")]
+                f"SELECT status,payload FROM agent_generic_restarts WHERE status IN ('PENDING','COMMITTED') ORDER BY {dialect_for(db).order_column()}")]
 
     def retarget_routed_log_request(self, command_key, command):
         """A rejected route marker may follow the now-active Generic Job once."""
         with self.repository.database_transaction() as db:
+            owner = db.execute("SELECT conversation_id FROM agent_generic_restarts WHERE command_key=?", (command_key,)).fetchone()
+            if owner is not None:
+                lock_conversation(db, owner[0])
             row = db.execute("SELECT status,payload FROM agent_generic_restarts WHERE command_key=?", (command_key,)).fetchone()
             if row is None or row[0] != "PENDING":
                 raise AgentStoreError("AGENT_RUN_CHANGED", "本次定位已结束或发生变化，请刷新会话。", 409)
@@ -492,6 +524,9 @@ class AgentStore:
 
     def finish_generic_restart(self, command_key, *, rejected=False):
         with self.repository.database_transaction() as db:
+            owner = db.execute("SELECT conversation_id FROM agent_generic_restarts WHERE command_key=?", (command_key,)).fetchone()
+            if owner is not None:
+                lock_conversation(db, owner[0])
             db.execute("UPDATE agent_generic_restarts SET status=? WHERE command_key=? AND status IN ('PENDING','COMMITTED')",
                 ("REJECTED" if rejected else "COMPLETED", command_key))
 
@@ -529,7 +564,7 @@ class AgentStore:
             public["messages"] = [self._message(row[0], body["run_id"]) for row in db.execute(
                 "SELECT body FROM agent_messages WHERE conversation_id=? AND run_id=? ORDER BY event_sequence", (conversation_id, body["run_id"]))]
             public["attachments"] = [AgentAttachment.model_validate_json(row[0]) for row in db.execute(
-                "SELECT body FROM agent_attachments WHERE conversation_id=? ORDER BY rowid", (conversation_id,))]
+                f"SELECT body FROM agent_attachments WHERE conversation_id=? ORDER BY {dialect_for(db).order_column()}", (conversation_id,))]
             return ConversationView.model_validate(public)
 
     def get_status(self, conversation_id, *, run_id=None):
@@ -558,11 +593,11 @@ class AgentStore:
             current_id = db.execute("SELECT current_run_id FROM agent_conversations WHERE conversation_id=?", (conversation_id,)).fetchone()[0]
             current = self._load(db, conversation_id, run_id=current_id)
             row = db.execute("SELECT body FROM agent_events WHERE conversation_id=? "
-                "AND run_id=? AND json_extract(body, '$.type')='agent.progress' ORDER BY sequence DESC LIMIT 1",
+                f"AND run_id=? AND {dialect_for(db).json_text('body', '$.type')}='agent.progress' ORDER BY sequence DESC LIMIT 1",
                 (conversation_id, selected_run_id)).fetchone()
             progress = None if row is None else AgentProgressData.model_validate(json.loads(row[0])["data"])
             attachments = None if not history else [AgentAttachment.model_validate_json(row[0]) for row in db.execute(
-                "SELECT body FROM agent_attachments WHERE conversation_id=? ORDER BY rowid", (conversation_id,))]
+                f"SELECT body FROM agent_attachments WHERE conversation_id=? ORDER BY {dialect_for(db).order_column()}", (conversation_id,))]
             entries, next_cursor = self._history(db, conversation_id, history_before, history_limit) if history else (None, None)
             return ConversationRead(view, progress, None, attachments, history=entries, history_next_cursor=next_cursor,
                 current_run=self._run_view(current), title=current["title"], capabilities=self._capabilities(current), selected_run_id=selected_run_id)
@@ -587,7 +622,7 @@ class AgentStore:
         with self.repository.database_read() as db:
             body = self._load(db, conversation_id, run_id=run_id)
             return db.execute("SELECT 1 FROM agent_messages WHERE conversation_id=? AND run_id=? "
-                "AND json_extract(body, '$.status') IN ('QUEUED','PROCESSING') LIMIT 1",
+                f"AND {dialect_for(db).json_text('body', '$.status')} IN ('QUEUED','PROCESSING') LIMIT 1",
                 (conversation_id, body["run_id"])).fetchone() is not None
 
     def list_events(self, conversation_id, after=0, limit=100):
@@ -660,15 +695,16 @@ class AgentStore:
         if cursor is not None and (not isinstance(values, list) or len(values) != 3 or values[0] != owner_tag or any(not isinstance(v, str) for v in values)):
             raise AgentStoreError("AGENT_INVALID_CURSOR", "分页游标不属于当前用户。", 400)
         with self.repository.database_read() as db:
+            d = dialect_for(db)
             params = [owner_key]
-            where = "c.owner_key IS ? AND c.deleted_at IS NULL"
+            where = "c.owner_key IS NOT DISTINCT FROM ? AND c.deleted_at IS NULL"
             if values:
                 where += " AND (c.updated_at,c.conversation_id)<(?,?)"
                 params += values[1:]
             fields = ["run_id", "ordinal", "status", "case_id", "job_id", "case_status", "archive_status", "created_at", "updated_at", "report_available"]
-            projection = ",".join(f"'{field}',json_extract(r.body,'$.{field}')" for field in fields)
-            rows = db.execute(f"SELECT c.conversation_id,c.updated_at,c.title,json_object({projection}),"
-                "coalesce(json_extract(r.body,'$.conversation_created_at'),json_extract(r.body,'$.created_at')) "
+            projection = ",".join(f"'{field}',{d.json_int('r.body', '$.' + field) if field in {'ordinal', 'report_available'} else d.json_text('r.body', '$.' + field)}" for field in fields)
+            rows = db.execute(f"SELECT c.conversation_id,c.updated_at,c.title,{d.json_object(projection)},"
+                f"coalesce({d.json_text('r.body', '$.conversation_created_at')},{d.json_text('r.body', '$.created_at')}) "
                 "FROM agent_conversations c JOIN agent_conversation_runs r ON r.run_id=c.current_run_id "
                 f"WHERE {where} ORDER BY c.updated_at DESC,c.conversation_id DESC LIMIT ?", (*params, limit + 1)).fetchall()
             items = []
@@ -692,14 +728,15 @@ class AgentStore:
                 created_at=body.get("conversation_created_at", body["created_at"]), updated_at=body["updated_at"])
 
     def _history(self, db, conversation_id, before, limit):
+        d = dialect_for(db)
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
             raise AgentStoreError("VALIDATION_ERROR", "每页历史数量应为 1 至 100。", 400)
         values = [conversation_id, 9223372036854775807] if before is None else self._decode_cursor(before)
         if not isinstance(values, list) or len(values) != 2 or values[0] != conversation_id or type(values[1]) is not int or not 1 <= values[1] <= 9223372036854775807:
             raise AgentStoreError("AGENT_INVALID_CURSOR", "历史游标无效。", 400)
         rows = db.execute("SELECT body,run_id,sequence FROM agent_events WHERE conversation_id=? AND sequence<? "
-            "AND json_extract(body, '$.type') IN ('message.accepted','assistant.question','result.available','conversation.completed') "
-            "AND (json_extract(body, '$.type')<>'conversation.completed' OR json_extract(body, '$.data.status') IN ('FAILED','INTERRUPTED','CANCELLED')) "
+            f"AND {d.json_text('body', '$.type')} IN ('message.accepted','assistant.question','result.available','conversation.completed') "
+            f"AND ({d.json_text('body', '$.type')}<>'conversation.completed' OR {d.json_text('body', '$.data.status')} IN ('FAILED','INTERRUPTED','CANCELLED')) "
             "ORDER BY sequence DESC LIMIT ?",
             (conversation_id, values[1], limit + 1)).fetchall()
         result = []
@@ -717,7 +754,7 @@ class AgentStore:
                     status="COMPLETED", report_state="READY", case_id=event.case_id, case_status=event.data["status"],
                     source_job_id=None if not artifacts else artifacts[0]["created_by_job_id"])))
             else:
-                row = db.execute("SELECT json_extract(body,'$.case_status'),json_extract(body,'$.failure') "
+                row = db.execute(f"SELECT {d.json_text('body', '$.case_status')},{d.json_document('body', '$.failure')} "
                     "FROM agent_conversation_runs WHERE conversation_id=? AND run_id=?", (conversation_id, run_id)).fetchone()
                 result.append(ConversationHistoryEntry(**common, type="diagnosis.result", result=ConversationResultSummary(
                     status=event.data["status"], report_state="UNAVAILABLE", case_id=event.case_id,
@@ -739,7 +776,7 @@ class AgentStore:
             ended = body["status"] in _CLOSED or body.get("report_available")
             status = "CANCELLED" if body["status"] == "CANCELLED" else "ALREADY_FINISHED" if ended else "CANCELLING"
             receipt = StopReceipt(conversation_id=conversation_id, run_id=run_id, request_id=request_id, status=status)
-            db.execute("INSERT INTO agent_stop_requests VALUES (?,?,?,?)", (conversation_id, request_id, run_id, _json(receipt)))
+            db.execute("INSERT INTO agent_stop_requests(conversation_id,request_id,run_id,receipt) VALUES (?,?,?,?)", (conversation_id, request_id, run_id, _json(receipt)))
             if not ended:
                 body.update(stop_requested=True, status="CANCELLING", intake_pending=False, current_questions=[])
                 self._mark_unused(db, body)
@@ -785,9 +822,13 @@ class AgentStore:
 
     def _request_delete(self, conversation_id, *, owner_key, preserve_completed_memory):
         with self.repository.database_transaction() as db:
+            lock_conversation(db, conversation_id)
             self.require_owner(conversation_id, owner_key, deleted=True)
             head = db.execute("SELECT deleted_at,cleanup_status FROM agent_conversations WHERE conversation_id=?", (conversation_id,)).fetchone()
             memory_store = getattr(self, "memory_store", None)
+            followup_store = getattr(self, "followup_store", None)
+            if followup_store is not None:
+                followup_store.revoke(db, conversation_id)
             # A user can delete a naturally expired conversation before its
             # tombstone disappears. That still revokes its surviving cards.
             if memory_store is not None and not preserve_completed_memory:
@@ -810,18 +851,21 @@ class AgentStore:
                     self._mark_unused(db, body)
                     self._save(db, body)
             manifest = self._cleanup_context(db, conversation_id)
-            db.execute("INSERT INTO agent_cleanup_jobs VALUES (?,'PENDING',?,NULL)", (conversation_id, _json(manifest)))
+            db.execute("INSERT INTO agent_cleanup_jobs(conversation_id,status,manifest,error_code) VALUES (?,'PENDING',?,NULL)", (conversation_id, _json(manifest)))
         self._notify(conversation_id)
         return DeleteReceipt(conversation_id=conversation_id, status="DELETING")
 
-    @staticmethod
-    def _cleanup_context(db, conversation_id):
+    def _cleanup_context(self, db, conversation_id):
+        d = dialect_for(db)
         runs = db.execute("SELECT run_id,case_id,body FROM agent_conversation_runs WHERE conversation_id=?", (conversation_id,)).fetchall()
         bodies = [json.loads(row[2]) for row in runs]
         jobs = {body.get("job_id") for body in bodies}
-        jobs.update(row[0] for row in db.execute("SELECT DISTINCT json_extract(body,'$.job_id') FROM agent_events WHERE conversation_id=?", (conversation_id,)))
-        workspaces = {row[0] for row in db.execute("SELECT DISTINCT json_extract(payload,'$.workspace_id') FROM agent_dispatches WHERE conversation_id=? AND json_extract(payload,'$.workspace_id') IS NOT NULL", (conversation_id,))}
+        jobs.update(row[0] for row in db.execute(f"SELECT DISTINCT {d.json_text('body', '$.job_id')} FROM agent_events WHERE conversation_id=?", (conversation_id,)))
+        workspaces = {row[0] for row in db.execute(f"SELECT DISTINCT {d.json_text('payload', '$.workspace_id')} FROM agent_dispatches WHERE conversation_id=? AND {d.json_text('payload', '$.workspace_id')} IS NOT NULL", (conversation_id,))}
         workspaces.update(workspace for body in bodies for workspace in body.get("legacy_workspace_ids", []))
+        followup_store = getattr(self, "followup_store", None)
+        if followup_store is not None:
+            workspaces.update(followup_store.workspace_ids(db, conversation_id))
         return {"run_ids": [row[0] for row in runs], "case_ids": [row[1] for row in runs if row[1] is not None],
             "job_ids": sorted(job for job in jobs if job is not None),
             "workspace_ids": sorted(workspaces),
@@ -834,7 +878,9 @@ class AgentStore:
 
     def claim_cleanup(self):
         with self.repository.database_transaction() as db:
-            row = db.execute("SELECT conversation_id,manifest FROM agent_cleanup_jobs WHERE status IN ('PENDING','FAILED') ORDER BY rowid LIMIT 1").fetchone()
+            d = dialect_for(db)
+            suffix = " FOR UPDATE SKIP LOCKED" if d.postgres else ""
+            row = db.execute(f"SELECT conversation_id,manifest FROM agent_cleanup_jobs WHERE status IN ('PENDING','FAILED') ORDER BY {d.order_column()} LIMIT 1" + suffix).fetchone()
             if row is None:
                 return None
             db.execute("UPDATE agent_cleanup_jobs SET status='RUNNING' WHERE conversation_id=?", (row[0],))
@@ -842,27 +888,33 @@ class AgentStore:
 
     def update_cleanup_manifest(self, conversation_id, manifest):
         with self.repository.database_transaction() as db:
+            lock_conversation(db, conversation_id)
             db.execute("UPDATE agent_cleanup_jobs SET manifest=? WHERE conversation_id=? AND status<>'DONE'", (_json(manifest), conversation_id))
 
     def fail_cleanup(self, conversation_id, code):
         with self.repository.database_transaction() as db:
+            lock_conversation(db, conversation_id)
             # Move a busy/error task to the tail so another conversation can drain.
             row = db.execute("SELECT manifest FROM agent_cleanup_jobs WHERE conversation_id=?", (conversation_id,)).fetchone()
             db.execute("DELETE FROM agent_cleanup_jobs WHERE conversation_id=?", (conversation_id,))
-            db.execute("INSERT INTO agent_cleanup_jobs VALUES (?,'FAILED',?,?)", (conversation_id, row[0], str(code)[:100]))
+            db.execute("INSERT INTO agent_cleanup_jobs(conversation_id,status,manifest,error_code) VALUES (?,'FAILED',?,?)", (conversation_id, row[0], str(code)[:100]))
 
     def finish_cleanup(self, conversation_id):
         with self.repository.database_transaction() as db:
+            lock_conversation(db, conversation_id)
             row = db.execute("SELECT deleted_at,request_id,cleanup_status FROM agent_conversations WHERE conversation_id=?", (conversation_id,)).fetchone()
             if row is None or row[0] is None:
                 raise AgentStoreError("AGENT_DELETE_REQUIRED", "只能清理已经删除的会话。", 409)
             if row[2] == "DELETED":
                 return
+            followup_store = getattr(self, "followup_store", None)
+            if followup_store is not None:
+                followup_store.purge(db, conversation_id)
             db.execute("DELETE FROM agent_attachment_imports WHERE run_id IN (SELECT run_id FROM agent_conversation_runs WHERE conversation_id=?)", (conversation_id,))
             for table in ("agent_message_adoptions", "agent_messages", "agent_events", "agent_dispatches", "agent_attachments", "agent_stop_requests", "agent_generic_restarts", "agent_conversation_runs"):
                 db.execute(f"DELETE FROM {table} WHERE conversation_id=?", (conversation_id,))
             digest = hashlib.sha256(row[1].encode()).hexdigest()
-            db.execute("INSERT OR IGNORE INTO agent_deleted_requests VALUES (?,?)", (digest, conversation_id))
+            db.execute("INSERT INTO agent_deleted_requests(request_hash,conversation_id) VALUES (?,?) ON CONFLICT DO NOTHING", (digest, conversation_id))
             db.execute("UPDATE agent_conversations SET body='{}',title='',request_id=?,case_id=NULL,create_request_id=NULL,cleanup_status='DELETED' WHERE conversation_id=?", ("deleted:" + digest, conversation_id))
             db.execute("UPDATE agent_cleanup_jobs SET status='DONE',manifest='{}',error_code=NULL WHERE conversation_id=?", (conversation_id,))
 
@@ -984,17 +1036,19 @@ class AgentStore:
 
     def pending_conversations(self):
         with self.repository.database_read() as db:
+            d = dialect_for(db)
             # Both branches read only indexed work. Settled histories, empty
             # conversations and runs waiting for a Case stage need no polling.
             eligible = ("c.deleted_at IS NULL AND c.status NOT IN ('COMPLETED','FAILED','INTERRUPTED','CANCELLED','CANCELLING') "
-                "AND coalesce(json_extract(c.body,'$.report_available'),0)=0 AND coalesce(json_extract(c.body,'$.stop_requested'),0)=0")
+                f"AND coalesce({d.json_int('c.body', '$.report_available')},0)=0 AND coalesce({d.json_int('c.body', '$.stop_requested')},0)=0")
             # Force the small ready-work index: ORDER BY rowid can otherwise
             # make SQLite prefer a full conversation scan to avoid sorting.
-            rows = db.execute("SELECT c.conversation_id,c.rowid AS position FROM agent_conversations c "
-                "INDEXED BY agent_conversations_intake_work WHERE " + eligible +
-                " AND json_extract(c.body,'$.intake_pending')=1 "
-                "AND (c.case_id IS NULL OR json_extract(c.body,'$.case_status') IS NULL OR json_extract(c.body,'$.case_status') IN ('WAITING_INPUT','WAITING_ATTACHMENT')) "
-                "UNION SELECT c.conversation_id,c.rowid AS position FROM agent_dispatches d "
+            hint = "" if d.postgres else "INDEXED BY agent_conversations_intake_work "
+            rows = db.execute(f"SELECT c.conversation_id,{d.order_column('c')} AS position FROM agent_conversations c "
+                + hint + "WHERE " + eligible +
+                f" AND {d.json_int('c.body', '$.intake_pending')}=1 "
+                f"AND (c.case_id IS NULL OR {d.json_text('c.body', '$.case_status')} IS NULL OR {d.json_text('c.body', '$.case_status')} IN ('WAITING_INPUT','WAITING_ATTACHMENT')) "
+                f"UNION SELECT c.conversation_id,{d.order_column('c')} AS position FROM agent_dispatches d "
                 "JOIN agent_conversations c ON c.conversation_id=d.conversation_id AND c.current_run_id=d.run_id "
                 "WHERE d.status='PENDING' AND d.epoch=? AND " + eligible + " ORDER BY position", (self.runtime_epoch,))
             return [row[0] for row in rows]
@@ -1048,7 +1102,7 @@ class AgentStore:
             previous = db.execute("SELECT conversation_id,dispatch_id FROM agent_message_adoptions WHERE message_id=?", (message_id,)).fetchone()
             if previous and previous != (conversation_id, dispatch_id):
                 raise AgentStoreError("AGENT_ADOPTION_CONFLICT", "消息已经关联另一项命令。", 409)
-            db.execute("INSERT OR IGNORE INTO agent_message_adoptions VALUES (?,?,?)",
+            db.execute("INSERT INTO agent_message_adoptions(message_id,conversation_id,dispatch_id) VALUES (?,?,?) ON CONFLICT DO NOTHING",
                        (message_id, conversation_id, dispatch_id))
 
     def finish_adoption(self, conversation_id, message_id, accepted: bool):
@@ -1076,8 +1130,10 @@ class AgentStore:
             "notice": message["notice"]}, "message-status:" + message["message_id"] + ":" + status)
 
     def _accept_committed_adoptions(self, db, body, state):
+        array_test = ("jsonb_typeof(payload::jsonb -> 'generic_message_ids')='array'"
+            if dialect_for(db).postgres else "json_type(payload,'$.generic_message_ids')='array'")
         batches = list(db.execute("SELECT payload FROM agent_dispatches WHERE conversation_id=? AND run_id=? "
-            "AND json_type(payload,'$.generic_message_ids')='array'", (body["conversation_id"], body["run_id"])))
+            "AND " + array_test, (body["conversation_id"], body["run_id"])))
         for (raw,) in batches:
             payload = json.loads(raw)
             if payload.get("operation") != "SubmitSupplement":
@@ -1160,13 +1216,16 @@ class AgentStore:
             body = self._load(db, conversation_id)
             return [{"dispatch_id": row[0], "epoch": self.runtime_epoch, "status": "PENDING",
                 "payload": json.loads(row[1]), "result": json.loads(row[2]) if row[2] else None}
-                for row in db.execute("SELECT dispatch_id,payload,result FROM agent_dispatches WHERE conversation_id=? AND run_id=? AND epoch=? AND status='PENDING' ORDER BY rowid",
+                for row in db.execute(f"SELECT dispatch_id,payload,result FROM agent_dispatches WHERE conversation_id=? AND run_id=? AND epoch=? AND status='PENDING' ORDER BY {dialect_for(db).order_column()}",
                     (conversation_id, body["run_id"], self.runtime_epoch))]
 
     def complete_dispatch(self, dispatch_id, result=None, status="COMPLETED"):
         if status not in {"COMPLETED", "FAILED", "INTERRUPTED", "CANCELLED"}:
             raise ValueError("invalid dispatch status")
         with self.repository.database_transaction() as db:
+            owner = db.execute("SELECT conversation_id FROM agent_dispatches WHERE dispatch_id=?", (dispatch_id,)).fetchone()
+            if owner is not None:
+                lock_conversation(db, owner[0])
             db.execute("UPDATE agent_dispatches SET status=?,result=? WHERE dispatch_id=? AND epoch=? AND status='PENDING'",
                        (status, _json(result), dispatch_id, self.runtime_epoch))
 
@@ -1404,7 +1463,7 @@ class AgentStore:
                 raise AgentStoreError("AGENT_ATTACHMENT_LIMIT", "附件大小或数量超出本次会话限制。", 413)
             attachment = AgentAttachment(attachment_id=self._id("agentattachment"), conversation_id=conversation_id,
                 request_id=request_id, name=name, content_type=content_type, size=size, sha256=sha256, created_at=self._now())
-            db.execute("INSERT INTO agent_attachments VALUES (?,?,?,?,?,?)", (attachment.attachment_id,
+            db.execute("INSERT INTO agent_attachments(attachment_id,conversation_id,request_id,fingerprint,body,storage_path) VALUES (?,?,?,?,?,?)", (attachment.attachment_id,
                 conversation_id, request_id, fingerprint, _json(attachment), storage_path))
             self._append(db, body, "attachment.updated", attachment.model_dump(mode="json"), "attachment:" + attachment.attachment_id + ":RESERVED")
             self._save(db, body)
@@ -1422,6 +1481,7 @@ class AgentStore:
 
     def set_attachment_status(self, attachment_id, status, storage_path=None, *, case_attachment_id=None):
         with self.repository.database_transaction() as db:
+            self._lock_attachment_owner(db, attachment_id)
             row = db.execute("SELECT body,storage_path FROM agent_attachments WHERE attachment_id=?", (attachment_id,)).fetchone()
             if not row:
                 raise AgentStoreError("AGENT_ATTACHMENT_NOT_FOUND", "附件不存在。", 404)
@@ -1457,6 +1517,7 @@ class AgentStore:
 
     def bind_attachment(self, attachment_id, case_attachment_id, *, run_id=None):
         with self.repository.database_transaction() as db:
+            self._lock_attachment_owner(db, attachment_id)
             row = db.execute("SELECT body,storage_path FROM agent_attachments WHERE attachment_id=?", (attachment_id,)).fetchone()
             if row is None:
                 raise AgentStoreError("AGENT_ATTACHMENT_NOT_FOUND", "附件不存在。", 404)
@@ -1470,7 +1531,7 @@ class AgentStore:
             self._ensure_open(body)
             if attachment.status not in {"READY", "IMPORTED"}:
                 raise AgentStoreError("AGENT_ATTACHMENT_NOT_READY", "附件尚未上传完成。", 409)
-            db.execute("INSERT INTO agent_attachment_imports VALUES (?,?,?)", (body["run_id"], attachment_id, case_attachment_id))
+            db.execute("INSERT INTO agent_attachment_imports(run_id,attachment_id,case_attachment_id) VALUES (?,?,?)", (body["run_id"], attachment_id, case_attachment_id))
             attachment.status = "IMPORTED"
             attachment.case_attachment_id = case_attachment_id
             db.execute("UPDATE agent_attachments SET body=? WHERE attachment_id=?", (_json(attachment), attachment_id))
@@ -1478,3 +1539,11 @@ class AgentStore:
             self._save(db, body)
         self._notify(attachment.conversation_id)
         return AttachmentRecord(**attachment.model_dump(), storage_path=row[1])
+
+    @staticmethod
+    def _lock_attachment_owner(db, attachment_id):
+        # Resolve the immutable owner before reading mutable attachment state.
+        if dialect_for(db).postgres:
+            row = db.execute("SELECT conversation_id FROM agent_attachments WHERE attachment_id=?", (attachment_id,)).fetchone()
+            if row is not None:
+                lock_conversation(db, row[0])

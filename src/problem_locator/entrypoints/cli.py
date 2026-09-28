@@ -533,7 +533,11 @@ def main(
         except (OSError, RuntimeError, ValueError):
             _write_error(errors, _config_error("Export output must be outside DATA_ROOT."))
             return CLI_EXIT_CONFIG_OR_STATE_CORRUPT
-    admin = active_hooks.state_admin_factory(data_root)
+    try:
+        admin = active_hooks.state_admin_factory(data_root)
+    except SettingsError:
+        _write_error(errors, _config_error("数据库配置无效，请检查 DATABASE_URL 和 DATABASE_POOL_SIZE。"))
+        return CLI_EXIT_CONFIG_OR_STATE_CORRUPT
 
     if arguments.command == "validate-state":
         report = admin.validate_state()

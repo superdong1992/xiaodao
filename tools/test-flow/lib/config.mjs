@@ -39,7 +39,7 @@ const REPOSITORY_CHECKS = new Set(["python-compileall", "uv-lock", "git-diff-che
 const CAPABILITY_ADAPTERS = new Set(["host-capability", "server-linux-capability", "macos-codex-luna-methods", "macos-codex-luna-e2e", "macos-claude-deepseek-methods", "macos-claude-deepseek-e2e", "evidence-v2-release-verdict"]);
 const CROSS_JOB_PHASES = new Set(["environment", "route", "upload", "diagnose", "publish-restart"]);
 const OBSERVATIONS = new Set(["review-state-transition"]);
-const ENVIRONMENT_PROFILES = new Set(["real-logparse", "real-agent-backend", "real-generic-locator", "real-skill-generation", "real-route", "real-review"]);
+const ENVIRONMENT_PROFILES = new Set(["real-logparse", "real-agent-backend", "real-generic-locator", "real-report-followup", "real-skill-generation", "real-route", "real-review"]);
 const RELEASE_SETTINGS_ENVIRONMENT = Object.freeze([
   "ANTHROPIC_AUTH_TOKEN",
   "ANTHROPIC_BASE_URL",
@@ -418,11 +418,17 @@ function validateRuntimeProfiles(runtimeProfiles) {
       continue;
     }
     assertFlow(profile.kind === "formal-release", "CONFIG_RUNTIME_KIND", `${profileId} has invalid runtime kind`);
-    exactKeys(profile, ["kind", "claude", "codex", "uv", "python", "hatchling", "base_image", "external_sources", "settings_environment_allowlist", "real_caps", "network_policy"], "CONFIG_RUNTIME_PROFILE_FIELDS", `runtime profile ${profileId}`);
+    exactKeys(profile, ["kind", "claude", "codex", "uv", "python", "hatchling", "postgres", "base_image", "external_sources", "settings_environment_allowlist", "real_caps", "network_policy"], "CONFIG_RUNTIME_PROFILE_FIELDS", `runtime profile ${profileId}`);
     exactKeys(profile.claude, ["package", "version", "version_output", "tarball_sha256", "cli_sha256", "model", "max_output_tokens_upper_limit"], "CONFIG_RUNTIME_CLAUDE_FIELDS", `${profileId}.claude`);
     exactKeys(profile.codex, ["product", "version", "executable_sha256", "model", "reasoning_effort", "auth_kind", "budget_enforcement"], "CONFIG_RUNTIME_CODEX_FIELDS", `${profileId}.codex`);
     exactKeys(profile.uv, ["version", "version_output", "uvx_version_output", "archive_sha256", "uv_sha256", "uvx_sha256"], "CONFIG_RUNTIME_UV_FIELDS", `${profileId}.uv`);
     exactKeys(profile.base_image, ["name", "source", "os", "architecture", "macos_docker_context"], "CONFIG_RUNTIME_IMAGE_FIELDS", `${profileId}.base_image`);
+    exactKeys(profile.postgres, ["version", "image", "image_id", "os", "architecture"], "CONFIG_RUNTIME_POSTGRES_FIELDS", `${profileId}.postgres`);
+    assertFlow(profile.postgres.version === "17.11"
+      && profile.postgres.image === "postgres:17.11-bookworm@sha256:91eb910c44c7ed13f7f1a4ccadaa9ca72ef14cddc04cacb6e070e48eb44731a3"
+      && profile.postgres.image_id === "sha256:248efd5e58cd743f2a0e0daec8ea4649e5580145ec2a12e2345bc710d4a77201"
+      && profile.postgres.os === "linux" && profile.postgres.architecture === "amd64",
+    "CONFIG_RUNTIME_POSTGRES_IDENTITY", `${profileId}.postgres 必须使用固定的 PostgreSQL 17.11 linux/amd64 官方镜像`);
     exactKeys(profile.external_sources, ["logparse", "mcp"], "CONFIG_RUNTIME_EXTERNAL_FIELDS", `${profileId}.external_sources`);
     assertFlow(profile.claude.package === "@anthropic-ai/claude-code", "CONFIG_RUNTIME_CLAUDE_PACKAGE", `${profileId} must use the official Claude Code package`);
     nonEmptyString(profile.claude.version, "CONFIG_RUNTIME_CLAUDE_VERSION", `${profileId}.claude.version`);
@@ -455,7 +461,7 @@ function validateRuntimeProfiles(runtimeProfiles) {
     for (const [name, commit] of Object.entries(profile.external_sources)) assertFlow(/^[a-f0-9]{40}$/.test(commit), "CONFIG_RUNTIME_EXTERNAL_COMMIT", `${profileId}.external_sources.${name} must be a commit SHA`);
     stringArray(profile.settings_environment_allowlist, "CONFIG_RUNTIME_SETTINGS_ENV", `${profileId}.settings_environment_allowlist`, { nonEmpty: true });
     assertFlow(canonicalJson([...profile.settings_environment_allowlist].sort()) === canonicalJson([...RELEASE_SETTINGS_ENVIRONMENT].sort()), "CONFIG_RUNTIME_SETTINGS_ENV", `${profileId} has an unsupported settings environment allowlist`);
-    exactKeys(profile.real_caps, ["isolated", "isolated.skill-generation", "codex.macos-methods", "codex.macos-e2e", "claude.macos-methods", "claude.macos-e2e", "service_agent", "service_intake", "journey.route", "journey.diagnose", "journey.publish-restart"], "CONFIG_RUNTIME_CAPS_FIELDS", `${profileId}.real_caps`);
+    exactKeys(profile.real_caps, ["isolated", "isolated.report-followup", "isolated.skill-generation", "codex.macos-methods", "codex.macos-e2e", "claude.macos-methods", "claude.macos-e2e", "service_agent", "service_intake", "journey.route", "journey.diagnose", "journey.publish-restart"], "CONFIG_RUNTIME_CAPS_FIELDS", `${profileId}.real_caps`);
     for (const [capId, cap] of Object.entries(profile.real_caps)) {
       exactKeys(cap, ["max_turns", "max_total_tokens", "max_output_tokens", "max_budget_usd", "hard_timeout_seconds"], "CONFIG_RUNTIME_CAP_FIELDS", `${profileId}.real_caps.${capId}`);
       positiveInteger(cap.max_turns, "CONFIG_RUNTIME_MAX_TURNS", `${capId}.max_turns`);
@@ -600,6 +606,17 @@ function crossValidate(config) {
   for (const track of Object.values(config.policy.tracks)) assertFlow(Object.hasOwn(config.proofs.goals, track.default_goal), "CONFIG_TRACK_GOAL_UNKNOWN", `Unknown default goal ${track.default_goal}`);
 
   const release = config.proofs.goals["release.full"];
+  const postgresGate = config.gates.gates["det.postgres"];
+  assertFlow(
+    deterministicFull?.gates.includes("det.postgres")
+      && deterministicFull.reuse.dev === "never"
+      && postgresGate?.kind === "pytest" && postgresGate.skip_policy === "forbid"
+      && postgresGate.min_passed >= 1
+      && canonicalJson(postgresGate.selectors) === canonicalJson(["tests/deterministic/postgres"])
+      && canonicalJson(postgresGate.pytest_args ?? []) === canonicalJson(["--tb=short"]),
+    "CONFIG_POSTGRES_COVERAGE",
+    "完整确定性测试必须重新执行真实 PostgreSQL 专项，不能跳过或以 SQLite 替代；异常摘要必须隐藏连接参数。",
+  );
   for (const [gateId, testName] of [["det.journey.mcp", "test_mcp_diagnosis"], ["det.journey.web-api", "test_rest_diagnosis"]]) {
     const gate = config.gates.gates[gateId];
     assertFlow(
@@ -613,6 +630,8 @@ function crossValidate(config) {
   assertFlow(release && release.tracks.length === 1 && release.tracks[0] === "release", "CONFIG_RELEASE_GOAL", "release.full must be Release-only");
   const releaseStages = new Set(release.required_proofs.flatMap((proofId) => config.proofs.proofs[proofId].stages));
   const journey = config.stages.stages.filter((stage) => stage.id.startsWith("journey.cross-job."));
+  assertFlow(journey.every((stage) => !stage.checkpoint && stage.reuse.dev === "never" && stage.reuse.release === "never"),
+    "CONFIG_POSTGRES_CHECKPOINT_UNSUPPORTED", "PostgreSQL CrossJob 必须从新空数据库开始，不能复用仅含 DATA_ROOT 的检查点");
   assertFlow(journey.every((stage) => releaseStages.has(stage.id)), "CONFIG_RELEASE_JOURNEY_CLOSURE", "release.full does not close every CrossJob stage");
   assertFlow(![...releaseStages].some((stageId) => {
     const stage = config.stages.stages.find((item) => item.id === stageId);

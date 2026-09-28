@@ -20,6 +20,7 @@ from problem_locator.contracts import (
     ValidationReport,
     canonical_json_bytes,
 )
+from tests.postgres_helpers import postgres_database_url
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -28,6 +29,7 @@ OFFICIAL_KEYS = {
     "BIND_HOST",
     "CLAUDE_COMMAND",
     "DATA_ROOT",
+    "DATABASE_URL",
     "DIAGNOSE_CLAUDE_COMMAND",
     "GENERIC_SKILL_NAME",
     "LOGPARSE_CONFIG_PATH",
@@ -185,7 +187,7 @@ def _assert_service_ready(
     ]
 
 
-def _run_native_startup_gate(expected_system: str, tmp_path: Path) -> None:
+def _run_native_startup_gate(expected_system: str, tmp_path: Path, database_url: str) -> None:
     assert platform.system() == expected_system
     assert os.environ.get("TEST_FLOW_NATIVE_STARTUP_GATE") == expected_system.lower()
 
@@ -200,6 +202,7 @@ def _run_native_startup_gate(expected_system: str, tmp_path: Path) -> None:
     port = _free_loopback_port()
     values = {
         "DATA_ROOT": os.fspath(data_root),
+        "DATABASE_URL": database_url,
         "PUBLIC_BASE_URL": f"http://127.0.0.1:{port}",
         "BIND_HOST": "127.0.0.1",
         "PORT": str(port),
@@ -217,6 +220,8 @@ def _run_native_startup_gate(expected_system: str, tmp_path: Path) -> None:
     child_env = os.environ.copy()
     for key in OFFICIAL_KEYS:
         child_env.pop(key, None)
+    # Administrative subprocesses use the same database after the Server exits.
+    child_env["DATABASE_URL"] = database_url
 
     first = _start_service(env_file, child_env, expected_system)
     try:
@@ -275,5 +280,5 @@ def _run_native_startup_gate(expected_system: str, tmp_path: Path) -> None:
     platform.system() != "Linux",
     reason="requires an explicitly configured native Linux runner",
 )
-def test_native_linux_startup_gate(tmp_path: Path) -> None:
-    _run_native_startup_gate("Linux", tmp_path)
+def test_native_linux_startup_gate(tmp_path: Path, postgres_database_url: str) -> None:
+    _run_native_startup_gate("Linux", tmp_path, postgres_database_url)

@@ -58,6 +58,37 @@ def load_website_auth_configuration(values: Mapping[str, str]) -> WebsiteAuthCon
     )
 
 
+def load_database_configuration(values: Mapping[str, str]) -> tuple[str, int]:
+    """Validate PostgreSQL configuration without exposing connection credentials."""
+
+    database_url = values.get("DATABASE_URL", "")
+    if not database_url:
+        raise SettingsError("必须配置 DATABASE_URL，服务不会回退到 SQLite")
+    try:
+        parsed = urlsplit(database_url)
+        port = parsed.port
+        valid = (
+            database_url == database_url.strip()
+            and not any(ord(character) < 32 or ord(character) == 127 for character in database_url)
+            and parsed.scheme in {"postgresql", "postgres"}
+            and parsed.hostname is not None
+            and bool(parsed.path.strip("/"))
+            and not parsed.fragment
+            and port != 0
+        )
+    except ValueError:
+        valid = False
+    if not valid:
+        raise SettingsError(
+            "DATABASE_URL 必须是包含服务器地址和数据库名的 postgresql:// 或 postgres:// 连接地址"
+        ) from None
+
+    raw_pool_size = values.get("DATABASE_POOL_SIZE", "8")
+    if re.fullmatch(r"[1-9][0-9]?", raw_pool_size) is None or not 2 <= int(raw_pool_size) <= 32:
+        raise SettingsError("DATABASE_POOL_SIZE 必须是 2–32 之间的整数")
+    return database_url, int(raw_pool_size)
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     data_root: Path
@@ -83,6 +114,11 @@ class Settings:
     methods_evidence_validation: str = "off"
     generic_logparse_product: str = "default"
     generic_memory_enabled: bool = False
+    report_followup_enabled: bool = False
+    report_followup_snapshot_bytes: int = 1024 ** 3
+    report_followup_storage_bytes: int = 5 * 1024 ** 3
+    database_url: str | None = field(default=None, repr=False)
+    database_pool_size: int = 8
     website_auth: WebsiteAuthConfig = field(default_factory=WebsiteAuthConfig, repr=False)
 
     @classmethod
@@ -114,6 +150,7 @@ class Settings:
         if missing:
             raise SettingsError("required configuration is missing")
 
+        database_url, database_pool_size = load_database_configuration(values)
         website_auth = load_website_auth_configuration(values)
 
         paths: dict[str, Path] = {}
@@ -216,6 +253,20 @@ class Settings:
         raw_memory_enabled = values.get("GENERIC_MEMORY_ENABLED", "false")
         if raw_memory_enabled not in {"true", "false"}:
             raise SettingsError("GENERIC_MEMORY_ENABLED 必须是 true 或 false")
+        raw_followup_enabled = values.get("REPORT_FOLLOWUP_ENABLED", "false")
+        if raw_followup_enabled not in {"true", "false"}:
+            raise SettingsError("REPORT_FOLLOWUP_ENABLED 必须是 true 或 false")
+        followup_sizes = {}
+        for key, default in (("REPORT_FOLLOWUP_SNAPSHOT_BYTES", 1024 ** 3),
+                             ("REPORT_FOLLOWUP_STORAGE_BYTES", 5 * 1024 ** 3)):
+            raw = values.get(key, str(default))
+            if re.fullmatch(r"[1-9][0-9]{0,18}", raw) is None or int(raw) > 2 ** 63 - 1:
+                raise SettingsError(f"{key} 必须是有效的正整数字节数")
+            followup_sizes[key.lower()] = int(raw)
+        if followup_sizes["report_followup_snapshot_bytes"] > 1024 ** 3:
+            raise SettingsError("REPORT_FOLLOWUP_SNAPSHOT_BYTES 不能超过 1 GiB")
+        if followup_sizes["report_followup_snapshot_bytes"] > followup_sizes["report_followup_storage_bytes"]:
+            raise SettingsError("追问快照总量不能小于单份上限")
 
         workers = {}
         for key, default in (("ROUTE_WORKERS", 1), ("DIAGNOSE_WORKERS", 2), ("LOGPARSE_CONCURRENCY", 1), ("ARCHIVE_WORKERS", 1)):
@@ -226,8 +277,11 @@ class Settings:
 
         return cls(
             **workers,
-            website_auth=website_auth,
+            **followup_sizes,
             data_root=paths["DATA_ROOT"],
+            database_url=database_url,
+            database_pool_size=database_pool_size,
+            website_auth=website_auth,
             public_base_url=base_url.rstrip("/"),
             bind_host=bind_host,
             port=port,
@@ -243,6 +297,7 @@ class Settings:
             specialized_reviewer_enabled=(raw_reviewer_enabled == "true" and methods_evidence_validation != "off"),
             methods_evidence_validation=methods_evidence_validation,
             generic_memory_enabled=raw_memory_enabled == "true",
+            report_followup_enabled=raw_followup_enabled == "true",
             route_claude_command=route_claude_command,
             diagnose_claude_command=diagnose_claude_command,
             intake_claude_command=intake_claude_command,
@@ -252,6 +307,8 @@ class Settings:
         return (
             "Settings(data_root=<configured>, public_base_url="
             f"{self.public_base_url!r}, bind_host={self.bind_host!r}, port={self.port}, "
+            "database_url=<redacted>, "
+            f"database_pool_size={self.database_pool_size}, "
             "claude_command=<configured>, "
             "route_claude_command=<configured>, "
             "diagnose_claude_command=<configured>, "
@@ -268,4 +325,4 @@ class Settings:
         )
 
 
-__all__ = ["Settings", "SettingsError"]
+__all__ = ["Settings", "SettingsError", "load_database_configuration"]

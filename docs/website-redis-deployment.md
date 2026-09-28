@@ -29,7 +29,7 @@ WEBSITE_OWNER_NAMESPACE=xiaodao-website
 
 用户名、密码和 TLS 按实际 Redis 配置填写。已有网站保留原命名空间，并确认旧 `user.id` 与 `user.userid` 一致，以继续访问历史会话。
 
-完整更新后端源码、`pyproject.toml` 和 `uv.lock`，在 Linux 发布目录执行：
+完整更新后端源码、`pyproject.toml` 和 `uv.lock`。当前累计版本还要求 PostgreSQL；先按[9 月 23 日以来的生产升级清单](production-upgrade-2026-09-23.md)完成数据库准备或历史迁移，再在 Linux 发布目录安装依赖并启动：
 
 ```bash
 uv sync --frozen
@@ -38,11 +38,11 @@ uv run python -m problem_locator serve --env-file /opt/xiaodao/service.env
 
 服务端使用 Python 3.12，新增的 Redis 依赖由 `uv sync --frozen` 安装。CLI **不会自动读取 `.env`**，需要显式传入 `--env-file`，或者由进程管理器注入配置。同名进程环境变量优先于配置文件。
 
-本次改动不引入 PostgreSQL，不需要 `DATABASE_URL`，也不需要重建现有兼容版本的 `DATA_ROOT`。
+Redis 身份接入本身不改变业务数据格式。但当前累计版本已改用 PostgreSQL，必须配置 `DATABASE_URL`；已有 SQLite 历史须按[PostgreSQL 迁移说明](postgresql-migration.md)复制到专用空数据库和新的 `DATA_ROOT`，再同时切换两项配置。已经使用当前 PostgreSQL 格式的部署，单独调整 Redis 配置时无需重建数据目录。
 
 ## 2. 同步更新 BFF
 
-同步部署 `examples/website-agent/server.ts` 和 `server.mjs`，业务实现位于 `server.mjs`。从部署环境删除 `WEBSITE_AUTH_MODULE`；自定义 `createAgentBackend({ access })` 还需移除 `access` 参数。
+同步部署 `examples/website-agent/server.ts`、`server.mjs` 及其依赖 `followup-bff.mjs`、`followup-contract.js`，保留相对路径。业务实现位于 `server.mjs`，即使关闭报告追问，也不能遗漏它静态导入的模块。切换到默认 Redis 模式时，从部署环境删除 `WEBSITE_AUTH_MODULE`；自定义 `createAgentBackend({ access })` 还需移除 `access` 参数。
 
 使用 Node.js 24+，从网站源码根目录启动，无需 npm 依赖：
 

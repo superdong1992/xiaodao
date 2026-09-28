@@ -5,6 +5,27 @@
 本文件记录已经在当前工作区验证、修复并由专项回归测试保护的问题。活跃待办仍只写入
 [`TODO.md`](TODO.md)；同一问题再次回归时更新原条目，不另建一个缺少历史关联的条目。
 
+## PL-FIX-077：累计升级说明仍沿用 SQLite 和旧 BFF 鉴权假设
+
+- **状态**：文档修正和专项回归已纳入本次交付；正式验证以本条最终 Test Flow 元数据为准，实际生产配置和上线验收尚未执行。
+- **症状、受影响版本与确认**：8.2.0 / `095dade` 加本次 PostgreSQL 与报告追问改动的工作区中，Redis 部署说明仍称不需要 PostgreSQL 和 `DATABASE_URL`；旧数据升级说明让用户在得到中间 SQLite 后直接启动当前 8.2.0；追问说明把默认 BFF 路径写成全部经过 `access.authenticate`。已逐项对照当前 Settings、导入入口、BFF 分支及 Redis 会话读取代码确认冲突，README 和 TODO 也保留相同旧假设。
+- **根因**：各功能的单独升级说明未随着合并发布更新，且同为 `8.2.0` 的版本号不能区分 SQLite 版与 PostgreSQL 版，导致局部正确的旧步骤在累计版本中失效。
+- **修复历史（2026-09-28）**：新增以 9 月 23 日前主干为基线的生产累计升级清单，覆盖数据库和历史数据、Redis 身份、注册 V2 与 ROUTE 协议、追问前后端及消息轮次绑定。修正 Redis、追问和旧格式升级说明，统一 README 与 TODO 入口；明确必填配置、单实例、模块依赖、先计划再导入、备份回退及实际生产验收边界。
+- **不可回归行为**：当前累计版本必须配置 PostgreSQL；旧格式升级生成的 SQLite 只能作为导入源，不能直接交给当前 Server；默认 BFF 透传 Cookie，仅显式旧模式调用 `access.authenticate`，不得声称默认 BFF 已验证 CSRF。指南必须保留迁移顺序、身份归属检查和四项累计适配要求，相对链接可解析。
+- **专项回归测试**：`tools/test-flow/tests/production-upgrade.test.mjs` 直接检查上述已确认的过期说法、当前配置与迁移顺序；`docs-drift.test.mjs` 将累计升级和关联说明纳入文档链接及合同检查。中央 `framework.node-tests` 执行这些专项，完整确定性轨继续覆盖 PostgreSQL、鉴权、路由与追问功能。
+- **最新 Test Flow verdict（2026-09-28，生产累计适配）**：中央 Linux `dev.default` [run-20260928T114938Z-76be1af8](.tmp/postgres-linux-evidence/run-20260928T114938Z-76be1af8/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，仅 performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:a545eb3e3e4ca5d8eded0bf5d4313c61219938997c6a62281b79bef841215416`（952 文件），verdict digest `47b3d0c4a39a1abed282773a832f4a08c4a336d4837e29037148ef9588ef2866`。新增文档专项 6/6、完整 pytest 4400 项、网站 Node 215 项通过；pytest 2 项规定的平台跳过，PostgreSQL 专项 58/58。框架 Node 508 项通过、5 项平台跳过。affected 由编排器交完整轨覆盖，完整轨 274.478 秒，真实模型调用、token 和费用均为 0。Windows 与 Linux 的源码摘要一致，本轮完整证据 101 文件逐项校验一致；verdict 文件 SHA-256 为 `76af9df12623d74a05b85fbd5b17ed7e6945ce13406f014118efeda60d9684ca`。本行仅为验证后的引用元数据，不属于所引用源码快照；此前验证记录继续保留，不代表真实 Release、生产部署或真实历史数据迁移验收。
+
+## PL-FIX-076：SQLite 单连接与全局锁使不同会话的数据库操作串行化
+
+- **状态**：实现及专项回归完成；正式验证结论以本条最终 Test Flow 元数据为准。Linux 是唯一 Server 平台，当前仍只支持一个服务进程独占同一数据库和资源目录。
+- **症状、受影响版本与确认**：8.2.0 当前工作区的 `CaseStateRepository` 使用一条 SQLite 连接和全局 `RLock`，所有数据库读写都经过该锁，写事务使用 `BEGIN IMMEDIATE`。SQLite WAL 可以支持读写并行，但同时只能有一个写事务；本项目的全局锁进一步让不同会话的数据库操作互相等待。修改前已核对当前生产装配入口、连接配置和事务路径。
+- **根因**：原存储层依赖共享连接和全局串行访问，Agent、记忆与报告追问中的 JSON 更新、序列号和任务领取也默认依赖这一串行保证，无法只替换连接驱动。
+- **修复历史（2026-09-28）**：生产配置改用 PostgreSQL 17 或更新版本，固定 psycopg 与连接池依赖，要求 `DATABASE_URL`，缺少配置时拒绝启动。按线程借用连接，使用 PostgreSQL 原生 SQL、会话级事务锁和 `FOR UPDATE SKIP LOCKED`；同一业务事务保留原子提交和回滚。数据库与 `DATA_ROOT` 绑定，独立实例锁及失效检查防止多个进程接管内存状态。初始化失败日志不再携带原始驱动异常中的凭据。新增显式离线导入命令，复制源 SQLite/WAL 和资源后校验，再导入专用空库及新目录；源目录不作修改。正式 Linux 测试入口新增独立 PostgreSQL 实例身份和重启接线，停止复用不含数据库的目录检查点。
+- **不可回归行为**：一个会话的事务未提交时，另一个会话仍可完成写入；同一会话的并发消息不能丢失更新、重复请求不能重复执行，事件序列保持递增。任务只领取一次，删除与发布互斥，失败事务不得留下半份报告或事件。旧目录和不匹配的数据库不能被自动接入；实例锁失效后旧进程不得继续写入，新进程须等待旧事务结束。导入保留报告、附件、追问快照、经验卡及原始 JSON，除已声明的附件根路径和后端绑定外不得改写历史；发布失败时目录和数据库均保持不可启用状态。生产入口不得自动回退到 SQLite，客户端仍经 HTTP 直连 Linux Server。
+- **专项回归测试**：`tests/deterministic/postgres/test_postgres_repository.py` 直接覆盖独立 Case 并行提交、事务回滚、重启恢复、并发领取及实例锁失效接管；`test_postgres_store.py` 覆盖不同会话并发、同会话序列、幂等、报告与事件原子发布；`test_postgres_memory.py` 和 `test_followup_database_concurrency.py` 覆盖任务领取、删除互斥、容量竞争和保留清理；`test_postgres_import.py` 覆盖 WAL、非空 Case/BYTEA、报告与 ZIP、追问快照与经验卡、已有目标拒绝以及发布后故障重新封锁。`test_database.py` 覆盖引用连接、目录身份和凭据脱敏。`det.postgres` 是完整确定性轨的必跑 Gate，不允许跳过或复用，数据库不可用必须失败。
+- **最新 Test Flow verdict（2026-09-28）**：中央 Linux `dev.default` [run-20260928T111406Z-86f4514c](.tmp/postgres-linux-evidence/run-20260928T111406Z-86f4514c/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:d7a1f9b530f6e34f6793cb7d48be36513e55ca8f07e7277093a48782838cc887`（950 文件），verdict digest `94860190d1a8d9c648acdebc7f02f173ca3e7a0a4ca3fdc8944aee4f96b078b0`。affected 按编排交完整轨覆盖，pytest 4400 项通过、2 项规定的平台跳过；PostgreSQL 专项 58/58、单元 3511、集成 198 项通过，网站 Node 215 项通过。完整轨 266.394 秒，真实模型调用、token 和费用为 0。Windows 两轮、首轮 Linux PASS 及台账混合换行失败的证据全部保留；Windows 的文件元数据与长路径 URI 限制未被掩盖或扩展为受支持 Server 平台。最终证据副本哈希与 Linux 原件一致，回填前主工作区与被测副本的 950 文件摘要完全一致。本行仅为验证后的引用元数据，不属于所引用源码快照；不代表真实 Release、Linux Docker 部署或线上历史数据迁移验收。
+
+
 ## PL-FIX-075：网站凭据请求头未经脱敏写入 HTTP 诊断日志
 
 - **症状与受影响版本**：8.2.0 / `c37c4f5` 至 `343e1ba` 的 `HttpDiagnosticsMiddleware` 在 `http.request.started` 原样写入所有请求头；代码路径核对确认 Cookie 和 Authorization 会进入日志。
@@ -14,7 +35,6 @@
 - **专项回归测试**：`test_http_diagnostics_redact_cookie_and_authentication_headers` 直接断言下游保留原请求而日志不含凭据。`test_session_auth.py` 覆盖 Cookie 读取、Redis 键名、工号读取、必要错误及连接关闭；`server.test.mjs` 覆盖各 BFF 请求路径的 Cookie 透传与错误处理。
 - **状态**：实现与专项回归已完成，正式 Dev 验证结论以本条最终 Test Flow 元数据为准；真实 Redis 与 Linux 生产接入另行验收。
 - **最新 Test Flow 元数据**：`run-20260928T091540Z-7f54185e` / `PASS_WITH_WARNINGS`，源码快照 `a5d363db05317766eb159a5e1a38a2fbfdeb664d98395823c865243a15308aed`；affected 按计划移交 full，完整确定性验证、源码核验与运行收尾通过，真实模型调用为 0。本次在已有 Ubuntu 环境执行简化版本，未放宽测试门槛；此前 Windows 配置合同失败和性能超限证据均保留。本行是验证后的元数据回填，不属于所引用源码快照；不替代真实 Redis 与 Linux 生产验收。
-
 ## PL-FIX-073：路由仅凭有效 Skill ID 放行，缺少专用定位准入门槛
 
 - **状态**：实现及专项回归完成；正式验证结论以本条最终 Test Flow 元数据为准。确定性验证不等于真实模型语义准确率或线上验收。
@@ -41,6 +61,20 @@
 - **前次合并快照的 Test Flow verdict（2026-09-28）**：与 PL-FIX-073 同一中央 Dev [run-20260928T021949Z-549ed227](.tmp/route-admission-dev/run-20260928T021949Z-549ed227/verdict.json)，源码快照 `88d62a734706236490883fb47e2cf09654fae5afae4dffccdcca6e8038ff7224`，`PASS_WITH_WARNINGS`，仅 performance 为 `NOT_CALIBRATED`，functional、operation、verification 均为 PASS；当前扫描器重审通过。此前 Windows 环境及包装器专项 56 项通过，正式 Windows 框架 Gate 464 项通过、30 项平台跳过；该 Windows 整轮随后因并行源码漂移为 ERROR，不能视作整轮通过。平台规则的确定性检查纳入当时的 Linux Gate，真实 Windows 子进程专项在 Linux 明确跳过。零模型调用。本行仅为验证后的引用元数据，不属于所引用快照。
 
 - **最新 Test Flow verdict（2026-09-28 独立提交）**：中央 Linux `dev.default` [run-20260928T071148Z-b75f709e](.tmp/route-admission-push-dev/run-20260928T071148Z-b75f709e/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，仅 performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:e7add69142343ebff3b417bd7affeab60a4a3c90cbb2a252b41ce2d1836f9925`（898 文件），verdict digest `e2f907b2956913d74336529a0bd1e9fb2a21354b12d25bcae82f5bf3cc337fe1`。完整证据复制后由本次交付版本的扫描器重新核验为 PASS，模型调用、token 和费用均为 0。环境白名单及 ROUTE 控制字段专项纳入框架 Gate；真实 Windows 子进程专项在 Linux 明确跳过，Windows 直接复现与专项结果见前次记录。本行是验证后的引用元数据，不宣称被所引用源码快照覆盖；不代表 Windows 整轮或真实模型验收。
+
+## PL-FIX-062：报告交付后继续提问会误开新诊断，缺少独立问答与恢复能力
+
+- **状态**：实现完成；是否通过正式验证，以本条最终 Test Flow 元数据为准。功能默认关闭，实际网站与部署环境须单独验收。
+- **症状与受影响版本**：`c37c4f5` / 8.2.0 的消息入口在报告完成后创建新诊断轮次，没有报告追问接口。当前版本代码路径与改动前中央 Dev 基线均已核对；原有诊断 SSE 已支持回放，但没有独立追问记录、游标和停止目标。
+- **根因**：原消息接口同时承担补充与开启新诊断，报告解释不能复用其状态机；原日志临时工作区与报告保留期限也不相同。
+- **不可回归行为**：会话详情 schema 3、诊断 SSE schema 2、Agent 存储 v2 和旧网站行为保留。追问仅写入独立 `agent_followup_*` 表，不改 Case、正式报告字节、赞踩和旧事件序列。新网站诊断补充携带 `target_run_id`，完成竞争返回 409；追问失败不得回退到旧消息接口。查询和事件订阅不调用模型；同一请求只执行一次，停止、删除和重启后的不确定结果不能迟到发布。快照复制在报告成功之后异步执行，失败不撤销报告；问答和快照按原报告 7 天期限清理，不因追问续期。
+- **修复历史**：2026-09-24 新增独立提交、分页查询、停止与回放接口，以及生产 worker、限定输入目录的 Read/Grep、快照校验和独立容量配置。默认关闭 `REPORT_FOLLOWUP_ENABLED`；关闭后仍能查询、取消和清理已保存记录。网站 SDK、BFF、控制器、问答视图和离线预览增量适配。交叉审阅补齐报告发布后立即切轮的快照通知竞争，以及页面销毁后迟到响应覆盖新草稿和请求 ID 的竞争。
+- **专项回归测试**：`tests/deterministic/unit/agent/test_report_followup.py` 覆盖连续问答、日志快照、降级、幂等、并发、停止、恢复、写入失败、漂移和长历史；`test_target_run_guard.py` 覆盖新旧消息分流与通用日志重启的幂等保护；`tests/deterministic/unit/interfaces/test_followup_http.py` 覆盖严格输入、归属、分页与独立 SSE；`tests/deterministic/unit/storage/test_followup_retention.py` 和 `test_retention_cleaner.py` 覆盖清理和临时工作区保护；`tests/deterministic/integration/test_report_followups.py` 验证生产报告与追问链路。网站竞态专项在 `examples/website-agent/followup.test.mjs`，纳入原网站示例 Gate。独立真实 Gate 为 `real.report-followup`，不加入现有 Release 旅程。
+- **改动前基线**：中央 `dev.default` [run-20260924T041237Z-5a410efa](.tmp/test-flow-evidence/run-20260924T041237Z-5a410efa/verdict.json)，源码快照 `a2f1d5921bf084824e20436f815b9388af24d3bcebd5b09ed85c8e9e4ff4b9da`（891 文件）。functional、operation、verification 均为 PASS；overall 为 FAIL，唯一失败项为 Windows 完整确定性轨超过 300 秒性能上限。基线全部功能 Gate 通过，零模型调用，未放宽性能门槛。此前因沙箱 Python 权限和重试意图缺失产生的两轮 BLOCKED 证据一并保留。
+- **最新 Test Flow verdict（追问完整 Dev，2026-09-28）**：中央 Linux `dev.default` [run-20260928T021949Z-549ed227](.tmp/report-followup-evidence/run-20260928T021949Z-549ed227/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:88d62a734706236490883fb47e2cf09654fae5afae4dffccdcca6e8038ff7224`（926 文件），verdict digest `056c20a9d6311dabc5dbd41119fe91ff4a9d5a93c6f53fde9daa8f916daf2e29`。affected 由编排器交完整套件覆盖；Core 32、合同 592、单元 3453、集成 196、SameJob 5、MCP 2、Web API 2、网站示例 200 项通过，单元 2 项平台跳过，零模型调用。最终快照包含共享工作区的并行改动；夹具更新后的固定摘要和清单已同步，原断言与性能上限未放宽，先前失败证据保留。本行是验证后的引用元数据，不属于所引用源码快照。
+- **最新 Test Flow verdict（两轮真实追问，2026-09-28）**：中央 `dev.real --stage real.report-followup` [run-20260928T022649Z-b3305ce6](.tmp/report-followup-evidence/run-20260928T022649Z-b3305ce6/verdict.json)，同一源码快照 `88d62a734706236490883fb47e2cf09654fae5afae4dffccdcca6e8038ff7224`，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`，真实 Gate 两项均通过。verdict digest `9708b811d4ea92d202d6b26f7ae1eb6680ac90f8f280f6c2d4dbcc816f20f529`。执行前已审阅身份、Proof、Stage、Gate、复用决定与预算；Claude Code 2.1.89 / `deepseek-v4-flash[1m]` 共两次调用，44346 token、0.160554 美元。仅使用新建临时数据根中的合成报告与日志；生产 worker 的限定目录 Read/Grep、日志独有证据、前轮语境、文字补充和原报告／诊断／反馈不变断言全部通过。专用 Linux 运行时仅补齐固定官方包内 rg 的执行权限，文件内容逐一核对未变；包树身份 `7d396487a1f6758a4abf7a726db2dc5ac37cea738d794e0efa8fc093a6c40471` 已纳入计划。前两轮工具失败证据保留，已确认并修正显式 ask 覆盖目录检查器允许结果的冲突，未放宽工具审计。本行是验证后的引用元数据；不代表实际网站、部署环境、真实业务日志效果或 Release 旅程已验收。
+- **最新 Test Flow verdict（推送分支，2026-09-28）**：中央 [run-20260928T070708Z-ec40d743](.tmp/report-followup-evidence/run-20260928T070708Z-ec40d743/verdict.json)，源码快照 `a93a36d59662ed4e20a92e9d546a27b16cf150f1133dc7824f0a2b295f2d2498`（926 文件），`PASS_WITH_WARNINGS`；functional、operation、verification 均为 PASS，performance 为 `NOT_CALIBRATED`，verdict digest `1c9ede0f034f38e2a16c7bc7fcc96563e2410bf2965673910a58610bac7530de`。推送分支保留 Git 原有脚本执行位，产品字节与此前通过版本一致；中央完整确定性回归重新执行通过。两轮合成日志真实追问重新验证通过，实际 43732 token、0.157924 美元；原报告、诊断、反馈不变。该快照不包含主工作区后续 PostgreSQL 与鉴权改动。生产网站和部署环境仍需适配验收。本行是验证后的引用元数据，不属于所引用快照。
+
 
 ## PL-FIX-060：调度暂停后继续接单，结果提交失败使任务状态长期不明
 

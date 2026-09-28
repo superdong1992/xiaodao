@@ -45,6 +45,48 @@ test("unknown configuration fields fail closed", () => {
   }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_GATE_FIELDS");
 });
 
+test("PostgreSQL runtime profile rejects mutable tags and image or platform drift", () => {
+  for (const mutate of [
+    (profile) => { profile.image = "postgres:17.11-bookworm"; },
+    (profile) => { profile.image_id = `sha256:${"0".repeat(64)}`; },
+    (profile) => { profile.architecture = "arm64"; },
+  ]) {
+    assert.throws(() => withConfigMutation("runtime-profiles.v2.json", (value) => {
+      mutate(value.profiles.release.postgres);
+    }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_RUNTIME_POSTGRES_IDENTITY");
+  }
+});
+
+test("PostgreSQL CrossJob cannot re-enable directory-only checkpoint reuse", () => {
+  assert.throws(() => withConfigMutation("stages.v2.json", (value) => {
+    value.stages.find((stage) => stage.id === "journey.cross-job.route").reuse.dev = "identity";
+  }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_POSTGRES_CHECKPOINT_UNSUPPORTED");
+});
+
+test("full deterministic PostgreSQL coverage cannot be skipped, reused or expose connection arguments", () => {
+  for (const mutate of [
+    (gate) => { gate.selectors = ["tests/deterministic/unit/storage"]; },
+    (gate) => { gate.skip_policy = "allow-explicit"; },
+    (gate) => { delete gate.pytest_args; },
+    (gate) => { gate.pytest_args = ["--tb=long"]; },
+    (gate) => { gate.pytest_args = ["--tb=short", "--showlocals"]; },
+  ]) {
+    assert.throws(() => withConfigMutation("gates.v2.json", (value) => {
+      mutate(value.gates["det.postgres"]);
+    }, (root) => loadConfiguration(REPO_ROOT, root)),
+    (error) => error.code === "CONFIG_POSTGRES_COVERAGE");
+  }
+  for (const [mutate, expectedCode] of [
+    [(stage) => { stage.gates = stage.gates.filter((id) => id !== "det.postgres"); }, "CONFIG_ORPHAN_GATE"],
+    [(stage) => { stage.reuse.dev = "identity"; }, "CONFIG_POSTGRES_COVERAGE"],
+  ]) {
+    assert.throws(() => withConfigMutation("stages.v2.json", (value) => {
+      mutate(value.stages.find((stage) => stage.id === "deterministic.full"));
+    }, (root) => loadConfiguration(REPO_ROOT, root)),
+    (error) => error.code === expectedCode);
+  }
+});
+
 test("full deterministic closure cannot replace either public journey with unit tests or skips", () => {
   for (const gateId of ["det.journey.mcp", "det.journey.web-api"]) {
     for (const mutation of [

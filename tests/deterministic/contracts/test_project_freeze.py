@@ -21,7 +21,7 @@ def test_test_flow_identity_closure_replaces_the_manual_patch_allowlist() -> Non
 
     assert {"src", "schemas", "pyproject.toml", "uv.lock"} <= product_paths
     assert "tests/deterministic" not in product_paths
-    assert deterministic_paths == {"tests/deterministic", "examples/website-agent"}
+    assert deterministic_paths == {"tests/deterministic", "tests/postgres_helpers.py", "examples/website-agent"}
     assert "tools/test-flow/lib" in framework_paths
     assert "product.source" in identity_sets["deterministic"]["producer"]
     assert "proof.deterministic" in identity_sets["deterministic"]["proof"]
@@ -48,6 +48,7 @@ def test_public_console_entries_are_pre_registered() -> None:
     assert scripts == {
         "problem-locator-logparse": "problem_locator.integrations.logparse.cli:main",
         "problem-locator-data-upgrade": "problem_locator.entrypoints.data_upgrade:main",
+        "problem-locator-postgres-import": "problem_locator.entrypoints.postgres_import:main",
         "problem-locator-seal-outcome-draft": (
             "problem_locator.runtime.outcome_finalizer:main"
         ),

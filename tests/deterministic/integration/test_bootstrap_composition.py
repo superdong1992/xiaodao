@@ -19,6 +19,7 @@ from problem_locator.bootstrap import (
     UuidIdGenerator,
     build_service,
     create_app,
+    create_state_admin,
     main,
 )
 from problem_locator.contracts import (
@@ -32,7 +33,7 @@ from problem_locator.contracts import (
     canonical_json_bytes,
     parse_canonical_json_bytes,
 )
-from problem_locator.entrypoints.settings import Settings
+from problem_locator.entrypoints.settings import Settings, SettingsError
 from problem_locator.storage.layout import StorageLayout
 from problem_locator.storage.platform import FileInstanceLock
 from problem_locator.storage.retention_cleaner import CleanupRunResult
@@ -57,6 +58,7 @@ def _settings(
 ) -> Settings:
     environ = {
         "DATA_ROOT": str(data_root),
+        "DATABASE_URL": "postgresql://locator:placeholder@127.0.0.1:5432/locator_test",
         "WEBSITE_AUTH_MODE": "trusted_header",
         "PUBLIC_BASE_URL": "http://127.0.0.1:8000",
         "SKILL_DIR": str(skill_dir),
@@ -76,7 +78,30 @@ def _settings(
         environ["DIAGNOSE_CLAUDE_COMMAND"] = diagnose_command
     if intake_command is not None:
         environ["INTAKE_CLAUDE_COMMAND"] = intake_command
-    return Settings.load(environ=environ)
+    # These existing composition tests use isolated local SQLite fixtures.
+    return replace(Settings.load(environ=environ), database_url=None)
+
+
+def test_offline_admin_uses_explicit_postgresql_configuration_without_opening_it(tmp_path, monkeypatch):
+    url = "postgresql://locator:private-password@127.0.0.1:5432/locator_test"
+    monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.setenv("DATABASE_POOL_SIZE", "12")
+    admin = create_state_admin(tmp_path / "uncreated")
+    assert admin._database_url == url
+    assert admin._database_pool_size == 12
+    assert not (tmp_path / "uncreated").exists()
+
+
+def test_offline_admin_rejects_missing_database_url_without_falling_back(tmp_path, monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    with pytest.raises(SettingsError, match="DATABASE_URL"):
+        create_state_admin(tmp_path)
+    stdout, stderr = io.BytesIO(), io.BytesIO()
+    assert main(["validate-state", "--data-root", str(tmp_path)],
+                stdout=stdout, stderr=stderr) == CLI_EXIT_CONFIG_OR_STATE_CORRUPT
+    assert stdout.getvalue() == b""
+    assert b"CONFIG_INVALID" in stderr.getvalue()
+    assert not tuple(tmp_path.iterdir())
 
 
 def test_public_create_app_does_not_expose_the_test_skill_override(
@@ -717,7 +742,9 @@ def test_standalone_admin_is_lock_scoped_and_exports_one_canonical_generation(
 
 def test_unmarked_legacy_state_is_rejected_without_any_data_root_mutation(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://locator:placeholder@127.0.0.1:5432/locator_test")
     data_root = tmp_path / "data"
     data_root.mkdir()
     layout = StorageLayout.at(data_root)

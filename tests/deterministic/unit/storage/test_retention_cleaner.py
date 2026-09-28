@@ -656,6 +656,21 @@ def test_state_references_and_nonterminal_workspaces_are_retained(
     assert rejected_archive.read_bytes() == b'{"invalid":"agent output"}\n'
 
 
+def test_followup_lease_protects_expired_workspace_until_released(tmp_path: Path) -> None:
+    harness = _harness(tmp_path, state=_state())
+    identifier = "70000000-0000-0000-0000-000000000007"
+    workspace = harness.layout.workspaces / identifier
+    workspace.mkdir()
+    (workspace / "input.log").write_bytes(b"original evidence")
+    _set_age(workspace, WORKSPACE_RETENTION_SECONDS + 1)
+    harness.cleaner.workspace_in_use = lambda value: value == identifier
+    harness.cleaner.run_once()
+    assert workspace.exists()
+    harness.cleaner.workspace_in_use = lambda _value: False
+    harness.cleaner.run_once()
+    assert not workspace.exists()
+
+
 def test_running_job_protects_both_workspaces_until_it_finishes(tmp_path: Path) -> None:
     state = _state()
     aggregate = state.cases[CASE_ID]

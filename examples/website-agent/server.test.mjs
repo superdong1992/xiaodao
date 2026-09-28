@@ -18,6 +18,7 @@ import "./report-view.test.mjs";
 import "./browser-client.test.mjs";
 import "./preview.test.mjs";
 import "./onboarding.test.mjs";
+import "./followup.test.mjs";
 
 test("TypeScript compatibility entry exports the same BFF implementation", () => {
   assert.equal(createAgentBackend, createPureJsBackend);
@@ -136,8 +137,12 @@ function authFailure(status, code) {
     details: [{ field: "reason_code", actual: "SECRET" }],
   } }), { status, headers: { "Content-Type": "application/json" } });
 }
+const followupPath = `${conversationPath}/runs/${runId}/followups`;
+const followupView = { schema_version: 1, conversation_id: conversation, run_id: runId,
+  can_ask: true, reason: null, snapshot_status: "UNAVAILABLE", active_followup: null,
+  items: [], next_cursor: null, last_event_id: 0 };
 
-test("default BFF forwards Cookie credentials for API, uploads and events", async () => {
+test("default BFF forwards Cookie credentials for API, uploads, followups and both event streams", async () => {
   const calls = [];
   const wire = ": connected\n\n";
   await withServer({ fetchImpl: async (url, init) => {
@@ -149,6 +154,13 @@ test("default BFF forwards Cookie credentials for API, uploads and events", asyn
       assert.equal(new Headers(init.headers).get("Last-Event-ID"), "7");
       return new Response(wire, { headers: { "Content-Type": "text/event-stream" } });
     }
+    if (path.endsWith("/followups")) {
+      if (init.method === "POST") return envelope({ conversation_id: conversation, run_id: runId,
+        followup_id: artifactId, request_id: "question-one", event_id: 1, status: "ACCEPTED" });
+      return envelope(followupView);
+    }
+    if (path.endsWith(`/followups/${artifactId}/stop`)) return envelope({ conversation_id: conversation,
+      run_id: runId, followup_id: artifactId, request_id: "question-stop", event_id: 2, status: "CANCELLED" });
     if (path === "/api/v1/agent/attachments") return envelope({
       attachment: { attachment_id: artifactId, conversation_id: conversation },
       upload: { attachment_id: artifactId, url: "private" },
@@ -169,6 +181,9 @@ test("default BFF forwards Cookie credentials for API, uploads and events", asyn
       ["/api/agent/conversations", "GET"],
       ["/api/agent/conversations", "POST", { request_id: "browser-request-original" }],
       ["/api/agent/attachments", "POST", { conversation_id: conversation }],
+      [followupPath, "GET"],
+      [followupPath, "POST", { request_id: "question-one", text: "如何理解这份报告？" }],
+      [`${followupPath}/${artifactId}/stop`, "POST", { request_id: "question-stop" }],
     ];
     for (const [path, method, body] of requests) {
       const response = await fetch(origin + path, { method,
@@ -180,12 +195,12 @@ test("default BFF forwards Cookie credentials for API, uploads and events", asyn
       headers: { ...cookieHeaders, "Content-Type": "application/zip", "Idempotency-Key": "upload-one",
         "X-Content-SHA256": createHash("sha256").update("log").digest("hex") } });
     assert.equal(upload.status, 200); await upload.json();
-    for (const path of [`${conversationPath}/events`]) {
+    for (const path of [`${conversationPath}/events`, `${followupPath}/events`]) {
       const response = await fetch(origin + path, { headers: { ...cookieHeaders, "Last-Event-ID": "7" } });
       assert.equal(response.status, 200); assert.equal(await response.text(), wire);
     }
   });
-  assert.equal(calls.length, 5);
+  assert.equal(calls.length, 9);
 });
 
 for (const kind of ["USER_RESULT", "AUDIT_BUNDLE"]) {
@@ -259,7 +274,7 @@ for (const [status, code, message] of [
   [401, "AUTH_REQUIRED", "登录已失效，请重新登录。"],
   [503, "AUTH_UNAVAILABLE", "登录验证暂时不可用，请稍后重试。"],
 ]) {
-  for (const route of ["api", "events", "download"]) {
+  for (const route of ["api", "events", "followups", "followup-events", "download"]) {
     test(`backend ${code} reaches ${route} with fixed safe message and unchanged status`, async () => {
       let calls = 0;
       const fixture = artifactFixture();
@@ -269,7 +284,7 @@ for (const [status, code, message] of [
         return authFailure(status, code);
       } }, async (origin) => {
         const path = { api: "/api/agent/conversations", events: `${conversationPath}/events`,
-          download: reportDownloadPath }[route];
+          followups: followupPath, "followup-events": `${followupPath}/events`, download: reportDownloadPath }[route];
         const response = await fetch(origin + path, { headers: cookieHeaders });
         assert.equal(response.status, status);
         assert.deepEqual(await response.json(), { ok: false, data: null,

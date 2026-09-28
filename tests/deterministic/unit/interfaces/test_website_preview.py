@@ -15,7 +15,12 @@ def test_offline_report_preview_samples_follow_the_actual_response_contract():
         cwd=root, capture_output=True, check=True, text=True, encoding="utf-8", timeout=15,
     )
     samples = json.loads(result.stdout)
-    assert len(samples) == 8
+    assert len(samples) == 9
+    assert [sample["label"] for sample in samples[:8]] == [
+        "完整结果", "部分结果", "暂无法确定", "等待结果", "未生成报告", "归档状态未知", "通用 Markdown", "历史报告",
+    ]
+    assert samples[8]["label"] == "旧报告追问"
+    assert samples[8]["followup_snapshot_status"] == "UNAVAILABLE"
     for sample in samples:
         envelope = sample["response"]
         assert envelope["ok"] is True and envelope["error"] is None

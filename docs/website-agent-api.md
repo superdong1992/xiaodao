@@ -6,6 +6,8 @@
 
 已接入 8.2 的网站，请按 [2026-09-21～22 增量适配清单](website-agent-changes-2026-09-22.md)核对通用日志、赞踩、历史过期和下载处理。
 
+报告后的解释、质疑和文字补充请接入[报告追问](website-report-followup.md)。追问使用独立接口和 schema_version=1 的事件流，不修改正式报告和赞踩。新页面在同一会话内连续追问；独立定位统一新建对话。原消息接口的新轮行为仍保留兼容，但追问失败后不能退回消息接口。
+
 适用于 xiaodao `8.2.0`、V11 / `v11-contract-r2`。网站把用户原话和日志交给 xiaodao，展示追问、执行进度和经过服务端验证的定位报告。一个会话包含多轮独立诊断，历史消息、追问和结果按轮次保留。网站只需接入会话和附件两类接口：页面所需的信息从会话接口读取，文件单独流式传输。会话查询响应的版本为 `schema_version=3`；SSE 为 schema_version=2，报告内部数据格式仍为 schema 3。
 
 首次接入先读 [部署后快速接入与联调清单](website-agent-quickstart.md)。本文是完整接口参考。在线入口是 xiaodao 服务的 `/docs` 和 `/openapi.json`；仓库保存 [OpenAPI 快照](../schemas/v2/web-api.openapi.snapshot.json)。快照保留底层 `trusted_header` 接口合同，生产默认 Redis 模式的在线文档会改为 Cookie 鉴权。联调前核对线上 `info.version`、路由和鉴权配置，不能假设已部署服务与当前源码一致。
@@ -19,9 +21,9 @@
 3. 订阅 SSE。选中 Skill 后，服务端先从已有消息（包括首条原文）提取所需参数，并提交通过校验的部分；此时显示 `INTAKE` 的整理进度。采用结果后，`assistant.question` 只列出仍未满足的要求，用户继续调用消息接口回答。没有剩余要求时不额外追问。
 4. 初次打开或刷新调用 `GET /api/v1/agent/conversations/{conversation_id}`，一次获取状态、历史、报告和下载信息。收到 `result.available` 且页面尚无报告时，用同一路径加 `?include=report` 读取 `data.result`。采用网站示例时前缀是 `/api/agent`。不要等待 ZIP 才展示报告。
 5. `archive.updated` 的状态变为 `READY` 后提供 ZIP 下载按钮。用户点击并确认包含原始目标日志后才下载。
-6. 只有当前轮的 `conversation.completed` 才关闭本轮订阅；旧轮完成事件不能关闭新轮订阅。本轮结束后可在同一会话发送新问题，服务端创建新轮；重新建立订阅以接收新轮事件。
+6. 只有当前轮的 `conversation.completed` 才关闭本轮订阅；旧轮完成事件不能关闭新轮订阅。报告后的解释和补充使用独立 followups 接口；独立定位统一新建对话。旧客户端仍可在终态会话发送新问题开启新轮，这是兼容行为，不用于报告追问。
 
-关闭页面或断开事件流不会停止后台任务。刷新页面后可查询会话快照并回放历史。服务重启后，未完成任务会明确标为 `INTERRUPTED`；用户可在原会话发送新问题开始下一轮。任务失败或中断后，当前追问会清空，页面按 `failure` 展示结束原因，历史问题仍可回看。已完成报告保留，待生成 ZIP 继续按既有归档机制恢复。
+关闭页面或断开事件流不会停止后台任务。刷新页面后可查询会话快照并回放历史。服务重启后，未完成任务会明确标为 `INTERRUPTED`；新页面引导用户新建对话再次定位。任务失败或中断后，当前诊断补充问题会清空，页面按 `failure` 展示结束原因，历史问题仍可回看。已完成报告保留，待生成 ZIP 继续按既有归档机制恢复。
 
 全部用户原话保存在会话历史中。关联 Case 的 `raw_problem_text` 保留创建任务的完整用户原话，`statement` 和 `actual_behavior` 使用同一文本。其余问题字段使用 MCP 客户端的固定中性默认值，初始事实为空；`expected_behavior` 不要求用户单独填写。后续消息按当前 OPEN requirements 补充，不拼接进 `raw_problem_text`；网站展示聊天历史时读取会话消息。只有附件、没有问题文本时，服务端先提示用户提供问题原话。
 
@@ -52,10 +54,14 @@
 | 会话 | `PATCH /api/v1/agent/conversations/{conversation_id}` | 修改标题，JSON：`title`，1 到 80 个字符 |
 | 会话 | `POST /api/v1/agent/conversations/{conversation_id}/stop` | 停止指定轮次，JSON：稳定 `request_id` 和 `run_id` |
 | 会话 | `DELETE /api/v1/agent/conversations/{conversation_id}` | 删除会话，无请求体；按会话 ID 幂等 |
-| 会话 | `POST /api/v1/agent/conversations/{conversation_id}/messages` | 发送问题、补充回答或附件引用，JSON：`request_id`、可空 `text`、`attachment_ids` |
+| 会话 | `POST /api/v1/agent/conversations/{conversation_id}/messages` | 发送问题、补充回答或附件引用，JSON：`request_id`、可空 `text`、`attachment_ids`、可选 `target_run_id` |
 | 会话 | `GET /api/v1/agent/conversations/{conversation_id}` | 一次返回状态、进度、追问、失败、历史、完整报告和下载信息 |
 | 会话 | `GET /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/feedback` | 指定报告的评价资格与当前投票，无请求体 |
 | 会话 | `PUT /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/feedback` | JSON：`request_id`、`rating`（`LIKE` 或 `DISLIKE`） |
+| 会话 | `GET /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups` | 指定报告的追问快照，支持 `cursor`、`limit`，默认最新 50 条、最大 100 条 |
+| 会话 | `POST /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups` | 提交追问，JSON：稳定 `request_id` 和非空 `text`；会调用模型 |
+| 会话 | `GET /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups/events` | 独立追问 SSE，可带 `Last-Event-ID`，不混入诊断事件流 |
+| 会话 | `POST /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups/{followup_id}/stop` | 停止指定追问，JSON：稳定 `request_id` |
 | 会话 | `GET /api/v1/agent/conversations/{conversation_id}/events` | SSE 历史回放和实时订阅；可带 `Last-Event-ID` |
 | 会话 | `GET /api/v1/agent/conversations/{conversation_id}/files/{artifact_id}/content` | 下载文件，可用 `run_id` 固定历史轮次 |
 | 附件 | `POST /api/v1/agent/attachments` | 预约日志上传，JSON 含 `conversation_id` 和文件元数据 |
@@ -63,7 +69,7 @@
 
 赞踩接入、响应格式、换票和错误处理见[通用定位经验库与网站赞踩接入](generic-feedback-memory.md)。评价接口不接受查询参数，`request_id` 最多 128 个 Unicode 字符；仅已交付的通用定位 V2 正式报告支持评价，资格由服务端判断。前端负责按钮，不新增 SSE 事件。
 
-会话 GET 支持 `include`、`run_id`、`history_before`、`history_limit`。不传时加载 `history,report,artifacts`；`include=none` 只返回状态、追问、最新阶段和事件游标；也可传 `include=report`、`include=artifacts` 或不重复的逗号组合。目录查询支持 `cursor`、`limit`；文件支持 `run_id`；其余路由不接受查询参数。未知项、重复项和重复 `include` 参数返回明确校验错误。
+会话 GET 支持 `include`、`run_id`、`history_before`、`history_limit`。不传时加载 `history,report,artifacts`；`include=none` 只返回状态、追问、最新阶段和事件游标；也可传 `include=report`、`include=artifacts` 或不重复的逗号组合。目录和追问列表查询支持 `cursor`、`limit`；文件支持 `run_id`；其余路由不接受查询参数。未知项、重复项和重复 `include` 参数返回明确校验错误。
 
 返回字段固定，`included` 明确本次加载的部分。未加载的 `history`、`attachments`、`result`、`artifacts` 为 null；空数组表示已加载且没有记录。前端只更新本次加载的部分，不能用 null 清空此前的报告。`report_state` 表示业务可用性，`READY` 与 `result=null` 可以同时出现，含义是本次没有请求报告。
 
@@ -110,7 +116,7 @@ xiaodao 后端的 `WEBSITE_AUTH_MODE` 默认是 `redis`。网站 BFF 透传 Cook
 
 Redis 地址在 Linux 后端预留为 `WEBSITE_REDIS_HOST=`，内网部署时填 IP 或主机名；`WEBSITE_REDIS_PORT=6379`、`WEBSITE_REDIS_DB=0`，可选 `WEBSITE_REDIS_USERNAME`、`WEBSITE_REDIS_PASSWORD`，`WEBSITE_REDIS_SSL=false`。完整配置见[部署说明](website-redis-deployment.md)。
 
-会话、上传、下载、反馈和 SSE 请求均透传 Cookie，后端使用同一工号识别用户。原有会话归属检查继续生效。
+会话、上传、下载、反馈、追问和两类 SSE 请求均透传 Cookie，后端使用同一工号识别用户。原有会话归属检查继续生效。
 
 旧 BFF 仍可配合 `WEBSITE_AUTH_MODE=trusted_header` 和原 `WEBSITE_AUTH_MODULE` 使用。切换时保留原命名空间，并确认旧 `user.id` 对应 Redis 中的 `user.userid`，以继续访问历史会话。旧模式会改写创建请求的 `request_id`，切换前先确认未完成创建请求的结果。
 
@@ -255,6 +261,7 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `SendMessageBody` | `request_id` | 此条消息的稳定请求标识。 |
 | `SendMessageBody` | `text` | 用户原话；可省略或为 `null`，不能与附件列表同时为空。 |
 | `SendMessageBody` | `attachment_ids` | 当前会话内已经上传完成的附件 UUID 数组。 |
+| `SendMessageBody` | `target_run_id` | 协议为兼容旧客户端允许省略或为 null；新网站的诊断补充必须填写。只允许投递到仍未交付报告的当前活动轮次，否则返回 `AGENT_RUN_CHANGED`；先刷新原轮次，再把报告后的文字送到 followups。 |
 | `PrepareAgentAttachmentBody` | `conversation_id` | 已创建且归当前用户所有的会话 UUID。 |
 | `PrepareAgentAttachmentBody` | `request_id` | 本次预约的稳定请求标识。 |
 | `PrepareAgentAttachmentBody` | `name` | 不含目录的压缩日志文件名。 |
@@ -348,7 +355,62 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 
 不适用报告返回 `409 / AGENT_FEEDBACK_UNSUPPORTED`，重试改参数返回 `409 / AGENT_IDEMPOTENCY_CONFLICT`，反馈存储配额已满返回 `429 / AGENT_FEEDBACK_LIMIT_EXCEEDED`。浏览器封装、完整错误处理及启用条件见[经验库与赞踩接入说明](generic-feedback-memory.md)。
 
-### 会话管理和历史字段
+### 报告追问字段
+
+以下模型独立于原会话 schema 3 和诊断事件 schema 2。GET 最新页后，从其 `last_event_id` 订阅独立追问流；加载更早页不会改变实时游标。完整接入与恢复规则见[报告追问说明](website-report-followup.md)。
+
+| 模型 | 字段 | 含义 |
+| --- | --- | --- |
+| `FollowupRequest` | `request_id` | 1 到 128 个 Unicode 字符，不能全为空白；同一逻辑请求重试保持原 ID。 |
+| `FollowupRequest` | `text` | 非空白文字，最多 65536 字符且最多 65536 UTF-8 字节；不接受附件。 |
+| `FollowupStopRequest` | `request_id` | 停止操作的稳定请求 ID，限制与提交相同。 |
+| `FollowupFailure` | `code` | `AGENT_FOLLOWUP_FAILED`、`AGENT_FOLLOWUP_INTERRUPTED` 或 `AGENT_FOLLOWUP_INPUT_CHANGED`。 |
+| `FollowupFailure` | `message` | 固定的安全中文失败说明，不包含模型原文、堆栈或内部路径。 |
+| `FollowupItem` | `followup_id` | 追问 UUID。 |
+| `FollowupItem` | `run_id` | 追问所属报告的轮次 UUID。 |
+| `FollowupItem` | `request_id` | 提交时的原请求 ID，用于刷新后对上未确认提交。 |
+| `FollowupItem` | `ordinal` | 该报告内从 1 开始的问答顺序。 |
+| `FollowupItem` | `status` | `QUEUED`、`RUNNING`、`CANCELLING`、`COMPLETED`、`FAILED`、`INTERRUPTED` 或 `CANCELLED`。 |
+| `FollowupItem` | `context_mode` | `REPORT_ONLY` 仅依据报告和已有问答，或 `REPORT_AND_LOGS` 可结合原日志。 |
+| `FollowupItem` | `text` | 保存的原始追问文字。 |
+| `FollowupItem` | `answer_markdown` | 完成后返回 Markdown 答复，最多 65536 UTF-8 字节；其他状态为 null。 |
+| `FollowupItem` | `failure` | 失败或中断时返回 `FollowupFailure`，其他状态为 null。 |
+| `FollowupItem` | `created_at` | 追问首次保存的 UTC 时间。 |
+| `FollowupItem` | `updated_at` | 追问状态最近变化的 UTC 时间。 |
+| `FollowupView` | `schema_version` | 追问快照版本，固定为 `1`。 |
+| `FollowupView` | `conversation_id` | 路径指定的会话 UUID。 |
+| `FollowupView` | `run_id` | 路径指定的报告轮次 UUID。 |
+| `FollowupView` | `can_ask` | 当前能否继续提问，由服务端资格、忙状态和限额决定。 |
+| `FollowupView` | `reason` | 不能提问的原因：`DISABLED`、`UNSUPPORTED`、`EXPIRED`、`BUSY`、`LIMIT_EXCEEDED` 或 `CONTEXT_LIMIT`；可以提问时为 null。 |
+| `FollowupView` | `snapshot_status` | 原日志副本状态：`DISABLED`、`UNAVAILABLE`、`PENDING`、`BUILDING`、`READY` 或 `FAILED`。未就绪仍可仅依据报告提问。 |
+| `FollowupView` | `active_followup` | 会话级活动追问，可属于另一轮；停止时使用此项的 run_id，不并入当前报告列表。 |
+| `FollowupView` | `items` | 本页问答，按 ordinal 升序；默认返回最新 50 条。 |
+| `FollowupView` | `next_cursor` | 加载更早问答的 opaque 游标，无更早项时为 null。 |
+| `FollowupView` | `last_event_id` | 此报告的最新追问事件序号，与诊断流游标完全独立。 |
+| `FollowupReceipt` | `conversation_id` | 接收追问的会话 UUID。 |
+| `FollowupReceipt` | `run_id` | 接收追问的报告轮次 UUID。 |
+| `FollowupReceipt` | `followup_id` | 已持久接收的追问 UUID。 |
+| `FollowupReceipt` | `request_id` | 原提交请求 ID。 |
+| `FollowupReceipt` | `event_id` | 接收事件序号，不能用它跳过尚未处理的流事件。 |
+| `FollowupReceipt` | `status` | 固定为 `ACCEPTED`；回执只确认接收，不能覆盖最新任务状态。 |
+| `FollowupStopReceipt` | `conversation_id` | 被停止追问的会话 UUID。 |
+| `FollowupStopReceipt` | `run_id` | 被停止追问的报告轮次 UUID。 |
+| `FollowupStopReceipt` | `followup_id` | 被停止追问的 UUID。 |
+| `FollowupStopReceipt` | `request_id` | 原停止请求 ID。 |
+| `FollowupStopReceipt` | `event_id` | 对应状态事件序号；停止后重新 GET 获取最新状态。 |
+| `FollowupStopReceipt` | `status` | `CANCELLING`、`CANCELLED` 或 `ALREADY_FINISHED`；不覆盖已收到的更新。 |
+| `FollowupEvent` | `schema_version` | 独立追问事件版本，固定为 `1`。 |
+| `FollowupEvent` | `sequence` | 此报告内的事件序号，成功处理后才推进游标。 |
+| `FollowupEvent` | `conversation_id` | 所属会话 UUID，必须匹配选中会话。 |
+| `FollowupEvent` | `run_id` | 所属报告轮次 UUID，必须匹配选中报告。 |
+| `FollowupEvent` | `followup_id` | 事件对应追问 UUID，必须与 data 一致。 |
+| `FollowupEvent` | `type` | `followup.accepted` 或 `followup.updated`；从 JSON 读取，不使用命名 SSE 监听器。 |
+| `FollowupEvent` | `created_at` | 事件持久保存的时间。 |
+| `FollowupEvent` | `data` | 最新 `FollowupItem`，用于替换该追问的状态和答复。 |
+| `FollowupEventBatch` | `events` | 服务内部一次读取的追问事件数组；HTTP 按 SSE 逐条发送。 |
+| `FollowupEventBatch` | `stream_closed` | 当前轮的追问是否全部终止且没有后续事件。 |
+
+### 会话管理字段对照
 
 | 模型 | 字段 | 含义与使用方式 |
 | --- | --- | --- |
@@ -630,6 +692,10 @@ Linux 启动命令、Redis 配置及反向代理要求见 [示例 README](../exa
 | 网站示例路径 | 用途 |
 | --- | --- |
 | `GET /api/agent/conversations/{id}` | 一次返回完整会话，支持与上游相同的 include 参数 |
+| `GET /api/agent/conversations/{id}/runs/{run_id}/followups` | 查询所选报告的追问快照和更早页 |
+| `POST /api/agent/conversations/{id}/runs/{run_id}/followups` | 提交文字追问 |
+| `GET /api/agent/conversations/{id}/runs/{run_id}/followups/events` | 独立追问 SSE，透传 Last-Event-ID |
+| `POST /api/agent/conversations/{id}/runs/{run_id}/followups/{followup_id}/stop` | 停止指定追问 |
 | `POST /api/agent/attachments` | 预约上传；JSON 必须带 conversation_id，先检查该会话是否属于当前用户 |
 | `GET /api/agent/conversations/{id}/files/{artifact_id}/content` | 从会话核验文件身份后下载 |
 | 上一下载路径加 `?download=archive&acknowledge_raw_logs=true` | 用户确认原始日志提示后下载结果 ZIP |

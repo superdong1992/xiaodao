@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from problem_locator.agent.models import AgentStoreError
+from problem_locator.storage.database import dialect_for, lock_conversation, lock_key, try_lock_conversation
 
 from .models import FeedbackRequest, FeedbackSource, FeedbackView
 
@@ -61,6 +62,7 @@ class MemoryStore:
 
     @staticmethod
     def _scope(db, conversation_id, run_id, owner_key):
+        lock_conversation(db, conversation_id)
         owner = db.execute("SELECT owner_key,deleted_at FROM agent_conversations WHERE conversation_id=?",
                            (conversation_id,)).fetchone()
         if owner_key is None or owner is None or owner[1] is not None or owner[0] != owner_key:
@@ -88,6 +90,9 @@ class MemoryStore:
         request = FeedbackRequest(request_id=request_id, rating=rating)
         now = self._now()
         with self.repository.database_transaction() as db:
+            # This short, memory-only admission lock also protects the global
+            # source/task quotas and owner-scoped request IDs across reports.
+            lock_key(db, "memory", "admission")
             case_id = self._scope(db, conversation_id, run_id, owner_key)
             if source is None:
                 raise AgentStoreError("AGENT_FEEDBACK_UNSUPPORTED", "这份报告暂不支持反馈。", 409)
@@ -141,9 +146,14 @@ class MemoryStore:
     def claim_task(self):
         now = self._now()
         with self.repository.database_transaction() as db:
-            row = _one(db, "SELECT t.* FROM memory_tasks t JOIN agent_conversations c ON c.conversation_id=t.conversation_id JOIN agent_conversation_runs r ON r.run_id=t.run_id AND r.conversation_id=t.conversation_id WHERE t.status='PENDING' AND t.created_at>? AND c.deleted_at IS NULL ORDER BY t.created_at,t.task_id LIMIT 1",
+            suffix = " FOR UPDATE OF t SKIP LOCKED" if dialect_for(db).postgres else ""
+            row = _one(db, "SELECT t.* FROM memory_tasks t JOIN agent_conversations c ON c.conversation_id=t.conversation_id JOIN agent_conversation_runs r ON r.run_id=t.run_id AND r.conversation_id=t.conversation_id WHERE t.status='PENDING' AND t.created_at>? AND c.deleted_at IS NULL ORDER BY t.created_at,t.task_id LIMIT 1" + suffix,
                        (_before(now, SOURCE_RETENTION_DAYS),))
             if row is None:
+                return None
+            if not try_lock_conversation(db, row["conversation_id"]):
+                return None
+            if db.execute("SELECT 1 FROM agent_conversations WHERE conversation_id=? AND deleted_at IS NULL", (row["conversation_id"],)).fetchone() is None:
                 return None
             db.execute("UPDATE memory_tasks SET status='RUNNING',updated_at=? WHERE task_id=? AND status='PENDING'",
                        (now, row["task_id"]))
@@ -155,6 +165,7 @@ class MemoryStore:
         content = parse_card_json(card_json)
         now = self._now()
         with self.repository.database_transaction() as db:
+            self._lock_task_owner(db, task_id)
             task = _one(db, "SELECT * FROM memory_tasks WHERE task_id=? AND status='RUNNING'", (task_id,))
             if task is None:
                 return False
@@ -171,9 +182,17 @@ class MemoryStore:
 
     def fail_task(self, task_id):
         with self.repository.database_transaction() as db:
+            self._lock_task_owner(db, task_id)
             result = db.execute("UPDATE memory_tasks SET status='FAILED',active=0,problem_text=NULL,report_markdown=NULL,updated_at=? WHERE task_id=? AND status IN ('PENDING','RUNNING')",
                                 (self._now(), task_id))
             return result.rowcount == 1
+
+    @staticmethod
+    def _lock_task_owner(db, task_id):
+        if dialect_for(db).postgres:
+            row = db.execute("SELECT conversation_id FROM memory_tasks WHERE task_id=?", (task_id,)).fetchone()
+            if row is not None:
+                lock_conversation(db, row[0])
 
     def recover(self):
         with self.repository.database_transaction() as db:

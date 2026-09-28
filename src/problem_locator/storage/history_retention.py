@@ -17,6 +17,7 @@ from pydantic import TypeAdapter
 
 from problem_locator.contracts import OpaqueId
 from problem_locator.diagnostics import log_event
+from .database import dialect_for, lock_conversation, lock_key
 from .paths import job_workspace_names
 
 HISTORY_RETENTION_SECONDS = 7 * 24 * 60 * 60
@@ -114,7 +115,8 @@ class HistoryRetentionService:
 
     def _retry_paths(self):
         with self.repository.database_read() as db:
-            rows = db.execute("SELECT cleanup_id,manifest FROM history_cleanup_jobs ORDER BY rowid").fetchall()
+            order = dialect_for(db).order_column()
+            rows = db.execute(f"SELECT cleanup_id,manifest FROM history_cleanup_jobs ORDER BY {order}").fetchall()
         changed, failures = False, []
         for cleanup_id, raw in rows:
             try:
@@ -146,35 +148,57 @@ class HistoryRetentionService:
             return True
 
     def _prune_keys_and_tombstones(self, cutoff):
-        with self.repository.database_transaction() as db:
-            before = db.total_changes
+        changed = False
+        with self.repository.database_read() as db:
             expired = db.execute("SELECT k.request_hash,k.conversation_id FROM agent_create_keys k "
                 "JOIN agent_create_key_times t USING(request_hash) WHERE t.created_at<=?", (cutoff,)).fetchall()
-            for key, cid in expired:
-                db.execute("DELETE FROM agent_create_keys WHERE request_hash=?", (key,))
+        for key, cid in expired:
+            with self.repository.database_transaction() as db:
+                # Creation uses this same order. Each expired key owns a short
+                # transaction so cleanup cannot hold unrelated conversations.
+                lock_key(db, "create-request", key)
+                lock_conversation(db, cid)
+                if db.execute("SELECT 1 FROM agent_create_keys k JOIN agent_create_key_times t USING(request_hash) "
+                        "WHERE k.request_hash=? AND k.conversation_id=? AND t.created_at<=?", (key, cid, cutoff)).fetchone() is None:
+                    continue
+                changed = db.execute("DELETE FROM agent_create_keys WHERE request_hash=?", (key,)).rowcount > 0 or changed
                 db.execute("DELETE FROM agent_create_key_times WHERE request_hash=?", (key,))
                 # The request column has a UNIQUE constraint independent of the
                 # retry index. Release both together when the seven days end.
                 if db.execute("SELECT 1 FROM agent_create_keys WHERE conversation_id=?", (cid,)).fetchone() is None:
                     db.execute("UPDATE agent_conversations SET request_id=? WHERE conversation_id=?",
                                ("expired:" + cid, cid))
+        with self.repository.database_read() as db:
             rows = db.execute("SELECT conversation_id FROM agent_conversations WHERE cleanup_status='DELETED' "
                 "AND deleted_at<=?", (cutoff,)).fetchall()
-            for (cid,) in rows:
+        for (cid,) in rows:
+            with self.repository.database_transaction() as db:
+                keys = db.execute("SELECT request_hash FROM agent_create_keys WHERE conversation_id=? ORDER BY request_hash", (cid,)).fetchall()
+                for (key,) in keys:
+                    lock_key(db, "create-request", key)
+                lock_conversation(db, cid)
+                if db.execute("SELECT 1 FROM agent_conversations WHERE conversation_id=? AND cleanup_status='DELETED' "
+                        "AND deleted_at<=?", (cid, cutoff)).fetchone() is None:
+                    continue
                 db.execute("DELETE FROM agent_create_key_times WHERE request_hash IN "
                     "(SELECT request_hash FROM agent_create_keys WHERE conversation_id=?)", (cid,))
                 for table in ("agent_create_keys", "agent_deleted_requests", "agent_cleanup_jobs", "agent_conversations"):
-                    db.execute(f"DELETE FROM {table} WHERE conversation_id=?", (cid,))
-            changed = db.total_changes > before
+                    changed = db.execute(f"DELETE FROM {table} WHERE conversation_id=?", (cid,)).rowcount > 0 or changed
         self._database_dirty |= changed
         return changed
 
     def _prune_run(self, db, cid, run_id, cutoff):
+        lock_conversation(db, cid)
         row = db.execute("SELECT r.body,c.current_run_id,c.body FROM agent_conversation_runs r "
             "JOIN agent_conversations c USING(conversation_id) WHERE r.conversation_id=? AND r.run_id=? "
             "AND c.deleted_at IS NULL", (cid, run_id)).fetchone()
         if row is None or row[1] == run_id or not HistoryRetentionService._expired(json.loads(row[0]), cutoff):
             return False
+        followup_store = getattr(self.store, "followup_store", None)
+        if followup_store is not None:
+            if followup_store.busy(db, cid, run_id=run_id):
+                return False
+            followup_store.purge(db, cid, run_id=run_id)
         memory_store = getattr(self.store, "memory_store", None)
         if memory_store is not None:
             memory_store.expire_sources(db, cid, run_id=run_id)
@@ -196,6 +220,10 @@ class HistoryRetentionService:
             if lease is None:
                 return False
             leases.enter_context(lease)
+            followup_store = getattr(self.store, "followup_store", None)
+            with self.repository.database_read() as db:
+                if followup_store is not None and followup_store.busy(db, cid, run_id=run_id):
+                    return False
             if case_id is not None:
                 lease = self.repository.case_cleanup_if_idle(case_id)
                 if lease is None or not self._idle([case_id]):
@@ -210,9 +238,12 @@ class HistoryRetentionService:
                 if manifest is None or not self._uploads_idle(manifest["attachment_ids"]):
                     return False
                 with self.repository.database_read() as db:
-                    workspaces = [row[0] for row in db.execute("SELECT json_extract(payload,'$.workspace_id') "
-                        "FROM agent_dispatches WHERE run_id=? AND json_extract(payload,'$.workspace_id') IS NOT NULL", (run_id,))]
+                    workspace = dialect_for(db).json_text("payload", "$.workspace_id")
+                    workspaces = [row[0] for row in db.execute(f"SELECT {workspace} "
+                        f"FROM agent_dispatches WHERE run_id=? AND {workspace} IS NOT NULL", (run_id,))]
                     body = db.execute("SELECT body FROM agent_conversation_runs WHERE run_id=?", (run_id,)).fetchone()
+                    if followup_store is not None:
+                        workspaces.extend(followup_store.workspace_ids(db, cid, run_id=run_id))
                 if body is None:
                     return False
                 workspaces.extend(json.loads(body[0]).get("legacy_workspace_ids", []))
@@ -239,6 +270,9 @@ class HistoryRetentionService:
                 row = db.execute("SELECT deleted_at FROM agent_conversations WHERE conversation_id=?", (cid,)).fetchone()
                 if row is None or row[0] is not None:
                     return False
+                followup_store = getattr(self.store, "followup_store", None)
+                if followup_store is not None and followup_store.busy(db, cid):
+                    return False
                 runs = [(case_id, json.loads(raw)) for case_id, raw in db.execute(
                     "SELECT case_id,body FROM agent_conversation_runs WHERE conversation_id=?", (cid,))]
             if not runs or any(not self._expired(body, cutoff) for _, body in runs):
@@ -263,9 +297,10 @@ class HistoryRetentionService:
 
     def _expire_uploads(self, cutoff):
         with self.repository.database_read() as db:
+            created = dialect_for(db).json_text("a.body", "$.created_at")
             rows = db.execute("SELECT a.attachment_id,a.conversation_id FROM agent_attachments a "
                 "JOIN agent_conversations c USING(conversation_id) WHERE c.deleted_at IS NULL "
-                "AND json_extract(a.body,'$.created_at')<=?", (cutoff,)).fetchall()
+                f"AND {created}<=?", (cutoff,)).fetchall()
         changed, failures = False, []
         for aid, cid in rows:
             try:
@@ -285,25 +320,32 @@ class HistoryRetentionService:
                 workspace_ids=[], upload_ids=[aid], paths=[f"resources/conversations/{aid}"])
             self._validate_manifest(manifest)
             def remove(db):
+                lock_conversation(db, cid)
+                dialect = dialect_for(db)
                 row = db.execute("SELECT body FROM agent_attachments WHERE attachment_id=? AND conversation_id=?", (aid, cid)).fetchone()
                 if row is None or json.loads(row[0])["created_at"] > cutoff:
                     return False
                 # A retained run may still display or use its selected
                 # attachment, even after the original upload is seven days old.
-                referenced = db.execute("SELECT 1 FROM agent_messages m,json_each(m.body,'$.attachment_ids') x "
+                attachments = dialect.json_array("m.body", "$.attachment_ids", "x")
+                referenced = db.execute(f"SELECT 1 FROM agent_messages m,{attachments} "
                     "WHERE m.conversation_id=? AND x.value=? LIMIT 1", (cid, aid)).fetchone()
-                pending_restart = db.execute("SELECT 1 FROM agent_generic_restarts r,"
-                    "json_each(r.payload,'$.message.attachment_ids') x WHERE r.status IN ('PENDING','COMMITTED') "
+                attachments = dialect.json_array("r.payload", "$.message.attachment_ids", "x")
+                pending_restart = db.execute(f"SELECT 1 FROM agent_generic_restarts r,{attachments} "
+                    "WHERE r.status IN ('PENDING','COMMITTED') "
                     "AND x.value=? LIMIT 1", (aid,)).fetchone()
                 if referenced or pending_restart or db.execute("SELECT 1 FROM agent_attachment_imports WHERE attachment_id=?", (aid,)).fetchone():
                     return False
+                attachment = dialect.json_text("body", "$.data.attachment_id")
                 maximum = db.execute("SELECT max(sequence) FROM agent_events WHERE conversation_id=? "
-                    "AND json_extract(body,'$.data.attachment_id')=?", (cid, aid)).fetchone()[0]
+                    f"AND {attachment}=?", (cid, aid)).fetchone()[0]
                 row = db.execute("SELECT body FROM agent_conversations WHERE conversation_id=?", (cid,)).fetchone()
+                if row is None:
+                    return False
                 head = json.loads(row[0])
                 head["events_pruned_through"] = max(head.get("events_pruned_through", 0), maximum or 0)
                 db.execute("UPDATE agent_conversations SET body=? WHERE conversation_id=?", (_json(head), cid))
-                db.execute("DELETE FROM agent_events WHERE conversation_id=? AND json_extract(body,'$.data.attachment_id')=?", (cid, aid))
+                db.execute(f"DELETE FROM agent_events WHERE conversation_id=? AND {attachment}=?", (cid, aid))
                 db.execute("DELETE FROM agent_attachments WHERE attachment_id=?", (aid,))
                 return True
             cleanup_id = str(uuid.uuid5(uuid.UUID(aid), "history-upload-retention-v1"))
@@ -354,10 +396,13 @@ class HistoryRetentionService:
                     return False
             changed = self._prune_keys_and_tombstones(cutoff) or changed
             with self.repository.database_read() as db:
+                dialect = dialect_for(db)
+                completed = dialect.json_text("r.body", "$.completed_at")
+                updated = dialect.json_text("r.body", "$.updated_at")
                 rows = db.execute("SELECT r.conversation_id,r.run_id,r.case_id,c.current_run_id "
                     "FROM agent_conversation_runs r JOIN agent_conversations c USING(conversation_id) "
-                    "WHERE c.deleted_at IS NULL AND coalesce(json_extract(r.body,'$.completed_at'),"
-                    "json_extract(r.body,'$.updated_at'))<=? ORDER BY r.rowid", (cutoff,)).fetchall()
+                    f"WHERE c.deleted_at IS NULL AND coalesce({completed},{updated})<=? "
+                    f"ORDER BY {dialect.order_column('r')}", (cutoff,)).fetchall()
             for cid, run_id, case_id, current in rows:
                 if run_id == current:
                     changed = attempt(lambda: self._expire_conversation(cid, cutoff)) or changed

@@ -1,3 +1,6 @@
+import { validFollowupId, validFollowupRequestId, validFollowupText, validateFollowupView,
+  validateFollowupReceipt, validateFollowupEvent } from "./followup-contract.js";
+
 /**
  * 浏览器 → 网站同源后端。成功时直接返回 data，失败时抛 AgentApiError。
  * 不生成请求 ID、不自动重试、不轮询；由页面保存同一逻辑请求的 ID 和内容。
@@ -83,6 +86,14 @@ export function createAgentClient({ basePath = "/api/agent", fetchImpl = globalT
       throw new TypeError("分页条数必须是 1 到 100 的整数。");
   };
   const withQuery = (path, query) => `${path}${query.size ? `?${query.toString().replaceAll("%2C", ",")}` : ""}`;
+  const followupPath = (id, runId) => {
+    if (!validFollowupId(id) || !validFollowupId(runId)) throw new TypeError("会话和轮次标识必须是小写规范 UUID。");
+    return `${conversationPath(id)}/runs/${runId}/followups`;
+  };
+  const checked = (validate) => {
+    try { return validate(); }
+    catch { throw new AgentApiError("追问响应与所选报告不一致或格式无效，请刷新后重试。", { status: 502, code: "WEBSITE_INVALID_RESPONSE" }); }
+  };
 
   return {
     conversations: {
@@ -131,6 +142,78 @@ export function createAgentClient({ basePath = "/api/agent", fetchImpl = globalT
         return feedbackResult(data, id, runId);
       },
       eventsUrl: (id) => `${conversationPath(id)}/events`,
+    },
+    followups: {
+      async list(id, runId, { cursor, limit, signal } = {}) {
+        const path = followupPath(id, runId), query = new URLSearchParams();
+        pageSize(limit);
+        if (cursor !== undefined) query.set("cursor", cursor);
+        if (limit !== undefined) query.set("limit", limit);
+        const data = await request(withQuery(path, query), { signal });
+        return checked(() => validateFollowupView(data, id, runId));
+      },
+      async send(id, runId, input) {
+        const path = followupPath(id, runId);
+        if (!input || Object.keys(input).length !== 2 || !validFollowupRequestId(input.request_id) || !validFollowupText(input.text))
+          throw new TypeError("追问只接受 request_id 和非空 text；request_id 最多 128 个字符，text 最多 65536 UTF-8 字节。");
+        const data = await post(path, { request_id: input.request_id, text: input.text });
+        return checked(() => validateFollowupReceipt(data, id, runId, input.request_id));
+      },
+      async stop(id, runId, followupId, input) {
+        const path = followupPath(id, runId);
+        if (!validFollowupId(followupId) || !input || Object.keys(input).length !== 1 || !validFollowupRequestId(input.request_id))
+          throw new TypeError("停止追问需要有效的 followup_id 和稳定 request_id。");
+        const data = await post(`${path}/${followupId}/stop`, { request_id: input.request_id });
+        return checked(() => validateFollowupReceipt(data, id, runId, input.request_id, followupId));
+      },
+      /** 消费独立追问流；只在 onEvent 成功后继续读取。断开不等于停止任务。 */
+      async events(id, runId, { after = 0, signal, onEvent } = {}) {
+        const path = followupPath(id, runId);
+        if (!Number.isSafeInteger(after) || after < 0 || typeof onEvent !== "function") throw new TypeError("请提供有效的事件游标和 onEvent。");
+        const combined = new Headers(typeof headers === "function" ? headers() : headers);
+        combined.delete("Content-Length"); combined.delete("X-Agent-Owner-Key");
+        combined.set("Accept", "text/event-stream"); combined.set("Last-Event-ID", String(after));
+        const response = await fetchImpl(`${path}/events`, { headers: combined, signal,
+          credentials: "same-origin", redirect: "error", cache: "no-store" });
+        if (!response.ok) {
+          const envelope = await response.json();
+          throw new AgentApiError(envelope?.error?.message ?? "追问事件暂时无法读取。", {
+            status: response.status, code: envelope?.error?.code, retryable: envelope?.error?.retryable === true,
+          });
+        }
+        if (!response.body || !response.headers.get("content-type")?.startsWith("text/event-stream")) {
+          await response.body?.cancel();
+          throw new AgentApiError("追问事件响应格式无效。", { status: 502, code: "WEBSITE_INVALID_RESPONSE" });
+        }
+        const reader = response.body.getReader(), decoder = new TextDecoder("utf-8", { fatal: true });
+        let buffer = "", data = [], frameLength = 0;
+        const abort = () => { void reader.cancel().catch(() => {}); };
+        signal?.addEventListener("abort", abort, { once: true });
+        try {
+          while (!signal?.aborted) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            buffer += decoder.decode(chunk.value, { stream: true });
+            let boundary;
+            while ((boundary = buffer.indexOf("\n")) !== -1) {
+              const line = buffer.slice(0, boundary).replace(/\r$/, ""); buffer = buffer.slice(boundary + 1);
+              frameLength += line.length;
+              if (frameLength > 1024 * 1024) throw new AgentApiError("追问事件超过大小上限。", { code: "WEBSITE_INVALID_RESPONSE" });
+              if (!line) {
+                if (data.length) {
+                  const event = checked(() => validateFollowupEvent(JSON.parse(data.join("\n")), id, runId));
+                  if (event.sequence > after) { await onEvent(event); after = event.sequence; }
+                }
+                data = []; frameLength = 0;
+              } else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+            }
+            if (buffer.length + frameLength > 1024 * 1024) throw new AgentApiError("追问事件超过大小上限。", { code: "WEBSITE_INVALID_RESPONSE" });
+          }
+        } finally {
+          signal?.removeEventListener("abort", abort);
+          await reader.cancel().catch(() => {}); reader.releaseLock();
+        }
+      },
     },
     attachments: {
       prepare: (id, metadata) => post(`${base}/attachments`, { ...metadata, conversation_id: id }),

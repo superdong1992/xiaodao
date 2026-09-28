@@ -1,6 +1,6 @@
 """Case-scoped live state and durable, lazily loaded terminal snapshots.
 
-The process owns active Cases. Only terminal Cases cross the SQLite durability
+The process owns active Cases. Only terminal Cases cross the database durability
 barrier; no active mutation scans historical Cases or their resource bytes.
 """
 from __future__ import annotations
@@ -25,8 +25,11 @@ from problem_locator.contracts import (
 )
 from .atomic import FileSync, Replacer, read_stable_file_bytes
 from .coordination import StorageCoordinationLock
+from .database import (PostgresDatabase, DatabaseOwnershipError, dialect_for, table_exists, table_names,
+                       lock_conversation, try_lock_conversation)
 from .layout import StorageLayout, UnsupportedDataFormatError
 from .platform import PlatformFileSync
+from .postgres_layout import preflight_postgres_root, initialize_postgres_root, root_identity
 
 _TERMINAL = frozenset({CaseStatus.RESOLVED, CaseStatus.PARTIALLY_RESOLVED,
                       CaseStatus.UNRESOLVED, CaseStatus.FAILED, CaseStatus.CANCELLED})
@@ -48,19 +51,21 @@ def _object_counts(state: StateFile) -> StateExportObjectCounts:
         recovery_processing_records=len(state.recovery_processing_records))
 
 class CaseStateRepository:
-    """An isolated revision domain per Case; SQLite contains completed work only."""
+    """An isolated revision domain per Case; durable storage holds completed work."""
 
     def __init__(self, data_root: Path, coordination_lock: StorageCoordinationLock,
                  clock: Clock, id_generator: IdGenerator, *, file_sync: FileSync | None = None,
                  replacer: Replacer | None = None,
                  execution_record_store: ExecutionRecordStore | None = None,
-                 read_file: Callable[[Path], bytes] = read_stable_file_bytes) -> None:
+                 read_file: Callable[[Path], bytes] = read_stable_file_bytes,
+                 database_url: str | None = None, database_pool_size: int = 8) -> None:
         self._layout = StorageLayout.at(data_root)
         self._clock = clock
         self._id_generator = id_generator
         self._file_sync = file_sync or PlatformFileSync()
         self._index_lock = threading.RLock()
         self._database_lock = threading.RLock()
+        self._database = None
         self._case_locks = weakref.WeakValueDictionary()
         self._live: dict[str, StateFile] = {}
         self._objects: dict[str, str] = {}
@@ -71,23 +76,63 @@ class CaseStateRepository:
         self.on_terminal: Callable[[str], None] = lambda case_id: None
         # Projection receives only the candidate aggregate and the shared SQL
         # transaction. It must never acquire a Case lock or re-read repository.
-        self.on_case_projection: Callable[[sqlite3.Connection, StateFile], None] | None = None
+        self.on_case_projection: Callable[[Any, StateFile], None] | None = None
         self.on_case_committed: Callable[[str], None] = lambda case_id: None
         try:
-            self._layout.initialize_v2_data_root(self._file_sync)
+            marker = None
+            if database_url is not None:
+                marker = preflight_postgres_root(self._layout)
+                self._database = PostgresDatabase(database_url, pool_size=database_pool_size)
+                self._database_lock = self._database.scope
+                self._db = self._database.proxy
+            else:
+                # Explicit reference/offline construction only. Production
+                # bootstrap validates DATABASE_URL before composing this class.
+                self._layout.initialize_v2_data_root(self._file_sync)
+                self._db = sqlite3.connect(self._layout.data_root / 'completed.sqlite3',
+                                          check_same_thread=False, isolation_level=None, timeout=30)
+                self._db.execute('PRAGMA journal_mode=WAL')
+                self._db.execute('PRAGMA synchronous=FULL')
+            with self.database_transaction() if self._database is not None else self._database_lock:
+                self._initialize_database(marker)
+            if self._database is not None:
+                initialize_postgres_root(self._layout, self._base.installation_id, self._file_sync)
+            self._file_sync.sync_directory(self._layout.data_root)
+        except DatabaseOwnershipError as exc:
+            if self._database is not None:
+                self._database.close()
+            raise _port_error(ErrorCode.INSTANCE_LOCKED, str(exc)) from exc
         except UnsupportedDataFormatError as exc:
-            raise _port_error(ErrorCode.STATE_SCHEMA_UNSUPPORTED,
-                '数据目录格式不受支持。请保留原目录；旧版 r1/r2 会话数据需先用 '
-                'problem-locator-data-upgrade 显式复制升级。') from exc
-        try:
-            self._db = sqlite3.connect(self._layout.data_root / 'completed.sqlite3',
-                                      check_same_thread=False, isolation_level=None, timeout=30)
-            self._db.execute('PRAGMA journal_mode=WAL')
-            self._db.execute('PRAGMA synchronous=FULL')
-            self._db.executescript("""
+            if self._database is not None:
+                self._database.close()
+            raise _port_error(ErrorCode.STATE_SCHEMA_UNSUPPORTED, str(exc)) from exc
+        except Exception:
+            if self._database is not None:
+                self._database.close()
+            elif hasattr(self, '_db'):
+                self._db.close()
+            # libpq configuration errors can echo credentials. Keep the safe
+            # initialization error while excluding the driver's exception chain.
+            raise _port_error(ErrorCode.STATE_CORRUPT, '无法打开已完成 Case 的数据库。') from None
+
+    def _initialize_database(self, marker):
+        db = self._db
+        postgres = dialect_for(db).postgres
+        if postgres:
+            if table_exists(db, 'metadata'):
+                current = dict(db.execute('SELECT key,value FROM metadata'))
+                if (current.get('storage_backend') != 'postgresql-v1'
+                        or current.get('data_root_identity') != root_identity(self._layout)
+                        or (marker is not None and current.get('installation_id') != marker['installation_id'])):
+                    raise UnsupportedDataFormatError('PostgreSQL 数据库与 DATA_ROOT 不匹配，请检查连接地址和数据目录。')
+            elif marker is not None or table_names(db):
+                raise UnsupportedDataFormatError('PostgreSQL 数据库没有匹配的安装标识；已有数据不能自动接入。')
+        blob = 'BYTEA' if postgres else 'BLOB'
+        order = ', storage_order BIGINT GENERATED ALWAYS AS IDENTITY' if postgres else ''
+        db.executescript(f"""
                 CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS completed_cases (
-                    case_id TEXT PRIMARY KEY, snapshot BLOB NOT NULL);
+                    case_id TEXT PRIMARY KEY, snapshot {blob} NOT NULL);
                 CREATE TABLE IF NOT EXISTS object_index (
                     object_id TEXT PRIMARY KEY, case_id TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS request_index (
@@ -96,28 +141,32 @@ class CaseStateRepository:
                     storage_key TEXT PRIMARY KEY, case_id TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS archive_tasks (
                     case_id TEXT PRIMARY KEY, status TEXT NOT NULL,
-                    payload BLOB NOT NULL, error TEXT);
+                    payload {blob} NOT NULL, error TEXT{order});
                 CREATE INDEX IF NOT EXISTS archive_tasks_status ON archive_tasks(status);
                 CREATE TABLE IF NOT EXISTS completed_case_retention (
                     case_id TEXT PRIMARY KEY, retained_at TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS completed_case_retention_age
                     ON completed_case_retention(retained_at);
                 CREATE TABLE IF NOT EXISTS history_cleanup_jobs (
-                    cleanup_id TEXT PRIMARY KEY, manifest TEXT NOT NULL);
+                    cleanup_id TEXT PRIMARY KEY, manifest TEXT NOT NULL{order});
             """)
-            self._db.execute("UPDATE archive_tasks SET status='PENDING' WHERE status='RUNNING'")
-            now = self._clock.now()
-            self._db.execute('INSERT OR IGNORE INTO metadata VALUES (?, ?)',
-                             ('installation_id', self._id_generator.new('installation')))
-            self._db.execute('INSERT OR IGNORE INTO metadata VALUES (?, ?)', ('created_at', now))
-            metadata = dict(self._db.execute('SELECT key, value FROM metadata'))
-            self._base = StateFile(schema_version=SCHEMA_VERSION, contract_revision=CONTRACT_REVISION,
-                generation=1, installation_id=metadata['installation_id'],
-                created_at=metadata['created_at'], updated_at=metadata['created_at'], runtime_epochs=[],
-                recovery_processing_records={}, cases={}, idempotency_records={})
-            self._file_sync.sync_directory(self._layout.data_root)
-        except (sqlite3.Error, OSError, ValueError) as exc:
-            raise _port_error(ErrorCode.STATE_CORRUPT, '无法打开已完成 Case 的数据库。') from exc
+        db.execute("UPDATE archive_tasks SET status='PENDING' WHERE status='RUNNING'")
+        now = self._clock.now()
+        db.execute('INSERT INTO metadata(key,value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING',
+                   ('installation_id', self._id_generator.new('installation')))
+        db.execute('INSERT INTO metadata(key,value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING', ('created_at', now))
+        if postgres:
+            for key, value in (('storage_backend', 'postgresql-v1'), ('data_root_identity', root_identity(self._layout))):
+                db.execute('INSERT INTO metadata(key,value) VALUES (?,?) ON CONFLICT(key) DO NOTHING', (key, value))
+        metadata = dict(db.execute('SELECT key, value FROM metadata'))
+        self._base = StateFile(schema_version=SCHEMA_VERSION, contract_revision=CONTRACT_REVISION,
+            generation=1, installation_id=metadata['installation_id'],
+            created_at=metadata['created_at'], updated_at=metadata['created_at'], runtime_epochs=[],
+            recovery_processing_records={}, cases={}, idempotency_records={})
+
+    @property
+    def database_errors(self):
+        return (sqlite3.Error,) if self._database is None else self._database.errors
 
     @property
     def layout(self) -> StorageLayout:
@@ -125,9 +174,13 @@ class CaseStateRepository:
 
     @contextmanager
     def database_read(self):
-        """Serialize access to the connection shared with durable adapters."""
-        with self._database_lock:
-            yield self._db
+        """Capture a consistent snapshot using an independent PostgreSQL lease."""
+        if self._database is not None:
+            with self._database.transaction(readonly=True) as db:
+                yield db
+        else:
+            with self._database_lock:
+                yield self._db
 
     def read_case_snapshot_with(self, case_id: str | None, capture: Callable):
         """Capture related SQL rows and one Case using the normal Case→DB lock order.
@@ -136,8 +189,8 @@ class CaseStateRepository:
         resource reads after this method returns and releases both locks.
         """
         with self._lock_for(case_id) if case_id is not None else nullcontext():
-            with self._database_lock:
-                related = capture(self._db)
+            with self.database_read() as db:
+                related = capture(db)
             # The Case lock keeps its state aligned with the captured SQL
             # projection. Decode/copy outside the shared database lock.
             state = None if case_id is None else self._load_case(case_id)
@@ -146,7 +199,11 @@ class CaseStateRepository:
 
     @contextmanager
     def database_transaction(self):
-        """One FULL-WAL transaction; callers must not acquire Case locks."""
+        """Durable transaction; callers must not acquire Case locks."""
+        if self._database is not None:
+            with self._database.transaction() as db:
+                yield db
+            return
         with self._database_lock:
             self._db.execute('BEGIN IMMEDIATE')
             try:
@@ -214,7 +271,7 @@ class CaseStateRepository:
                 row = self._db.execute('SELECT snapshot FROM completed_cases WHERE case_id=?',
                                        (case_id,)).fetchone()
             return None if row is None else StateFile.model_validate_json(row[0])
-        except (sqlite3.Error, ValidationError) as exc:
+        except self.database_errors + (ValidationError,) as exc:
             self._state_failure = _port_error(ErrorCode.STATE_CORRUPT, '已完成 Case 的快照无法读取。').error
             raise ApplicationPortError(_clone(self._state_failure)) from exc
 
@@ -323,35 +380,34 @@ class CaseStateRepository:
         payload = self._archive_payload(aggregate)
         if payload is not None and aggregate.case.archive_status == 'NOT_REQUIRED':
             aggregate.case.archive_status = 'PENDING'
-        # Resource publication owns file/directory fsync. This FULL WAL commit
+        # Resource publication owns file/directory fsync. This durable commit
         # occurs only after those immutable files have been published.
         objects = [key for name in ('jobs', 'attachments', 'evidence', 'artifacts', 'outcomes')
                    for key in getattr(aggregate, name)]
-        with self._database_lock:
-            self._db.execute('BEGIN IMMEDIATE')
-            try:
-                self._db.execute('INSERT OR REPLACE INTO completed_cases VALUES (?, ?)',
-                                  (case_id, canonical_json_bytes(state)))
-                self._db.execute('INSERT OR IGNORE INTO completed_case_retention VALUES (?, ?)',
-                                  (case_id, aggregate.case.updated_at))
-                self._db.executemany('INSERT OR REPLACE INTO object_index VALUES (?, ?)',
-                                     ((key, case_id) for key in objects))
-                self._db.executemany('INSERT OR REPLACE INTO request_index VALUES (?, ?)',
-                                     ((key, case_id) for key in state.idempotency_records))
-                self._db.executemany('INSERT OR REPLACE INTO resource_index VALUES (?, ?)',
-                                     ((key, case_id) for key in self._resource_keys(aggregate)))
-                if payload is not None:
-                    self._db.execute('INSERT OR IGNORE INTO archive_tasks VALUES (?, ?, ?, NULL)',
-                        (case_id, 'PENDING', canonical_json_bytes(payload)))
-                if aggregate.case.archive_status in {'READY', 'FAILED'}:
-                    self._db.execute('UPDATE archive_tasks SET status=? WHERE case_id=?',
-                        (aggregate.case.archive_status, case_id))
-                if self.on_case_projection is not None:
-                    self.on_case_projection(self._db, state)
-                self._db.execute('COMMIT')
-            except BaseException:
-                self._db.execute('ROLLBACK')
-                raise
+        with self.database_transaction() as db:
+            self._lock_case_conversation(db, case_id, state)
+            db.execute('INSERT INTO completed_cases(case_id,snapshot) VALUES (?, ?) '
+                       'ON CONFLICT(case_id) DO UPDATE SET snapshot=excluded.snapshot',
+                       (case_id, canonical_json_bytes(state)))
+            db.execute('INSERT INTO completed_case_retention(case_id,retained_at) VALUES (?, ?) '
+                       'ON CONFLICT(case_id) DO NOTHING', (case_id, aggregate.case.updated_at))
+            db.executemany('INSERT INTO object_index(object_id,case_id) VALUES (?, ?) '
+                           'ON CONFLICT(object_id) DO UPDATE SET case_id=excluded.case_id',
+                           ((key, case_id) for key in objects))
+            db.executemany('INSERT INTO request_index(request_key,case_id) VALUES (?, ?) '
+                           'ON CONFLICT(request_key) DO UPDATE SET case_id=excluded.case_id',
+                           ((key, case_id) for key in state.idempotency_records))
+            db.executemany('INSERT INTO resource_index(storage_key,case_id) VALUES (?, ?) '
+                           'ON CONFLICT(storage_key) DO UPDATE SET case_id=excluded.case_id',
+                           ((key, case_id) for key in self._resource_keys(aggregate)))
+            if payload is not None:
+                db.execute('INSERT INTO archive_tasks(case_id,status,payload,error) VALUES (?, ?, ?, NULL) '
+                           'ON CONFLICT(case_id) DO NOTHING', (case_id, 'PENDING', canonical_json_bytes(payload)))
+            if aggregate.case.archive_status in {'READY', 'FAILED'}:
+                db.execute('UPDATE archive_tasks SET status=? WHERE case_id=?',
+                           (aggregate.case.archive_status, case_id))
+            if self.on_case_projection is not None:
+                self.on_case_projection(db, state)
 
     def commit(self, expected_generation: int, expected_case_revision: int | None,
                mutation: StateMutation) -> CommitReceipt:
@@ -407,7 +463,7 @@ class CaseStateRepository:
                             self._requests.pop(key, None)
                         self.on_terminal(case_id)
                 self.on_case_committed(case_id)
-            except (sqlite3.Error, OSError) as exc:
+            except self.database_errors + (OSError,) as exc:
                 with self._index_lock:
                     for key in reserved:
                         self._requests.pop(key, None)
@@ -424,6 +480,13 @@ class CaseStateRepository:
 
     def health(self) -> ValidationReport:
         failure = self._state_failure
+        if failure is None and self._database is not None:
+            try:
+                with self.database_read() as db:
+                    db.execute('SELECT 1').fetchone()
+            except self.database_errors + (RuntimeError,) as exc:
+                failure = _port_error(ErrorCode.STATE_CORRUPT,
+                    'PostgreSQL 连接或服务实例锁不可用，请检查数据库连接并重启服务。').error
         return ValidationReport(valid=failure is None, schema_version=SCHEMA_VERSION,
             contract_revision=CONTRACT_REVISION, generation=self._base.generation,
             object_counts=_object_counts(self._base),
@@ -464,22 +527,31 @@ class CaseStateRepository:
             return self._db.execute('SELECT 1 FROM object_index WHERE object_id=?', (key,)).fetchone() is not None
 
     def claim_archive_task(self):
-        with self._database_lock:
+        with self.database_transaction() as db:
             agent_filter = ""
             if self._has_agent_runs():
                 agent_filter = (" AND NOT EXISTS (SELECT 1 FROM agent_conversation_runs r "
                     "JOIN agent_conversations c ON c.conversation_id=r.conversation_id "
                     "WHERE r.case_id=archive_tasks.case_id AND c.deleted_at IS NOT NULL)")
-            row = self._db.execute("SELECT case_id, payload FROM archive_tasks WHERE status='PENDING'"
-                + agent_filter + " ORDER BY rowid LIMIT 1").fetchone()
+            dialect = dialect_for(db)
+            claim = " FOR UPDATE OF archive_tasks SKIP LOCKED" if dialect.postgres else ""
+            row = db.execute("SELECT case_id, payload FROM archive_tasks WHERE status='PENDING'"
+                + agent_filter + " ORDER BY " + dialect.order_column() + " LIMIT 1" + claim).fetchone()
             if row is None:
                 return None
-            self._db.execute("UPDATE archive_tasks SET status='RUNNING' WHERE case_id=?", (row[0],))
+            if dialect.postgres and self._has_agent_runs():
+                owner = db.execute("SELECT conversation_id FROM agent_conversation_runs WHERE case_id=?", (row[0],)).fetchone()
+                if owner is not None and not try_lock_conversation(db, owner[0]):
+                    return None
+                if self.is_agent_case_deleted(row[0]):
+                    return None
+            db.execute("UPDATE archive_tasks SET status='RUNNING' WHERE case_id=?", (row[0],))
             return row[0], json.loads(row[1])
 
     def requeue_archive_task(self, case_id: str) -> None:
-        with self._database_lock:
-            self._db.execute("UPDATE archive_tasks SET status='PENDING' WHERE case_id=? AND status='RUNNING'", (case_id,))
+        with self.database_transaction() as db:
+            self._lock_case_conversation(db, case_id)
+            db.execute("UPDATE archive_tasks SET status='PENDING' WHERE case_id=? AND status='RUNNING'", (case_id,))
 
     def cancel_archive_tasks(self, case_ids) -> None:
         selected = tuple(_OPAQUE_ID.validate_python(value) for value in case_ids)
@@ -497,24 +569,41 @@ class CaseStateRepository:
                 "WHERE r.case_id=? AND c.deleted_at IS NOT NULL", (case_id,)).fetchone() is not None
 
     def _has_agent_runs(self) -> bool:
-        return self._db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
-            "AND name='agent_conversation_runs'").fetchone() is not None
+        return table_exists(self._db, 'agent_conversation_runs')
+
+    def _lock_case_conversation(self, db, case_id, state=None):
+        """Acquire the same lock as Agent mutations, before touching work rows."""
+        if not dialect_for(db).postgres or not table_exists(db, 'agent_conversation_runs'):
+            return
+        row = db.execute("SELECT conversation_id FROM agent_conversation_runs WHERE case_id=?", (case_id,)).fetchone()
+        if row is None and state is not None:
+            for record in state.idempotency_records.values():
+                if str(record.operation) == 'CreateCase' and record.case_id == case_id:
+                    row = db.execute("SELECT conversation_id FROM agent_conversation_runs WHERE create_request_id=?",
+                                     (record.idempotency_key,)).fetchone()
+                    if row is not None:
+                        break
+        if row is not None:
+            lock_conversation(db, row[0])
 
     @contextmanager
     def archive_publication(self, case_id: str):
         """Serialize the short publication with the durable Agent tombstone.
 
-        Case-before-database ordering matches normal commits. The shared DB lock
-        also protects Agent deletion, so a successful delete cannot be followed
-        by an archive publication that checked an earlier state.
+        Case-before-conversation ordering matches normal commits. PostgreSQL
+        holds the conversation lock until publication and its transaction end.
         """
-        with self._lock_for(case_id), self._database_lock:
-            if self.is_agent_case_deleted(case_id):
-                raise InterruptedError("archive belongs to a deleted conversation")
-            yield
+        with self._lock_for(case_id):
+            context = self.database_transaction() if self._database is not None else self._database_lock
+            with context:
+                self._lock_case_conversation(self._db, case_id)
+                if self.is_agent_case_deleted(case_id):
+                    raise InterruptedError("archive belongs to a deleted conversation")
+                yield
 
     @staticmethod
     def _require_deleted_case_owner(db, conversation_id, case_ids):
+        lock_conversation(db, conversation_id)
         row = db.execute("SELECT deleted_at FROM agent_conversations WHERE conversation_id=?",
             (conversation_id,)).fetchone()
         if row is None or row[0] is None:
@@ -643,7 +732,8 @@ class CaseStateRepository:
                 except (ValidationError, ValueError, TypeError):
                     continue
                 with self.database_transaction() as db:
-                    db.execute('INSERT OR IGNORE INTO completed_case_retention VALUES (?, ?)',
+                    db.execute('INSERT INTO completed_case_retention(case_id,retained_at) VALUES (?, ?) '
+                               'ON CONFLICT(case_id) DO NOTHING',
                                (case_id, retained_at))
 
     def _history_case_manifest(self, case_id, cutoff):
@@ -696,7 +786,8 @@ class CaseStateRepository:
             with self.database_transaction() as db:
                 if mutate is not None and mutate(db) is False:
                     return False
-                db.execute('INSERT OR REPLACE INTO history_cleanup_jobs VALUES (?, ?)',
+                db.execute('INSERT INTO history_cleanup_jobs(cleanup_id,manifest) VALUES (?, ?) '
+                           'ON CONFLICT(cleanup_id) DO UPDATE SET manifest=excluded.manifest',
                     (cleanup_id, json.dumps(manifest, ensure_ascii=False, sort_keys=True)))
                 if case_id is not None:
                     for table in ('completed_cases', 'object_index', 'request_index',
@@ -713,10 +804,20 @@ class CaseStateRepository:
             return True
 
     def compact_history_database(self) -> None:
-        """Reclaim deleted pages and WAL bytes outside every business transaction."""
+        """Reclaim reusable space outside every business transaction."""
         with self._database_lock:
             if self._db.in_transaction:
                 raise RuntimeError('database compaction cannot run inside a transaction')
+            if self._database is not None:
+                # VACUUM reuses dead tuples without VACUUM FULL's exclusive lock.
+                for name in sorted(table_names(self._db)):
+                    if name in {'metadata', 'completed_cases', 'object_index', 'request_index',
+                                'resource_index', 'archive_tasks', 'completed_case_retention',
+                                'history_cleanup_jobs'} or name.startswith('agent_'):
+                        if not name.replace('_', '').isalnum():
+                            raise ValueError('invalid database table name')
+                        self._db.execute(f'VACUUM (ANALYZE) "{name}"')
+                return
             self._db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
             if self._db.execute('PRAGMA freelist_count').fetchone()[0]:
                 self._db.execute('VACUUM')
@@ -725,7 +826,14 @@ class CaseStateRepository:
     def validate_all(self) -> ValidationReport:
         state = self.read_snapshot()
         with self._database_lock:
-            if self._db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+            if self._database is not None:
+                metadata = dict(self._db.execute('SELECT key,value FROM metadata'))
+                valid = (metadata.get('installation_id') == self._base.installation_id
+                         and metadata.get('data_root_identity') == root_identity(self._layout)
+                         and metadata.get('storage_backend') == 'postgresql-v1')
+            else:
+                valid = self._db.execute('PRAGMA quick_check').fetchone()[0] == 'ok'
+            if not valid:
                 raise _port_error(ErrorCode.STATE_CORRUPT, '已完成 Case 数据库校验失败。')
         return ValidationReport(valid=True, schema_version=SCHEMA_VERSION,
             contract_revision=CONTRACT_REVISION, generation=state.generation,
@@ -735,6 +843,9 @@ class CaseStateRepository:
         return canonical_json_bytes(self.read_snapshot())
 
     def close(self) -> None:
+        if self._database is not None:
+            self._database.close()
+            return
         with self._database_lock:
             self._db.close()
 

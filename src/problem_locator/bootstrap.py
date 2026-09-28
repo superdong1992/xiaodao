@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 import time
 import uuid
@@ -60,7 +61,7 @@ from problem_locator.entrypoints.replay import (
     run_method_validation_replay_v2,
     run_replay_job as execute_replay_job,
 )
-from problem_locator.entrypoints.settings import Settings
+from problem_locator.entrypoints.settings import Settings, load_database_configuration
 from problem_locator.integrations.logparse import build_logparse_runtime
 from problem_locator.dispatch.archive import ArchiveService
 from problem_locator.operational import OperationalState
@@ -94,6 +95,7 @@ from problem_locator.storage.retention_cleaner import (
     StorageRetentionCleaner,
 )
 from problem_locator.storage.state_repository import CaseStateRepository
+from problem_locator.storage.postgres_layout import preflight_postgres_root, validate_postgres_root
 
 
 _SHUTDOWN_TIMEOUT_SECONDS = 30.0
@@ -502,8 +504,11 @@ class ServiceStateAdmin:
 class StandaloneStateAdmin:
     """Lock-scoped StateAdmin used only by offline validate/export commands."""
 
-    def __init__(self, data_root: Path) -> None:
+    def __init__(self, data_root: Path, *, database_url: str | None = None,
+                 database_pool_size: int = 8) -> None:
         self._data_root = Path(data_root)
+        self._database_url = database_url
+        self._database_pool_size = database_pool_size
 
     @contextmanager
     def _open_repository(
@@ -511,10 +516,14 @@ class StandaloneStateAdmin:
     ) -> Iterator[tuple[CaseStateRepository, StorageCoordinationLock]]:
         try:
             layout = StorageLayout.at(self._data_root)
-            layout.validate_v2_data_format()
+            if self._database_url is not None:
+                validate_postgres_root(layout)
+            else:
+                layout.validate_v2_data_format()
             for directory in _layout_directories(layout):
                 require_real_directory(directory)
-            require_ordinary_file(layout.data_root / "completed.sqlite3")
+            if self._database_url is None:
+                require_ordinary_file(layout.data_root / "completed.sqlite3")
         except UnsupportedDataFormatError as exc:
             raise _port_error(
                 ErrorCode.STATE_SCHEMA_UNSUPPORTED,
@@ -544,6 +553,8 @@ class StandaloneStateAdmin:
                 ProductionClock(),
                 UuidIdGenerator(),
                 execution_record_store=records,
+                database_url=self._database_url,
+                database_pool_size=self._database_pool_size,
             )
             try:
                 yield repository, coordination_lock
@@ -1111,7 +1122,11 @@ def _assemble(
     try:
         layout = StorageLayout.at(settings.data_root)
         file_sync = PlatformFileSync()
-        layout.initialize_v2_data_root(file_sync)
+        if settings.database_url is not None:
+            preflight_postgres_root(layout)
+            layout.ensure_directories(file_sync)
+        else:
+            layout.initialize_v2_data_root(file_sync)
     except UnsupportedDataFormatError as exc:
         raise _CompositionFailure(
             _failure_owner(
@@ -1169,7 +1184,8 @@ def _assemble(
     replacer = PlatformReplaceOperation()
 
     try:
-        asset_catalog.freeze_assets(layout.temporary / "assets")
+        if settings.database_url is None:
+            asset_catalog.freeze_assets(layout.temporary / "assets")
         execution_records = FileExecutionRecordStore(
             layout.data_root,
             coordination_lock,
@@ -1184,7 +1200,11 @@ def _assemble(
             file_sync=file_sync,
             replacer=replacer,
             execution_record_store=execution_records,
+            database_url=settings.database_url,
+            database_pool_size=settings.database_pool_size,
         )
+        if settings.database_url is not None:
+            asset_catalog.freeze_assets(layout.temporary / "assets")
     except ApplicationPortError as exc:
         raise _CompositionFailure(
             _failure_owner(
@@ -1265,6 +1285,14 @@ def _assemble(
             memory_store, settings.diagnose_claude_command or settings.claude_command,
             workspace_root=layout.workspaces, enabled=settings.generic_memory_enabled,
         )
+        from problem_locator.followup.service import ReportFollowupService
+        agent.followups = ReportFollowupService(
+            agent, settings.diagnose_claude_command or settings.claude_command,
+            enabled=settings.report_followup_enabled,
+            snapshot_max_bytes=settings.report_followup_snapshot_bytes,
+            snapshot_total_bytes=settings.report_followup_storage_bytes,
+        )
+        agent_store.followup_store = agent.followups.store
         runtime = DiagnosisRuntime(
             state_repository=repository,
             resource_store=resource_store,
@@ -1304,6 +1332,7 @@ def _assemble(
             file_sync=file_sync,
             replacer=replacer,
         )
+        retention.cleaner.workspace_in_use = agent.followups.store.workspace_in_use
         state_admin = ServiceStateAdmin(
             layout=layout,
             instance_lock=instance_lock,
@@ -1486,10 +1515,14 @@ def _create_test_app(settings: Settings) -> Any:
     return _create_app(settings, allow_test_skills=True)
 
 
-def create_state_admin(data_root: Path) -> StandaloneStateAdmin:
+def create_state_admin(data_root: Path, *, database_url: str | None = None,
+                       database_pool_size: int = 8) -> StandaloneStateAdmin:
     """Create the lazy offline admin facade; filesystem access starts on call."""
 
-    return StandaloneStateAdmin(data_root)
+    if database_url is None:
+        database_url, database_pool_size = load_database_configuration(os.environ)
+    return StandaloneStateAdmin(data_root, database_url=database_url,
+                                database_pool_size=database_pool_size)
 
 
 def run_replay_job(request: ReplayRequest, settings: Settings) -> ReplayResult:

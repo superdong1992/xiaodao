@@ -1,9 +1,12 @@
+import { createPreviewFollowups } from "./followup-preview.js";
 /** 只用于离线交互预览的内存数据源；不连接服务，不执行诊断。 */
-export function createPreviewApi(samples) {
+export function createPreviewApi(samples, { schedule, followupDelay = 1200 } = {}) {
   let serial = 100;
   const id = () => `00000000-0000-0000-0000-${String(++serial).padStart(12, "0")}`;
   const now = () => new Date().toISOString();
   const conversations = new Map();
+  const followups = createPreviewFollowups({ conversations, id, now, schedule, delay: followupDelay });
+  const creations = new Map();
   const finish = (data, status = 200) => new Response(JSON.stringify({ ok: status === 200,
     data: status === 200 ? data : null, error: status === 200 ? null : {
       code: "PREVIEW_REQUEST_FAILED", message: data, details: [], retryable: false,
@@ -33,10 +36,27 @@ export function createPreviewApi(samples) {
         status: view.report_state === "READY" ? "COMPLETED" : view.status, failure: view.failure,
         case_status: view.case_status, report_state: view.report_state, source_job_id: view.source_job_id } });
     conversations.set(conversationId, { id: conversationId, title: sample.label, note: sample.note,
-      current: runId, runs: new Map([[runId, view]]), history, created: view.created_at, updated: view.updated_at });
+      current: runId, runs: new Map([[runId, view]]), history, created: view.created_at, updated: view.updated_at,
+      snapshotStatus: sample.followup_snapshot_status ?? "READY" });
   }
   return async (path, init = {}) => {
     const url = new URL(path, "http://preview.local"), method = init.method ?? "GET";
+    const followupResponse = await followups(url, init);
+    if (followupResponse) return followupResponse;
+    if (url.pathname === "/api/agent/conversations" && method === "POST") {
+      const input = JSON.parse(init.body);
+      if (creations.has(input.request_id)) return finish(creations.get(input.request_id));
+      const cid = id(), rid = id(), timestamp = now(), view = structuredClone(samples[0].response.data);
+      Object.assign(view, { conversation_id: cid, selected_run_id: rid, run_id: rid, status: "WAITING_INPUT",
+        report_state: "PENDING", case_id: null, job_id: null, source_job_id: null, case_status: null,
+        archive_status: "NOT_REQUIRED", failure: null, current_questions: [], artifacts: [] });
+      view.result = { ...view.result, conversation_id: cid, report_state: "PENDING", format: null, report: null, markdown: null, artifact: null, failure: null };
+      view.current_run = { run_id: rid, ordinal: 0, status: "WAITING_INPUT", case_id: null, job_id: null,
+        case_status: null, archive_status: "NOT_REQUIRED", report_state: "PENDING", created_at: timestamp, updated_at: timestamp };
+      conversations.set(cid, { id: cid, title: "新对话", current: rid, runs: new Map([[rid, view]]), history: [], created: timestamp, updated: timestamp });
+      const receipt = { schema_version: 1, conversation_id: cid, request_id: input.request_id };
+      creations.set(input.request_id, receipt); return finish(receipt);
+    }
     if (url.pathname === "/api/agent/conversations" && method === "GET") {
       const offset = Number(url.searchParams.get("cursor") ?? 0), limit = Number(url.searchParams.get("limit") ?? 20);
       const items = [...conversations.values()].map(summary);

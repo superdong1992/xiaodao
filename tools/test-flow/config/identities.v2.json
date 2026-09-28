@@ -3,7 +3,7 @@
   "components": {
     "product.source": {"kind": "paths", "paths": ["src", "schemas", "pyproject.toml", "uv.lock"]},
     "product.fixtures": {"kind": "paths", "paths": ["tests/fixtures"]},
-    "proof.deterministic": {"kind": "paths", "paths": ["tests/deterministic", "examples/website-agent"]},
+    "proof.deterministic": {"kind": "paths", "paths": ["tests/deterministic", "tests/postgres_helpers.py", "examples/website-agent"]},
     "proof.platform": {"kind": "paths", "paths": ["tests/platform"]},
     "proof.real": {"kind": "paths", "paths": ["tests/real"]},
     "framework.runner": {"kind": "paths", "paths": ["tools/test-flow/run.mjs", "tools/test-flow/run.sh", "tools/test-flow/run.ps1", "tools/test-flow/lib", "tools/test-flow/config", "tools/test-flow/adapters"]},
@@ -70,6 +70,10 @@
     },
     "real-generic-locator": {
       "producer": ["product.source", "source.agent", "source.diagnose", "skill.generic-adapter", "skill.generic-parity", "runtime.support", "runtime.claude", "runtime.settings", "runtime.release"],
+      "proof": ["proof.real", "framework.runner"]
+    },
+    "real-report-followup": {
+      "producer": ["product.source", "source.agent", "runtime.support", "runtime.claude", "runtime.settings", "runtime.release"],
       "proof": ["proof.real", "framework.runner"]
     },
     "real-route": {

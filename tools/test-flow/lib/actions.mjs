@@ -13,6 +13,7 @@ import {
   writeJsonSync,
 } from "./util.mjs";
 import { runProcess } from "./process.mjs";
+import { validPostgresSidecarReceipt } from "../runtime-support/postgres-sidecar.mjs";
 import {
   RELEASE_BASE_IMAGE,
   RELEASE_CLAUDE_CLI_SHA256,
@@ -54,6 +55,7 @@ import {
   validSkillGenerationTraceAuditReceipt,
 } from "../runtime-support/isolated-agent-tool-audit.mjs";
 import { projectEvidenceV2ProviderTerminalFailure } from "../runtime-support/evidence-v2-provider-terminal.mjs";
+import { validReportFollowupTraceReceipt } from "../runtime-support/report-followup-tool-audit.mjs";
 import {
   auditNoSecretLeak,
   buildPosthocBudgetReceipt,
@@ -508,6 +510,10 @@ function expectedCrossJobServerContainer(plan, receipt) {
 }
 
 export function validCrossJobPassRuntimeBoundary(receipt, { plan, generatedSkill }) {
+  if (!validPostgresSidecarReceipt(receipt?.postgres, {
+    runId: plan?.run_id, scope: "crossjob", databaseName: "problem_locator_release_test",
+    expectedImageId: plan?.release_inputs?.image?.postgres?.image_id,
+  })) return false;
   const dual = plan?.release_inputs?.topology === "darwin-orchestrated-dual-linux-containers";
   const expectedTopology = dual ? "dual-linux-containers" : "host-client";
   const serverImageId = plan?.release_inputs?.image?.server?.image_id ?? null;
@@ -1765,7 +1771,8 @@ export function collectIsolatedModelUsage(context, profile) {
     || !validEnvironmentKeySummary(invocation.environment_policy?.claude_process)
     || !validIsolatedOutputCapReceipt(invocation)
   ))) throw new Error("ISOLATED_MODEL_ENVIRONMENT_POLICY_RECEIPT_INVALID");
-  const expectedWorkflow = profile === "real-skill-generation" ? "skill-generation" : "job";
+  const expectedWorkflow = profile === "real-skill-generation" ? "skill-generation"
+    : profile === "real-report-followup" ? "report-followup" : "job";
   if (invocations.some((invocation) => invocation.workflow !== expectedWorkflow)) throw new Error("ISOLATED_MODEL_WORKFLOW_RECEIPT_INVALID");
   if (invocations.some((invocation) => (
     typeof invocation.terminal?.subtype !== "string"
@@ -1787,6 +1794,12 @@ export function collectIsolatedModelUsage(context, profile) {
     return invocation.wrapper_outcome.status === "PASS" ? !passedAudit : !(passedAudit || failedAudit);
   })) throw new Error("ISOLATED_MODEL_TOOL_TRACE_AUDIT_INVALID");
   if (expectedWorkflow === "job" && invocations.some((invocation) => invocation.tool_trace_audit !== null)) throw new Error("ISOLATED_MODEL_TOOL_TRACE_AUDIT_UNEXPECTED");
+  if (expectedWorkflow === "report-followup" && invocations.some((invocation) => {
+    const audit = invocation.tool_trace_audit;
+    if (audit === null) return invocation.wrapper_outcome.status === "PASS";
+    return !validReportFollowupTraceReceipt(audit)
+      || (invocation.wrapper_outcome.status === "PASS" && audit.status !== "PASS");
+  })) throw new Error("ISOLATED_MODEL_FOLLOWUP_TRACE_AUDIT_INVALID");
   const usage = sumUsage(invocations.map((invocation) => invocation.usage));
   const summary = {
     schema_version: 3,
@@ -1885,6 +1898,9 @@ async function serverLinuxCapability(context, stage, gate) {
     args: [
       path.join(context.sourceSnapshotRoot, "tools", "test-flow", "adapters", "server-linux-capability.mjs"),
       "--output-root", outputRoot,
+      "--attempt-root", context.attemptRoot,
+      "--run-id", runId,
+      "--resource-registry", context.resources.filePath,
       "--docker-context", context.options.dockerContext ?? "default",
       "--image", serverImageId,
       "--repo-root", context.sourceSnapshotRoot,
@@ -1934,7 +1950,18 @@ async function serverLinuxCapability(context, stage, gate) {
   const claims = gate.required_claims ?? [];
   const runtimeIdentityPath = path.join(outputRoot, "server-runtime-identity.json");
   const runtimeIdentityValid = validServerRuntimeIdentity(runtimeIdentity, serverImageId);
-  if (receipt?.schema_version !== 3 || receipt.status !== "PASS" || receipt.runtime_profile_digest !== context.plan.runtime_profile_digest || receipt.image !== serverImageId || receipt.image_id !== serverImageId || receipt.docker_context !== (context.options.dockerContext ?? "default") || receipt.runtime_identity_sha256 !== sha256File(runtimeIdentityPath) || !runtimeIdentityValid || claims.some((claim) => receipt.claims?.[claim] !== "PASS") || Object.keys(receipt.claims ?? {}).some((claim) => !claims.includes(claim)) || junit.executed !== 3 || junit.passed !== 3 || junit.skipped !== 0) {
+  const postgresIdentity = context.plan.release_inputs?.image?.postgres;
+  const postgresReceipt = receipt?.postgres;
+  const postgresValid = postgresIdentity?.image_id && postgresReceipt?.schema_version === 1
+    && postgresReceipt.run_id === runId && postgresReceipt.scope === "capability"
+    && postgresReceipt.image_id === postgresIdentity.image_id && postgresReceipt.image === postgresIdentity.image
+    && postgresReceipt.database === "problem_locator_test_admin" && postgresReceipt.user === "pl_test_admin"
+    && postgresReceipt.initial_database === "EMPTY" && receipt.network === postgresReceipt.network
+    && /^pltf-pg-[a-f0-9]{24}$/.test(postgresReceipt.container ?? "")
+    && /^pltf-pgdata-[a-f0-9]{24}$/.test(postgresReceipt.volume ?? "")
+    && /^pltf-pgnet-[a-f0-9]{24}$/.test(postgresReceipt.network ?? "")
+    && !Object.hasOwn(postgresReceipt, "secret_directory");
+  if (receipt?.schema_version !== 4 || receipt.status !== "PASS" || receipt.runtime_profile_digest !== context.plan.runtime_profile_digest || receipt.image !== serverImageId || receipt.image_id !== serverImageId || receipt.docker_context !== (context.options.dockerContext ?? "default") || receipt.runtime_identity_sha256 !== sha256File(runtimeIdentityPath) || !runtimeIdentityValid || !postgresValid || claims.some((claim) => receipt.claims?.[claim] !== "PASS") || Object.keys(receipt.claims ?? {}).some((claim) => !claims.includes(claim)) || junit.executed !== 3 || junit.passed !== 3 || junit.skipped !== 0) {
     return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "SERVER_CAPABILITY_RECEIPT_INVALID" };
   }
   return { ...result, adapter_receipt: receipt, pytest: junit };
@@ -3897,6 +3924,7 @@ async function runMacosClaudeDeepseekGate(context, stage, { workflow, evaluation
 }
 
 async function crossJob(context, stage) {
+  if (context.restoredCheckpoint) return { status: "BLOCKED", failure_domain: "INFRA", code: "POSTGRES_CHECKPOINT_RESTORE_UNSUPPORTED" };
   const dockerBoundary = probeDockerRuntimeBoundary(context);
   if (dockerBoundary !== null) return dockerBoundary;
   const adapter = context.options.crossJobAdapter;
@@ -3957,24 +3985,10 @@ async function crossJob(context, stage) {
   add("--service-intake-max-budget-usd", intakeCaps.max_budget_usd);
   add("--service-intake-hard-timeout-seconds", intakeCaps.hard_timeout_seconds);
   if (stage.id === "journey.cross-job.environment") adapterArguments.push("--fresh-data-root");
-  if (context.restoredCheckpoint) {
-    adapterArguments.push(
-      "--restored-data-root", context.restoredCheckpoint.state_root,
-      "--restored-continuation", context.restoredCheckpoint.continuation_path,
-      "--restored-checkpoint-id", context.restoredCheckpoint.checkpoint_id,
-    );
-  }
   const stageIndex = context.plan.stages.findIndex((candidate) => candidate.id === stage.id);
   const laterExecutedJourney = context.plan.stages.slice(stageIndex + 1).some((candidate) =>
     candidate.decision === "RUN" && candidate.id.startsWith("journey.cross-job."));
   if (!laterExecutedJourney) adapterArguments.push("--terminal-after-stage");
-  const checkpointStage = stage.id;
-  if (["journey.cross-job.route", "journey.cross-job.upload", "journey.cross-job.diagnose", "journey.cross-job.publish-restart"].includes(checkpointStage)) {
-    adapterArguments.push(
-      "--checkpoint-output-source",
-      path.join(context.attemptRoot, "payload", "stages", checkpointStage, "checkpoint-source.json"),
-    );
-  }
   const nodeAdapter = adapter.endsWith(".mjs");
   const result = await runProcess({
     repoRoot: context.repoRoot,
@@ -4096,6 +4110,7 @@ async function crossJob(context, stage) {
       topology: receipt.topology,
       runtime_images: receipt.runtime_images,
       runtime_resources: receipt.runtime_resources,
+      postgres: receipt.postgres,
       generated_skill: receipt.generated_skill,
     },
   };
@@ -4116,7 +4131,8 @@ function realEnvironment(context, profile) {
   }
   const command = agentCommand(
     context,
-    profile === "real-skill-generation" ? "skill-generation" : "job",
+    profile === "real-skill-generation" ? "skill-generation"
+      : profile === "real-report-followup" ? "report-followup" : "job",
   );
   if (!command) return { error: "CLAUDE_COMMAND_OR_HARD_CAP_MISSING" };
   const runtime = preparedClaudeRuntime(context);
@@ -4134,6 +4150,11 @@ function realEnvironment(context, profile) {
     S08_REAL_REVIEW_AGENT_COMMAND: command,
   };
   if (profile === "real-agent-backend") return { env: { ...common, S08_REAL_AGENT_GATE: "1" } };
+  if (profile === "real-report-followup") return { env: { ...common,
+    S08_REAL_REPORT_FOLLOWUP_GATE: "1",
+    S08_REAL_REPORT_FOLLOWUP_AGENT_COMMAND: command,
+    S08_REAL_REPORT_FOLLOWUP_AUDIT_PATH: path.join(context.gateRoot, "report-followup-audit.json"),
+  } };
   if (profile === "real-generic-locator") {
     const skillName = "generic-problem-locator-dual-mode";
     const skillPath = path.join(

@@ -38,11 +38,11 @@
       "id": "deterministic.full",
       "kind": "deterministic",
       "depends_on": ["deterministic.affected"],
-      "gates": ["det.evidence-v2-core", "det.contracts", "det.unit", "det.integration", "det.journey.same-job", "det.journey.mcp", "det.journey.web-api", "det.website-example"],
+      "gates": ["det.evidence-v2-core", "det.contracts", "det.unit", "det.postgres", "det.integration", "det.journey.same-job", "det.journey.mcp", "det.journey.web-api", "det.website-example"],
       "identity_set": "deterministic",
       "timeout_seconds": 600,
       "progress_class": "local",
-      "reuse": {"dev": "identity", "release": "never"},
+      "reuse": {"dev": "never", "release": "never"},
       "platforms": ["windows", "macos", "linux"]
     },
     {
@@ -96,6 +96,19 @@
       "gates": ["real.agent.generic-locator"],
       "identity_set": "real-generic-locator",
       "timeout_seconds": 1200,
+      "progress_class": "real",
+      "reuse": {"dev": "identity", "release": "never"},
+      "platforms": ["windows", "macos", "linux"]
+    },
+    {
+      "id": "real.report-followup",
+      "kind": "isolated-real",
+      "depends_on": ["deterministic.full"],
+      "gates": ["real.agent.report-followup"],
+      "identity_set": "real-report-followup",
+      "real_cap_id": "isolated.report-followup",
+      "estimated_tokens": 40000,
+      "timeout_seconds": 720,
       "progress_class": "real",
       "reuse": {"dev": "identity", "release": "never"},
       "platforms": ["windows", "macos", "linux"]

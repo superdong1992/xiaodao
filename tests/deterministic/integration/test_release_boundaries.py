@@ -21,10 +21,15 @@ EXPECTED_ENV_KEYS = {
     "BIND_HOST",
     "CLAUDE_COMMAND",
     "DATA_ROOT",
+    "DATABASE_URL",
+    "DATABASE_POOL_SIZE",
     "DFX_LOG_LEVEL",
     "GENERIC_SKILL_NAME",
     "GENERIC_LOGPARSE_PRODUCT",
     "GENERIC_MEMORY_ENABLED",
+    "REPORT_FOLLOWUP_ENABLED",
+    "REPORT_FOLLOWUP_SNAPSHOT_BYTES",
+    "REPORT_FOLLOWUP_STORAGE_BYTES",
     "DFX_LOG_DIR",
     "SPECIALIZED_REVIEWER_ENABLED",
     "METHODS_EVIDENCE_VALIDATION",
@@ -67,16 +72,13 @@ def test_business_layers_do_not_depend_on_json_file_adapters() -> None:
             ), path
 
 
-def test_release_metadata_keeps_the_offline_database_boundary() -> None:
+def test_release_metadata_requires_postgresql_with_pinned_driver_and_pool() -> None:
     configuration = tomllib.loads(
         (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     )
     dependencies = configuration["project"]["dependencies"]
-    assert not any(
-        marker in dependency.lower()
-        for dependency in dependencies
-        for marker in ("postgres", "psycopg", "sqlalchemy", "asyncpg")
-    )
+    assert "psycopg[binary]==3.3.6" in dependencies
+    assert "psycopg-pool==3.3.3" in dependencies
     assert configuration["tool"]["pytest"]["ini_options"]["testpaths"] == (
         EXPECTED_TEST_ROOTS
     )
@@ -87,7 +89,8 @@ def test_release_metadata_keeps_the_offline_database_boundary() -> None:
         "v11-contract-r2",
         "docs/data-upgrade-v11-r2.md",
         "不重放活动任务或未确认的 Outcome",
-        "SQLite WAL + FULL",
+        "PostgreSQL 17",
+        "DATABASE_POOL_SIZE",
         "旧数据目录原样保留",
         "活动 Case、Job、幂等记录和中间状态不恢复",
         "archive_status=PENDING|READY|FAILED",
@@ -117,7 +120,12 @@ def test_env_example_contains_only_the_public_settings() -> None:
     assert assignments["WEBSITE_OWNER_NAMESPACE"] == "xiaodao-website"
     assert assignments["GENERIC_LOGPARSE_PRODUCT"] == "default"
     assert assignments["METHODS_EVIDENCE_VALIDATION"] == "off"
+    assert assignments["DATABASE_URL"].startswith("postgresql://")
+    assert assignments["DATABASE_POOL_SIZE"] == "8"
     assert assignments["GENERIC_MEMORY_ENABLED"] == "false"
+    assert assignments["REPORT_FOLLOWUP_ENABLED"] == "false"
+    assert assignments["REPORT_FOLLOWUP_SNAPSHOT_BYTES"] == "1073741824"
+    assert assignments["REPORT_FOLLOWUP_STORAGE_BYTES"] == "5368709120"
     forbidden_fragments = (
         "JOB_CONCURRENCY",
         "_LIMIT_",

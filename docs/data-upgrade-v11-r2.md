@@ -4,6 +4,8 @@
 
 数据目录的版本标记新增 `agent_storage_version: 2`，SQLite 元数据也会记录版本。新版服务不能直接打开旧目录，旧服务也不能打开新目录。不要手工替换版本标记。
 
+本文只完成历史 SQLite 格式升级。当前累计版本的 Server 已改用 PostgreSQL；本文生成的 Agent storage v2 目录只是迁移中间结果，不能直接用这个 SQLite 目录启动当前 Server。还须按[PostgreSQL 迁移说明](postgresql-migration.md)继续导入，再启动服务。整体顺序见[生产升级清单](production-upgrade-2026-09-23.md)。
+
 ## 升级前
 
 先让旧版服务停止接收新任务，等待正在执行的诊断完成，或主动结束这些诊断。确认上传、任务派发和归档写入都已结束后，再停止服务。正在处理的 Case 只保存在内存中，升级工具无法恢复未完成的诊断。请准备包含 SQLite 主库、WAL 和资源文件的完整备份，并保留旧版程序与配置。
@@ -51,7 +53,11 @@ problem-locator-data-upgrade \
 
 校验时，工具直接读取副本中的数据库和资源，不启动服务、不恢复任务，也不调用模型。数据库完整性、任务快照、引用关系和资源哈希全部通过检查后，才会生成可用的目标目录并输出升级记录。原始模型响应、报告和审计文件中的旧版本信息会保留，不作全文替换。
 
-执行成功后，保存目标目录中的 `data-upgrade.agent-v2.receipt.json` 和命令输出。此前 r1→r2 升级留下的 `data-upgrade.receipt.json` 会原样保留。将服务配置中的 `DATA_ROOT` 改为目标目录，再启动 8.2.0。检查 `/ready` 和 `/openapi.json`，确认版本为 8.2.0；以已有会话归属记录的用户身份读取历史会话，下载已知报告并核对原哈希。这些检查无需发起新诊断。
+执行成功后，保存目标目录中的 `data-upgrade.agent-v2.receipt.json` 和命令输出。此前 r1→r2 升级留下的 `data-upgrade.receipt.json` 会原样保留。
+
+部署当前 PostgreSQL 版本时，保持停服，将本次目标目录作为 `problem-locator-postgres-import` 的 `--source-data-root`，另选一个尚不存在的目标目录和专用空数据库。导入成功后，同时切换 `DATA_ROOT` 和 `DATABASE_URL`，再启动服务。只有保留历史 SQLite 版 8.2.0 的部署，才可直接使用本次升级目录；版本号相同不代表存储后端相同，须核对实际提交和配置。
+
+最终启动后检查 `/ready` 和 `/openapi.json`，核对实际部署版本及提交；以已有会话归属记录的用户身份读取历史会话，下载已知报告并核对原哈希。这些检查无需发起新诊断。
 
 ## 失败与回退
 

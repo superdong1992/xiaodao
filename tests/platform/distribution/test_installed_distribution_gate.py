@@ -22,6 +22,7 @@ from problem_locator.contracts import (
     ValidationReport,
     canonical_json_bytes,
 )
+from tests.postgres_helpers import postgres_database_url
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -47,6 +48,7 @@ OFFICIAL_KEYS = {
     "BIND_HOST",
     "CLAUDE_COMMAND",
     "DATA_ROOT",
+    "DATABASE_URL",
     "DIAGNOSE_CLAUDE_COMMAND",
     "GENERIC_SKILL_NAME",
     "LOGPARSE_CONFIG_PATH",
@@ -61,6 +63,9 @@ EXPECTED_RUNTIME_VERSIONS = {
     "fastapi": "0.139.2",
     "httpx": "0.28.1",
     "mcp": "1.29.0",
+    "psycopg": "3.3.6",
+    "psycopg-binary": "3.3.6",
+    "psycopg-pool": "3.3.3",
     "problem-locator": "8.2.0",
     "pydantic": "2.13.4",
     "python-dotenv": "1.2.2",
@@ -374,6 +379,7 @@ def _real_asset_paths(
 
 def test_clean_installed_distribution_import_cli_and_server_gate(
     tmp_path: Path,
+    postgres_database_url: str,
 ) -> None:
     outside_cwd = tmp_path / "outside-cwd"
     outside_cwd.mkdir()
@@ -537,6 +543,9 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
             "fastapi",
             "httpx",
             "mcp",
+            "psycopg",
+            "psycopg-binary",
+            "psycopg-pool",
             "problem-locator",
             "pydantic",
             "python-dotenv",
@@ -608,6 +617,7 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
             "CLAUDE_COMMAND": os.environ.get("CLAUDE_COMMAND", "claude"),
             "DIAGNOSE_CLAUDE_COMMAND": os.environ.get("CLAUDE_COMMAND", "claude"),
             "DATA_ROOT": os.fspath(data_root),
+            "DATABASE_URL": postgres_database_url,
             "GENERIC_SKILL_NAME": "generic-problem-locator-smoke",
             "LOGPARSE_CONFIG_PATH": os.fspath(logparse_config),
             "LOGPARSE_PYTHON": os.fspath(logparse_python),
@@ -621,6 +631,7 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
     service_environ = _outside_environment()
     for key in OFFICIAL_KEYS:
         service_environ.pop(key, None)
+    service_environ["DATABASE_URL"] = postgres_database_url
     service_environ.pop("PROBLEM_LOCATOR_LOGPARSE_ENDPOINT", None)
     service_environ.pop("PROBLEM_LOCATOR_LOGPARSE_TOKEN", None)
     creationflags = 0

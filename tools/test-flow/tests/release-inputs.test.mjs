@@ -596,7 +596,7 @@ test("active runtime support is explicit and the historical harness closure is g
     "audit_intake_usage.py", "audit_service_agent_usage.py", "checkpoint-temporary.mjs", "export-checkpoint.sh",
     "codex-luna-app-server-runtime.mjs", "codex-luna-app-server.mjs", "codex-luna-contract.mjs", "codex-luna-diagnosis.schema.json", "codex-luna-exploration-runner.mjs", "codex-luna-prepare.py",
     "evidence-v2-provider-terminal.mjs", "initialize-container.sh", "isolated-agent-env.mjs", "isolated-agent-tool-audit.mjs", "isolated-agent-wrapper.mjs", "linux_client_browser_runner.py",
-    "prepare_claude_settings.py",
+    "postgres-sidecar.mjs", "prepare_claude_settings.py", "report-followup-tool-audit.mjs",
     "prepare_nonroot_settings.py", "prepare_release_case.py", "relay_service_journey.py",
     "server_dfx_probe.py", "service-supervisor.sh", "stop-service.sh", "test_service_launcher.py",
     "verify-source-snapshot.mjs", "website_backend.mjs",
@@ -795,13 +795,14 @@ test("Skill generation grants only an audited Methods package subtree without ex
   assert.match(realGate, /Do not call Bash, Edit, Glob, Grep/);
 });
 
-test("checkpoints export stable state without symlinks, hardlinks or retained temporary workspaces", () => {
+test("PostgreSQL CrossJob rejects directory-only checkpoint restore and export", () => {
   const core = fs.readFileSync(path.join(TOOL_ROOT, "adapters", "cross-job-core.mjs"), "utf8");
+  assert.match(core, /!configuration\.restoredDataRoot && !configuration\.restoredContinuation && !configuration\.restoredCheckpointId, "POSTGRES_CHECKPOINT_RESTORE_UNSUPPORTED"/);
+  assert.doesNotMatch(core, /extractCheckpointSourceArchive|applyRestoredCheckpoint|createCheckpointSource|checkpoint-temporary-classification\.json|export-checkpoint\.sh/);
+});
+
+test("historical checkpoint exporter still rejects symlinks, hardlinks and temporary workspaces", () => {
   const exporter = fs.readFileSync(path.join(SUPPORT_ROOT, "export-checkpoint.sh"), "utf8");
-  assert.match(core, /extractCheckpointSourceArchive\(\{ archivePath: archiveHostPath, targetRoot: stateRoot \}\)/);
-  assert.match(core, /checkpoint-temporary-classification\.json/);
-  assert.match(core, /classification\.outbox_clear === true/);
-  assert.match(core, /"exec", state\.active_container, "ps", "-ww", "-eo", "args"/);
   assert.match(exporter, /for required in data-format\.json state\.json resources jobs/);
   assert.match(exporter, /tmp\/workspaces/);
   assert.match(exporter, /-type l -print -quit/);

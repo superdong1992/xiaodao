@@ -149,6 +149,15 @@
         "pytest-summary.json"
       ]
     },
+    "det.postgres": {
+      "kind": "pytest",
+      "selectors": ["tests/deterministic/postgres"],
+      "pytest_args": ["--tb=short"],
+      "min_passed": 1,
+      "skip_policy": "forbid",
+      "runtime_profile": "python-test",
+      "evidence": ["pytest.xml", "pytest-summary.json"]
+    },
     "det.integration": {
       "kind": "pytest",
       "selectors": [
@@ -470,6 +479,16 @@
         "model-usage.json"
       ],
       "isolated_agent_invocations": 1
+    },
+    "real.agent.report-followup": {
+      "kind": "pytest",
+      "selectors": ["tests/real/agent/test_real_report_followup.py"],
+      "environment_profile": "real-report-followup",
+      "min_passed": 2,
+      "skip_policy": "forbid",
+      "runtime_profile": "release",
+      "evidence": ["pytest.xml", "pytest-summary.json", "model-usage.json", "report-followup-audit.json"],
+      "isolated_agent_invocations": 2
     },
     "real.agent.skill-generation": {
       "kind": "pytest",

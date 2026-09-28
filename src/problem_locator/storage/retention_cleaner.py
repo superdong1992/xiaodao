@@ -149,6 +149,7 @@ class StorageRetentionCleaner:
         self._quarantine_mover = quarantine_mover
         self._stage_registry = stage_registry
         self._attachment_registry = attachment_registry
+        self.workspace_in_use: Callable[[str], bool] = lambda _workspace_id: False
         self._is_interrupted = is_interrupted or (lambda: False)
         self._on_delete_failure = on_delete_failure or (
             lambda _path, _error: None
@@ -229,7 +230,8 @@ class StorageRetentionCleaner:
             return not self._state_repository.retention_in_use('active_job', owner_job_id)
         if candidate.kind == "WORKSPACE":
             job_id = workspace_owner_id(path.name)
-            return not self._state_repository.retention_in_use('active_job', job_id)
+            return (not self.workspace_in_use(path.name)
+                    and not self._state_repository.retention_in_use('active_job', job_id))
         if candidate.kind == "FORMAL_RESOURCE":
             storage_key = path.relative_to(self._layout.data_root).as_posix()
             return self._state_repository.retention_in_use('resource', storage_key) is False

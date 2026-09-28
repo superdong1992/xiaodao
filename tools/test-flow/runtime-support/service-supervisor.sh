@@ -104,6 +104,8 @@ journey_relay_pid=$!
 diagnostic_relay_pid=$!
 
 cd /opt/src/xiaodao
+database_url=$(cat /run/test-flow-postgres/database-url)
+test -n "$database_url"
 service_claude_command="/usr/bin/timeout --foreground --signal=TERM --kill-after=5s ${TEST_FLOW_SERVICE_HARD_TIMEOUT_SECONDS}s /usr/local/bin/claude -p --output-format stream-json --verbose --no-chrome --no-session-persistence --dangerously-skip-permissions --tools Bash,Read,Write,Skill --allowedTools Skill(logparse-diagnose) --setting-sources user --settings /run/plagent-claude/settings.json --model haiku --effort low --max-turns $TEST_FLOW_SERVICE_MAX_TURNS --max-budget-usd $TEST_FLOW_SERVICE_MAX_BUDGET_USD"
 intake_claude_command="/usr/local/bin/claude -p --output-format stream-json --verbose --no-chrome --no-session-persistence --setting-sources user --settings /run/plagent-claude/settings.json --model haiku --effort low --max-turns $TEST_FLOW_INTAKE_MAX_TURNS --max-budget-usd $TEST_FLOW_INTAKE_MAX_BUDGET_USD"
 /usr/bin/setpriv \
@@ -119,6 +121,8 @@ intake_claude_command="/usr/local/bin/claude -p --output-format stream-json --ve
     PYTHONUNBUFFERED=1 \
     PYTHONPYCACHEPREFIX="/tmp/test-flow-service-pycache-$instance" \
     DATA_ROOT=/var/lib/problem-locator \
+    DATABASE_URL="$database_url" \
+    DATABASE_POOL_SIZE=8 \
     WEBSITE_AUTH_MODE=trusted_header \
     DFX_LOG_DIR="$dfx" \
     PUBLIC_BASE_URL="$E2E_PUBLIC_BASE_URL" \

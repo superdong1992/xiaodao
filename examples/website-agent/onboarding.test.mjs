@@ -54,7 +54,7 @@ test("copied create/send example retains original logical IDs after lost create 
 });
 
 const executeUpload = new AsyncFunction("client", "crypto", "file", "conversationId", "websiteUpload",
-  `${upload}\nreturn { metadata, submitLogs };`);
+  `const selectedRunId = "selected-run";\n${upload}\nreturn { metadata, submitLogs };`);
 
 for (const [name, contentType] of [["logs.zip", "application/zip"], ["LOGS.zip", "application/zip"],
   ["logs.tar", "application/x-tar"], ["logs.tar.gz", "application/gzip"], ["日志.tgz", "application/gzip"], ["logs.gz", "application/gzip"]]) {
@@ -105,5 +105,5 @@ test("copied upload retry reuses the hash, reservation, Blob and attachment-only
   await assert.rejects(submitLogs(), /lost attachment message/);
   assert.deepEqual(await submitLogs(), { status: "ACCEPTED" });
   assert.deepEqual([hashes, reservations, uploads], [1, 1, 1]);
-  assert.deepEqual(messages, Array(2).fill({ request_id: "logical-request-2", attachment_ids: ["attachment"] }));
+  assert.deepEqual(messages, Array(2).fill({ request_id: "logical-request-2", attachment_ids: ["attachment"], target_run_id: "selected-run" }));
 });
