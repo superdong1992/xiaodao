@@ -417,6 +417,7 @@ class ValidatedAgentDraft:
     target_logs: tuple[CapturedTargetLog, ...]
     route_recovery: RouteQuoteRecovery | None = None
     model_json_extraction: ModelJsonExtraction | None = None
+    route_admission: dict[str, Any] | None = None
 
 
 class ValidatedOutputKind(StrEnum):

@@ -348,10 +348,21 @@ def _skill_index_entry(
     expected_ref: VersionedRef,
 ) -> dict[str, Any]:
     registration = specialized.registration
+    routing = registration.routing
     return {
         "ref": expected_ref.model_dump(mode="json"),
         "capability": registration.capability,
         "summary": registration.summary,
+        "routing": None if routing is None else {
+            "applicability": [
+                {"id": condition.id, "description": condition.description}
+                for condition in routing.applicability
+            ],
+            "exclusions": [
+                {"id": condition.id, "description": condition.description}
+                for condition in routing.exclusions
+            ],
+        },
         "required_user_inputs": list(specialized.methods.required_user_inputs),
         "required_artifacts": list(specialized.methods.required_artifacts),
         "requires_logparse": registration.preprocessing.requires_logparse,
@@ -440,7 +451,7 @@ class RuntimeAssetResolver:
         if job.job_type is JobType.ROUTE:
             skill_index = canonical_json_bytes(
                 {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "skills": [
                         _skill_index_entry(snapshot.specialized, ref)
                         for snapshot, ref in zip(

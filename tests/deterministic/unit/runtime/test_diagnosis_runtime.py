@@ -107,6 +107,7 @@ from problem_locator.runtime.workspace import (
     _verify_materialized,
     inspect_tree,
 )
+from tests.route_helpers import route_response_for_prompt
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
@@ -444,7 +445,7 @@ def _job_from_catalog(catalog: VersionedAssetCatalog) -> Job:
     return Job.model_validate(base)
 
 
-def test_route_skill_index_v2_exposes_only_the_complete_namespaced_ref(
+def test_route_skill_index_v3_exposes_only_the_complete_namespaced_ref(
     tmp_path: Path,
 ) -> None:
     catalog = _make_route_catalog(tmp_path)
@@ -453,7 +454,7 @@ def test_route_skill_index_v2_exposes_only_the_complete_namespaced_ref(
     assert resolved.skill_index_text is not None
     index = json.loads(resolved.skill_index_text)
 
-    assert index["schema_version"] == 2
+    assert index["schema_version"] == 3
     assert len(index["skills"]) == 1
     skill = index["skills"][0]
     assert "registration_id" not in skill
@@ -464,8 +465,8 @@ def test_route_skill_index_v2_exposes_only_the_complete_namespaced_ref(
         BUILTIN_ASSET_ROOT / "output-contracts" / "route" / "output-contract.md"
     ).read_text(encoding="utf-8")
     assert "`skill_id`" in route_contract
-    assert "`SKILL_INDEX.skills[*].ref.id`" in route_contract
-    assert catalog.route_bindings().output_contract_ref.version == "5.0.0"
+    assert "`ref.id`" in route_contract
+    assert catalog.route_bindings().output_contract_ref.version == "6.0.0"
 
 
 def test_route_reuses_one_validated_skill_snapshot_for_the_index(
@@ -757,13 +758,13 @@ class _RuntimeBackend:
         final_result = None
         if self.outcome_bytes is not None:
             # Existing test builders describe the server envelope. The fake
-            # CLI emits only the new model-owned three-field response.
+            # CLI emits the model-owned semantic assessment, not the envelope.
             value = json.loads(self.outcome_bytes)
             payload = value.get("payload", {})
-            final_result = json.dumps({
-                "skill_id": None if payload.get("skill_ref") is None else payload["skill_ref"]["id"],
-                "reason": payload.get("reason"), "confidence": payload.get("confidence"),
-            })
+            final_result = json.dumps(route_response_for_prompt(
+                kwargs["prompt"], None if payload.get("skill_ref") is None else payload["skill_ref"]["id"],
+                reason=payload.get("reason"), confidence=0.99,
+            ))
         sinks: ExecutionLogSinks = kwargs["log_sinks"]
         unique = {id(sinks.stdout): sinks.stdout, id(sinks.stderr): sinks.stderr}
         for sink in unique.values():
@@ -1029,7 +1030,7 @@ def test_extra_user_fact_keeps_registered_route_candidate_for_semantic_router(
     assert receipt.job_outcome.payload.kind.value == "NO_CAPABILITY"
     assert receipt.job_outcome.payload.skill_ref is None
     assert receipt.job_outcome.payload.reason == (
-        "No specialized Skill semantically matches the problem."
+        "路由审核未选择专用 Skill，转入通用定位。"
     )
     assert len(backend.calls) == 1
     assert state.calls == [job.case_id]
@@ -1077,7 +1078,7 @@ def test_empty_production_catalog_publishes_no_capability_without_router(
     assert receipt.job_outcome.payload is not None
     assert receipt.job_outcome.payload.kind is RouteKind.NO_CAPABILITY
     assert receipt.job_outcome.payload.reason == (
-        "No diagnosis skill is available in the production catalog."
+        "生产目录中没有可用的专用 Skill，转入通用定位。"
     )
     assert state.calls == []
     assert records.log_sinks == {}

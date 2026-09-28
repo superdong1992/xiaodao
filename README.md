@@ -27,9 +27,9 @@
 | S00 合同修订版 | `v11-contract-r2` |
 | Agent 会话详情 / 存储 / 事件 | `3` / `2` / `2` |
 | Methods 包 | `SKILL.md` + `methods.json@1` + `references/*.md` |
-| 产品注册格式 | `registration-template.json@1` |
+| 产品注册格式 | `registration-template.json@2`；V1 仅兼容加载，不参与自动专用路由 |
 | Methods 评估协议 | `Methods V1` |
-| ROUTE / DIAGNOSE / REVIEW 输出格式 | `5.0.0` / `11.0.0` / `10.0.0` |
+| ROUTE / DIAGNOSE / REVIEW 输出格式 | `6.0.0` / `11.0.0` / `10.0.0` |
 | GENERIC 输出格式 / 运行配置 | `2.0.0` / `3.0.0` |
 | Specialist / Reviewer 运行配置 | `8.0.0` / `7.0.0` |
 | 默认 Skill 直接输出所用配置 | `agent-profile/skill-direct` / `output-contract/skill-direct` |
@@ -66,7 +66,9 @@ Logparse 产品可以省略，此时运行时将实际使用的产品记录为 `
 
 要求模型输出 JSON 的阶段允许开头带 BOM、外层包裹完整 Markdown 代码块，以及使用 CRLF 换行。这些兼容规则不适用于 Skill 直接输出的正文，七个 MCP 工具的输入格式要求也保持不变。网站快照新增可安全展示的 `failure` 字段，用于查看失败阶段并关联服务端日志。调度或持久化异常会使服务停止接收新任务。结果提交可在现有 30 秒窗口内重试；窗口到期不会强行中断单次阻塞 I/O，也不会重新调用模型。
 
-如果 ROUTE 输出的 `reason` 漏掉了双引号转义，服务允许在本地修正一次，但必须能唯一确定字段边界，保持 `skill_id`、`confidence` 和已有转义不变，并重新通过完整校验。原始响应、最终采用的结果和修正记录分别归档。其他模型阶段和公开输入不自动修复 JSON 语法；适用范围与排查方式见[模型输出兼容说明](docs/model-output-compatibility.md)。
+专用 Skill 必须声明明确的适用范围。ROUTE 一次性逐项审核，只有唯一候选明确适用、其余候选均可排除、原文引用有效且置信度不低于 0.95 时才放行。低置信、依据不足或歧义转通用定位；已明确适用但缺诊断材料，仍进入专用流程补齐。旧注册未补齐范围声明时不能自动选用。详见[路由准入与注册升级](docs/route-admission.md)。
+
+新 ROUTE 审核协议严格拒绝非法 JSON，包括根 `reason` 中未转义的引号。原始响应和有效审核记录分别归档，不自动修补字段或证据；旧版 reason 引号恢复记录仍可用于历史排查。展示格式兼容与排查方式见[模型输出兼容说明](docs/model-output-compatibility.md)。
 
 ### 发布验收
 
@@ -130,7 +132,7 @@ uv lock --check
 | `LOGPARSE_CONCURRENCY` | 否 | `1` | 同时执行的 Logparse 子进程数 |
 | `ARCHIVE_WORKERS` | 否 | `1` | ZIP 后台工作线程数 |
 
-需要尽量缩短整体耗时时，可让 `ROUTE_CLAUDE_COMMAND` 使用低延迟模型，并将推理预算降到所需的最低水平，同时让 `DIAGNOSE_CLAUDE_COMMAND` 保留诊断所需能力。ROUTE 只加载本阶段需要的输出格式说明，返回 `skill_id`、简短的 `reason` 和 `confidence`；无匹配时返回 `skill_id=null`。服务端根据启动时的快照补全 Skill 引用（ref）和 Outcome。非法 JSON、未知 Skill 或异常退出均直接判为失败，不自动修复。
+需要尽量缩短整体耗时时，可让 `ROUTE_CLAUDE_COMMAND` 使用低延迟模型，并将推理预算降到所需的最低水平，同时让 `DIAGNOSE_CLAUDE_COMMAND` 保留诊断所需能力。ROUTE 返回 `skill_id`、简短的 `reason`、`confidence` 和逐项 `assessments`；无明确匹配时返回 `skill_id=null`。服务端校验准入条件，并根据启动快照补全 Skill 引用（ref）和 Outcome。非法 JSON、未知 Skill、缺少审核字段或异常退出均报错，不转通用。
 
 Reviewer 必须继续使用 `DIAGNOSE_CLAUDE_COMMAND`，确保与 Specialist 使用相同的模型。
 

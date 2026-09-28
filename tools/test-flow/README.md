@@ -280,12 +280,12 @@ stable marker；语义 oracle 只能在该机械合同上检查原因分组与�
 生成加九次直接 diagnosis Goal，Evidence V2 model cert 不复用该路径。
 
 所有 pytest 包装的真实 isolated Agent Gate 还使用版本化的
-`isolated-agent-env-allowlist-v3` 环境策略。pytest 只继承跨平台启动所需的
+`isolated-agent-env-allowlist-v4` 环境策略。pytest 只继承跨平台启动所需的
 `PATH/HOME/SystemRoot/TEMP` 等基础键，并显式加入当前 Test Flow Gate 所需的键；宿主 provider、代理、
 云平台和 CI 环境变量不会进入 pytest、AgentBackend 或 Claude wrapper。模型 provider 认证只由已审计的
 env-only settings 文件提供；Logparse 会话凭据只能由 AgentBackend 的显式 broker 机制成对加入。
-wrapper 会再次拒绝未知入站键；macOS 启动 Node 时注入的 `__CF_USER_TEXT_ENCODING` 只允许出现在入站
-审计中，不会转发给 pytest 或 Claude。Skill-generation 的单响应上限只由计划派生，宿主同名环境变量不能覆盖。invocation receipt 会写入策略版本、有效键名列表及其 SHA-256，
+wrapper 会再次拒绝未知入站键；macOS 启动 Node 时注入的 `__CF_USER_TEXT_ENCODING`、Windows 下 libuv 补入的
+`WINDIR` 允许记入入站审计，环境构造器不主动向下游继承；`WINDIR` 仅在 Windows 入站允许，系统可能在后续子进程启动时再次补入。Skill-generation 的单响应上限只由计划派生，宿主同名环境变量不能覆盖。invocation receipt 会写入策略版本、有效键名列表及其 SHA-256，
 不写入任何环境值或 secret。该策略实现位于 `runtime.support` 身份中，源码变化会使既有证明失效。
 
 ## Verdict 与退出码

@@ -7,7 +7,7 @@ import pytest
 
 from problem_locator.contracts import StateFile, JobType
 from problem_locator.runtime.agent_telemetry import AgentStreamTelemetry
-from problem_locator.runtime.final_response import parse_route_response, parse_specialist_response, specialist_prompt, INLINE_INPUT_BYTES, MARKER_INDEX_BYTES
+from problem_locator.runtime.final_response import parse_route_response as _parse_route_response, parse_specialist_response, specialist_prompt, INLINE_INPUT_BYTES, MARKER_INDEX_BYTES
 from problem_locator.runtime.failures import RuntimeExecutionError
 from problem_locator.runtime.methods_grounding import FrozenTargetLogV1, scan_method_markers
 from problem_locator.runtime.methods_skill import load_specialized_skill_registration
@@ -19,46 +19,71 @@ def route_job():
     return next(job for case in state.cases.values() for job in case.jobs.values() if job.job_type is JobType.ROUTE)
 
 
-def test_route_uses_final_three_fields_and_server_pinned_identity():
+def _assessments(job=None):
+    job = job or route_job()
+    return [{"skill_id": ref.id, "applicability": [{
+        "condition_id": "rpc", "verdict": "SUPPORTED", "reason": "问题明确属于服务间 RPC。",
+        "evidence": [{"pointer": "/problem_spec/scope", "quote": job.context_snapshot.problem_spec.scope}],
+    }], "exclusions": [{
+        "condition_id": "not-rpc", "verdict": "REFUTED", "reason": "问题明确属于服务间 RPC。",
+        "evidence": [{"pointer": "/problem_spec/scope", "quote": job.context_snapshot.problem_spec.scope}],
+    }]} for ref in job.available_skill_refs]
+
+
+def parse_route_response(text, job):
+    index = {"schema_version": 3, "skills": [{
+        "ref": ref.model_dump(mode="json"), "routing": {
+            "applicability": [{"id": "rpc", "description": "服务间 RPC 问题"}],
+            "exclusions": [{"id": "not-rpc", "description": "问题不属于服务间 RPC"}],
+        },
+    } for ref in job.available_skill_refs]}
+    return _parse_route_response(text, job, skill_index=json.dumps(index))
+
+
+def _no_match_response():
+    return json.dumps({"skill_id": None, "reason": "无匹配", "confidence": 1, "assessments": _assessments()})
+
+
+def test_route_uses_four_fields_and_server_pinned_identity():
     job = route_job()
     ref = job.available_skill_refs[0]
-    draft = parse_route_response(json.dumps({'skill_id': ref.id, 'reason': '范围匹配', 'confidence': .9}), job).draft
+    draft = parse_route_response(json.dumps({'skill_id': ref.id, 'reason': '范围匹配', 'confidence': .99,
+                                            'assessments': _assessments(job)}), job).draft
     assert draft.payload.skill_ref == ref
     assert (draft.job_id, draft.case_id, draft.base_state_revision) == (job.job_id, job.case_id, job.base_state_revision)
-    assert parse_route_response('{"skill_id":null,"reason":"无匹配","confidence":1}', job).draft.payload.skill_ref is None
+    assert parse_route_response(_no_match_response(), job).draft.payload.skill_ref is None
 
 
 @pytest.mark.parametrize("matched", [False, True])
-def test_route_recovers_only_reason_and_preserves_frozen_routing(matched):
+def test_route_rejects_unescaped_root_reason_quotes(matched):
     job = route_job()
     ref = job.available_skill_refs[0] if matched else None
     raw = ('{"skill_id":' + json.dumps(ref.id if ref else None)
-           + ',"reason":"选择 "foo" 方法","confidence":0.9}')
-    result = parse_route_response(raw, job)
-    assert result.draft.payload.skill_ref == ref
-    assert result.draft.payload.reason == '选择 "foo" 方法'
-    assert result.draft.payload.confidence == 0.9
-    assert result.route_recovery is not None
-    assert result.route_recovery.raw_bytes == raw.encode()
+           + ',"reason":"选择 "foo" 方法","confidence":0.99,"assessments":' + json.dumps(_assessments(job)) + '}')
+    with pytest.raises(RuntimeExecutionError):
+        parse_route_response(raw, job)
 
 
 @pytest.mark.parametrize("skill,confidence", [
     ("unknown", "0.9"), (None, "true"), (None, "NaN"), (None, "1.1"),
     (123, "0.9"), (None, '"0.9"'), (None, "-0.1"),
 ])
-def test_route_reason_recovery_never_bypasses_routing_validation(skill, confidence):
+def test_route_malformed_reason_and_controls_are_rejected(skill, confidence):
     raw = ('{"skill_id":' + json.dumps(skill)
-           + ',"reason":"选择 "foo" 方法","confidence":' + confidence + '}')
+           + ',"reason":"选择 "foo" 方法","confidence":' + confidence
+           + ',"assessments":' + json.dumps(_assessments()) + '}')
     with pytest.raises(RuntimeExecutionError):
         parse_route_response(raw, route_job())
 
 
 def test_route_valid_quotes_do_not_create_recovery_or_bypass_reason_limit():
-    value = {"skill_id": None, "reason": '选择 "foo" 方法；路径 C:\\logs\\new', "confidence": 0.9}
+    value = {"skill_id": None, "reason": '选择 "foo" 方法；路径 C:\\logs\\new', "confidence": 0.9,
+             "assessments": _assessments()}
     parsed = parse_route_response(json.dumps(value), route_job())
     assert parsed.route_recovery is None
-    assert parsed.draft.payload.reason == value["reason"]
-    raw = '{"skill_id":null,"reason":"' + 'x' * 1024 + '"foo"' + '","confidence":0.9}'
+    assert parsed.route_admission["model_reason"] == value["reason"]
+    raw = ('{"skill_id":null,"reason":"' + 'x' * 1024 + '"foo"' + '","confidence":0.9,"assessments":'
+           + json.dumps(_assessments()) + '}')
     with pytest.raises(RuntimeExecutionError):
         parse_route_response(raw, route_job())
 
@@ -91,7 +116,7 @@ def test_specialist_json_normalizes_without_a_draft_file():
     ('\ufeff', ''), ('```json\n', '\n```'), ('\ufeff```\r\n', '\r\n```'),
 ])
 def test_route_and_specialist_accept_complete_model_presentation_wrappers(prefix, suffix):
-    route = '{"skill_id":null,"reason":"无匹配","confidence":1}'
+    route = _no_match_response()
     assert parse_route_response(prefix + route + suffix, route_job()).draft.payload.skill_ref is None
     value = {'schema_version': 1, 'status': 'INSUFFICIENT', 'confirmed_methods': [],
         'candidate_methods': [], 'evidence': [], 'limitations': ['缺少证据'], 'safety_notes': []}
@@ -120,7 +145,7 @@ def test_specialist_preserves_all_items_before_independent_evidence_validation()
     ('## 分析\n最终结果如下：\n', ''),
 ])
 def test_route_and_specialist_extract_final_json_with_raw_receipts(prefix, suffix):
-    route = '{"skill_id":null,"reason":"无匹配","confidence":1}'
+    route = _no_match_response()
     routed = parse_route_response(prefix + route + suffix, route_job())
     assert routed.draft.payload.skill_ref is None
     assert routed.route_recovery is None

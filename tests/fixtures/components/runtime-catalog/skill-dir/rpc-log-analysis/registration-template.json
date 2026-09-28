@@ -1,10 +1,16 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "registration_id": "rpc-log-analysis",
   "version": "1.0.0",
   "capability": "rpc-timeout-log-analysis",
   "deployment_scope": "PRODUCTION",
   "summary": "Correlate a client RPC timeout with frozen client and server target logs.",
+  "routing": {
+    "applicability": [
+      {"id": "rpc-call-timeout", "description": "问题是客户端 RPC 调用超时，需要定位超时原因。"}
+    ],
+    "exclusions": []
+  },
   "package": {
     "relative_path": "package/rpc-log-analysis",
     "skill_name": "rpc-log-analysis",

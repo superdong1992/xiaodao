@@ -135,15 +135,19 @@ def test_nested_json_preserves_strings_through_redaction_telemetry_and_business_
 ):
     job = Job.model_validate_json((_CONTRACTS / "job-route.json").read_bytes())
     value = {
-        "route": {"skill_id": None, "reason": _TEXT, "confidence": 0.9},
+        "route": {"skill_id": None, "reason": _TEXT, "confidence": 0.9, "assessments": []},
         "intake": _intake_value(_TEXT),
         "specialist": _specialist_value(_TEXT),
     }[entry]
     inner = json.dumps(value, ensure_ascii=ascii_only)
     final = _from_stream(inner, ascii_only=ascii_only, ending=ending, chunk_size=chunk_size)
     if entry == "route":
-        result = parse_route_response(final, job)
-        assert result.draft.payload.reason == _TEXT
+        index = {"schema_version": 3, "skills": [
+            {"ref": ref.model_dump(mode="json"), "routing": None}
+            for ref in job.available_skill_refs
+        ]}
+        result = parse_route_response(final, job, skill_index=json.dumps(index))
+        assert result.route_admission["model_reason"] == _TEXT
         assert result.draft.payload.confidence == 0.9
         assert result.draft.payload.skill_ref is None
     elif entry == "intake":

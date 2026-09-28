@@ -3,7 +3,7 @@
 
 The fixture deliberately implements the production protocol split:
 
-* ROUTE retains the legacy route envelope.
+* ROUTE returns one structured semantic assessment for every eligible Skill.
 * Pass A requires one installed ``logparse-diagnose`` Helper load before one
   product-owned Logparse broker command.
 * Pass B receives the frozen Methods package/target logs and writes only the
@@ -28,6 +28,9 @@ from typing import Any
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, os.fspath(REPOSITORY_ROOT / "src"))
+sys.path.insert(0, os.fspath(REPOSITORY_ROOT))
+
+from tests.route_helpers import route_response_for_prompt
 
 from problem_locator.contracts import (  # noqa: E402
     AgentJobOutcomeDraftV2,
@@ -195,8 +198,8 @@ def _route(instruction: dict[str, Any], context: str) -> None:
         error=None,
         rule_claims=[],
     )
-    _emit_result({"skill_id": draft.payload.skill_ref.id,
-        "reason": draft.payload.reason, "confidence": draft.payload.confidence})
+    _emit_result(route_response_for_prompt(context, draft.payload.skill_ref.id,
+        reason=draft.payload.reason, confidence=draft.payload.confidence))
     _record_invocation(
         job_id=draft.job_id,
         job_type=JobType.ROUTE,

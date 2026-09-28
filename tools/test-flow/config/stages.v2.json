@@ -207,7 +207,7 @@
       "depends_on": ["real.agent-backend"],
       "gates": ["real.agent.route"],
       "identity_set": "real-route",
-      "timeout_seconds": 1200,
+      "timeout_seconds": 4800,
       "progress_class": "real",
       "reuse": {"dev": "identity", "release": "never"},
       "platforms": ["windows", "macos", "linux"]

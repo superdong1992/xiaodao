@@ -495,7 +495,7 @@
         "tests/real/agent/test_real_route_agent_contract_gate.py"
       ],
       "environment_profile": "real-route",
-      "min_passed": 1,
+      "min_passed": 5,
       "skip_policy": "forbid",
       "runtime_profile": "release",
       "evidence": [
@@ -503,7 +503,7 @@
         "pytest-summary.json",
         "model-usage.json"
       ],
-      "isolated_agent_invocations": 1
+      "isolated_agent_invocations": 5
     },
     "real.agent.review": {
       "kind": "pytest",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -22,6 +22,8 @@ from problem_locator.contracts import (
     OutcomeResultType,
     ReviewAssessment,
     ReviewVerdict,
+    RouteDecision,
+    RouteKind,
     UserResultPayload,
     WorkspaceInputManifest,
     bytes_sha256,
@@ -35,6 +37,7 @@ from problem_locator.integrations.logparse.paths import resolve_workspace_path
 from .authoritative_targets import AuthoritativeTargetSet
 from .outcome_finalizer import SERVER_OUTCOME_RELATIVE_PATH
 from .result_types import CapturedTargetLog, ServerGeneratedResultFile
+from .route_admission import MIN_ROUTE_CONFIDENCE
 from .verification_result import VerificationResult
 from .user_results import build_server_result_bundle
 
@@ -159,6 +162,40 @@ def _server_state_path(root: Path) -> Path:
     return server_state
 
 
+def _validate_route_admission(
+    job: Job, draft: AgentJobOutcomeDraftV2, draft_bytes: bytes,
+    admission: dict[str, Any] | None,
+) -> None:
+    """Require this execution's server admission before minting a ROUTE Outcome."""
+    payload = draft.payload
+    if not isinstance(admission, dict) or not isinstance(payload, RouteDecision):
+        raise ValueError("ROUTE 发布缺少服务端路由准入记录。")
+    expected_skill_id = None if payload.skill_ref is None else payload.skill_ref.id
+    hashes = admission.get("input_hashes")
+    if (
+        type(admission.get("schema_version")) is not int
+        or admission.get("schema_version") != 1
+        or admission.get("policy") != "strict_route_admission_v1"
+        or admission.get("job_id") != job.job_id
+        or admission.get("case_id") != job.case_id
+        or type(admission.get("base_state_revision")) is not int
+        or admission.get("base_state_revision") != job.base_state_revision
+        or draft_bytes != canonical_json_bytes(draft)
+        or admission.get("draft_sha256") != bytes_sha256(draft_bytes)
+        or admission.get("effective_skill_id") != expected_skill_id
+        or admission.get("confidence") != payload.confidence
+        or not isinstance(hashes, dict)
+        or hashes.get("context_snapshot_sha256") != bytes_sha256(canonical_json_bytes(job.context_snapshot))
+        or (admission.get("reason_code") == "ADMITTED") != (payload.kind is RouteKind.MATCHED)
+    ):
+        raise ValueError("ROUTE 准入记录与当前 Job、输入或最终草稿不一致。")
+    if payload.kind is RouteKind.MATCHED and (
+        admission.get("model_skill_id") != expected_skill_id
+        or payload.confidence < MIN_ROUTE_CONFIDENCE
+    ):
+        raise ValueError("ROUTE 未通过专用 Skill 准入，不能发布 MATCHED。")
+
+
 def finalize_server_outcome(
     *,
     workspace_root: Path,
@@ -171,9 +208,12 @@ def finalize_server_outcome(
     verification: VerificationResult | None,
     authoritative_targets: AuthoritativeTargetSet | None,
     target_logs: tuple[CapturedTargetLog, ...],
+    route_admission: dict[str, Any] | None = None,
 ) -> ServerFinalizationResult:
     """Validate, possibly downgrade, then atomically publish one final Outcome."""
 
+    if draft.job_type is JobType.ROUTE and draft.result_type is not OutcomeResultType.FAILED:
+        _validate_route_admission(job, draft, draft_bytes, route_admission)
     if draft.job_type is JobType.ROUTE or draft.result_type is OutcomeResultType.FAILED:
         if verification is not None:
             raise ValueError("ROUTE/FAILED drafts forbid a DecisionAudit")

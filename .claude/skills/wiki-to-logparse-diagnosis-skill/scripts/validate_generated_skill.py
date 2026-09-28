@@ -32,6 +32,7 @@ REGISTRATION_KEYS = {
     "capability",
     "deployment_scope",
     "summary",
+    "routing",
     "package",
     "runtime",
 }
@@ -935,6 +936,37 @@ def _validate_methods(
     return result
 
 
+def _validate_routing(value: object, errors: list[str]) -> None:
+    if not isinstance(value, dict) or set(value) != {"applicability", "exclusions"}:
+        errors.append("registration routing 只能包含 applicability 和 exclusions")
+        return
+    seen_ids: set[str] = set()
+    for group, minimum in (("applicability", 1), ("exclusions", 0)):
+        conditions = value[group]
+        if not isinstance(conditions, list) or not minimum <= len(conditions) <= 16:
+            errors.append(f"registration routing.{group} 必须包含 {minimum}–16 项条件")
+            continue
+        for index, condition in enumerate(conditions):
+            label = f"registration routing.{group}[{index}]"
+            if not isinstance(condition, dict) or set(condition) != {"id", "description"}:
+                errors.append(f"{label} 只能包含 id 和 description")
+                continue
+            condition_id = condition["id"]
+            if (
+                not isinstance(condition_id, str)
+                or len(condition_id) > 64
+                or not NAME_PATTERN.fullmatch(condition_id)
+            ):
+                errors.append(f"{label}.id 必须是最多 64 个字符的小写 kebab-case")
+            elif condition_id in seen_ids:
+                errors.append(f"{label}.id 必须在整个 routing 中唯一")
+            else:
+                seen_ids.add(condition_id)
+            description = condition["description"]
+            if not isinstance(description, str) or not description.strip() or len(description) > 1024:
+                errors.append(f"{label}.description 必须是最多 1024 个字符的非空文本")
+
+
 def _validate_registration(
     value: object,
     *,
@@ -951,8 +983,9 @@ def _validate_registration(
         return
     if set(value) != REGISTRATION_KEYS:
         errors.append("registration-template.json root keys do not match the registration contract")
-    if type(value.get("schema_version")) is not int or value.get("schema_version") != 1:
-        errors.append("registration schema_version must be 1")
+    if type(value.get("schema_version")) is not int or value.get("schema_version") != 2:
+        errors.append("新生成的 registration schema_version 必须是 2")
+    _validate_routing(value.get("routing"), errors)
     if value.get("registration_id") != registration_id or not NAME_PATTERN.fullmatch(
         registration_id
     ):

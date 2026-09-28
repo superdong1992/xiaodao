@@ -1,10 +1,16 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "registration_id": "rpc-timeout-methods-v1",
   "version": "1.0.0",
   "capability": "Diagnose RPC timeouts from frozen client and server logs using authored evidence methods.",
   "deployment_scope": "PRODUCTION",
   "summary": "Release-only product registration for the Wiki-derived RPC timeout Methods Skill.",
+  "routing": {
+    "applicability": [
+      {"id": "rpc-call-timeout", "description": "问题是 RPC 同步或异步调用超时，客户端未在截止时间前收到服务端响应，需要定位超时原因。"}
+    ],
+    "exclusions": []
+  },
   "package": {
     "relative_path": "package/diagnose-rpc-timeout",
     "skill_name": "diagnose-rpc-timeout",
