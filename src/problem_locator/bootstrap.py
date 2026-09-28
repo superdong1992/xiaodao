@@ -1446,6 +1446,7 @@ def _create_app(settings: Settings, *, allow_test_skills: bool) -> Any:
                 query_port=unavailable,
                 state_admin=_FailedStateAdmin(owner),
                 public_base_url=settings.public_base_url,
+                website_auth=settings.website_auth,
             )
         )
         app.state.problem_locator_composition = None
@@ -1463,6 +1464,7 @@ def _create_app(settings: Settings, *, allow_test_skills: bool) -> Any:
             state_admin=composition.state_admin,
             public_base_url=settings.public_base_url,
             agent_service=composition.agent,
+            website_auth=settings.website_auth,
         )
     )
     app.state.problem_locator_composition = composition

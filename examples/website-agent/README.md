@@ -28,7 +28,7 @@ node examples/website-agent/preview.mjs
 | `report-view.js` | 按固定字段生成报告界面 | 复制到网站静态资源目录，调用 `renderReport` |
 | `report-view.css` | 报告区样式 | 与渲染模块一起复制，也可替换为网站自己的样式 |
 | `browser-client.js` | 封装浏览器对网站同源 API 的调用 | 复制后使用，或按相同接口接入现有请求库 |
-| [server.mjs](server.mjs) | 统一实现网站后端的权限校验、上游请求、SSE 和产物下载 | Node.js 18+ 可导入 `createAgentBackend`，集成到现有后端 |
+| [server.mjs](server.mjs) | 统一实现 Cookie 透传、上游请求、SSE 和产物下载 | Node.js 18+ 可导入 `createAgentBackend`，集成到现有后端 |
 | [server.ts](server.ts) | 类型声明和兼容启动入口 | 使用 Node.js 24+ 执行下文启动命令，与 `server.mjs` 共用实现 |
 
 ## 2. 用最少代码显示已有报告
@@ -137,7 +137,7 @@ async function submitProblem() {
 }
 ```
 
-`problemText` 是用户本次从输入框提交的原文。如果需要在刷新后继续重试，网站应持久保存这份提交记录；只有提交新请求时才更换 ID。创建回执中的 `request_id` 已由网站后端按用户改写，不能用它替换原始 `createRequestId` 再次创建会话。
+`problemText` 是用户本次从输入框提交的原文。如果需要在刷新后继续重试，网站应持久保存这份提交记录；只有提交新请求时才更换 ID。默认 Cookie 模式原样转发创建请求的 `request_id`，xiaodao 按用户隔离幂等记录。旧认证模块模式仍会改写创建请求键，因此统一保留原始 `createRequestId`，不要用回执中的值替换它。
 
 收到非空的问题文本后，服务端按 MCP 客户端的固定中性模板创建 Case，初始事实为空。网站不应要求用户先提供预期行为、范围或日志，才允许创建 Case；创建前也不调用 INTAKE。Case 创建后，按原文展示 OPEN requirements 中的追问。没有 OPEN requirements 时不额外追问，前端也无需生成 `problem_spec`。
 
@@ -189,23 +189,42 @@ async function submitLogs() {
 
 ## 4. 接入真实网站后端
 
+生产配置和更新步骤见[Redis 会话接入部署说明](../../docs/website-redis-deployment.md)。
+
 先确认网站后端可以访问 xiaodao 的 `/live`、`/ready` 和 `/openapi.json`，实际部署版本为 `8.2.0` / `v11-contract-r2`。
 
-`WEBSITE_AUTH_MODULE` 指向网站自己的 `.mjs` 模块。该模块须以具名导出的方式提供 `access` 对象，对应 [server.ts](server.ts) 中的 `Access` 类型：
+默认由 xiaodao 后端读取 Redis 会话，BFF 不需要配置 `WEBSITE_AUTH_MODULE`。升级时移除该变量；自行调用 `createAgentBackend({ access })` 的网站还需移除 `access` 参数。浏览器访问网站同源接口时携带 Cookie，BFF 将它透传给 xiaodao，包括上传、下载和 SSE。
 
-| 回调 | 网站需实现的逻辑 |
-| --- | --- |
-| `authenticate(request)` | 校验真实登录态，返回 `{id: string}` 或 `null`；Cookie 认证还需校验 CSRF / Origin |
+xiaodao 从 Cookie 中读取 `sessionid`，查询 Redis 的 `airobot2-session:{session_id}`。value 是 JSON 字符串，例如：
 
-唯一的回调 `authenticate(request)` 是异步函数。会话和附件的用户归属由 xiaodao 持久保存，重复请求不会重复登记，网站不再维护另一份列表。后端将固定的 `WEBSITE_OWNER_NAMESPACE` 与已认证用户 ID 编码后计算 SHA-256，作为 `X-Agent-Owner-Key`。命名空间默认为 `xiaodao-website`，上线后应保持不变，不同网站使用不同的值。不得信任浏览器自行提交的用户归属键或 `user_id`。
+```json
+{"user":{"userid":"001234"},"cookie":{}}
+```
 
-从仓库根目录启动，替换实际地址和模块路径。
+只读取 `user.userid` 作为工号，保留前导零。`cookie` 和 `user` 中其他字段不参与身份解析。xiaodao 按 `SHA-256(JSON.stringify([WEBSITE_OWNER_NAMESPACE, userid]))` 派生内部归属键。会话和附件的用户归属由 xiaodao 持久保存，重复请求不会重复登记。
+
+以下变量配置在 **Linux xiaodao 后端**。`WEBSITE_REDIS_HOST` 先留空，内网部署时填实际 Redis IP 或主机名；无需在 BFF 配置 Redis。
+
+```dotenv
+WEBSITE_AUTH_MODE=redis
+WEBSITE_REDIS_HOST=
+WEBSITE_REDIS_PORT=6379
+WEBSITE_REDIS_DB=0
+WEBSITE_REDIS_USERNAME=
+WEBSITE_REDIS_PASSWORD=
+WEBSITE_REDIS_SSL=false
+WEBSITE_SESSION_COOKIE_NAME=sessionid
+WEBSITE_OWNER_NAMESPACE=xiaodao-website
+```
+
+`WEBSITE_AUTH_MODE` 默认是 `redis`。Redis 用户名、密码和 TLS 按内网实例填写。已有网站保留原 `WEBSITE_OWNER_NAMESPACE`，并确认旧 `user.id` 与 Redis 的 `user.userid` 一致，以继续读取历史会话。
+
+从仓库根目录启动 **BFF**，替换实际 xiaodao 地址：
 
 Linux / Bash：
 
 ```bash
 export XIAODAO_BASE_URL='http://xiaodao.internal:8000'
-export WEBSITE_AUTH_MODULE='/opt/website/xiaodao-access.mjs'
 node examples/website-agent/server.ts
 ```
 
@@ -213,13 +232,18 @@ Windows / PowerShell：
 
 ```powershell
 $env:XIAODAO_BASE_URL = 'http://xiaodao.internal:8000'
-$env:WEBSITE_AUTH_MODULE = 'D:\website\xiaodao-access.mjs'
 node examples/website-agent/server.ts
 ```
 
 后端示例固定监听 `127.0.0.1`，默认端口为 `8787`；`PORT` 只能修改端口。将网站同源 `/api/agent/` 反向代理到此服务，或把 `createAgentBackend` 接入现有的 Node HTTP 后端。SSE 代理需关闭响应缓冲，将读取超时设为大于 15 秒心跳间隔的值，例如 60 秒。上传代理需保留原始字节、长度和校验请求头。
 
-未配置认证模块时，进程可启动，但业务请求全部返回 `401`。模块路径建议使用绝对路径；相对路径以启动目录为准。不要为了联调删除授权检查，也不要把监听地址改为公网来绕过授权。
+登录会话缺失、过期或 `user.userid` 无效时返回 `401`；访问其他用户的数据仍返回 `404`；Redis 地址未配置或连接不可用时返回 `503`。Cookie 的 Domain、Path 等属性须允许浏览器向网站的 `/api/agent/` 携带它。
+
+旧部署可继续使用 `WEBSITE_AUTH_MODE=trusted_header` 和原 BFF 的 `WEBSITE_AUTH_MODULE`。该 `.mjs` 模块具名导出 `access`，实现异步 `authenticate(request)` 并返回 `{id: string}` 或 `null`。
+
+旧模式的创建请求键为 `SHA-256(JSON.stringify([user.id, request_id]))`，Cookie 模式使用原始 `request_id`。切换前先确认未完成创建请求的结果，避免重复创建会话。
+
+xiaodao 的诊断、MCP 和其他内部 API 保持现有内网部署方式，浏览器继续访问网站同源 BFF。
 
 浏览器调用网站的 `/api/agent`，网站后端访问 xiaodao 的 `/api/v1/agent`。后端只向配置的 `XIAODAO_BASE_URL` 发送请求，每次读取会话只请求一次上游接口。`included` 标明本次实际加载了哪些部分。未请求的 `history`、`attachments`、`result` 或 `artifacts` 为 null，页面应保留此前的内容；空数组则表示确实没有记录。
 

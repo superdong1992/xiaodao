@@ -122,6 +122,164 @@ function artifactFixture({ kind = "USER_RESULT", payload = Buffer.from(JSON.stri
   return { calls, artifact, fetchImpl };
 }
 
+const cookieHeaders = {
+  Cookie: "theme=light; sessionid=session-alice",
+};
+function assertCookieHeaders(init, cookie = cookieHeaders.Cookie) {
+  const headers = new Headers(init.headers);
+  assert.equal(headers.get("Cookie"), cookie);
+  assert.equal(headers.has("X-Agent-Owner-Key"), false);
+}
+function authFailure(status, code) {
+  return new Response(JSON.stringify({ ok: false, data: null, error: {
+    code, message: "SECRET /srv/private redis-session", retryable: false,
+    details: [{ field: "reason_code", actual: "SECRET" }],
+  } }), { status, headers: { "Content-Type": "application/json" } });
+}
+
+test("default BFF forwards Cookie credentials for API, uploads and events", async () => {
+  const calls = [];
+  const wire = ": connected\n\n";
+  await withServer({ fetchImpl: async (url, init) => {
+    assertCookieHeaders(init);
+    assert.equal(init.redirect, "manual");
+    const path = new URL(url).pathname;
+    calls.push(path);
+    if (path.endsWith("/events")) {
+      assert.equal(new Headers(init.headers).get("Last-Event-ID"), "7");
+      return new Response(wire, { headers: { "Content-Type": "text/event-stream" } });
+    }
+    if (path === "/api/v1/agent/attachments") return envelope({
+      attachment: { attachment_id: artifactId, conversation_id: conversation },
+      upload: { attachment_id: artifactId, url: "private" },
+    });
+    if (path === `/api/v1/agent/attachments/${artifactId}/content`) {
+      const chunks = []; for await (const chunk of init.body) chunks.push(chunk);
+      assert.equal(Buffer.concat(chunks).toString(), "log");
+      return envelope({ attachment_id: artifactId });
+    }
+    assert.equal(path, "/api/v1/agent/conversations");
+    if (init.method === "POST") {
+      assert.equal(JSON.parse(init.body).request_id, "browser-request-original");
+      return envelope({ conversation_id: conversation });
+    }
+    return envelope({ items: [], next_cursor: null });
+  } }, async (origin) => {
+    const requests = [
+      ["/api/agent/conversations", "GET"],
+      ["/api/agent/conversations", "POST", { request_id: "browser-request-original" }],
+      ["/api/agent/attachments", "POST", { conversation_id: conversation }],
+    ];
+    for (const [path, method, body] of requests) {
+      const response = await fetch(origin + path, { method,
+        headers: { ...cookieHeaders, ...(body ? { "Content-Type": "application/json" } : {}) },
+        body: body ? JSON.stringify(body) : undefined });
+      assert.equal(response.status, 200, path); await response.json();
+    }
+    const upload = await fetch(`${origin}/api/agent/attachments/${artifactId}/content`, { method: "PUT", body: "log",
+      headers: { ...cookieHeaders, "Content-Type": "application/zip", "Idempotency-Key": "upload-one",
+        "X-Content-SHA256": createHash("sha256").update("log").digest("hex") } });
+    assert.equal(upload.status, 200); await upload.json();
+    for (const path of [`${conversationPath}/events`]) {
+      const response = await fetch(origin + path, { headers: { ...cookieHeaders, "Last-Event-ID": "7" } });
+      assert.equal(response.status, 200); assert.equal(await response.text(), wire);
+    }
+  });
+  assert.equal(calls.length, 5);
+});
+
+for (const kind of ["USER_RESULT", "AUDIT_BUNDLE"]) {
+  test(`Cookie credentials reach metadata and ${kind} download`, async () => {
+    const payload = kind === "USER_RESULT" ? Buffer.from(JSON.stringify(report)) : Buffer.from("audit bytes");
+    const fixture = artifactFixture({ kind, payload });
+    await withServer({ fetchImpl: (url, init) => {
+      assertCookieHeaders(init); return fixture.fetchImpl(url, init);
+    } }, async (origin) => {
+      const response = await fetch(origin + reportDownloadPath + (kind === "AUDIT_BUNDLE" ? "?download=audit" : ""),
+        { headers: cookieHeaders });
+      assert.equal(response.status, 200);
+      assert.deepEqual(Buffer.from(await response.arrayBuffer()), payload);
+    });
+    assert.equal(fixture.calls.length, 2);
+  });
+}
+
+test("default Cookie credentials also reach history, messages, stop, rename, delete and feedback", async () => {
+  const operations = [
+    [conversationPath + "?include=none", "GET"],
+    [conversationPath + "/messages", "POST", { request_id: "message-one", text: "补充事实" }],
+    [conversationPath + "/stop", "POST", { request_id: "stop-one", run_id: runId }],
+    [conversationPath, "PATCH", { title: "更新标题" }],
+    [conversationPath, "DELETE"],
+    [`${conversationPath}/runs/${runId}/feedback`, "GET"],
+    [`${conversationPath}/runs/${runId}/feedback`, "PUT", { request_id: "vote-one", rating: "LIKE" }],
+  ];
+  let calls = 0;
+  await withServer({ fetchImpl: async (url, init) => {
+    calls++; assertCookieHeaders(init);
+    if (new URL(url).pathname.endsWith("/feedback")) return envelope(nativeFeedback());
+    if (!init.method || init.method === "GET") return envelope(nativeDetail([]));
+    return envelope({ conversation_id: conversation, run_id: runId, status: "ACCEPTED" });
+  } }, async (origin) => {
+    for (const [path, method, body] of operations) {
+      const response = await fetch(origin + path, { method,
+        headers: { ...cookieHeaders, ...(body ? { "Content-Type": "application/json" } : {}) },
+        body: body ? JSON.stringify(body) : undefined });
+      assert.equal(response.status, 200, path); await response.json();
+    }
+  });
+  assert.equal(calls, operations.length);
+});
+
+test("concurrent Cookie requests retain their own credentials across metadata and download awaits", async () => {
+  const received = [];
+  let releaseMetadata;
+  const bothStarted = new Promise((resolve) => { releaseMetadata = resolve; });
+  const fixture = artifactFixture();
+  await withServer({ fetchImpl: async (url, init) => {
+    const cookie = new Headers(init.headers).get("Cookie");
+    assertCookieHeaders(init, cookie);
+    received.push(cookie);
+    if (!new URL(url).pathname.endsWith("/content")) {
+      if (received.length === 2) releaseMetadata();
+      await bothStarted;
+    }
+    return fixture.fetchImpl(url, init);
+  } }, async (origin) => {
+    await Promise.all(["alice", "bob"].map(async (name) => {
+      const response = await fetch(origin + reportDownloadPath,
+        { headers: { ...cookieHeaders, Cookie: `sessionid=session-${name}` } });
+      assert.equal(response.status, 200); await response.arrayBuffer();
+    }));
+  });
+  assert.deepEqual(received.sort(), ["sessionid=session-alice", "sessionid=session-alice", "sessionid=session-bob", "sessionid=session-bob"]);
+});
+
+for (const [status, code, message] of [
+  [401, "AUTH_REQUIRED", "登录已失效，请重新登录。"],
+  [503, "AUTH_UNAVAILABLE", "登录验证暂时不可用，请稍后重试。"],
+]) {
+  for (const route of ["api", "events", "download"]) {
+    test(`backend ${code} reaches ${route} with fixed safe message and unchanged status`, async () => {
+      let calls = 0;
+      const fixture = artifactFixture();
+      await withServer({ fetchImpl: async (url, init) => {
+        calls++; assertCookieHeaders(init);
+        if (route === "download" && calls === 1) return fixture.fetchImpl(url, init);
+        return authFailure(status, code);
+      } }, async (origin) => {
+        const path = { api: "/api/agent/conversations", events: `${conversationPath}/events`,
+          download: reportDownloadPath }[route];
+        const response = await fetch(origin + path, { headers: cookieHeaders });
+        assert.equal(response.status, status);
+        assert.deepEqual(await response.json(), { ok: false, data: null,
+          error: { code, message, details: [], retryable: code === "AUTH_UNAVAILABLE" } });
+      });
+      assert.equal(calls, route === "download" ? 2 : 1);
+    });
+  }
+}
+
 for (const [code, status, retryable, message] of [
   ["AGENT_LOG_SELECTION_INVALID", 409, false, "当前仅支持一份日志归档，请合并后上传，或重新选择一个附件。"],
   ["AGENT_LOG_ALREADY_SELECTED", 409, false, "这份日志已用于当前定位，无需重复提交。"],
@@ -289,10 +447,17 @@ for (const [include, limit] of [["none", 16 * 1024 * 1024], ["report", 6 * 16 * 
     }); assert.ok(sent <= limit + 2 * chunk.length);
   });
 }
-test("default access denies before any upstream request", async () => {
-  await withServer({ fetchImpl: async () => assert.fail("未授权请求不能访问上游。") }, async (origin) => {
-    assert.equal((await fetch(origin + conversationPath)).status, 401);
+test("default access delegates missing Cookie rejection to the backend", async () => {
+  let calls = 0;
+  await withServer({ fetchImpl: async (_url, init) => {
+    calls++; assert.equal(new Headers(init.headers).has("Cookie"), false);
+    assert.equal(new Headers(init.headers).has("X-Agent-Owner-Key"), false);
+    return authFailure(401, "AUTH_REQUIRED");
+  } }, async (origin) => {
+    const response = await fetch(origin + conversationPath);
+    assert.equal(response.status, 401); assert.equal((await response.json()).error.code, "AUTH_REQUIRED");
   });
+  assert.equal(calls, 1);
 });
 test("all operations carry server-derived identity and preserve native ownership denial", async () => {
   let calls = 0;
@@ -885,8 +1050,8 @@ test("feedback refuses invalid parameters and GET request bodies without contact
   });
 });
 
-test("feedback requires website login and CSRF authorization before forwarding", async () => {
-  for (const [accessOverride, status] of [[undefined, 401], [{ authenticate: async () => {
+test("explicit legacy access still authorizes login and CSRF before forwarding feedback", async () => {
+  for (const [accessOverride, status] of [[{ authenticate: async () => null }, 401], [{ authenticate: async () => {
     throw new HttpError(403, "请求来源校验失败。");
   } }, 403]]) {
     await withServer({ access: accessOverride, fetchImpl: async () => assert.fail("未授权评价不能访问上游。") }, async (origin) => {

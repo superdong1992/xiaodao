@@ -8,6 +8,8 @@
 
 需要接入通用报告的点赞、点踩时，见[经验库与赞踩接入说明](generic-feedback-memory.md)。按钮由网站实现；本仓库提供按报告轮次读取和提交评价的封装。
 
+生产配置和更新步骤见[Redis 会话接入部署说明](website-redis-deployment.md)。
+
 ## 1. 先预览报告，再复制到网站
 
 使用 Node.js 24+，从仓库根目录运行：
@@ -41,7 +43,8 @@ renderReport(document.querySelector("#diagnosis-report"), conversation.result);
 | 部署版本 | 应为 `8.2.0` / `v11-contract-r2`，同时记录部署的 commit 或源码快照；不能仅凭进程启动判断版本 |
 | 接口规范 | 在线 `GET /openapi.json`；可视化入口 `GET /docs`；仓库 [OpenAPI 快照](../schemas/v2/web-api.openapi.snapshot.json) |
 | 完整说明 | [Agent API 参考](website-agent-api.md)：请求响应、附件、SSE、字段、错误与报告校验 |
-| 网站接入示例 | [预览、浏览器模块和后端启动说明](../examples/website-agent/README.md)：先展示报告，再接入登录回调、服务端用户归属校验、上传和 SSE |
+| 网站接入示例 | [预览、浏览器模块和后端启动说明](../examples/website-agent/README.md)：先展示报告，再配置 Cookie 透传、Redis 会话校验、上传和 SSE |
+| Redis 会话 | `WEBSITE_REDIS_HOST` 预留为空，部署时填内网 IP 或主机名；确认端口、库编号及可选认证信息 |
 | 联调样本 | 经批准可用于测试的真实问题和配套压缩日志；按任务要求补充时间、环境等信息。创建 Case 前无需提供预期行为，回答追问时不得编造事实 |
 | 网络和运行约束 | 允许访问的后端来源、反向代理配置、上传限制、模型调用预算、测试负责人 |
 
@@ -61,37 +64,60 @@ curl --fail-with-body "$XIAODAO_BASE_URL/openapi.json"
 依次确认：
 
 1. `/live`：HTTP 200，`{"ok":true,"data":{"status":"live"},"error":null}`。
-2. `/ready`：HTTP 200，`ok=true`、`data.ready=true`。失败时先由运维根据返回的错误码排查。该接口检查服务是否就绪，**不代表模型或完整诊断流程已经可用**。
-3. `/openapi.json`：直接返回 OpenAPI 文档，不使用 `ok/data` 包装；`info.version` 为 `8.2.0`，`paths` 中有 `/api/v1/agent/conversations` 及消息、事件、附件路由。
+2. `/ready`：HTTP 200，`ok=true`、`data.ready=true`。失败时先由运维根据返回的错误码排查。该接口检查服务是否就绪，**不代表模型或完整诊断流程已经可用**。当前 `/ready` 不检查 Redis，登录校验还需使用有效测试 Cookie 单独确认。
+3. `/openapi.json`：直接返回 OpenAPI 文档，不使用 `ok/data` 包装；`info.version` 为 `8.2.0`，`paths` 中有 `/api/v1/agent/conversations` 及消息、事件、附件路由。生产 Redis 模式声明 Cookie 鉴权；仓库快照保留底层 `trusted_header` 合同，鉴权方式以当前部署配置和在线文档为准。
 
 Swagger 页面位于服务的 `/docs`。如果内网资源加载受限，或代理添加了路径前缀，页面可能无法打开。当前页面从根路径 `/openapi.json` 加载接口规范，遇到问题时可先直接读取 OpenAPI。文档页面无法打开不代表业务 API 不可用，也不应因此开放公网访问。
 
-路由存在只说明接口已注册。接下来创建一个空会话，再查询该会话，确认 Agent 服务可以正常调用。这一步会保存会话，但不会调用模型。网站后端应先接入登录和用户归属校验，再使用网站自己的同源接口测试。直接检查 xiaodao 服务时，创建请求如下：
+路由存在只说明接口已注册。接下来创建一个空会话，再查询该会话，确认 Agent 服务可以正常调用。这一步会保存会话，但不会调用模型。先按下一节配置 Redis，再使用网站自己的同源接口测试。内网排查需要直接检查 xiaodao 服务时，创建请求如下；Cookie 使用有效测试会话：
 
 ```http
 POST /api/v1/agent/conversations
 Content-Type: application/json
+Cookie: sessionid=<session_id>
 
 {"request_id":"website-smoke-20260907-001"}
 ```
 
-直接请求 xiaodao 接口时，必须携带 `X-Agent-Owner-Key`。该值由可信后端根据固定的网站命名空间和登录用户 ID 计算，格式为 64 位小写 SHA-256，不能由浏览器自行提交。保存响应中的 `data.conversation_id` 和 `run_id`，再调用 `GET /api/v1/agent/conversations/{conversation_id}`，应能读回同一会话。重试时沿用同一 `request_id`，下一次独立测试则使用新 ID。
+默认 Redis 模式使用 Cookie 验证身份，外部 `X-Agent-Owner-Key` 不作为登录凭据。不要将真实 Cookie 写入联调记录或提交到仓库。保存响应中的 `data.conversation_id` 和 `run_id`，再携带同一 Cookie 调用 `GET /api/v1/agent/conversations/{conversation_id}`，应能读回同一会话。重试时沿用同一 `request_id`，下一次独立测试则使用新 ID。
 
 `503 / AGENT_UNAVAILABLE` 表示 Agent 服务未就绪，前端重试无法解决。排查时不要删除已有 `DATA_ROOT`。新部署使用空目录；已有 r1 或 r2 数据需提供 `--ownership-map`，按[副本升级说明](data-upgrade-v11-r2.md)手动升级，并保留原目录和历史报告。
 
 ## 3. 网站前后端分别做什么
 
-先接入网站登录和用户归属校验，再启用服务接口。浏览器模块 `createAgentClient()` 默认使用同源 `/api/agent`；可以配置 `basePath`、`fetchImpl` 和用于 CSRF 的 `headers` 回调，无需向浏览器提供服务端地址。
+先配置 xiaodao 后端的 Redis 连接，再启用服务接口。浏览器模块 `createAgentClient()` 默认使用同源 `/api/agent`；可以配置 `basePath`、`fetchImpl` 和网站已有的 `headers` 回调，无需向浏览器提供服务端地址。
 
 | 负责方 | 首版必须完成 |
 | --- | --- |
-| 网站后端 | 验证登录；根据登录身份生成稳定的用户归属键；所有请求交由 xiaodao 统一校验用户归属；转发服务端报告、SSE 和文件；下载原始产物时校验来源、大小和 SHA-256 |
+| 网站后端 | 透传 `Cookie`；所有请求交由 xiaodao 校验身份与用户归属；转发报告、SSE 和文件；下载原始产物时校验来源、大小和 SHA-256 |
 | 网站前端 | 提供输入框、压缩日志上传、追问、消息采用状态、阶段进度、报告区和下载按钮；刷新后恢复历史；按事件序号去重 |
-| xiaodao 运维 | 配置问题整理和诊断角色、日志解析与可选审核；确认模型身份和预算；限制服务可达来源；保证 SSE 不被代理缓冲 |
+| xiaodao 运维 | 配置 Redis 会话读取、问题整理和诊断角色、日志解析与可选审核；确认模型身份和预算；限制内部 API 可达来源；保证 SSE 不被代理缓冲 |
 
-网站前端访问网站自己的 `/api/agent/...`（示例路径）；网站后端访问 xiaodao 的 `/api/v1/agent/...`。两者不要混用。UUID 不是授权凭据；网站不得相信前端自报的 `user_id`。示例没有内置登录系统，未接入授权回调时返回 `401` 是预期行为。
+网站前端访问网站自己的 `/api/agent/...`（示例路径）；网站后端访问 xiaodao 的 `/api/v1/agent/...`。两者不要混用。UUID 不是授权凭据；不能用前端自报的 `user_id`、`userid` 或归属键判断身份。默认 BFF 不需要 `WEBSITE_AUTH_MODULE`，只需配置 `XIAODAO_BASE_URL`。诊断、MCP 和其他内部 API 仍限制为可信内网访问，浏览器只访问同源 BFF。
 
-客户端只提供 `conversations` 和 `attachments` 两组方法。先使用 `conversations.create(requestId)`、`conversations.send(id, message)` 创建会话并发送消息。刷新页面时，用 `conversations.get(id)` 一次恢复状态、历史和报告；日常轮询则使用 `conversations.get(id, {include: []})`。同一逻辑请求的 ID 和原始内容应保存在按钮回调及网络重试函数之外。不要使用网站后端改写后返回的 `request_id` 重新创建会话。最简提交代码见[网站示例](../examples/website-agent/README.md)。
+在 **Linux xiaodao 后端**配置以下变量：
+
+```dotenv
+WEBSITE_AUTH_MODE=redis
+WEBSITE_REDIS_HOST=
+WEBSITE_REDIS_PORT=6379
+WEBSITE_REDIS_DB=0
+WEBSITE_REDIS_USERNAME=
+WEBSITE_REDIS_PASSWORD=
+WEBSITE_REDIS_SSL=false
+WEBSITE_SESSION_COOKIE_NAME=sessionid
+WEBSITE_OWNER_NAMESPACE=xiaodao-website
+```
+
+`WEBSITE_AUTH_MODE` 默认 `redis`。`WEBSITE_REDIS_HOST` 在内网部署时填写，用户名、密码和 TLS 按需配置。Cookie 的 Domain、Path 等属性须允许浏览器向网站 `/api/agent/` 携带登录 Cookie。
+
+xiaodao 读取 Cookie 的 `sessionid`，查询 `airobot2-session:{session_id}`。value 是 JSON 字符串 `{"user":{"userid":"001234"},"cookie":{}}`，只使用 `user.userid` 识别工号。`userid` 为非空字符串，保留前导零。归属键仍由 `WEBSITE_OWNER_NAMESPACE` 和 `userid` 派生。
+
+`401` 表示登录会话缺失、过期或工号无效；访问其他用户数据返回 `404`；Redis 地址未配置或连接不可用返回 `503`。
+
+旧部署可继续使用 `WEBSITE_AUTH_MODE=trusted_header` 和原 BFF 的 `WEBSITE_AUTH_MODULE`。切换时保留原命名空间，确认旧 `user.id` 与 `user.userid` 一致；旧模式会改写创建请求的 `request_id`，先确认未完成创建请求的结果。
+
+客户端只提供 `conversations` 和 `attachments` 两组方法。先使用 `conversations.create(requestId)`、`conversations.send(id, message)` 创建会话并发送消息。刷新页面时，用 `conversations.get(id)` 一次恢复状态、历史和报告；日常轮询则使用 `conversations.get(id, {include: []})`。同一逻辑请求的 ID 和原始内容应保存在按钮回调及网络重试函数之外。默认 Cookie 模式不改写 `request_id`；为兼容旧认证模块模式，统一保留原始创建 ID。最简提交代码见[网站示例](../examples/website-agent/README.md)。
 
 上传时先调用 `attachments.prepare(id, metadata)`，再把完整的上传预约结果和文件传给 `attachments.upload(prepared, file)`。文件 SHA-256 需使用网站现有的增量哈希组件或后端上传模块计算，避免一次读取数 GiB 日志；客户端示例不会自动计算哈希。`file.type` 可能为空，应根据支持的压缩后缀确定 MIME。仅带附件的消息应省略 `text` 或传 null。`conversations.eventsUrl(id)` 返回网站的 SSE 路径，可配合 [API 参考](website-agent-api.md)中的串行事件处理和游标续传代码使用。
 
@@ -101,7 +127,7 @@ Content-Type: application/json
 
 | 步骤 | 网站调用与展示 | 成功标志 |
 | --- | --- | --- |
-| 创建会话 | `POST /api/v1/agent/conversations`，由可信后端提交登录用户的 `owner_key` | 拿到 `conversation_id` 和首轮 `run_id` |
+| 创建会话 | `POST /api/v1/agent/conversations`，BFF 透传 Cookie，xiaodao 从 Redis 确认 `userid` | 拿到 `conversation_id` 和首轮 `run_id` |
 | 订阅进度 | `GET /api/v1/agent/conversations/{conversation_id}/events` | `text/event-stream`；每条业务消息为一行 `data: <JSON>` 加空行，`onmessage` 可直接接收；空闲每 15 秒有注释心跳 |
 | 发送问题原文 | `POST /api/v1/agent/conversations/{conversation_id}/messages` | 立即收到 `ACCEPTED` 回执；非空问题文本按 MCP 固定中性模板创建 Case，初始事实为空，创建前不调用 INTAKE、不追问预期行为 |
 | 回答追问 | Case 创建后按原文展示 OPEN requirements 的 `assistant.question`，仍调用同一消息接口回答 | 仅补充任务当前要求；没有 OPEN requirements 就不追问，不要求网站生成诊断字段 |
@@ -143,6 +169,7 @@ Content-Type: application/json
 | 删除请求已受理 | 收到 `DELETING` 后从侧栏移除并关闭本地订阅；服务端立即拒绝后续访问，并在后台安全清理数据 |
 | 归档交付 `persistence=UNKNOWN` | 保留 `RUNNING / PENDING` 和已发布 JSON，显示归档状态暂时无法确认；临时提示不写入历史 |
 | SSE 断线 | 显示连接状态；`EventSource` 重连后回放历史并去重，或用 `fetch` 携带最后处理成功的游标续传；不能因为断线就新建诊断任务 |
+| HTTP `401` / `503` | 分别提示重新登录、服务暂时不可用；Redis 故障时保留页面内容 |
 | HTTP `409` | 区分幂等冲突、正在停止或目标轮次变化；不要在原因未明时换 ID 重发原诊断请求 |
 | 报告校验失败 | 不展示未校验内容，提示重新获取报告；保留已接收消息和会话 |
 
@@ -156,6 +183,8 @@ Content-Type: application/json
 - [ ] 下载响应缺少 `Content-Length` / `X-Content-SHA256` 仍核对真实字节数和 SHA-256；提供这些头时必须匹配。
 - [ ] 失败事件和刷新均读取快照 `failure`；报告已生成但归档 UNKNOWN 时，首次读取 JSON 仍可成功。
 - [ ] 未登录用户、其他用户不能查询会话、订阅、上传或下载；修改 UUID 不能越权。
+- [ ] Cookie 覆盖普通请求、上传、下载和 SSE，后端读取到正确工号。
+- [ ] 工号的前导零保留；登录过期、Redis 不可用分别返回 `401`、`503`。
 - [ ] 停止后可在原会话明确发起新轮；旧消息、停止请求重放和旧轮归档事件不会影响新轮；历史报告仍可按 `run_id` 读取。
 - [ ] 重命名、目录分页和历史分页不触发模型；删除后立即不可访问，后台清理中断后仍会继续，旧请求不能重建会话。
 - [ ] 经测试负责人安排，在无其他受影响用户时做重启检查：历史保留，活动任务明确中断，不自动重跑；完成报告仍可读取，待归档任务按原机制恢复。

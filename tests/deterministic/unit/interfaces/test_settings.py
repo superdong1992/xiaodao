@@ -20,6 +20,35 @@ def environment(tmp_path: Path) -> dict[str, str]:
     }
 
 
+def test_website_redis_auth_defaults_and_private_configuration(tmp_path):
+    settings = Settings.load(environ=environment(tmp_path))
+    assert settings.website_auth.mode == "redis"
+    assert settings.website_auth.redis_host == ""
+    assert settings.website_auth.cookie_name == "sessionid"
+    settings = Settings.load(environ={**environment(tmp_path),
+        "WEBSITE_REDIS_HOST": "10.0.0.8", "WEBSITE_REDIS_PORT": "6380",
+        "WEBSITE_REDIS_DB": "2", "WEBSITE_REDIS_SSL": "true",
+        "WEBSITE_REDIS_USERNAME": "session-reader", "WEBSITE_REDIS_PASSWORD": "redis-private-secret",
+        "WEBSITE_SESSION_COOKIE_NAME": "sid", "WEBSITE_OWNER_NAMESPACE": "website-one"})
+    config = settings.website_auth
+    assert (config.redis_host, config.redis_port, config.redis_db, config.redis_ssl) == ("10.0.0.8", 6380, 2, True)
+    assert config.redis_username == "session-reader" and config.redis_password == "redis-private-secret"
+    assert config.cookie_name == "sid" and config.owner_namespace == "website-one"
+    assert "redis-private-secret" not in repr(settings) + repr(config)
+    assert Settings.load(environ={**environment(tmp_path), "WEBSITE_AUTH_MODE": "trusted_header"}).website_auth.mode == "trusted_header"
+
+
+@pytest.mark.parametrize("key,value", [
+    ("WEBSITE_AUTH_MODE", "disabled"),
+    ("WEBSITE_REDIS_PORT", "not-a-number"),
+    ("WEBSITE_REDIS_DB", "not-a-number"),
+])
+def test_website_mode_and_redis_numeric_settings(tmp_path, key, value):
+    with pytest.raises(SettingsError, match=key):
+        Settings.load(environ={**environment(tmp_path), key: value})
+
+
+
 def test_process_environment_overrides_utf8_env_file(tmp_path: Path) -> None:
     env_file = tmp_path / "service.env"
     env_file.write_text(

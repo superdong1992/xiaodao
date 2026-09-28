@@ -474,7 +474,7 @@ test("quickstart identifies the deployed contract and separates preflight from m
   assert.match(quickstart, /手工联调记录不能替代官方/);
 });
 
-test("example setup documents the actual authorization callbacks and safe deployment boundaries", () => {
+test("website setup documents Cookie passthrough and Redis employee lookup", () => {
   const implementation = read("examples/website-agent/server.ts");
   const access = implementation.match(/export type Access = \{([\s\S]*?)\n\};/)[1];
   const names = [...access.matchAll(/^\s+(\w+)\([^\n]*\): Promise</gm)].map((match) => match[1]);
@@ -486,10 +486,33 @@ test("example setup documents the actual authorization callbacks and safe deploy
   assert.match(example, /从仓库根目录启动/);
   assert.match(example, /node examples\/website-agent\/server\.ts/);
   assert.match(example, /固定监听 `127\.0\.0\.1`/);
-  assert.match(example, /业务请求全部返回 `401`/);
   assert.match(example, /持久保存[^\n]*重复请求不会重复登记/);
-  assert.match(example, /CSRF \/ Origin/);
-  assert.match(example, /不要为了联调删除授权检查/);
+  for (const [name, content] of [["API reference", guide], ["quickstart", quickstart], ["backend README", example]]) {
+    for (const setting of ["WEBSITE_AUTH_MODE", "WEBSITE_REDIS_HOST", "WEBSITE_REDIS_PORT=6379",
+      "WEBSITE_REDIS_DB=0", "WEBSITE_REDIS_USERNAME", "WEBSITE_REDIS_PASSWORD", "WEBSITE_REDIS_SSL=false",
+      "WEBSITE_SESSION_COOKIE_NAME=sessionid", "WEBSITE_OWNER_NAMESPACE"])
+      assert.ok(content.includes(setting), `${name} is missing ${setting}`);
+    for (const term of ["airobot2-session:{session_id}", "user.userid", "WEBSITE_AUTH_MODE=trusted_header", "user.id", "request_id"])
+      assert.ok(content.includes(term), `${name} is missing ${term}`);
+    assert.match(content, /默认[^\n]*(?:不需要|无需)[^\n]*`WEBSITE_AUTH_MODULE`/);
+    assert.match(content, /WEBSITE_REDIS_HOST=/);
+    assert.match(content, /保留前导零|前导零保留/);
+    assert.doesNotMatch(content, /WEBSITE_ALLOWED_ORIGINS/);
+    assert.doesNotMatch(content, /每个发往 xiaodao 的 Agent 请求都必须带 `X-Agent-Owner-Key`/);
+    assert.doesNotMatch(content, /未配置 `WEBSITE_AUTH_MODULE` 时[^\n]*业务请求全部返回 `401`/);
+    const redisExample = content.match(/\{"user":\{"userid":"001234"\},"cookie":\{\}\}/)?.[0];
+    assert.ok(redisExample, `${name} must show the Redis JSON value with a string employee ID`);
+    assert.deepEqual(JSON.parse(redisExample), { user: { userid: "001234" }, cookie: {} });
+    for (const status of ["401", "404", "503"])
+      assert.ok(content.includes(`\`${status}\``), `${name} is missing authentication status ${status}`);
+  }
+  const commands = [...example.matchAll(/^```(?:bash|powershell)\n([\s\S]*?)^```/gm)]
+    .map((match) => match[1]).filter((command) => command.includes("node examples/website-agent/server.ts"));
+  assert.equal(commands.length, 2);
+  for (const command of commands) {
+    assert.match(command, /XIAODAO_BASE_URL/);
+    assert.doesNotMatch(command, /WEBSITE_AUTH_MODULE|WEBSITE_REDIS_PASSWORD/);
+  }
 });
 
 test("website onboarding entry points and relative documentation links resolve", () => {

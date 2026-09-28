@@ -8,13 +8,13 @@
 
 适用于 xiaodao `8.2.0`、V11 / `v11-contract-r2`。网站把用户原话和日志交给 xiaodao，展示追问、执行进度和经过服务端验证的定位报告。一个会话包含多轮独立诊断，历史消息、追问和结果按轮次保留。网站只需接入会话和附件两类接口：页面所需的信息从会话接口读取，文件单独流式传输。会话查询响应的版本为 `schema_version=3`；SSE 为 schema_version=2，报告内部数据格式仍为 schema 3。
 
-首次接入先读 [部署后快速接入与联调清单](website-agent-quickstart.md)。本文是完整接口参考。在线入口是 xiaodao 服务的 `/docs` 和 `/openapi.json`；仓库保存 [完整 OpenAPI 快照](../schemas/v2/web-api.openapi.snapshot.json)。联调前核对线上 `info.version` 和路由，不能假设已部署服务与当前源码一致。
+首次接入先读 [部署后快速接入与联调清单](website-agent-quickstart.md)。本文是完整接口参考。在线入口是 xiaodao 服务的 `/docs` 和 `/openapi.json`；仓库保存 [OpenAPI 快照](../schemas/v2/web-api.openapi.snapshot.json)。快照保留底层 `trusted_header` 接口合同，生产默认 Redis 模式的在线文档会改为 Cookie 鉴权。联调前核对线上 `info.version`、路由和鉴权配置，不能假设已部署服务与当前源码一致。
 
-调用关系：网站前端 → 网站后端 → Linux 上的 xiaodao REST API。网站原有问答功能保持独立。网站后端负责登录校验；xiaodao 保存会话、附件、订阅和文件的所属用户信息，并在访问时统一检查。UUID 不是授权凭据。不要把 xiaodao 内部地址或下载地址直接交给浏览器。
+调用关系：网站前端 → 网站后端 → Linux 上的 xiaodao REST API。网站原有问答功能保持独立。网站后端默认透传 Cookie；xiaodao 从 Redis 会话读取工号，统一校验登录和会话、附件、订阅、文件的用户归属。UUID 不是授权凭据。不要把 xiaodao 内部地址或下载地址直接交给浏览器。
 
 ## 1. 网站开发者需要实现的流程
 
-1. 网站后端根据登录身份生成用户标识，再创建会话；xiaodao 保存会话与用户的对应关系，网站不再单独维护一份会话目录。
+1. 网站后端透传 Cookie；xiaodao 根据 `sessionid` 查询 Redis 中的 `user.userid`，识别登录用户，再创建会话并保存归属，网站不再单独维护一份会话目录。
 2. 用户发送非空的问题原话，服务端立即按 MCP 客户端的固定中性模板创建 Case；创建前不追问预期行为、范围、日志或时间，也不调用 INTAKE。网站不需要构造 `problem_spec` 或命名事实。日志可先上传，再随问题消息发送附件 ID。
 3. 订阅 SSE。选中 Skill 后，服务端先从已有消息（包括首条原文）提取所需参数，并提交通过校验的部分；此时显示 `INTAKE` 的整理进度。采用结果后，`assistant.question` 只列出仍未满足的要求，用户继续调用消息接口回答。没有剩余要求时不额外追问。
 4. 初次打开或刷新调用 `GET /api/v1/agent/conversations/{conversation_id}`，一次获取状态、历史、报告和下载信息。收到 `result.available` 且页面尚无报告时，用同一路径加 `?include=report` 读取 `data.result`。采用网站示例时前缀是 `/api/agent`。不要等待 ZIP 才展示报告。
@@ -73,7 +73,7 @@
 
 路径标识和 `attachment_ids` 必须是小写规范 UUID。JSON 未定义字段、字符串化数组、重复附件 ID 会被拒绝。消息至少包含非空文本或一个已上传附件；`text` 可省略或为 `null`。文本和 `request_id` 分别最多 65,536 UTF-8 字节，一条消息最多 20 个附件。
 
-创建、发消息和预约上传都使用稳定 `request_id`。同一逻辑请求重试时保持内容和 ID 不变；内容改变会返回幂等冲突。新消息使用新 ID。网站应按登录用户为创建请求划分命名空间，避免不同用户使用相同 ID 命中同一个创建回执；下方 TypeScript 示例已实现。
+创建、发消息和预约上传都使用稳定 `request_id`。同一逻辑请求重试时保持内容和 ID 不变；内容改变会返回幂等冲突。新消息使用新 ID。默认 Cookie 模式原样转发创建请求的 `request_id`，xiaodao 按登录用户隔离创建回执，不同用户使用相同 ID 不会命中同一记录。
 
 成功响应统一为：
 
@@ -96,11 +96,27 @@
 }
 ```
 
-常见 HTTP 状态：`400` 参数错误；`404` 不存在；`409` 状态或幂等冲突；`413` 超出限制；`422` 文件校验失败；`503` 服务未配置或暂时不可用。网站自身还应返回 `401` 未登录和 `403` 无权访问。Agent 错误码只用于 Agent 接口；现有 Case 接口的错误格式和处理规则保持不变。
+常见 HTTP 状态：`400` 参数错误；`401` 登录缺失、过期或会话身份无效；`404` 不存在或属于其他用户；`409` 状态或幂等冲突；`413` 超出限制；`422` 文件校验失败；`503` Redis 地址未配置、连接不可用或其他服务暂时不可用。BFF 保留这些鉴权状态，页面应按原因提示用户，不能把 Redis 故障当成退出登录。
+
+### Cookie、Redis 与用户归属
+
+xiaodao 后端的 `WEBSITE_AUTH_MODE` 默认是 `redis`。网站 BFF 透传 Cookie。后端从 `WEBSITE_SESSION_COOKIE_NAME=sessionid` 指定的 Cookie 读取会话 ID，对 Redis 执行 `GET airobot2-session:{session_id}`。value 是 JSON 字符串，例如：
+
+```json
+{"user":{"userid":"001234"},"cookie":{}}
+```
+
+后端只取 `user.userid` 作为工号，不使用 `cookie` 或其他用户属性。`userid` 为非空字符串，前导零保留。内部归属键仍由 `WEBSITE_OWNER_NAMESPACE` 和 `userid` 派生，命名空间默认 `xiaodao-website`。
+
+Redis 地址在 Linux 后端预留为 `WEBSITE_REDIS_HOST=`，内网部署时填 IP 或主机名；`WEBSITE_REDIS_PORT=6379`、`WEBSITE_REDIS_DB=0`，可选 `WEBSITE_REDIS_USERNAME`、`WEBSITE_REDIS_PASSWORD`，`WEBSITE_REDIS_SSL=false`。完整配置见[部署说明](website-redis-deployment.md)。
+
+会话、上传、下载、反馈和 SSE 请求均透传 Cookie，后端使用同一工号识别用户。原有会话归属检查继续生效。
+
+旧 BFF 仍可配合 `WEBSITE_AUTH_MODE=trusted_header` 和原 `WEBSITE_AUTH_MODULE` 使用。切换时保留原命名空间，并确认旧 `user.id` 对应 Redis 中的 `user.userid`，以继续访问历史会话。旧模式会改写创建请求的 `request_id`，切换前先确认未完成创建请求的结果。
 
 ### 创建与发送消息
 
-每个发往 xiaodao 的 Agent 请求都必须带 `X-Agent-Owner-Key`。网站后端计算 `SHA-256(JSON.stringify([固定网站命名空间, 已认证用户 ID]))`，得到 64 位小写十六进制用户标识。命名空间与用户 ID 必须长期稳定。这个请求头不是登录凭据，xiaodao 只能开放给可信网站后端；其值不能由浏览器指定。Core Case 接口在访问 Agent 创建的数据时，也会核对数据是否属于该用户。
+以下原生接口示例省略了会话 Cookie。网站前端使用同源 `/api/agent`，由 BFF 转发 Cookie。
 
 `current_run` 始终是当前轮；`selected_run_id` 指明这次读取的状态、报告和文件属于哪一轮。省略 `run_id` 选当前轮，传历史轮 ID 即可读取旧报告，不重新诊断。`capabilities` 给出发送、停止、重新诊断、重命名和删除按钮是否可用，前端不必自行猜测状态组合。
 
@@ -235,7 +251,7 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 
 | 模型 | 字段 | 含义与使用方式 |
 | --- | --- | --- |
-| `CreateConversationBody` | `request_id` | 创建请求的稳定幂等标识；按网站登录用户划分命名空间。 |
+| `CreateConversationBody` | `request_id` | 创建请求的稳定幂等标识；xiaodao 按已认证用户隔离记录。 |
 | `SendMessageBody` | `request_id` | 此条消息的稳定请求标识。 |
 | `SendMessageBody` | `text` | 用户原话；可省略或为 `null`，不能与附件列表同时为空。 |
 | `SendMessageBody` | `attachment_ids` | 当前会话内已经上传完成的附件 UUID 数组。 |
@@ -596,19 +612,20 @@ Markdown 报告按原文展示，渲染器应关闭原始 HTML。结构化报告
 
 ## 5. 可运行的 TypeScript 网站后端
 
-仓库的 `examples/website-agent/server.ts` 使用 Node.js 24 内置 TypeScript 支持和标准库，无需安装 npm 包。`Access` 类型和启动入口在此文件，业务逻辑统一在 `server.mjs` 中实现。示例提供登录回调、服务端用户权限检查、同源会话接口、SSE 转发、上传转发、统一会话视图和文件下载校验。网站可直接集成其中的逻辑，也可将它作为后端服务接入现有反向代理。
+生产配置和更新步骤见[Redis 会话接入部署说明](website-redis-deployment.md)。
+
+仓库的 `examples/website-agent/server.ts` 使用 Node.js 24 内置 TypeScript 支持和标准库，无需安装 npm 包。类型和启动入口在此文件，业务逻辑统一在 `server.mjs` 中实现。示例默认透传 Cookie，提供同源会话接口、SSE 转发、上传转发、统一会话视图和文件下载校验。登录与用户归属由 xiaodao 后端校验。网站可直接集成其中的逻辑，也可将它作为后端服务接入现有反向代理。
 
 ```powershell
 $env:XIAODAO_BASE_URL = 'http://xiaodao.internal:8000'
-$env:WEBSITE_AUTH_MODULE = 'D:\website\xiaodao-access.mjs'
 node examples/website-agent/server.ts
 ```
 
-Linux 启动命令、认证回调及反向代理要求见 [示例 README](../examples/website-agent/README.md)。示例固定监听 `127.0.0.1`，不是可以直接暴露给所有浏览器的完整网站。
+Linux 启动命令、Redis 配置及反向代理要求见 [示例 README](../examples/website-agent/README.md)。示例固定监听 `127.0.0.1`，不是可以直接暴露给所有浏览器的完整网站。
 
-未配置 `WEBSITE_AUTH_MODULE` 时，服务仍可启动，但业务请求全部返回 `401`。不要为了联调删掉授权检查。认证模块导出 `access`，只需实现 `authenticate(request)`：验证网站登录态，返回稳定的 `{id}`，未登录时返回 `null`。BFF 根据已认证的 ID 和固定的 `WEBSITE_OWNER_NAMESPACE` 生成 `owner_key`。会话、附件与用户的对应关系统一由 xiaodao 保存，BFF 不再单独维护一份。Cookie 认证还需接入网站既有 CSRF 和 Origin 校验；不得相信客户端自行传入的用户名或用户 ID。
+默认不需要 `WEBSITE_AUTH_MODULE`，Redis 连接配置位于 xiaodao 后端。BFF 只需透传 Cookie；登录会话缺失或工号无效返回 `401`，Redis 不可用返回 `503`，其他用户的会话仍返回 `404`。
 
-网站示例前缀是 `/api/agent`，xiaodao 上游前缀是 `/api/v1/agent`。两者的会话和附件操作一致；网站负责授权、受控错误和同源下载地址，不再额外生成中文 sections。
+网站示例前缀是 `/api/agent`，xiaodao 上游前缀是 `/api/v1/agent`。两者的会话和附件操作一致；BFF 负责受控转发、受控错误和同源下载地址，不再额外生成中文 sections。
 
 | 网站示例路径 | 用途 |
 | --- | --- |

@@ -235,7 +235,9 @@ class HttpDiagnosticsMiddleware:
         headers = [
             [
                 bytes(name).decode("latin-1", errors="replace"),
-                bytes(value).decode("latin-1", errors="replace"),
+                "<redacted>" if bytes(name).lower() in {
+                    b"cookie", b"authorization", b"proxy-authorization", b"x-csrf-token",
+                } else bytes(value).decode("latin-1", errors="replace"),
             ]
             for name, value in scope.get("headers", [])
         ]

@@ -11,6 +11,13 @@ BUSINESS_ROOTS = (
     ROOT / "src/problem_locator/application",
 )
 EXPECTED_ENV_KEYS = {
+    "WEBSITE_AUTH_MODE",
+    "WEBSITE_REDIS_HOST",
+    "WEBSITE_REDIS_PORT",
+    "WEBSITE_REDIS_DB",
+    "WEBSITE_REDIS_SSL",
+    "WEBSITE_SESSION_COOKIE_NAME",
+    "WEBSITE_OWNER_NAMESPACE",
     "BIND_HOST",
     "CLAUDE_COMMAND",
     "DATA_ROOT",
@@ -96,10 +103,18 @@ def test_env_example_contains_only_the_public_settings() -> None:
         if not stripped or stripped.startswith("#"):
             continue
         key, separator, value = stripped.partition("=")
-        assert separator == "=" and key and value
+        assert separator == "=" and key
+        assert value or key == "WEBSITE_REDIS_HOST"
         assignments[key] = value
 
     assert set(assignments) == EXPECTED_ENV_KEYS
+    assert assignments["WEBSITE_AUTH_MODE"] == "redis"
+    assert assignments["WEBSITE_REDIS_HOST"] == ""
+    assert assignments["WEBSITE_SESSION_COOKIE_NAME"] == "sessionid"
+    assert assignments["WEBSITE_REDIS_PORT"] == "6379"
+    assert assignments["WEBSITE_REDIS_DB"] == "0"
+    assert assignments["WEBSITE_REDIS_SSL"] == "false"
+    assert assignments["WEBSITE_OWNER_NAMESPACE"] == "xiaodao-website"
     assert assignments["GENERIC_LOGPARSE_PRODUCT"] == "default"
     assert assignments["METHODS_EVIDENCE_VALIDATION"] == "off"
     assert assignments["GENERIC_MEMORY_ENABLED"] == "false"

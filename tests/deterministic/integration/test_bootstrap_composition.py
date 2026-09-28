@@ -57,6 +57,7 @@ def _settings(
 ) -> Settings:
     environ = {
         "DATA_ROOT": str(data_root),
+        "WEBSITE_AUTH_MODE": "trusted_header",
         "PUBLIC_BASE_URL": "http://127.0.0.1:8000",
         "SKILL_DIR": str(skill_dir),
         "GENERIC_SKILL_NAME": "generic-problem-locator-smoke",

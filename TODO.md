@@ -8,6 +8,13 @@
 本次补充记录已由代码路径确认的实现边界及待评估风险，尚未执行性能压测或新的 Test Flow。
 后续是否修复、采用何种方案，仍需结合届时的当前版本、复现证据和实际使用需求决定。
 
+## 网站 Redis 生产接入验收（2026-09-28）
+
+- 按[生产适配步骤](docs/website-redis-deployment.md)更新后端和 BFF，补充 `WEBSITE_REDIS_HOST` 内网 IP，以及实际端口、DB 和登录凭据。
+- 用真实 Cookie 验证 `sessionid → airobot2-session:{session_id} → user.userid`，核对工号和历史会话归属。当前没有生产 Redis 地址，真实联调待部署时完成。
+- `/ready` 不检查 Redis，验收须带真实 Cookie 请求网站 API；不需要重建 `DATA_ROOT`。
+
+
 ## P0：8.0 网站 Agent 真实 Release 与内部网站联调
 
 - **2026-09-17 / 8.1.0 测试路径核对**：已补充两个独立的零模型 MCP/Case REST 诊断 Gate，覆盖实际协议与生产业务闭环；这不证明真实 Agent 遵循 Skill。当前 `cross-job-core.mjs` 的 route/upload/diagnose 走网站，`runClaude` 只用于重启后查询。仍需补齐用户 Agent 从加载正式 `problem-locator-client`、新问题建单、按权威 requirements 追问、补参和上传，到诊断、报告下载的完整路径，并与网站路径分别保存验收结果。不得把旧 Phase prompt/validator 的单测当成实际执行证明，也不得用旧 provider model-cert 替代。
@@ -19,7 +26,7 @@
 - 2026-09-08 本地 Docker 已恢复，Windows Client、Linux 镜像、Claude 2.1.89 和 DeepSeek Flash 测试配置已对齐。`dev.real` 的完整 Web CrossJob 前几轮被过期的安装版本/Skill 哈希断言、旧 `state.json` 夹具初始化，以及并行修改中的网站测试拦住；这些轮次均未进入真实网站与模型生成。已修正平台夹具并等待网页先建案改动完成，后续按合并后的源码重新规划并执行完整旅程，结果以对应 verdict 为准。服务端 INTAKE 对 Markdown 围栏的拒绝已在本地复现，仍需结合真实 Web 输出与内网实际模型核对。
 - 合并后的完整旅程计划已通过环境准入，但实际执行被自动审批拒绝：需用户明确批准向 `api.deepseek.com` 发送本地测试提示词、Skill 和诊断材料，最多 7 次调用、费用硬上限 22 美元。批准前只运行零真实模型的正式 Dev 检查；Linux 平台修正和完整真实 Web 旅程仍待复验，不以计划或确定性通过代替。
 - **本轮验证元数据**：Dev `run-20260908T081857Z-5a9f18d6` 为 `FAIL`；默认基线下 affected 597 passed / 24 skipped，但 66.806 秒超过 60 秒门槛，full 未运行。源码快照 `git-visible-worktree-v1:5921b281a8e2cadb6005c99787a88fdaa301c425195767f9031ce9534f502e41`，源码核验 `PASS`、真实模型调用为 0；继续前需解决该耗时阻塞并取得上述外部模型授权。此行是验证后的状态回填，不属于所引用快照。
-- 网站开发者需把示例中的登录与归属回调接入内部网站后端，并部署来源访问限制。未经这些接入和真实 Release，不宣称已在内部网站生产可用。
+- 网站开发者需配置 Cookie 透传和后端 Redis 会话读取；显式旧模式才需要网站登录回调。未经这些接入和真实 Release，不宣称已在内部网站生产可用。
 - **推送前 Dev 复验元数据（2026-09-08）**：`run-20260908T082640Z-197109e5` 为 `PASS_WITH_WARNINGS`，基线为网站引入提交 `8b53bc5`，受影响范围按既定规则移交全量；完整确定性阶段、功能、运行及源码核验均通过，性能基线尚未校准。源码快照 `git-visible-worktree-v1:5167e26963def74008b0e1c760d7e7e6c8c73377393a83d04780ef098aacaf28`，零真实模型调用。此前默认快速阶段超时记录保留，外部模型授权、完整真实 Web 旅程和 Linux 平台复验仍待完成。本行是验证后的元数据回填，不属于所引用快照。
 
 ## P0：Methods V1 Reviewer 最长链路 Release

@@ -144,6 +144,11 @@ def _no_query(request: Request) -> None:
 
 
 def _owner_key(request: Request, *, required: bool = True) -> str | None:
+    if "website_owner_key" in request.scope:
+        owner = request.scope["website_owner_key"]
+        if owner is None and required:
+            raise ValueError("请先登录。")
+        return owner
     values = request.headers.getlist("x-agent-owner-key")
     if not values and not required:
         return None

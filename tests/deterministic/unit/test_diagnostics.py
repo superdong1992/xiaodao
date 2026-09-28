@@ -16,6 +16,31 @@ from problem_locator.diagnostics import (
 )
 
 
+def test_http_diagnostics_redact_cookie_and_authentication_headers(monkeypatch):
+    import asyncio
+    from problem_locator import diagnostics
+
+    events = []
+    monkeypatch.setattr(diagnostics, "log_event", lambda event, **fields: events.append((event, fields)))
+    async def downstream(scope, receive, send):
+        assert (b"Cookie", b"sessionid=private-session") in scope["headers"]
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+    async def noop(*args):
+        pass
+    asyncio.run(diagnostics.HttpDiagnosticsMiddleware(downstream)({
+        "type": "http", "method": "GET", "path": "/api/v1/agent/conversations",
+        "query_string": b"", "headers": [(b"Cookie", b"sessionid=private-session"),
+            (b"authorization", b"Bearer private-token"), (b"proxy-authorization", b"private-proxy"),
+            (b"x-csrf-token", b"private-csrf"), (b"content-type", b"application/json")],
+    }, noop, noop))
+    rendered = json.dumps(events)
+    assert "private-" not in rendered
+    headers = next(fields["headers"] for event, fields in events if event == "http.request.started")
+    assert dict(headers) == {"Cookie": "<redacted>", "authorization": "<redacted>",
+        "proxy-authorization": "<redacted>", "x-csrf-token": "<redacted>", "content-type": "application/json"}
+
+
 def test_json_diagnostics_include_context_arguments_and_traceback() -> None:
     stream = io.StringIO()
     root = logging.getLogger()

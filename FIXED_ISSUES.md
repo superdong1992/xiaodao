@@ -5,6 +5,16 @@
 本文件记录已经在当前工作区验证、修复并由专项回归测试保护的问题。活跃待办仍只写入
 [`TODO.md`](TODO.md)；同一问题再次回归时更新原条目，不另建一个缺少历史关联的条目。
 
+## PL-FIX-075：网站凭据请求头未经脱敏写入 HTTP 诊断日志
+
+- **症状与受影响版本**：8.2.0 / `c37c4f5` 至 `343e1ba` 的 `HttpDiagnosticsMiddleware` 在 `http.request.started` 原样写入所有请求头；代码路径核对确认 Cookie 和 Authorization 会进入日志。
+- **根因**：HTTP 诊断边界没有区分普通请求头和认证凭据。网站改为向 xiaodao 透传 Cookie 后，服务端日志会持有可用登录凭据。
+- **修复历史（2026-09-28）**：在写入日志前统一隐藏 Cookie、Authorization、Proxy-Authorization 和 X-CSRF-Token 的值，下游请求仍接收原始凭据。配套 Cookie 透传与 Redis 会话读取只使用 `user.userid`。
+- **不可回归行为**：凭据请求头按大小写无关规则脱敏；日志中不得出现原始凭据；不能改写传给业务鉴权的原始 Cookie。
+- **专项回归测试**：`test_http_diagnostics_redact_cookie_and_authentication_headers` 直接断言下游保留原请求而日志不含凭据。`test_session_auth.py` 覆盖 Cookie 读取、Redis 键名、工号读取、必要错误及连接关闭；`server.test.mjs` 覆盖各 BFF 请求路径的 Cookie 透传与错误处理。
+- **状态**：实现与专项回归已完成，正式 Dev 验证结论以本条最终 Test Flow 元数据为准；真实 Redis 与 Linux 生产接入另行验收。
+- **最新 Test Flow 元数据**：`run-20260928T091540Z-7f54185e` / `PASS_WITH_WARNINGS`，源码快照 `a5d363db05317766eb159a5e1a38a2fbfdeb664d98395823c865243a15308aed`；affected 按计划移交 full，完整确定性验证、源码核验与运行收尾通过，真实模型调用为 0。本次在已有 Ubuntu 环境执行简化版本，未放宽测试门槛；此前 Windows 配置合同失败和性能超限证据均保留。本行是验证后的元数据回填，不属于所引用源码快照；不替代真实 Redis 与 Linux 生产验收。
+
 ## PL-FIX-073：路由仅凭有效 Skill ID 放行，缺少专用定位准入门槛
 
 - **状态**：实现及专项回归完成；正式验证结论以本条最终 Test Flow 元数据为准。确定性验证不等于真实模型语义准确率或线上验收。

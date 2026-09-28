@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from .session_auth import WebsiteAuthConfig
 
 from problem_locator.contracts.ports import (
     ApplicationCommandPort,
@@ -19,6 +20,7 @@ class InterfaceDependencies:
     state_admin: StateAdminPort
     public_base_url: str
     agent_service: Any | None = None
+    website_auth: WebsiteAuthConfig | None = None
 
 
 def create_asgi_app(dependencies: InterfaceDependencies):
@@ -32,6 +34,7 @@ def create_asgi_app(dependencies: InterfaceDependencies):
         state_admin=dependencies.state_admin,
         public_base_url=dependencies.public_base_url,
         agent_service=dependencies.agent_service,
+        website_auth=dependencies.website_auth,
     )
 
 

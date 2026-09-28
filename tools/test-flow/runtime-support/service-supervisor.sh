@@ -119,6 +119,7 @@ intake_claude_command="/usr/local/bin/claude -p --output-format stream-json --ve
     PYTHONUNBUFFERED=1 \
     PYTHONPYCACHEPREFIX="/tmp/test-flow-service-pycache-$instance" \
     DATA_ROOT=/var/lib/problem-locator \
+    WEBSITE_AUTH_MODE=trusted_header \
     DFX_LOG_DIR="$dfx" \
     PUBLIC_BASE_URL="$E2E_PUBLIC_BASE_URL" \
     BIND_HOST=0.0.0.0 \

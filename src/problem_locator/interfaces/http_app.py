@@ -58,6 +58,7 @@ from .error_mapping import (
     validation_error_from,
 )
 from .http_streaming import AsyncRequestBinaryStream, iterate_binary_stream
+from .session_auth import WebsiteAuthConfig, RedisSessionAuthenticator, WebsiteSessionAuthMiddleware
 from .mcp_server import create_mcp_transport
 from .projections import artifact_view, web_upload_descriptor
 from .rest_models import (
@@ -1140,6 +1141,7 @@ def create_http_app(
     state_admin: StateAdminPort,
     public_base_url: str,
     agent_service: Any | None = None,
+    website_auth: WebsiteAuthConfig | None = None,
 ) -> FastAPI:
     """Create one ASGI application containing HTTP and stateless MCP routes."""
 
@@ -1149,10 +1151,18 @@ def create_http_app(
         public_base_url=public_base_url,
     )
 
+    # Production always supplies Settings.website_auth. None is the low-level
+    # port-injection seam used by existing trusted-header interface fixtures.
+    authenticator = RedisSessionAuthenticator(website_auth) if website_auth is not None else None
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        async with mcp.session_manager.run():
-            yield
+        try:
+            async with mcp.session_manager.run():
+                yield
+        finally:
+            if authenticator is not None:
+                await authenticator.aclose()
 
     app = FastAPI(
         title="Problem Locator V1",
@@ -1171,6 +1181,26 @@ def create_http_app(
         schema = framework_openapi()
         if schema.get("x-rest-interface-overlay-version") != 2:
             _apply_rest_openapi_overlay(schema)
+            if website_auth is not None and website_auth.mode == "redis":
+                schema.setdefault("components", {}).setdefault("securitySchemes", {})["WebsiteSession"] = {
+                    "type": "apiKey", "in": "cookie", "name": website_auth.cookie_name,
+                    "description": "xiaodao 从 Redis 会话的 user.userid 校验网站登录身份。",
+                }
+                for path, operations in schema["paths"].items():
+                    if not path.startswith("/api/v1/agent/"):
+                        continue
+                    for operation in operations.values():
+                        if not isinstance(operation, dict) or "responses" not in operation:
+                            continue
+                        operation["parameters"] = [p for p in operation.get("parameters", [])
+                                                   if p.get("name") != "X-Agent-Owner-Key"]
+                        operation["security"] = [{"WebsiteSession": []}]
+                        operation["description"] = operation.get("description", "").replace(
+                            "归属由可信网站后端的 X-Agent-Owner-Key 确定。",
+                            "归属由 Redis 会话的 user.userid 确定。")
+                        for status, description in (("401", "请先登录。"),
+                                                    ("503", "登录验证暂时不可用。")):
+                            operation["responses"].setdefault(status, {"description": description})
         return schema
 
     app.openapi = rest_openapi  # type: ignore[method-assign]
@@ -1246,6 +1276,9 @@ def create_http_app(
                     lease.__exit__(None, None, None)
 
     app.add_middleware(AgentCaseAccessMiddleware)
+    if authenticator is not None:
+        app.state.website_authenticator = authenticator
+        app.add_middleware(WebsiteSessionAuthMiddleware, authenticator=authenticator)
     # Include ownership denials and CORS responses in HTTP diagnostics.
     app.add_middleware(HttpDiagnosticsMiddleware)
 

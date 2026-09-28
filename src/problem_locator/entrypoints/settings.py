@@ -5,11 +5,12 @@ from __future__ import annotations
 import re
 import sys
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from .env_file import EnvFileError, merged_environment
+from problem_locator.interfaces.session_auth import WebsiteAuthConfig
 
 
 _REQUIRED = (
@@ -33,6 +34,28 @@ _GENERIC_SKILL_NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 
 class SettingsError(ValueError):
     """Configuration is missing or violates the frozen S06 boundary."""
+
+
+def load_website_auth_configuration(values: Mapping[str, str]) -> WebsiteAuthConfig:
+    mode = values.get("WEBSITE_AUTH_MODE", "redis")
+    if mode not in {"redis", "trusted_header"}:
+        raise SettingsError("WEBSITE_AUTH_MODE 必须是 redis 或 trusted_header")
+    try:
+        port = int(values.get("WEBSITE_REDIS_PORT", "6379"))
+        database = int(values.get("WEBSITE_REDIS_DB", "0"))
+    except ValueError:
+        raise SettingsError("WEBSITE_REDIS_PORT 和 WEBSITE_REDIS_DB 必须是整数") from None
+    return WebsiteAuthConfig(
+        mode=mode,
+        redis_host=values.get("WEBSITE_REDIS_HOST", "").strip(),
+        redis_port=port,
+        redis_db=database,
+        redis_username=values.get("WEBSITE_REDIS_USERNAME") or None,
+        redis_password=values.get("WEBSITE_REDIS_PASSWORD") or None,
+        redis_ssl=values.get("WEBSITE_REDIS_SSL", "false").lower() == "true",
+        cookie_name=values.get("WEBSITE_SESSION_COOKIE_NAME", "sessionid"),
+        owner_namespace=values.get("WEBSITE_OWNER_NAMESPACE", "xiaodao-website"),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +83,7 @@ class Settings:
     methods_evidence_validation: str = "off"
     generic_logparse_product: str = "default"
     generic_memory_enabled: bool = False
+    website_auth: WebsiteAuthConfig = field(default_factory=WebsiteAuthConfig, repr=False)
 
     @classmethod
     def load(
@@ -89,6 +113,8 @@ class Settings:
         missing = [key for key in _REQUIRED if not values.get(key)]
         if missing:
             raise SettingsError("required configuration is missing")
+
+        website_auth = load_website_auth_configuration(values)
 
         paths: dict[str, Path] = {}
         for key in _PATH_KEYS:
@@ -200,6 +226,7 @@ class Settings:
 
         return cls(
             **workers,
+            website_auth=website_auth,
             data_root=paths["DATA_ROOT"],
             public_base_url=base_url.rstrip("/"),
             bind_host=bind_host,

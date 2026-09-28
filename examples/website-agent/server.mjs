@@ -1,7 +1,8 @@
 /** 网站后端的唯一实现；Node.js 18+ 可直接导入，无需 npm 依赖。
  * @typedef {{ id: string }} User
  * @typedef {{ authenticate(request: import('node:http').IncomingMessage): Promise<User|null> }} Access
- * authenticate 应验证登录态和 CSRF / Origin；身份来自网站服务端，不接受前端自报 user_id。
+ * 默认原样透传 Cookie，由 Xiaodao 后端读取 Redis 会话中的 user.userid。
+ * 显式配置 access 时启用旧接入方式：authenticate 验证登录态和 CSRF / Origin。
  */
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
@@ -228,7 +229,15 @@ const PUBLIC_PHASES = new Set([
 ]);
 const DIAGNOSTIC_ID = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|diag-[A-Za-z0-9_-]{1,128})$/;
 const FAILURE_LOCATION = /^(?:inputs|input_names|input_values|initial_user_fact_names|initial_user_fact_values|problem_spec|attachment_ids|attachments|declared_size|declared_sha256|content_type|expected_case_revision|idempotency_key|methods_result|verification_result|findings|evidence|evidence_refs|matched_rules|rules)(?:(?:\.[a-z][a-z0-9_]{0,63})|(?:\[[0-9]{1,5}\])){0,8}$/;
+const AUTH_ERRORS = {
+    AUTH_REQUIRED: "登录已失效，请重新登录。",
+    AUTH_UNAVAILABLE: "登录验证暂时不可用，请稍后重试。",
+};
 function safeError(value, terminal = false) {
+    if (Object.hasOwn(AUTH_ERRORS, value?.code)) return {
+        code: value.code, message: AUTH_ERRORS[value.code], details: [],
+        retryable: value.code === "AUTH_UNAVAILABLE",
+    };
     const code = typeof value?.code === "string" && PUBLIC_CODES.has(value.code) ? value.code : "WEBSITE_AGENT_ERROR";
     const details = [];
     for (const item of Array.isArray(value?.details) ? value.details.slice(0, 32) : []){
@@ -423,7 +432,7 @@ function validateFeedback(result, conversationId, runId) {
 }
 /** @param {{upstream: string, access?: Access, ownerNamespace?: string, fetchImpl?: typeof fetch}} options */
 export function createAgentBackend(options) {
-    const access = options.access ?? denyAccess;
+    const access = options.access;
     const fetchImpl = options.fetchImpl ?? fetch;
     const base = new URL(options.upstream.endsWith("/") ? options.upstream : `${options.upstream}/`);
     if (![
@@ -435,23 +444,31 @@ export function createAgentBackend(options) {
     const upstreamUrl = (path)=>new URL(path.replace(/^\//, ""), base);
     const ownerNamespace = options.ownerNamespace ?? "xiaodao-website";
     if (!ownerNamespace.trim()) throw new Error("网站归属命名空间不能为空。");
-    const upstreamFetch = (ownerKey, path, init)=>{
-        const headers = new Headers(init?.headers);
-        headers.set("X-Agent-Owner-Key", ownerKey);
+    // Cookie 属于当前请求；旧 access 接入继续携带其服务端生成的 owner。
+    const upstreamHeaders = (authContext, initial)=>{
+        const headers = new Headers(initial);
+        if (authContext.cookie !== undefined) headers.set("Cookie", authContext.cookie);
+        if (authContext.ownerKey) headers.set("X-Agent-Owner-Key", authContext.ownerKey);
+        else headers.delete("X-Agent-Owner-Key");
+        return headers;
+    };
+    const upstreamFetch = (authContext, path, init)=>{
         return fetchImpl(upstreamUrl(path), {
             ...init,
-            headers,
+            headers: upstreamHeaders(authContext, init?.headers),
             redirect: "manual"
         });
     };
-    const api = async (ownerKey, path, init, maxBytes = MAX_REPORT_BYTES)=>{
-        const response = await upstreamFetch(ownerKey, path, init);
+    const api = async (authContext, path, init, maxBytes = MAX_REPORT_BYTES)=>{
+        const response = await upstreamFetch(authContext, path, init);
         if (response.status >= 300 && response.status < 400) throw new HttpError(502, "定位服务返回了未允许的重定向。");
         const envelope = await boundedResponseJson(response, maxBytes);
         if (!response.ok || envelope.ok !== true || envelope.error !== null) {
             const error = safeError(envelope.error);
             throw new HttpError([
                 400,
+                401,
+                403,
                 404,
                 409,
                 413,
@@ -502,9 +519,9 @@ export function createAgentBackend(options) {
         }
         return result;
     }
-    async function conversationDetail(ownerKey, conversationId, included, query = "") {
+    async function conversationDetail(authContext, conversationId, included, query = "") {
         const limit = included.includes("report") ? MAX_REPORT_RESPONSE_BYTES + (included.includes("history") ? MAX_REPORT_BYTES : 0) : MAX_REPORT_BYTES;
-        const result = await api(ownerKey, `/api/v1/agent/conversations/${conversationId}${query}`, undefined, limit);
+        const result = await api(authContext, `/api/v1/agent/conversations/${conversationId}${query}`, undefined, limit);
         const requestedRun = new URLSearchParams(query).get("run_id");
         if (!result || result.schema_version !== 3 || result.conversation_id !== conversationId || !UUID.test(result.selected_run_id) || !UUID.test(result.current_run?.run_id) || !result.capabilities || result.selected_run_id !== (requestedRun ?? result.current_run.run_id) || ![
             "PENDING",
@@ -521,14 +538,17 @@ export function createAgentBackend(options) {
         if (result.failure) result.failure = safeError(result.failure, true);
         return result;
     }
-    async function downloadResponse(ownerKey, artifact, signal) {
+    async function downloadResponse(authContext, artifact, signal) {
         const response = await fetchImpl(artifact.download_url, {
             redirect: "manual",
             signal,
-            headers: {
-                "X-Agent-Owner-Key": ownerKey
-            }
+            headers: upstreamHeaders(authContext)
         });
+        if ([401, 403, 503].includes(response.status)) {
+            const envelope = await boundedResponseJson(response);
+            const error = safeError(envelope.error);
+            throw new HttpError(response.status, error.message, error.code, error.details, error.retryable);
+        }
         const contentLength = response.headers.get("content-length");
         const contentHash = response.headers.get("x-content-sha256");
         if (response.status !== 200 || !response.body || contentLength !== null && contentLength !== String(artifact.size) || contentHash !== null && contentHash !== artifact.sha256 || response.headers.get("content-type")?.split(";")[0] !== artifact.content_type || ![
@@ -540,9 +560,9 @@ export function createAgentBackend(options) {
         }
         return response;
     }
-    async function verifiedReport(ownerKey, artifact, signal) {
+    async function verifiedReport(authContext, artifact, signal) {
         if (artifact.size > MAX_REPORT_BYTES) throw new HttpError(502, "报告超出接入限制。");
-        const response = await downloadResponse(ownerKey, artifact, signal);
+        const response = await downloadResponse(authContext, artifact, signal);
         const content = Buffer.alloc(artifact.size);
         const hash = createHash("sha256");
         let size = 0;
@@ -575,10 +595,10 @@ export function createAgentBackend(options) {
             clientResponse.removeListener("close", disconnected);
         }
     }
-    async function verifiedDownload(ownerKey, artifact, signal, use) {
+    async function verifiedDownload(authContext, artifact, signal, use) {
         let directory;
         try {
-            const response = await downloadResponse(ownerKey, artifact, signal);
+            const response = await downloadResponse(authContext, artifact, signal);
             directory = await mkdtemp(join(tmpdir(), `xiaodao-website-p${process.pid}-`));
             activeDownloads.add(directory);
             const file = join(directory, "payload");
@@ -614,12 +634,16 @@ export function createAgentBackend(options) {
     }
     const server = createServer(async (request, response)=>{
         try {
-            const user = await access.authenticate(request);
-            if (!user || typeof user.id !== "string" || !user.id.trim()) throw new HttpError(401, "请先登录。");
-            const ownerKey = createHash("sha256").update(JSON.stringify([
-                ownerNamespace,
-                user.id
-            ])).digest("hex");
+            let user = null;
+            const authContext = { cookie: request.headers.cookie, ownerKey: null };
+            if (access) {
+                user = await access.authenticate(request);
+                if (!user || typeof user.id !== "string" || !user.id.trim()) throw new HttpError(401, "请先登录。");
+                authContext.ownerKey = createHash("sha256").update(JSON.stringify([
+                    ownerNamespace,
+                    user.id
+                ])).digest("hex");
+            }
             const url = new URL(request.url ?? "/", "http://website.local");
             const creation = url.pathname === "/api/agent/conversations";
             const reservation = url.pathname === "/api/agent/attachments";
@@ -644,7 +668,7 @@ export function createAgentBackend(options) {
                     request.headers["content-length"] !== undefined && request.headers["content-length"] !== "0") {
                     throw new HttpError(400, "读取评价不接受请求体。", "VALIDATION_ERROR");
                 }
-                const result = await api(ownerKey, `/api/v1/agent/conversations/${conversationId}/runs/${runId}/feedback`, {
+                const result = await api(authContext, `/api/v1/agent/conversations/${conversationId}/runs/${runId}/feedback`, {
                     method,
                     headers: body ? { "Content-Type": "application/json" } : undefined,
                     body: body ? JSON.stringify(body) : undefined
@@ -658,7 +682,7 @@ export function createAgentBackend(options) {
                     "limit"
                 ]);
                 checkLimit(url.searchParams.get("limit"));
-                const result = await api(ownerKey, `/api/v1/agent/conversations${url.search}`);
+                const result = await api(authContext, `/api/v1/agent/conversations${url.search}`);
                 if (!Array.isArray(result?.items) || !(result.next_cursor === null || typeof result.next_cursor === "string")) throw new HttpError(502, "定位服务返回的会话目录不符合约定。");
                 json(response, 200, {
                     ok: true,
@@ -671,12 +695,12 @@ export function createAgentBackend(options) {
                 if (url.search) throw new HttpError(400, "此接口不接受查询参数。");
                 const body = await jsonBody(request);
                 if (typeof body.request_id !== "string" || !body.request_id.trim()) throw new HttpError(400, "request_id 不能为空。");
-                // 保留旧网站请求键，升级后重放仍命中历史收据；owner 隔离由原生存储负责。
-                const requestId = createHash("sha256").update(JSON.stringify([
+                // Cookie 模式由后端按用户隔离请求键；显式 access 保留旧键，兼容历史重放。
+                const requestId = user ? createHash("sha256").update(JSON.stringify([
                     user.id,
                     body.request_id
-                ])).digest("hex");
-                const result = await api(ownerKey, "/api/v1/agent/conversations", {
+                ])).digest("hex") : body.request_id;
+                const result = await api(authContext, "/api/v1/agent/conversations", {
                     method,
                     headers: {
                         "Content-Type": "application/json"
@@ -699,7 +723,7 @@ export function createAgentBackend(options) {
                 if (typeof body.conversation_id !== "string" || !UUID.test(body.conversation_id)) {
                     throw new HttpError(400, "会话标识无效。");
                 }
-                const result = await api(ownerKey, "/api/v1/agent/attachments", {
+                const result = await api(authContext, "/api/v1/agent/attachments", {
                     method,
                     headers: {
                         "Content-Type": "application/json"
@@ -735,7 +759,7 @@ export function createAgentBackend(options) {
                 }
                 const size = Number(headers.get("content-length"));
                 if (!Number.isSafeInteger(size) || size < 1 || size > MAX_ATTACHMENT_BYTES) throw new HttpError(413, "附件大小超出支持范围。");
-                const result = await api(ownerKey, `/api/v1/agent/attachments/${attachmentId}/content`, {
+                const result = await api(authContext, `/api/v1/agent/attachments/${attachmentId}/content`, {
                     method,
                     headers,
                     body: request,
@@ -763,7 +787,7 @@ export function createAgentBackend(options) {
                 }
                 const controller = new AbortController();
                 response.once("close", ()=>controller.abort());
-                const upstream = await upstreamFetch(ownerKey, `/api/v1/agent/conversations/${conversationId}/events`, {
+                const upstream = await upstreamFetch(authContext, `/api/v1/agent/conversations/${conversationId}/events`, {
                     headers,
                     signal: controller.signal
                 });
@@ -772,6 +796,8 @@ export function createAgentBackend(options) {
                     const error = safeError(envelope.error);
                     throw new HttpError([
                         400,
+                        401,
+                        403,
                         404,
                         409,
                         413,
@@ -797,7 +823,7 @@ export function createAgentBackend(options) {
                 const included = includesFromUrl(url);
                 const query = new URLSearchParams(url.search);
                 if (query.has("include")) query.set("include", included.length ? included.join(",") : "none");
-                const result = await conversationDetail(ownerKey, conversationId, included, query.size ? `?${query.toString().replaceAll("%2C", ",")}` : "");
+                const result = await conversationDetail(authContext, conversationId, included, query.size ? `?${query.toString().replaceAll("%2C", ",")}` : "");
                 json(response, 200, {
                     ok: true,
                     data: result,
@@ -813,7 +839,7 @@ export function createAgentBackend(options) {
                 ]);
                 const runId = url.searchParams.get("run_id");
                 if (runId !== null && !UUID.test(runId)) throw new HttpError(400, "轮次标识无效。");
-                const current = await conversationDetail(ownerKey, conversationId, [
+                const current = await conversationDetail(authContext, conversationId, [
                     "artifacts"
                 ], `?include=artifacts${runId ? `&run_id=${runId}` : ""}`);
                 const artifact = current.artifacts.find((item)=>item.artifact_id === artifactId);
@@ -860,11 +886,11 @@ export function createAgentBackend(options) {
                         "USER_RESULT",
                         "GENERIC_REPORT"
                     ].includes(artifact.kind) && artifact.size <= MAX_REPORT_BYTES) {
-                        const content = await verifiedReport(ownerKey, artifact, signal);
+                        const content = await verifiedReport(authContext, artifact, signal);
                         response.writeHead(200, downloadHeaders);
                         await pipeline(Readable.from([content]), response, { signal });
                     } else {
-                        await verifiedDownload(ownerKey, artifact, signal, async (path, signal)=>{
+                        await verifiedDownload(authContext, artifact, signal, async (path, signal)=>{
                             response.writeHead(200, downloadHeaders);
                             await pipeline(createReadStream(path), response, { signal });
                         });
@@ -879,7 +905,7 @@ export function createAgentBackend(options) {
             if (!mutation || artifactId) throw new HttpError(404, "接口不存在。");
             if (url.search) throw new HttpError(400, "此接口不接受查询参数。");
             const body = method === "DELETE" ? undefined : await jsonBody(request);
-            const result = await api(ownerKey, `/api/v1/agent/conversations/${conversationId}${action ? `/${action}` : ""}`, {
+            const result = await api(authContext, `/api/v1/agent/conversations/${conversationId}${action ? `/${action}` : ""}`, {
                 method,
                 headers: body ? {
                     "Content-Type": "application/json"
@@ -925,7 +951,8 @@ export function createAgentBackend(options) {
 }
 export async function startAgentBackend() {
     const authModule = process.env.WEBSITE_AUTH_MODULE;
-    const access = authModule ? (await import(pathToFileURL(resolve(authModule)).href)).access : denyAccess;
+    const access = authModule ? (await import(pathToFileURL(resolve(authModule)).href)).access : undefined;
+    if (authModule && typeof access?.authenticate !== "function") throw new Error("WEBSITE_AUTH_MODULE 必须导出 access.authenticate。");
     const server = createAgentBackend({
         upstream: process.env.XIAODAO_BASE_URL ?? "http://127.0.0.1:8000",
         access,
@@ -934,7 +961,7 @@ export async function startAgentBackend() {
     const port = Number(process.env.PORT ?? "8787");
     server.listen(port, "127.0.0.1", ()=>{
         console.log(`网站 Agent 接入示例已启动：http://127.0.0.1:${port}`);
-        if (!authModule) console.log("尚未配置 WEBSITE_AUTH_MODULE，所有业务请求默认拒绝。");
+        if (!authModule) console.log("已启用 Cookie 透传，由 Xiaodao 后端从 Redis 会话读取用户工号。");
     });
     return server;
 }
