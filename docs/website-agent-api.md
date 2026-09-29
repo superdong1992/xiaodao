@@ -67,7 +67,7 @@
 | 附件 | `POST /api/v1/agent/attachments` | 预约日志上传，JSON 含 `conversation_id` 和文件元数据 |
 | 附件 | `PUT /api/v1/agent/attachments/{attachment_id}/content` | 上传文件原始字节 |
 
-赞踩接入、响应格式、换票和错误处理见[通用定位经验库与网站赞踩接入](generic-feedback-memory.md)。评价接口不接受查询参数，`request_id` 最多 128 个 Unicode 字符；仅已交付的通用定位 V2 正式报告支持评价，资格由服务端判断。前端负责按钮，不新增 SSE 事件。
+赞踩接入、响应格式、换票和错误处理见[通用定位经验库与网站赞踩接入](generic-feedback-memory.md)。评价接口不接受查询参数，`request_id` 最多 128 个 Unicode 字符；已交付的通用和专用 `direct` 的 V2 Markdown 正式报告支持评价，资格由服务端判断。前端负责按钮，不新增 SSE 事件。
 
 会话 GET 支持 `include`、`run_id`、`history_before`、`history_limit`。不传时加载 `history,report,artifacts`；`include=none` 只返回状态、追问、最新阶段和事件游标；也可传 `include=report`、`include=artifacts` 或不重复的逗号组合。目录和追问列表查询支持 `cursor`、`limit`；文件支持 `run_id`；其余路由不接受查询参数。未知项、重复项和重复 `include` 参数返回明确校验错误。
 
@@ -336,9 +336,9 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `AgentPublicFailure` | `details` | `field`/`actual` 形式的安全详情，例如 `phase`、`diagnostic_id`、`reason_code`、`location`；运行态故障还可含 `persistence=UNKNOWN`。 |
 | `AgentPublicFailure` | `retryable` | 固定为 `false`；查询或读取报告不会重新运行模型，也不能据此续办已结束的任务。 |
 
-### 通用报告的点赞和点踩
+### 正式报告的点赞和点踩
 
-评价属于指定会话的指定轮次，GET 和 PUT 都返回 `FeedbackView`，外层仍为 `{ok,data,error}`。网站按钮根据 `can_rate` 决定是否可用，根据 `rating` 显示选中状态；切换历史报告时使用 `selected_run_id`，忽略其他报告的迟到响应。
+评价属于指定会话的指定轮次，GET 和 PUT 都返回 `FeedbackView`，外层仍为 `{ok,data,error}`。网站只根据 `can_rate` 显示按钮，根据 `rating` 显示选中状态，不再叠加经验库配置、文本长度、Job 或 Skill 判断；切换历史报告时使用 `selected_run_id`，忽略其他报告的迟到响应。
 
 | 模型 | 字段 | 含义 |
 | --- | --- | --- |
@@ -347,13 +347,13 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `FeedbackView` | `schema_version` | 反馈响应合同版本，固定为 `1`。 |
 | `FeedbackView` | `conversation_id` | 已核验当前用户归属的会话 UUID，必须与请求路径一致。 |
 | `FeedbackView` | `run_id` | 被评价报告的轮次 UUID，必须与请求路径一致。 |
-| `FeedbackView` | `can_rate` | 当前是否支持评价；仅已交付的通用定位 V2 正式报告可评价，功能关闭或报告不适用时为 `false`。 |
+| `FeedbackView` | `can_rate` | 当前是否支持评价；已交付的通用和专用 `direct` 的 V2 Markdown 正式报告默认可评价，不受经验库开关或提炼条件影响。旧 V1 报告和专用 `strict` / `advisory` 的结构化报告为 `false`。 |
 | `FeedbackView` | `rating` | 当前保存的 `LIKE` 或 `DISLIKE`；尚未评价时为 `null`。旧请求重放也返回最新投票。 |
 | `FeedbackView` | `updated_at` | 最近一次投票变化的 UTC 时间，精确到毫秒；尚未评价时为 `null`。 |
 
 两个接口不接受查询参数，GET 不接受请求体，PUT 只接受表中的两个字段。同一报告的提交应串行处理，重复同票不累计票数、不重复提炼经验。反馈只对当前用户可见，响应不包含其他用户的报告。
 
-不适用报告返回 `409 / AGENT_FEEDBACK_UNSUPPORTED`，重试改参数返回 `409 / AGENT_IDEMPOTENCY_CONFLICT`，反馈存储配额已满返回 `429 / AGENT_FEEDBACK_LIMIT_EXCEEDED`。浏览器封装、完整错误处理及启用条件见[经验库与赞踩接入说明](generic-feedback-memory.md)。
+不适用报告返回 `409 / AGENT_FEEDBACK_UNSUPPORTED`，重试改参数返回 `409 / AGENT_IDEMPOTENCY_CONFLICT`，反馈来源或请求 ID 配额已满返回 `429 / AGENT_FEEDBACK_LIMIT_EXCEEDED`。`GENERIC_MEMORY_ENABLED` 只控制通用经验提炼和召回；通用原问题为空、超出提炼的 64 KiB 上限或提炼任务容量已满时，跳过提炼并正常保存投票。专用报告只保存评价，不生成或召回通用经验。浏览器封装、完整错误处理及经验库启用条件见[经验库与赞踩接入说明](generic-feedback-memory.md)。
 
 ### 报告追问字段
 

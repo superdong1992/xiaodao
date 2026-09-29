@@ -67,7 +67,7 @@ PUT 请求仅包含 `request_id` 和 `rating`，后者为 `LIKE` 或 `DISLIKE`�
 
 前端须串行提交同一报告的投票，提交期间禁用按钮。网络重试保持 ID 和内容；换票使用新 ID；再次点击已选按钮不表示取消评价。以服务端返回的最新状态为准，旧点赞重放可能返回最新的点踩。切换报告后不能用旧请求的迟到响应更新新报告。
 
-默认 `GENERIC_MEMORY_ENABLED=false`，此时 `can_rate=false`；PUT 返回 `409 / AGENT_FEEDBACK_UNSUPPORTED`。专用定位即便也输出 Markdown，仍不适用通用报告反馈，不能按报告格式猜测资格。反馈失败不清除报告。
+已交付的通用和专用 `direct` 的 V2 Markdown 正式报告默认支持赞踩。`GENERIC_MEMORY_ENABLED=false` 只关闭通用经验提炼和召回，不影响评价读写；专用报告只保存评价，不生成或召回通用经验。前端只按 `can_rate` 显示按钮，不叠加经验库配置、文本长度、Job 或 Skill 判断。旧 V1 报告和专用 `strict` / `advisory` 的结构化报告仍不支持评价，不能按 Markdown 格式猜测资格。反馈失败不清除报告。
 
 同步 [browser-client.js](../examples/website-agent/browser-client.js) 的 `conversations.getFeedback` / `setFeedback` 和 [server.mjs](../examples/website-agent/server.mjs) 的转发实现。具体错误、配额、归属与交互示例见[赞踩接入说明](generic-feedback-memory.md)。
 
@@ -94,7 +94,7 @@ PUT 请求仅包含 `request_id` 和 `rating`，后者为 `LIKE` 或 `DISLIKE`�
 2. 执行中补包仍是原轮次、原 Case；新包替换旧包，重复同请求不新增 Job；遇到重启交接等待时可用原请求重试。首条多包能展示选择追问，再用仅引用目标附件的新消息继续。
 3. 旧报告抢先完成、停止和删除与补日志并发时，页面按收据和最新快照展示，不显示未接受的附件为已分析。
 4. 多包、重复包、解析失败、空清单分别展示正确错误或 `UNRESOLVED` 原因。
-5. 切换历史报告、赞踩换票、网络重试和功能关闭均符合资格及幂等规则；默认专用 Markdown 不显示通用赞踩按钮。
+5. 切换历史报告、赞踩换票和网络重试符合资格及幂等规则；经验库关闭、通用原问题超出提炼上限或提炼任务容量已满时，已交付的 V2 Markdown 正式报告仍可赞踩；专用 `direct` 报告可评价，但不触发通用经验提炼；旧 V1 和专用 `strict` / `advisory` 结构化报告不显示赞踩按钮。
 6. 旧事件游标能恢复快照后续订；过期报告和附件入口能失效；小报告与 ZIP 下载断连均取消上游。
 
 8.2 早期的多轮状态、旧 `/status` / `/report` 入口删除和专用 Markdown 交付不是这两天新增的变化。尚未完成这些适配的网站，另按 [8.2 完整升级清单](website-agent-upgrade-8.2.md)补齐。

@@ -123,6 +123,8 @@ def test_memory_worker_and_recall_follow_the_same_feature_flag(tmp_path, enabled
     graph = app.state.problem_locator_composition
     assert graph.memory_worker is not None
     assert graph.memory_worker._enabled is enabled
+    assert graph.agent.feedback is not None
+    assert graph.agent.feedback.memory_enabled is enabled
     assert (graph.runtime._generic_locator_executor._experience_retriever is not None) is enabled
     with TestClient(app) as client:
         assert client.get("/ready").status_code == 200

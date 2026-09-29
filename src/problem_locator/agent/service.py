@@ -47,7 +47,7 @@ class AgentConversationService:
         self.memory_store = memory_store
         self.memory_enabled = memory_enabled
         store.memory_store = memory_store
-        self.feedback = None if memory_store is None else FeedbackService(self, memory_store, enabled=memory_enabled)
+        self.feedback = None if memory_store is None else FeedbackService(self, memory_store, memory_enabled=memory_enabled)
         self.uploads = ConversationUploads(store, application, layout)
         self.usage_guard = ConversationUsageGuard()
         self.cleanup = None

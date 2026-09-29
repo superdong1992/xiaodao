@@ -1,9 +1,20 @@
 # 已修复问题台账
 
-更新时间：2026-09-28
+更新时间：2026-09-29
 
 本文件记录已经在当前工作区验证、修复并由专项回归测试保护的问题。活跃待办仍只写入
 [`TODO.md`](TODO.md)；同一问题再次回归时更新原条目，不另建一个缺少历史关联的条目。
+
+## PL-FIX-078：报告赞踩被经验库开关和提炼条件阻断
+
+- **状态**：实现和专项回归已完成；正式验证以本条最新 Test Flow 元数据为准。
+- **症状、受影响版本与确认**：8.2.0 / `6591504` 中，网站按 GET 反馈接口的 `can_rate` 显示按钮，而生产装配把默认关闭的 `GENERIC_MEMORY_ENABLED` 同时传给反馈服务。正常通用 V2 报告因此不可评价，提炼任务满额时整次投票回滚；资格判定还重复叠加了提炼原文的非空与大小条件。修改前已核对当前启动入口、`FeedbackService._source/get_feedback/put_feedback`、`MemoryStore.put_feedback` 和网站接入规则。当前专用 direct 同样发布 V2 Markdown，却被旧 GENERIC 类型限制排除。
+- **根因**：赞踩资格复用了后台经验提炼的开关、输入预算和任务容量；资格检查还重复读取已发布报告文件，使评价依赖额外文件 IO。旧类型限制没有覆盖当前默认专用 Markdown 交付方式。
+- **修复历史（2026-09-29）**：已发布的通用及专用 direct V2 Markdown 默认可评价。经验库开关只控制通用经验提炼和召回；原问题为空、超出提炼上限或提炼任务满额时跳过提炼，正常保存投票。资格读取使用已经校验过来源、产物与哈希的 Case 快照，不再打开报告文件。关闭期间不创建新任务，重新启用不自动补学旧投票；用户提交新的点赞请求仍可按条件创建任务。同步 API 文案、OpenAPI 快照与接入说明。
+- **不可回归行为**：保留用户归属、指定轮次、已删除会话、报告来源一致性和请求幂等保护；旧点赞重放不能覆盖后来的点踩。专用报告只存评价，不参与通用经验提炼。未发布报告、旧 V1 和专用 strict/advisory 结构化报告仍不可评价；前端只依据 `can_rate` 显示按钮。关闭经验库后点踩仍停用已有经验；反馈来源与请求 ID 配额仍然有效。
+- **专项回归测试**：`test_generic_feedback.py` 中的 `test_disabled_memory_keeps_feedback_available_without_queuing_extraction`、`test_downvote_with_memory_disabled_still_deactivates_existing_experience`、`test_extraction_material_limits_do_not_hide_or_reject_feedback`、`test_extraction_capacity_does_not_block_feedback`、`test_published_markdown_feedback_does_not_reopen_report_files` 和 `test_unpublished_report_is_not_eligible` 直接覆盖本次显示、投票和文件依赖问题；既有测试继续覆盖归属、指定轮次、幂等、并发和删除。`test_postgres_feedback_survives_disabled_or_full_extraction` 验证生产数据库下的保存及重放；`test_memory_worker_and_recall_follow_the_same_feature_flag` 核对实际装配中的反馈、后台任务和召回接线。`test_direct_skill_keeps_model_status_and_exact_report_across_public_surfaces` 从实际专用诊断交付读取真实快照，验证已解决和未解决报告在默认关闭经验库时均可评价。
+
+- **最新 Test Flow verdict（2026-09-29）**：中央 Linux `dev.default` [run-20260929T025815Z-2e656d42](.tmp/feedback-linux-evidence-20260929/run-20260929T025815Z-2e656d42/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，唯一提示为 performance `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:06b754c7442bb25a006587566f1fcce99cfe4fd1c7091100b4f5bd5d92700048`（952 文件），verdict digest `50b03efcda81070bbdf6b1316a0a784e37061f12499e443b79e0bb08b325a1e5`。affected 由完整轨覆盖，pytest 4409 项通过、2 项规定的平台跳过；其中 PostgreSQL 60 项通过，赞踩与经验单元专项 97 项通过，网站 Node 215 项通过。完整轨 287.014 秒，模型调用、token 和费用均为 0。Windows 工作区与 Linux 被测源码逐文件校验一致，101 份证据文件复制后哈希一致；verdict 文件 SHA-256 为 `52e50bb871870760ce4424242b35467e0c006a6c734b78f5431c3991468701ef`。本行仅为验证后的引用元数据，不属于所引用源码快照；不代表生产网站、部署或真实 Release 已验收。
 
 ## PL-FIX-077：累计升级说明仍沿用 SQLite 和旧 BFF 鉴权假设
 

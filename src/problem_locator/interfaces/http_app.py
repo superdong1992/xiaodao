@@ -789,7 +789,7 @@ _REST_FIELD_DESCRIPTIONS.update({
     "context_mode": "REPORT_AND_LOGS 表示本次可读取原日志；REPORT_ONLY 表示仅依据报告和问答。",
     "answer_markdown": "完整追问回答的 Markdown 正文；未完成时为 null。",
     "rating": "报告评价：LIKE 有帮助，DISLIKE 没帮助；尚未评价时为 null。",
-    "can_rate": "当前是否允许评价；只支持已交付的通用定位 V2 正式报告，功能关闭或报告不适用时为 false。",
+    "can_rate": "当前是否允许评价；已交付的通用和专用 direct V2 Markdown 正式报告默认可评价，不受经验库开关或提炼条件影响；报告不适用时为 false。",
     "run_id": "独立诊断轮次的 UUID；同一会话可包含多轮。",
     "selected_run_id": "本次状态、报告和文件所属的轮次 UUID。",
     "title": "用户可编辑的会话标题，1 到 80 个字符。",

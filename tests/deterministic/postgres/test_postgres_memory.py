@@ -7,6 +7,7 @@ import pytest
 from problem_locator.agent.store import AgentStore
 from problem_locator.memory.models import FeedbackSource
 from problem_locator.memory.store import MemoryStore
+from problem_locator.memory import store as memory_module
 from problem_locator.storage.database import lock_conversation
 from tests.postgres_helpers import postgres_database_url, postgres_repository
 from tests.deterministic.unit.storage.fakes import FixedClock
@@ -62,3 +63,16 @@ def test_postgres_memory_concurrent_claims_never_duplicate_work(durable_memory):
     assert state.memory.finish_task(claimed[0]["task_id"], card_json()) is True
     state.agents.request_delete(state.created.conversation_id, owner_key="owner")
     assert state.memory.active_cards("generic") == []
+
+
+@pytest.mark.parametrize("memory_enabled", [False, True])
+def test_postgres_feedback_survives_disabled_or_full_extraction(durable_memory, monkeypatch, memory_enabled):
+    state = durable_memory
+    monkeypatch.setattr(memory_module, "MAX_TASKS", 0)
+    for request_id, rating, expected in [("up", "LIKE", "LIKE"), ("down", "DISLIKE", "DISLIKE"),
+                                         ("up", "LIKE", "DISLIKE")]:
+        result = state.memory.put_feedback(state.created.conversation_id, state.created.run_id,
+            owner_key="owner", request_id=request_id, rating=rating, source=state.source,
+            extract_memory=memory_enabled)
+        assert result.can_rate is True and result.rating == expected
+    assert state.memory.claim_task() is None

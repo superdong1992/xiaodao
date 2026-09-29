@@ -86,7 +86,7 @@ class MemoryStore:
             return self._view(db, conversation_id, run_id, can_rate)
 
     def put_feedback(self, conversation_id, run_id, *, owner_key, request_id, rating,
-                     source: FeedbackSource | None):
+                     source: FeedbackSource | None, extract_memory=True):
         request = FeedbackRequest(request_id=request_id, rating=rating)
         now = self._now()
         with self.repository.database_transaction() as db:
@@ -96,9 +96,7 @@ class MemoryStore:
             case_id = self._scope(db, conversation_id, run_id, owner_key)
             if source is None:
                 raise AgentStoreError("AGENT_FEEDBACK_UNSUPPORTED", "这份报告暂不支持反馈。", 409)
-            if (case_id != source.case_id or not source.problem_text or not source.report_markdown
-                    or len(source.problem_text.encode("utf-8")) > 65_536
-                    or len(source.report_markdown.encode("utf-8")) > 65_536
+            if (case_id != source.case_id or not source.report_markdown
                     or hashlib.sha256(source.report_markdown.encode("utf-8")).hexdigest() != source.report_sha256):
                 raise AgentStoreError("AGENT_FEEDBACK_UNSUPPORTED", "报告来源已变化，请刷新后重试。", 409)
             previous = db.execute("SELECT conversation_id,run_id,rating FROM memory_feedback_requests WHERE owner_key=? AND request_id=?",
@@ -129,9 +127,11 @@ class MemoryStore:
                        (owner_key, request.request_id, conversation_id, run_id, request.rating))
             task = _one(db, "SELECT * FROM memory_tasks WHERE run_id=? AND report_sha256=?",
                         (run_id, source.report_sha256))
-            if request.rating == "LIKE" and task is None:
-                if db.execute("SELECT count(*) FROM memory_tasks").fetchone()[0] >= MAX_TASKS:
-                    raise _limit()
+            if (request.rating == "LIKE" and task is None and extract_memory
+                    and source.problem_text.strip()
+                    and len(source.problem_text.encode("utf-8")) <= 65_536
+                    and len(source.report_markdown.encode("utf-8")) <= 65_536
+                    and db.execute("SELECT count(*) FROM memory_tasks").fetchone()[0] < MAX_TASKS):
                 db.execute("INSERT INTO memory_tasks (task_id,conversation_id,run_id,source_job_id,skill_name,report_sha256,status,problem_text,report_markdown,created_at,updated_at) VALUES (?,?,?,?,?,?,'PENDING',?,?,?,?)",
                            (str(uuid.uuid4()), conversation_id, run_id, source.source_job_id,
                             source.skill_name, source.report_sha256, source.problem_text,

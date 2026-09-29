@@ -15,7 +15,7 @@ from problem_locator.agent.models import AgentStoreError
 from problem_locator.agent.service import AgentConversationService
 from problem_locator.agent.store import AgentStore
 from problem_locator.application.reports import read_published_report
-from problem_locator.contracts import DiagnosisMode, JobStatus
+from problem_locator.contracts import CaseStatus, DiagnosisMode, JobStatus
 from problem_locator.memory import store as memory_module
 from problem_locator.memory.models import FeedbackRequest, FeedbackSource
 from problem_locator.memory.store import MemoryStore
@@ -133,15 +133,15 @@ def test_request_identity_is_owner_scoped_and_cannot_move_to_another_run(system)
         request_id="like", rating="LIKE", source=other_source).rating == "LIKE"
 
 
-def test_feedback_and_task_insert_roll_back_together_when_capacity_is_full(system, monkeypatch):
+def test_extraction_capacity_does_not_block_feedback(system, monkeypatch):
     monkeypatch.setattr(memory_module, "MAX_TASKS", 0)
-    with pytest.raises(AgentStoreError) as error:
-        put(system)
-    assert error.value.status_code == 429
+    assert put(system).rating == "LIKE"
+    assert put(system, "down", "DISLIKE").rating == "DISLIKE"
+    assert put(system).rating == "DISLIKE"
     assert task_rows(system) == []
     with system.repository.database_read() as db:
-        assert db.execute("SELECT count(*) FROM memory_feedback").fetchone()[0] == 0
-        assert db.execute("SELECT count(*) FROM memory_feedback_requests").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM memory_feedback").fetchone()[0] == 1
+        assert db.execute("SELECT count(*) FROM memory_feedback_requests").fetchone()[0] == 2
 
 
 def test_idempotency_capacity_keeps_old_receipts_and_current_vote(system, monkeypatch):
@@ -252,6 +252,7 @@ def configured_service(system, monkeypatch, *, enabled=True, version=2, mode=Dia
     captured = SimpleNamespace(view=SimpleNamespace(case_id=aggregate.case.case_id),
                                snapshot=SimpleNamespace(cases={aggregate.case.case_id: aggregate}))
     def capture(conversation_id, *, run_id, **kwargs):
+        system.agent_store.get_run(conversation_id, run_id)
         assert conversation_id == system.created.conversation_id and run_id == system.created.run_id
         return captured
     monkeypatch.setattr(system.agent_store, "read_conversation", capture)
@@ -288,9 +289,8 @@ def test_http_roundtrip_checks_real_source_job_and_exposes_only_minimal_state(sy
     assert any(item["name"] == "X-Agent-Owner-Key" and item["required"] for item in route["put"]["parameters"])
 
 
-@pytest.mark.parametrize("version,mode", [(1, DiagnosisMode.GENERIC), (2, DiagnosisMode.SPECIALIZED)])
-def test_legacy_or_specialized_markdown_report_is_not_eligible(system, monkeypatch, version, mode):
-    service, _, _ = configured_service(system, monkeypatch, version=version, mode=mode)
+def test_legacy_report_is_not_eligible(system, monkeypatch):
+    service, _, _ = configured_service(system, monkeypatch, version=1)
     response = request(service, system)
     assert response.status_code == 200 and response.json()["data"]["can_rate"] is False
     response = request(service, system, "PUT", body={"request_id": "no", "rating": "LIKE"})
@@ -299,16 +299,67 @@ def test_legacy_or_specialized_markdown_report_is_not_eligible(system, monkeypat
     assert task_rows(system) == []
 
 
-def test_disabled_feedback_is_readable_but_cannot_write_or_extract(system, monkeypatch):
-    put(system)
+@pytest.mark.parametrize("mode", [DiagnosisMode.GENERIC, DiagnosisMode.SPECIALIZED])
+def test_published_markdown_feedback_does_not_reopen_report_files(system, monkeypatch, mode):
+    service, captured, resources = configured_service(system, monkeypatch, mode=mode)
+    if mode is DiagnosisMode.SPECIALIZED:
+        job = next(iter(next(iter(captured.snapshot.cases.values())).jobs.values()))
+        job.generic_skill_name = None
+        job.generic_problem_text = None
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("评价已发布报告不应重复读取报告文件。")
+
+    monkeypatch.setattr(service.application, "read_conversation_delivery", forbidden)
+    assert request(service, system).json()["data"]["can_rate"] is True
+    response = request(service, system, "PUT", body={"request_id": "published", "rating": "LIKE"})
+    assert response.status_code == 200 and response.json()["data"]["rating"] == "LIKE"
+    assert resources.opened == []
+    assert len(task_rows(system)) == (1 if mode is DiagnosisMode.GENERIC else 0)
+
+
+@pytest.mark.parametrize("status", [CaseStatus.RUNNING, CaseStatus.FAILED, CaseStatus.CANCELLED])
+def test_unpublished_report_is_not_eligible(system, monkeypatch, status):
+    service, captured, _ = configured_service(system, monkeypatch)
+    aggregate = next(iter(captured.snapshot.cases.values()))
+    captured.snapshot.cases[aggregate.case.case_id] = aggregate.model_copy(
+        update={"case": aggregate.case.model_copy(update={"status": status})})
+    assert request(service, system).json()["data"]["can_rate"] is False
+    assert request(service, system, "PUT", body={"request_id": "pending", "rating": "LIKE"}).status_code == 409
+    assert task_rows(system) == []
+
+
+def test_disabled_memory_keeps_feedback_available_without_queuing_extraction(system, monkeypatch):
     service, _, _ = configured_service(system, monkeypatch, enabled=False)
     response = request(service, system)
     assert response.status_code == 200
-    assert response.json()["data"]["rating"] == "LIKE"
-    assert response.json()["data"]["can_rate"] is False
-    response = request(service, system, "PUT", body={"request_id": "down", "rating": "DISLIKE"})
-    assert response.status_code == 409
-    assert task_rows(system)[0][1] == "PENDING"
+    assert response.json()["data"]["rating"] is None
+    assert response.json()["data"]["can_rate"] is True
+    for request_id, rating, expected in [("up", "LIKE", "LIKE"), ("down", "DISLIKE", "DISLIKE"),
+                                         ("up", "LIKE", "DISLIKE")]:
+        response = request(service, system, "PUT", body={"request_id": request_id, "rating": rating})
+        assert response.status_code == 200
+        assert response.json()["data"]["can_rate"] is True
+        assert response.json()["data"]["rating"] == expected
+    assert task_rows(system) == []
+    service.feedback.memory_enabled = True
+    # Reading or replaying an old vote must not retroactively learn old reports.
+    assert request(service, system).json()["data"]["rating"] == "DISLIKE"
+    assert request(service, system, "PUT", body={"request_id": "up", "rating": "LIKE"}).status_code == 200
+    assert task_rows(system) == []
+    assert request(service, system, "PUT", body={"request_id": "new-up", "rating": "LIKE"}).status_code == 200
+    assert len(task_rows(system)) == 1
+
+
+def test_downvote_with_memory_disabled_still_deactivates_existing_experience(system, monkeypatch):
+    service, _, _ = configured_service(system, monkeypatch)
+    assert request(service, system, "PUT", body={"request_id": "up", "rating": "LIKE"}).status_code == 200
+    task = system.memory.claim_task()
+    system.memory.finish_task(task["task_id"], CARD)
+    assert len(system.memory.active_cards(task["skill_name"])) == 1
+    service.feedback.memory_enabled = False
+    assert request(service, system, "PUT", body={"request_id": "down", "rating": "DISLIKE"}).status_code == 200
+    assert system.memory.active_cards(task["skill_name"]) == []
 
 
 @pytest.mark.parametrize("owner,expected", [(None, 400), ("bad", 400), (OTHER, 404)])
@@ -348,13 +399,15 @@ def test_feedback_get_rejects_nonempty_body(system, monkeypatch):
     assert task_rows(system) == []
 
 
-def test_source_size_eligibility_matches_put_gate(system, monkeypatch):
+@pytest.mark.parametrize("material", ["large_problem", "empty_problem", "blank_problem"])
+def test_extraction_material_limits_do_not_hide_or_reject_feedback(system, monkeypatch, material):
     service, captured, _ = configured_service(system, monkeypatch)
     aggregate = next(iter(captured.snapshot.cases.values()))
     job = next(iter(aggregate.jobs.values()))
-    job.generic_problem_text = "字" * 21846
-    assert request(service, system).json()["data"]["can_rate"] is False
-    assert request(service, system, "PUT", body={"request_id": "large", "rating": "LIKE"}).status_code == 409
+    job.generic_problem_text = {"large_problem": "字" * 21846, "empty_problem": "", "blank_problem": "  "}[material]
+    assert request(service, system).json()["data"]["can_rate"] is True
+    response = request(service, system, "PUT", body={"request_id": "large", "rating": "LIKE"})
+    assert response.status_code == 200 and response.json()["data"]["rating"] == "LIKE"
     assert task_rows(system) == []
 
 

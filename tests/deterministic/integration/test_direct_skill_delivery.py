@@ -14,6 +14,7 @@ from problem_locator.agent.store import AgentStore
 from problem_locator.contracts import JobType, ReviewPolicy, is_specialized_direct
 from problem_locator.entrypoints.settings import Settings
 from problem_locator.interfaces.http_app import create_http_app
+from problem_locator.memory.store import MemoryStore
 from problem_locator.runtime import diagnosis_runtime
 from problem_locator.runtime.agent_backend import BackendExecution
 from problem_locator.runtime.catalog import VersionedAssetCatalog
@@ -121,7 +122,8 @@ def direct_website(tmp_path, monkeypatch, request):
     monkeypatch.setattr(diagnosis_runtime, "finalize_server_outcome", forbid_direct_finalizer)
     store = AgentStore(stack.repository, stack.clock, stack.ids, runtime_epoch="direct-epoch")
     engine = website_helpers.ScriptedIntake()
-    service = AgentConversationService(store, stack.application, engine, stack.layout)
+    service = AgentConversationService(store, stack.application, engine, stack.layout,
+                                      memory_store=MemoryStore(stack.repository, stack.clock))
     service.dispatcher = stack.scheduler
     stack.runtime._public_progress = store.append_case_progress
     app = create_http_app(
@@ -219,8 +221,15 @@ def test_direct_skill_keeps_model_status_and_exact_report_across_public_surfaces
     direct = direct_website
     direct.backend.status, direct.backend.report = status, body
     case_id, prefix = _finish(direct)
-    stack, _, _, _, client = direct.website
+    stack, _, _, service, client = direct.website
     _assert_public_report(stack, client, case_id, prefix, body, status)
+    selected = _get(client, prefix + "?include=none")["selected_run_id"]
+    feedback_path = f"{prefix}/runs/{selected}/feedback"
+    assert service.memory_enabled is False
+    assert _get(client, feedback_path)["can_rate"] is True
+    response = client.put(feedback_path, json={"request_id": "direct-like", "rating": "LIKE"})
+    assert response.status_code == 200 and response.json()["data"]["rating"] == "LIKE"
+    assert service.memory_store.claim_task() is None
     assert len(direct.scans) == 1
     assert direct.scans[0].loaded_method_ids == ("rpc-call-timeout",)
     assert '<<<METHODS_SKILL_FILE path="references/rpc-call-timeout.md">>>' in direct.backend.calls[0]["prompt"]

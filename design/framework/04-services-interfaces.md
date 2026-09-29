@@ -8,7 +8,7 @@
 | --- | --- | --- | --- |
 | `agent` | 网站会话、每轮诊断、消息、附件、事件、停止和删除 | Application 命令/查询、Case 仓库、Intake Engine | 不直接决定诊断结论；正式诊断仍由 Case 命令驱动 |
 | `followup` | 围绕已发布报告的问答、日志副本、独立事件和停止状态 | Agent 归属和使用租约、数据库、AgentBackend | 不修改原 Case、原报告和原 Agent 事件合同 |
-| `memory` | 点赞/点踩、一次性经验提炼、有限的历史经验检索 | 已发布 Generic V2 报告、数据库、AgentBackend | 不把点赞当成根因已证实，也不把历史经验当成本次证据 |
+| `memory` | 点赞/点踩、一次性经验提炼、有限的历史经验检索 | 已发布 V2 Markdown 报告、数据库、AgentBackend | 通用和专用 `direct` 报告均可评价，仅通用报告提炼经验；不把点赞当成根因已证实，也不把历史经验当成本次证据 |
 | `interfaces` | HTTP、SSE、MCP、客户端传输、认证与公开结果投影 | 冻结的命令/查询端口和可选 Agent 服务 | 不另建诊断状态机，不在读取接口中启动模型 |
 
 这些模块共用 `CaseStateRepository` 提供的数据库事务。生产配置使用 PostgreSQL；不带 `database_url` 的直接构造保留 SQLite 参考实现，用于离线工具与确定性测试。各业务 Store 使用显式 SQL 方言辅助函数，不通过整段 SQL 的隐式翻译模拟 PostgreSQL。
@@ -78,9 +78,9 @@ Generic 诊断途中补交日志有单独流程。服务先校验所选附件，
 
 ## 4. 反馈与经验记忆
 
-反馈目前只接受已发布的 Generic V2 Markdown 报告。读取或写入都要求明确 owner；评分绑定会话、轮次、来源 Job 和报告哈希。请求幂等键按 owner 隔离，旧请求重放返回当前评分，不把后来修改的评分恢复成旧值。
+反馈默认接受已发布的 V2 Markdown 正式报告，包括通用定位和专用定位 `direct` 模式的报告，不受 `GENERIC_MEMORY_ENABLED` 或提炼条件影响；旧 V1 报告和专用 `strict` / `advisory` 的结构化报告仍不支持。读取或写入都要求明确 owner；评分绑定会话、轮次、来源 Job 和报告哈希。请求幂等键按 owner 隔离，旧请求重放返回当前评分，不把后来修改的评分恢复成旧值。网站只按 `can_rate` 显示按钮。
 
-首次点赞为同一 `(run_id, report_sha256)` 创建一次提炼任务。模型从原问题和报告中提炼四组通用信息：问题特征、适用条件、排查步骤与限制。模型不使用工具，输出必须是严格 JSON。经验卡最多 4,096 字节；校验拒绝可识别的实例标识、敏感字段、长原文和指令式内容。该校验是保守过滤，代码没有声称正则表达式可以识别所有姓名或自然语言秘密。
+经验库启用后，通用报告的点赞为同一 `(run_id, report_sha256)` 最多创建一次提炼任务；专用报告只保存评价，不生成或召回通用经验。提炼要求通用原问题非空白且不超过 64 KiB，任务容量未满；条件不满足时只保存投票。正式报告仍须符合 V2 报告自身的 64 KiB 合同限制。关闭期间不积压新任务，重新开启不自动补提炼旧投票；用户用新请求再次点赞时，满足条件的通用报告可以创建任务。模型从原问题和报告中提炼四组通用信息：问题特征、适用条件、排查步骤与限制。模型不使用工具，输出必须是严格 JSON。经验卡最多 4,096 字节；校验拒绝可识别的实例标识、敏感字段、长原文和指令式内容。该校验是保守过滤，代码没有声称正则表达式可以识别所有姓名或自然语言秘密。
 
 成功或失败后移除任务内的原问题和原报告；未完成来源最多保留 7 天，已完成卡片从完成时间起最多保留 90 天。点踩关闭卡片的 active 标记，重新点赞可在有效期内重新启用已有卡片，不再次调用模型。显式删除会话撤销卡片；自然到期删除来源时，已完成卡片保留原有独立有效期。
 
@@ -92,8 +92,8 @@ Generic 诊断途中补交日志有单独流程。服务先校验所选附件，
 | --- | --- |
 | [memory/__init__.py](../../src/problem_locator/memory/__init__.py) | 包说明；没有初始化数据库或启动线程的副作用。 |
 | [memory/models.py](../../src/problem_locator/memory/models.py) | `FeedbackRequest` 定义 `LIKE`/`DISLIKE` 与请求标识；`FeedbackView` 保证评分和时间同时存在或同时为空；`FeedbackSource` 保存已发布报告的内部来源身份，不直接作为公开接口。 |
-| [memory/service.py](../../src/problem_locator/memory/service.py) | `FeedbackService._source` 从一致的会话/Case 快照校验成功 Generic Job、Skill、报告与产物；`get_feedback`、`put_feedback` 持有会话操作租约并传递 owner。功能关闭或来源不支持时读接口显示 `can_rate=false`，写接口拒绝。 |
-| [memory/store.py](../../src/problem_locator/memory/store.py) | `MemoryStore` 管理 `memory_feedback`、`memory_feedback_requests`、`memory_tasks`。事务覆盖评分、去重、配额和任务创建；来源及任务各最多 10,000 条，每份报告最多 128 个反馈请求。`claim_task` 将 PENDING 改为 RUNNING；`finish_task` 再校验卡片并删除原文；`recover` 将遗留 RUNNING 标为 FAILED。`revoke_conversation`、`expire_sources`、`prune` 分别处理显式撤销、自然来源到期及周期清理。 |
+| [memory/service.py](../../src/problem_locator/memory/service.py) | `FeedbackService._source` 从已验证的会话/Case 快照核对终态和报告来源；快照已校验 Job、Skill、Outcome、产物与报告哈希，不再重复打开报告文件。`get_feedback`、`put_feedback` 持有会话操作租约并传递 owner。来源不支持时读接口显示 `can_rate=false`，写接口拒绝；经验库开关只决定是否允许新建通用提炼任务，不阻断反馈。 |
+| [memory/store.py](../../src/problem_locator/memory/store.py) | `MemoryStore` 管理 `memory_feedback`、`memory_feedback_requests`、`memory_tasks`。事务覆盖评分、去重、配额和可选的任务创建；来源及任务各最多 10,000 条，每份报告最多 128 个反馈请求。来源或请求配额已满返回 429；任务容量已满只跳过提炼。`claim_task` 将 PENDING 改为 RUNNING；`finish_task` 再校验卡片并删除原文；`recover` 将遗留 RUNNING 标为 FAILED。`revoke_conversation`、`expire_sources`、`prune` 分别处理显式撤销、自然来源到期及周期清理。 |
 | [memory/extraction.py](../../src/problem_locator/memory/extraction.py) | `parse_card_json` 禁止重复字段、未知字段、空数组、超长条目及可识别隐私/指令内容，不从围栏中修补 JSON。`build_extraction_prompt` 验证来源哈希和预算。`MemoryExtractionWorker` 单线程领取一次性任务，使用 `file_access="none"`，默认墙钟限制 120 秒；日志只记录错误类型，不记录模型输出。仅删除自己创建的空工作区，异常文件交给保留清理。 |
 | [memory/retrieval.py](../../src/problem_locator/memory/retrieval.py) | `ExperienceRetriever.select` 完成确定性单卡检索，按共同特征数、覆盖比例、更新时间和稳定 ID 排序；一般至少两个共同特征，足够长且唯一的错误码允许单独命中。`MemorySelection.receipt` 返回卡片与引用文字的哈希，供执行记录绑定本次实际提示。 |
 

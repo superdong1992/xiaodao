@@ -396,7 +396,7 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
     @app.put(f"{_PREFIX}/conversations/{{conversation_id}}/runs/{{run_id}}/feedback", tags=["Agent"],
              response_model=SuccessEnvelope[FeedbackView], responses=errors,
              summary="保存指定诊断报告的反馈", operation_id="put_agent_feedback",
-             description="LIKE 点赞，DISLIKE 点踩；重试保留 request_id，换票使用新 request_id。只支持正式通用定位 V2 报告。")
+             description="LIKE 点赞，DISLIKE 点踩；重试保留 request_id，换票使用新 request_id。支持已交付的通用和专用 direct V2 Markdown 正式报告。")
     async def put_feedback(conversation_id: Annotated[OpaqueId, Path()], run_id: Annotated[OpaqueId, Path()],
                            body: FeedbackRequest, request: Request) -> JSONResponse:
         return await respond("put_feedback", request, conversation_id=conversation_id, run_id=run_id,
