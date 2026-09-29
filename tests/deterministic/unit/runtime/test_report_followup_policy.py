@@ -13,8 +13,9 @@ from problem_locator.runtime.followup_access import permits_tool, prepare_settin
 from problem_locator.runtime import followup_access
 
 
-def test_followup_policy_pins_read_and_grep_without_changing_existing_read_only_policy(tmp_path):
-    invocation = ClaudeCommand(("claude", "--dangerously-skip-permissions", "--tools", "Bash", "--allowedTools", "Bash(*)"),
+@pytest.mark.parametrize("executable", ["claude", "codeagent", "codeagent.exe", "codeagent.cmd"])
+def test_followup_policy_pins_read_and_grep_without_changing_existing_read_only_policy(tmp_path, executable):
+    invocation = ClaudeCommand((executable, "--dangerously-skip-permissions", "--tools", "Bash", "--allowedTools", "Bash(*)"),
         {"CLAUDE_CONFIG_DIR": str(tmp_path / ".claude")})
     result = apply_final_response_policy(invocation, file_access="read-search", workspace_root=tmp_path, phase="REPORT_FOLLOWUP")
     assert "--allowedTools" not in result.argv
@@ -28,6 +29,8 @@ def test_followup_policy_pins_read_and_grep_without_changing_existing_read_only_
     assert "--dangerously-skip-permissions" not in result.argv
     assert result.environment["PROBLEM_LOCATOR_AGENT_PHASE"] == "REPORT_FOLLOWUP"
     assert result.environment["PROBLEM_LOCATOR_AGENT_FILE_ACCESS"] == "read-search"
+    assert "--chrome" not in result.argv and "--bare" not in result.argv
+    assert result.argv.count("--no-chrome") == (1 if executable == "claude" else 0)
     old = apply_final_response_policy(ClaudeCommand(("claude",), {}), file_access="read-only", workspace_root=tmp_path, phase="METHODS_SPECIALIST")
     assert old.argv[-1] == f"Read({tmp_path.as_posix()}/inputs/**)"
     assert "Read,Grep" not in old.argv

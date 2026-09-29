@@ -124,7 +124,10 @@ def apply_final_response_policy(invocation: ClaudeCommand, *, file_access: str |
         if followup_policy:
             rewritten.extend(['--setting-sources', '', '--settings', str(settings_path),
                 '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-                '--disable-slash-commands', '--no-chrome', '--no-session-persistence'])
+                '--disable-slash-commands', '--no-session-persistence'])
+            # codeagent does not support Claude's Chrome integration flag.
+            if executable not in {'codeagent', 'codeagent.exe', 'codeagent.cmd'}:
+                rewritten.append('--no-chrome')
         argv = tuple(rewritten)
     return ClaudeCommand(argv, environment)
 
