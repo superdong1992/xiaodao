@@ -96,7 +96,7 @@ Problem Locator 8.2 将活动 Case、Job 和核心命令的幂等记录保存在
 
 - CPython 3.12（项目要求 `>=3.12,<3.13`）
 - `uv`，并使用仓库中已提交的 `uv.lock`
-- PostgreSQL 17，使用该主版本最新的小版本；建议独立数据库和专用账号。驱动与连接池已随 Python 依赖固定版本，无需客户端安装 PostgreSQL
+- PostgreSQL 15 或更新版本，使用所选主版本最新的维护小版本；建议独立数据库和专用账号。驱动与连接池已随 Python 依赖固定版本，无需客户端安装 PostgreSQL
 - 由部署方维护的 Logparse 源码目录、配置文件及 Python 启动器；源码目录可以来自 Git 检出，也可以由源码压缩包解压得到
 - 用于执行真实 Agent 任务、兼容 Claude 的命令行程序
 

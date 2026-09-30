@@ -90,7 +90,7 @@ Agent API。当前 `release.full` 执行完整网站路径，用户 Agent 只在
 
 PowerShell 使用同参数的 `tools/test-flow/run.ps1`。计划会列出 Goal、Proof、Stage、Gate、依赖、身份、复用决定、性能身份、预计资源和 admission blocker。
 
-完整确定性测试还需要 PostgreSQL 17 或更高版本。将 `PROBLEM_LOCATOR_TEST_DATABASE_URL` 指向独立的测试管理库，库名须包含 `_test`，测试账号需要 `CREATEDB`。连接地址放在私有环境变量中，不写进命令、日志或收据。每例 PostgreSQL 测试新建 `pl_test_*` 数据库，不复用已有业务库，不自动删除测试数据库；`deterministic.full` 每次重新执行。原 SQLite 用例继续覆盖旧格式和既有业务合同，`det.postgres` 单独验证生产数据库。未配置测试库时该 Gate 失败，不会跳过后宣称通过。
+完整确定性测试还需要 PostgreSQL 15 或更高版本。将 `PROBLEM_LOCATOR_TEST_DATABASE_URL` 指向独立的测试管理库，库名须包含 `_test`，测试账号需要 `CREATEDB`。连接地址放在私有环境变量中，不写进命令、日志或收据。每例 PostgreSQL 测试新建 `pl_test_*` 数据库，不复用已有业务库，不自动删除测试数据库；`deterministic.full` 每次重新执行。原 SQLite 用例继续覆盖旧格式和既有业务合同，`det.postgres` 单独验证生产数据库，并将实际服务端版本写入 JUnit 证据。未配置测试库时该 Gate 失败，不会跳过后宣称通过。
 
 Windows pytest 默认在仓库 `.tmp/p` 与系统临时目录中选择物理路径较短的一侧。若深层 worktree
 仍可能触发 `MAX_PATH`，可在规划和实际运行两次命令中把

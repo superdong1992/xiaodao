@@ -8,7 +8,7 @@
 
 | 变化 | 生产需要完成的操作 | 未适配的结果 |
 | --- | --- | --- |
-| PostgreSQL 替换 SQLite | 准备 PostgreSQL 17 或更新版本；配置 `DATABASE_URL`；有历史数据时停服后显式导入新数据库和新资源目录 | 缺少连接配置无法启动，旧 SQLite 目录也不能直接打开 |
+| PostgreSQL 替换 SQLite | 准备 PostgreSQL 15 或更新版本；配置 `DATABASE_URL`；有历史数据时停服后显式导入新数据库和新资源目录 | 缺少连接配置无法启动，旧 SQLite 目录也不能直接打开 |
 | 网站默认 Redis 鉴权 | 配置 Redis，BFF 透传 Cookie，核对 `user.userid` 与原用户归属 | Cookie 无效返回 401；Redis 未配置或不可用返回 503；身份变化会导致旧会话不可见 |
 | 专用路由准入收紧 | 从原 Wiki 重新生成带适用／排除条件的注册 V2，并同步自定义 ROUTE 包装器 | 注册 V1 仍能加载，但不会自动进入专用定位；旧模型响应可能变成协议错误 |
 | 报告追问与消息轮次绑定 | 同步前后端模块；诊断补充携带 `target_run_id`；完成验收后再打开追问开关 | 缺模块会导致加载失败；未区分入口可能重复提交或发往错误轮次 |
@@ -16,6 +16,8 @@
 Server 只支持 Linux，使用 Python 3.12。同步源码、`pyproject.toml` 和 `uv.lock` 后执行 `uv sync --frozen`；本次新增依赖包括 psycopg、连接池与 Redis 客户端。示例 BFF 使用 Node.js 24 或更新版本。
 
 ## 1. PostgreSQL、资源目录与历史数据
+
+生产最低版本为 PostgreSQL 15，建议使用所选主版本最新的维护小版本。Release 固定使用 PostgreSQL 17.11 镜像，以复现验证环境；该镜像版本不代表最低部署版本。
 
 ### 配置与运行边界
 

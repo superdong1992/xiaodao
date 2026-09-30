@@ -89,7 +89,7 @@ def test_release_metadata_requires_postgresql_with_pinned_driver_and_pool() -> N
         "v11-contract-r2",
         "docs/data-upgrade-v11-r2.md",
         "不重放活动任务或未确认的 Outcome",
-        "PostgreSQL 17",
+        "PostgreSQL 15 或更新版本",
         "DATABASE_POOL_SIZE",
         "旧数据目录原样保留",
         "活动 Case、Job、幂等记录和中间状态不恢复",

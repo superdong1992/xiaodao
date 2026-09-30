@@ -16,7 +16,7 @@
 | Job、Outcome、执行审计和 stdout/stderr | `DATA_ROOT/jobs/<job_id>/...` | 固定文件名、规范字节或原始审计字节；不可变记录与有界追加日志分开 |
 | 上传、提议、工作区、隔离内容 | `DATA_ROOT/tmp/...` | 有明确 owner、活动租约和保留期限 |
 
-生产装配传入 PostgreSQL `database_url`，要求 PostgreSQL 17 或更高版本。数据库与 `DATA_ROOT` 同时绑定 installation ID、存储后端和资源根身份，不能把一个数据库随意连到另一个资源目录。数据库还持有单 Server 所有权锁：连接池允许同一服务内部并发，不代表支持多个 Server 共享一个数据库同时运行。
+生产装配传入 PostgreSQL `database_url`，要求 PostgreSQL 15 或更高版本。数据库与 `DATA_ROOT` 同时绑定 installation ID、存储后端和资源根身份，不能把一个数据库随意连到另一个资源目录。数据库还持有单 Server 所有权锁：连接池允许同一服务内部并发，不代表支持多个 Server 共享一个数据库同时运行。
 
 直接构造 `CaseStateRepository` 且不传 `database_url` 时，仍使用 `completed.sqlite3`，开启 WAL 和 `synchronous=FULL`。这是离线/确定性参考路径。`state_atomic.py` 中的单文件 `state.json` 写入器仍有独立用途和测试，但当前 Case 仓库不会用它保存生产主状态。平台辅助代码保留 Windows/macOS 文件原语，也不能据此推导这些平台支持运行生产 Server。
 

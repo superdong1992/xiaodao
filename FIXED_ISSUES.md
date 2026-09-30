@@ -1,6 +1,6 @@
 # 已修复问题台账
 
-更新时间：2026-09-29
+更新时间：2026-09-30
 
 本文件记录已经在当前工作区验证、修复并由专项回归测试保护的问题。活跃待办仍只写入
 [`TODO.md`](TODO.md)；同一问题再次回归时更新原条目，不另建一个缺少历史关联的条目。
@@ -34,8 +34,12 @@
 - **修复历史（2026-09-28）**：生产配置改用 PostgreSQL 17 或更新版本，固定 psycopg 与连接池依赖，要求 `DATABASE_URL`，缺少配置时拒绝启动。按线程借用连接，使用 PostgreSQL 原生 SQL、会话级事务锁和 `FOR UPDATE SKIP LOCKED`；同一业务事务保留原子提交和回滚。数据库与 `DATA_ROOT` 绑定，独立实例锁及失效检查防止多个进程接管内存状态。初始化失败日志不再携带原始驱动异常中的凭据。新增显式离线导入命令，复制源 SQLite/WAL 和资源后校验，再导入专用空库及新目录；源目录不作修改。正式 Linux 测试入口新增独立 PostgreSQL 实例身份和重启接线，停止复用不含数据库的目录检查点。
 - **不可回归行为**：一个会话的事务未提交时，另一个会话仍可完成写入；同一会话的并发消息不能丢失更新、重复请求不能重复执行，事件序列保持递增。任务只领取一次，删除与发布互斥，失败事务不得留下半份报告或事件。旧目录和不匹配的数据库不能被自动接入；实例锁失效后旧进程不得继续写入，新进程须等待旧事务结束。导入保留报告、附件、追问快照、经验卡及原始 JSON，除已声明的附件根路径和后端绑定外不得改写历史；发布失败时目录和数据库均保持不可启用状态。生产入口不得自动回退到 SQLite，客户端仍经 HTTP 直连 Linux Server。
 - **专项回归测试**：`tests/deterministic/postgres/test_postgres_repository.py` 直接覆盖独立 Case 并行提交、事务回滚、重启恢复、并发领取及实例锁失效接管；`test_postgres_store.py` 覆盖不同会话并发、同会话序列、幂等、报告与事件原子发布；`test_postgres_memory.py` 和 `test_followup_database_concurrency.py` 覆盖任务领取、删除互斥、容量竞争和保留清理；`test_postgres_import.py` 覆盖 WAL、非空 Case/BYTEA、报告与 ZIP、追问快照与经验卡、已有目标拒绝以及发布后故障重新封锁。`test_database.py` 覆盖引用连接、目录身份和凭据脱敏。`det.postgres` 是完整确定性轨的必跑 Gate，不允许跳过或复用，数据库不可用必须失败。
+- **兼容性问题确认（2026-09-30）**：生产数据库明确为 PostgreSQL 15。`f13aa15` / 8.2.0 的实际初始化入口仍以 `< 170000` 拒绝连接，15.x 会在获取实例锁和创建连接池之前报版本过低。当前 SQL 与驱动未发现必须使用 17 的能力，原门槛把初次验证版本当成了最低支持版本。
+- **再次修复（2026-09-30）**：最低支持版本调整为 PostgreSQL 15（`150000`），集中保存版本常量并更新错误提示、部署文档和契约断言。保留低版本拒绝、失败连接关闭和原实例锁逻辑。Release 的固定 PostgreSQL 17.11 镜像身份保持不变，它是该轨的运行环境，不表示产品最低版本；本次 Dev 改用真实 PostgreSQL 15 验证，结论以随后回填的元数据为准。
+- **新增不可回归行为与专项测试**：`test_postgres_startup_version_boundary_and_rejected_connection_cleanup` 在真实构造入口覆盖 15.0、15.x、16、17 的放行，以及低于 15 时不得获取锁或创建连接池、必须关闭已建立连接。`test_empty_postgres_database_and_root_share_one_installation` 将实际 `postgres_server_version_num` 写入中央 Gate 的 JUnit 证据。既有 PostgreSQL 完整专项继续覆盖真实建表、导入、JSON、事务、并发领取、删除互斥和实例锁接管。
 - **最新 Test Flow verdict（2026-09-28）**：中央 Linux `dev.default` [run-20260928T111406Z-86f4514c](.tmp/postgres-linux-evidence/run-20260928T111406Z-86f4514c/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:d7a1f9b530f6e34f6793cb7d48be36513e55ca8f07e7277093a48782838cc887`（950 文件），verdict digest `94860190d1a8d9c648acdebc7f02f173ca3e7a0a4ca3fdc8944aee4f96b078b0`。affected 按编排交完整轨覆盖，pytest 4400 项通过、2 项规定的平台跳过；PostgreSQL 专项 58/58、单元 3511、集成 198 项通过，网站 Node 215 项通过。完整轨 266.394 秒，真实模型调用、token 和费用为 0。Windows 两轮、首轮 Linux PASS 及台账混合换行失败的证据全部保留；Windows 的文件元数据与长路径 URI 限制未被掩盖或扩展为受支持 Server 平台。最终证据副本哈希与 Linux 原件一致，回填前主工作区与被测副本的 950 文件摘要完全一致。本行仅为验证后的引用元数据，不属于所引用源码快照；不代表真实 Release、Linux Docker 部署或线上历史数据迁移验收。
 
+- **最新 Test Flow verdict（2026-09-30，PostgreSQL 15）**：中央 Linux `dev.default` [run-20260930T024311Z-0067df8a](.tmp/postgres15-linux-evidence-20260930/run-20260930T024311Z-0067df8a/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，仅 performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:cc8b0983b17d6faf753ad21d22791e7b18b6c4aa498f6388c247e3efd2ac064a`（952 文件），verdict digest `2c988db6010d744ca45b867645f97b4553088a02a3fb087c376b9a3dcb2c1ba7`。实际 PostgreSQL 为 15.19，本轮 `det.postgres/pytest.xml` 记录 `postgres_server_version_num=150019`；PostgreSQL 专项 60 项、完整 pytest 4419 项、网站 Node 215 项通过，pytest 2 项规定的平台跳过。新增构造入口版本边界 7 项全部通过；affected 由编排器交完整轨覆盖，完整轨 281.490 秒，真实模型调用、token 和费用均为 0。Windows 工作区与 Linux 被测源码逐文件一致，101 份证据文件复制后哈希一致；verdict 文件 SHA-256 为 `4c74cca1d37cea6f8f31c2ad3694a0e332f1988a6614cffd4c1b2100b434dff2`。本行仅为验证后的引用元数据，不属于所引用源码快照；此前 PostgreSQL 17 验证记录保留，本轮不代表真实 Release、生产数据库连接或线上迁移已验收。
 
 ## PL-FIX-075：网站凭据请求头未经脱敏写入 HTTP 诊断日志
 

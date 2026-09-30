@@ -25,14 +25,15 @@ def _open(root, database_url):
         SimpleNamespace(new=lambda kind: str(uuid.uuid4())), database_url=database_url)
 
 
-def test_empty_postgres_database_and_root_share_one_installation(postgres_repository):
+def test_empty_postgres_database_and_root_share_one_installation(postgres_repository, record_testsuite_property):
     repository = postgres_repository
     marker = validate_postgres_root(repository.layout)
     with repository.database_read() as db:
         metadata = dict(db.execute("SELECT key,value FROM metadata"))
         version = int(db.execute("SHOW server_version_num").fetchone()[0])
         assert db.execute("SELECT count(*) FROM completed_cases").fetchone()[0] == 0
-    assert version >= 170000
+    record_testsuite_property("postgres_server_version_num", str(version))
+    assert version >= 150000
     assert metadata["installation_id"] == marker["installation_id"] == repository.read_snapshot().installation_id
     assert metadata["storage_backend"] == "postgresql-v1"
     assert not (repository.layout.data_root / "completed.sqlite3").exists()

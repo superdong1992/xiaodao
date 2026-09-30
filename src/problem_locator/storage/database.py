@@ -17,6 +17,7 @@ from functools import lru_cache
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _JSON_PATH = re.compile(r"^\$(?:\.[A-Za-z_][A-Za-z0-9_]*)+$")
+_MIN_POSTGRES_VERSION = 150000  # PQserverVersion integer encoding for 15.0.
 
 
 class DatabaseOwnershipError(ValueError):
@@ -284,8 +285,8 @@ class PostgresDatabase:
                                       options="-c search_path=public,pg_catalog -c synchronous_commit=on")
         self._owner_pid = self._owner.info.backend_pid
         try:
-            if self._owner.info.server_version < 170000:
-                raise ValueError("PostgreSQL 版本过低，请使用 PostgreSQL 17 或更高版本。")
+            if self._owner.info.server_version < _MIN_POSTGRES_VERSION:
+                raise ValueError("PostgreSQL 版本过低，请使用 PostgreSQL 15 或更高版本。")
             owned = self._owner.execute("SELECT pg_try_advisory_lock(%s)",
                 (_OWNER_KEY,)).fetchone()[0]
             if not owned:

@@ -6,6 +6,8 @@ import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -21,6 +23,44 @@ from problem_locator.storage.postgres_layout import (initialize_postgres_root, p
 from problem_locator.storage.state_repository import CaseStateRepository
 from tests.deterministic.unit.storage.fakes import DeterministicIdGenerator, FakeFileSync, FixedClock
 from tests.postgres_helpers import PostgresTestDatabaseUrl
+
+
+@pytest.mark.parametrize(("server_version", "supported"), [
+    (140015, False),
+    (149999, False),
+    (150000, True),
+    (150001, True),
+    (150019, True),
+    (160000, True),
+    (170011, True),
+])
+def test_postgres_startup_version_boundary_and_rejected_connection_cleanup(
+    monkeypatch, server_version, supported,
+):
+    import psycopg
+    import psycopg_pool
+
+    owner = Mock(info=SimpleNamespace(server_version=server_version, backend_pid=123))
+    owner.execute.return_value.fetchone.return_value = (True,)
+    pool = Mock()
+    pool_factory = Mock(return_value=pool)
+    monkeypatch.setattr(psycopg, "connect", Mock(return_value=owner))
+    monkeypatch.setattr(psycopg_pool, "ConnectionPool", pool_factory)
+
+    if supported:
+        database = PostgresDatabase("postgresql://localhost/version_test")
+        try:
+            pool.open.assert_called_once_with(wait=True, timeout=15)
+            owner.close.assert_not_called()
+        finally:
+            database.close()
+        pool.close.assert_called_once_with()
+    else:
+        with pytest.raises(ValueError, match="PostgreSQL 15 或更高版本"):
+            PostgresDatabase("postgresql://localhost/version_test")
+        pool_factory.assert_not_called()
+        owner.execute.assert_not_called()
+    owner.close.assert_called_once_with()
 
 
 def test_qmark_binding_never_changes_literals_comments_or_sql_dialect():

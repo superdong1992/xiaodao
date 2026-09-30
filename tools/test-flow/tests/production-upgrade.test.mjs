@@ -59,7 +59,7 @@ test("累计生产升级指南覆盖数据库、Redis 登录、专用路由和�
   const guide = read("docs/production-upgrade-2026-09-23.md");
   assert.ok(hasParagraph(guide, /DATABASE_URL/, /必填|必须|需要配置|不可缺少/u), "DATABASE_URL 必须明确为必填配置");
   assert.match(guide, /DATABASE_POOL_SIZE/);
-  assert.match(guide, /PostgreSQL\s*17/);
+  assert.match(guide, /PostgreSQL\s*15\s*或更新版本/u);
   assert.ok(hasParagraph(guide, /redis/i, /默认/u), "应注明默认 Redis 登录模式");
   assert.match(guide, /trusted_header/);
   assert.match(guide, /user\.userid/);
