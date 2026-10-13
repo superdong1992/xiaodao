@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from problem_locator.contracts.models import OpaqueId, UtcTimestamp
+from problem_locator.contracts.models import OpaqueId, ServiceTimestamp
 
 Rating = Literal["LIKE", "DISLIKE"]
 
@@ -26,7 +26,7 @@ class FeedbackView(BaseModel):
     run_id: OpaqueId
     can_rate: bool
     rating: Rating | None = None
-    updated_at: UtcTimestamp | None = None
+    updated_at: ServiceTimestamp | None = None
 
     @model_validator(mode="after")
     def paired_rating_time(self):

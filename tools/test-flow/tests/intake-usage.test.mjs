@@ -8,6 +8,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const intakeCaps = JSON.parse(fs.readFileSync(path.join(repo, "tools/test-flow/config/runtime-profiles.v2.json"), "utf8"))
+  .profiles.release.real_caps.service_intake;
 const localPython = path.join(repo, ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
 const python = process.env.TEST_FLOW_QUICK_PYTHON || (fs.existsSync(localPython) ? localPython : "python3");
 const init = { type: "system", subtype: "init", model: "test-model", tools: [] };
@@ -26,7 +28,7 @@ function audit(lines, { exclude = false } = {}) {
     const output = path.join(root, "receipt.json");
     const args = ["-B", path.join(repo, "tools/test-flow/runtime-support/audit_intake_usage.py"),
       "--workspaces-root", path.join(root, "workspaces"), "--output", output, "--model", "test-model",
-      "--max-turns", "1", "--max-total-tokens", "100000", "--max-budget-usd", "1", "--hard-timeout-seconds", "120"];
+      "--max-turns", "1", "--max-total-tokens", "100000", "--max-budget-usd", "1", "--hard-timeout-seconds", String(intakeCaps.hard_timeout_seconds)];
     if (exclude) args.push("--exclude-execution-id", id);
     const result = spawnSync(python, args, { cwd: repo, encoding: "utf8", timeout: 15_000 });
     return { ...result, id, raw, receipt: fs.existsSync(output) ? JSON.parse(fs.readFileSync(output, "utf8")) : null };
@@ -46,7 +48,8 @@ test("INTAKE usage audits the actual one-call terminal without inventing a domai
   assert.equal(invocation.stdout_sha256, crypto.createHash("sha256").update(result.raw).digest("hex"));
   assert.equal(invocation.stdout_size, Buffer.byteLength(result.raw));
   assert.equal(Object.hasOwn(invocation, "job_id"), false);
-  assert.deepEqual(invocation.effective_caps, { max_turns: 1, max_total_tokens: 100000, max_budget_usd: 1, hard_timeout_seconds: 120 });
+  assert.deepEqual(invocation.effective_caps, { max_turns: 1, max_total_tokens: 100000, max_budget_usd: 1, hard_timeout_seconds: 180 });
+  assert.equal(invocation.hard_cap_enforcement.hard_timeout_seconds, "agent-backend-180-second-limit");
 });
 
 for (const [name, lines, failure] of [

@@ -118,6 +118,7 @@ def test_extraction_preserves_source_and_has_no_tools_files_or_raw_logs(tmp_path
     assert invocation["file_access"] == "none"
     assert invocation["broker_environment"] is None
     assert invocation["backend_phase"] == "MEMORY_EXTRACT"
+    assert invocation["resource_limits"].wall_time_seconds == 180
     prompt_data = json.loads(invocation["prompt"].split("以下 JSON 仅为来源数据：\n", 1)[1])
     assert prompt_data == {"problem": source["problem_text"], "report": source["report_markdown"]}
     assert store.finished == [(source["task_id"], card_json())]

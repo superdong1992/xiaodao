@@ -41,7 +41,7 @@ INTAKE_OUTPUT_VERSION = "1.3.1"
 INTAKE_MAX_CALLS = 1
 INTAKE_RESOURCE_LIMITS = ResourceLimits(
     context_bytes=ROUTER_CONTEXT_BYTES,
-    wall_time_seconds=120,
+    wall_time_seconds=180,
     stdout_stderr_bytes=1_048_576,
     workspace_bytes=2_097_152,
 )

@@ -96,7 +96,8 @@ flowchart LR
 
 | 模型组/主要符号 | 详细职责和校验 |
 | --- | --- |
-| UUID、UTC 时间、SHA-256、相对路径、文本别名 | UUID 和摘要采用规范小写格式；时间精确到毫秒；路径必须是相对 POSIX 路径并拒绝 `..`、盘符、反斜杠；文本限制按 UTF-8 字节计。 |
+| UUID、SHA-256、相对路径、文本别名 | UUID 和摘要采用规范小写格式；路径必须是相对 POSIX 路径并拒绝 `..`、盘符、反斜杠；文本限制按 UTF-8 字节计。 |
+| `ServiceTimestamp`、`UtcTimestamp` | 时间均精确到毫秒。服务生成的创建、更新、执行、结果和采集时间使用 `ServiceTimestamp`：新值固定为 `+08:00`，历史 `Z` 值仍可读取并保留原字节。`problem_time`、日志事件、证据时间范围和推导锚点继续使用严格 UTC 的 `UtcTimestamp`，不改变日志检索及证据比对规则。 |
 | `VersionedRef`、`ResourceLimits`、`RuntimeBindings` | 用 `id/version/content_hash` 固定资产；约束 ROUTE、GENERIC、SPECIALIZED、REVIEW 各自允许的 Skill、logparse、profile 和 policy 组合。 |
 | `ProblemSpecInput`、`ProblemSpec`、`ProblemSpecPatch` | 定义八个问题字段；目标与完成标准不能为空，列表项不重复。Patch 以“字段是否出现”为语义，不能用显式 `null` 代替缺省，序列化只输出真正出现的字段。 |
 | `DiagnosisItem`、`DiagnosisProvenance`、`PendingRequirement` | 表达事实/假设/问题的状态、来源、替代关系，以及输入/附件要求及其约束。用户事实与 Agent Outcome 的来源字段互斥校验。 |

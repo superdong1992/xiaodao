@@ -2,9 +2,9 @@
 
 [返回框架设计](README.md)
 
-本索引覆盖当前 `src/problem_locator/` 的全部 212 个文件。点击文件名查看源码，点击设计章节查看职责、接口、输入输出及关键机制。工程配置、合同快照、Skill、网站示例和测试导航见[工程配套](06-engineering.md)。
+本索引覆盖当前 `src/problem_locator/` 的全部 213 个文件。点击文件名查看源码，点击设计章节查看职责、接口、输入输出及关键机制。工程配置、合同快照、Skill、网站示例和测试导航见[工程配套](06-engineering.md)。
 
-## 入口、装配与外部集成（28 个文件）
+## 入口、装配与外部集成（29 个文件）
 
 | 源文件 | 详细设计 |
 | --- | --- |
@@ -36,6 +36,7 @@
 | [journey_timing.py](../../src/problem_locator/journey_timing.py) | [入口、装配与外部集成](01-composition-integrations.md) |
 | [journey.py](../../src/problem_locator/journey.py) | [入口、装配与外部集成](01-composition-integrations.md) |
 | [operational.py](../../src/problem_locator/operational.py) | [入口、装配与外部集成](01-composition-integrations.md) |
+| [timestamps.py](../../src/problem_locator/timestamps.py) | [入口、装配与外部集成](01-composition-integrations.md) |
 
 ## 合同、领域与任务调度（45 个文件）
 

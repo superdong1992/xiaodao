@@ -53,6 +53,7 @@ def test_journey_uses_fixed_envelope_context_and_contiguous_sequence() -> None:
 
     events = [json.loads(line) for line in stream.getvalue().splitlines()]
     assert [event["sequence"] for event in events] == [1, 2]
+    assert all(event["timestamp"].endswith("+08:00") for event in events)
     assert set(events[0]) == {
         "schema_version",
         "sequence",

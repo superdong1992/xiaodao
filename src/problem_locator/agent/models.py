@@ -5,7 +5,7 @@ from copy import deepcopy
 from typing import Annotated, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
-from problem_locator.contracts.models import GenericResult, NonEmptyText, OpaqueId, UserResultPayloadV3, UtcTimestamp
+from problem_locator.contracts.models import GenericResult, NonEmptyText, OpaqueId, UserResultPayloadV3, ServiceTimestamp
 
 PUBLIC_PROGRESS_MESSAGES = {
     "INTAKE": "正在整理问题", "ROUTE": "正在选择定位方法",
@@ -261,7 +261,7 @@ class PublicArtifactData(AgentModel):
     size: int = Field(ge=0)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     created_by_job_id: OpaqueId
-    created_at: UtcTimestamp
+    created_at: ServiceTimestamp
     downloadable: bool
 
     @model_validator(mode="after")

@@ -29,6 +29,9 @@ from tests.deterministic.unit.agent.test_store import (
     test_dispatch_payload_is_frozen_and_not_exposed,
     test_report_is_published_before_archive_and_completion_waits,
 )
+from tests.deterministic.unit.agent.test_conversation_runs import (
+    test_directory_and_cursor_compare_mixed_offsets_by_instant,
+)
 
 
 @pytest.fixture

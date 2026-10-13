@@ -12,13 +12,13 @@ import os
 import re
 import stat
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
 from pydantic import TypeAdapter
 
-from problem_locator.contracts import Clock, OpaqueId, UtcTimestamp
+from problem_locator.contracts import Clock, OpaqueId, ServiceTimestamp
+from problem_locator.timestamps import parse_timestamp
 from problem_locator.contracts.limits import (
     ORPHAN_RESOURCE_RETENTION_SECONDS,
     PROPOSAL_STAGING_RETENTION_SECONDS,
@@ -33,7 +33,7 @@ from .resource_files import iter_case_resource_nodes
 
 
 _OPAQUE_ID_ADAPTER = TypeAdapter(OpaqueId)
-_UTC_TIMESTAMP_ADAPTER = TypeAdapter(UtcTimestamp)
+_SERVICE_TIMESTAMP_ADAPTER = TypeAdapter(ServiceTimestamp)
 
 _RetentionKind = Literal[
     "UPLOAD",
@@ -53,9 +53,8 @@ class _RetentionCandidate:
     retention_seconds: int
 
 
-def _timestamp_ns(value: UtcTimestamp) -> int:
-    validated = _UTC_TIMESTAMP_ADAPTER.validate_python(value)
-    parsed = datetime.strptime(validated, "%Y-%m-%dT%H:%M:%S.%fZ")
+def _timestamp_ns(value: str) -> int:
+    parsed = parse_timestamp(_SERVICE_TIMESTAMP_ADAPTER.validate_python(value))
     return calendar.timegm(parsed.utctimetuple()) * 1_000_000_000 + parsed.microsecond * 1_000
 
 

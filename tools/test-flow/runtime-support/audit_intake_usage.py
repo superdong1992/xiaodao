@@ -49,7 +49,7 @@ def main():
         receipt.update({"invocation_id": "server-intake:" + root.name, "class": "server-intake",
             "execution_id": root.name, "phase": "INTAKE", "action": response["action"],
             "stdout_sha256": helper.hashlib.sha256(raw).hexdigest(), "stdout_size": len(raw)})
-        receipt["hard_cap_enforcement"]["hard_timeout_seconds"] = "agent-backend-120-second-limit"
+        receipt["hard_cap_enforcement"]["hard_timeout_seconds"] = "agent-backend-180-second-limit"
         invocations.append(receipt)
     helper._write_new(args.output, {"schema_version": 1, "status": "PASS", "invocations": invocations,
         "new_execution_ids": sorted(item["execution_id"] for item in invocations)})

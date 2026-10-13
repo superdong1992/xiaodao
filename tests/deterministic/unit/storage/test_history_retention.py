@@ -205,20 +205,47 @@ def test_natural_run_expiry_preserves_completed_memory_and_leaves_new_run_untouc
     assert all(not path.exists() for path in history.paths)
 
 
-def test_core_report_and_owned_resources_expire_at_seven_days_only(stack):
+@pytest.mark.parametrize(("before", "at"), [
+    ("2026-08-07T00:00:59.999Z", BOUNDARY),
+    ("2026-08-07T08:00:59.999+08:00", "2026-08-07T08:01:00.000+08:00"),
+])
+def test_core_report_and_owned_resources_expire_at_seven_days_only(stack, before, at):
     paths = _completed(stack)
     external = _file(stack.root, "codeagent/session.json", b"keep codeagent")
     unknown_phase = _file(stack.root, f"tmp/workspaces/{JOB_ID}.unrecognized/keep.txt")
-    stack.clock.value = "2026-08-07T00:00:59.999Z"
+    stack.clock.value = before
     assert not stack.history.run_once()
     assert all(path.exists() for path in paths)
-    stack.clock.value = BOUNDARY
+    stack.clock.value = at
     assert stack.history.run_once()
     assert stack.repository.read_snapshot(CASE_ID).cases == {}
     assert all(not path.exists() for path in paths)
     assert external.read_bytes() == b"keep codeagent" and unknown_phase.exists()
     for table in ("completed_cases", "completed_case_retention", "object_index", "request_index", "resource_index", "archive_tasks", "history_cleanup_jobs"):
         assert stack.repository._db.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
+
+
+def test_local_retention_index_and_manifest_use_utc_cutoff_without_rewriting_history(stack):
+    _completed(stack)
+    retained = "2026-07-31T08:01:00.000+08:00"
+    with stack.repository.database_transaction() as db:
+        db.execute("UPDATE completed_case_retention SET retained_at=? WHERE case_id=?", (retained, CASE_ID))
+        original = db.execute("SELECT snapshot FROM completed_cases WHERE case_id=?", (CASE_ID,)).fetchone()[0]
+    before = "2026-07-31T00:00:59.999Z"
+    assert stack.repository.history_case_candidates(before) == []
+    assert stack.repository.prepare_history_case_cleanup(CASE_ID, before) is None
+    assert stack.repository.history_case_candidates(OLD) == [CASE_ID]
+    assert stack.repository.prepare_history_case_cleanup(CASE_ID, OLD)["case_ids"] == [CASE_ID]
+    with stack.repository.database_read() as db:
+        assert db.execute("SELECT snapshot FROM completed_cases WHERE case_id=?", (CASE_ID,)).fetchone()[0] == original
+        assert db.execute("SELECT retained_at FROM completed_case_retention WHERE case_id=?", (CASE_ID,)).fetchone()[0] == retained
+
+
+def test_aggregate_updated_at_uses_latest_instant_across_offsets(stack):
+    stack.clock.value = "2026-07-31T07:01:00.000+08:00"
+    _completed(stack)
+    assert stack.repository.read_snapshot(CASE_ID).updated_at == stack.clock.value
+    assert stack.repository.read_snapshot().updated_at == OLD
 
 
 def test_case_download_lease_defers_expiry_and_cleanup_reservation_rejects_read(stack):
@@ -255,13 +282,14 @@ def test_running_case_and_pending_archive_are_never_expired(stack):
     assert stack.history.run_once()
 
 
-def test_old_waiting_case_without_worker_is_reclaimed(stack):
+@pytest.mark.parametrize("updated_at", [OLD, "2026-07-31T08:01:00.000+08:00"])
+def test_old_waiting_case_without_worker_is_reclaimed(stack, updated_at):
     aggregate = StateFile.model_validate_json(Path("tests/fixtures/contracts/positive/state.json").read_bytes()).cases[CASE_ID]
     case = Case.model_validate({**aggregate.case.model_dump(), "status": CaseStatus.WAITING_INPUT,
-        "active_job_id": None, "updated_at": OLD})
+        "active_job_id": None, "updated_at": updated_at})
     stack.repository.commit(1, None, _empty_mutation(upsert_case=case,
         insert_jobs=list(aggregate.jobs.values())))
-    stack.clock.value = NOW
+    stack.clock.value = BOUNDARY
     assert stack.history.run_once()
     assert not stack.repository.read_snapshot(CASE_ID).cases
 
@@ -371,14 +399,16 @@ def test_expired_web_run_removes_its_case_and_report_but_preserves_new_run(stack
     assert stack.store.get_run(created.conversation_id)["run_id"] == newer.run_id
 
 
-def test_idle_empty_conversation_and_unadopted_upload_expire_but_fresh_conversation_stays(stack):
+@pytest.mark.parametrize("created_at", [OLD, "2026-07-31T08:01:00.000+08:00"])
+def test_idle_empty_conversation_and_unadopted_upload_expire_but_fresh_conversation_stays(stack, created_at):
+    stack.clock.value = created_at
     old = stack.store.create_conversation("empty")
     active = stack.store.create_conversation("active")
     upload = stack.store.reserve_attachment(active.conversation_id, "upload", "log.zip", "application/zip", 3,
         hashlib.sha256(b"log").hexdigest())
     path = _file(stack.root, f"resources/conversations/{upload.attachment_id}/payload", b"log")
     stack.store.complete_attachment(upload.attachment_id, str(path))
-    stack.clock.value = NOW
+    stack.clock.value = BOUNDARY
     stack.store.submit_message(active.conversation_id, "fresh", "近期问题")
     with stack.usage.acquire(active.conversation_id):
         stack.history.run_once()
@@ -405,7 +435,9 @@ def test_selected_upload_stays_until_its_retained_run_expires(stack):
     assert stack.store.get_attachment(upload.attachment_id)
 
 
-def test_deleted_tombstone_and_all_retry_indexes_have_finite_lifetime(stack):
+@pytest.mark.parametrize("created_at", [OLD, "2026-07-31T08:01:00.000+08:00"])
+def test_deleted_tombstone_and_all_retry_indexes_have_finite_lifetime(stack, created_at):
+    stack.clock.value = created_at
     created = stack.store.create_conversation("deleted", owner_key="a" * 64)
     stack.store.request_delete(created.conversation_id, owner_key="a" * 64)
     # An empty run has no worker; settle the durable stop like the controller.

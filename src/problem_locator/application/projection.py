@@ -10,6 +10,7 @@ services map them to the public typed error contract at their boundary.
 from __future__ import annotations
 
 from problem_locator.contracts.models import AttachmentSummary
+from problem_locator.timestamps import parse_timestamp
 
 from collections.abc import Iterable, Sequence
 
@@ -108,7 +109,7 @@ def project_artifact_summaries(
     """Project Artifacts in a stable order, optionally retaining internal ones."""
 
     summaries = [project_artifact_summary(case, artifact) for artifact in artifacts]
-    summaries.sort(key=lambda item: (item.created_at, item.artifact_id))
+    summaries.sort(key=lambda item: (parse_timestamp(item.created_at), item.artifact_id))
     if include_internal:
         return summaries
     return [summary for summary in summaries if summary.downloadable]
@@ -200,7 +201,10 @@ def build_case_snapshot(state: StateFile, case_id: str) -> CaseSnapshot:
             # choice deterministic even for a corrupt/imported timestamp tie.
             resume_source = max(
                 candidates,
-                key=lambda job: (job.finished_at or job.created_at, job.created_at, job.job_id),
+                key=lambda job: (
+                    parse_timestamp(job.finished_at or job.created_at),
+                    parse_timestamp(job.created_at), job.job_id,
+                ),
             )
 
     waiting_source_ids = {

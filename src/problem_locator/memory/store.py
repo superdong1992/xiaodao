@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from problem_locator.agent.models import AgentStoreError
 from problem_locator.storage.database import dialect_for, lock_conversation, lock_key, try_lock_conversation
+from problem_locator.timestamps import format_timestamp, now_timestamp, parse_timestamp
 
 from .models import FeedbackRequest, FeedbackSource, FeedbackView
 
@@ -36,12 +37,11 @@ def _one(db, query, parameters=()):
 
 
 def _timestamp(value):
-    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    return parsed.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return format_timestamp(parse_timestamp(str(value)))
 
 
 def _before(now, days):
-    return _timestamp(datetime.fromisoformat(now.replace("Z", "+00:00")) - timedelta(days=days))
+    return format_timestamp(parse_timestamp(now) - timedelta(days=days))
 
 
 def _limit():
@@ -57,8 +57,7 @@ class MemoryStore:
                 db.execute(statement)
 
     def _now(self):
-        value = self.clock.now() if self.clock is not None else datetime.now(timezone.utc)
-        return _timestamp(value)
+        return _timestamp(self.clock.now()) if self.clock is not None else now_timestamp()
 
     @staticmethod
     def _scope(db, conversation_id, run_id, owner_key):
@@ -78,7 +77,7 @@ class MemoryStore:
         row = db.execute("SELECT rating,updated_at FROM memory_feedback WHERE conversation_id=? AND run_id=?",
                          (conversation_id, run_id)).fetchone()
         return FeedbackView(conversation_id=conversation_id, run_id=run_id, can_rate=can_rate,
-                            rating=None if row is None else row[0], updated_at=None if row is None else row[1])
+                            rating=None if row is None else row[0], updated_at=None if row is None else _timestamp(row[1]))
 
     def get_feedback(self, conversation_id, run_id, *, owner_key, can_rate):
         with self.repository.database_read() as db:
@@ -139,15 +138,18 @@ class MemoryStore:
             elif task is not None:
                 active = (request.rating == "LIKE" and task["status"] == "READY"
                           and task["card_json"] is not None
-                          and task["completed_at"] > _before(now, CARD_RETENTION_DAYS))
+                          and parse_timestamp(task["completed_at"]) > parse_timestamp(_before(now, CARD_RETENTION_DAYS)))
                 db.execute("UPDATE memory_tasks SET active=? WHERE task_id=?", (int(active), task["task_id"]))
             return self._view(db, conversation_id, run_id, True)
 
     def claim_task(self):
         now = self._now()
         with self.repository.database_transaction() as db:
-            suffix = " FOR UPDATE OF t SKIP LOCKED" if dialect_for(db).postgres else ""
-            row = _one(db, "SELECT t.* FROM memory_tasks t JOIN agent_conversations c ON c.conversation_id=t.conversation_id JOIN agent_conversation_runs r ON r.run_id=t.run_id AND r.conversation_id=t.conversation_id WHERE t.status='PENDING' AND t.created_at>? AND c.deleted_at IS NULL ORDER BY t.created_at,t.task_id LIMIT 1" + suffix,
+            dialect = dialect_for(db)
+            suffix = " FOR UPDATE OF t SKIP LOCKED" if dialect.postgres else ""
+            created = dialect.timestamp("t.created_at")
+            row = _one(db, "SELECT t.* FROM memory_tasks t JOIN agent_conversations c ON c.conversation_id=t.conversation_id JOIN agent_conversation_runs r ON r.run_id=t.run_id AND r.conversation_id=t.conversation_id "
+                       f"WHERE t.status='PENDING' AND {created}>{dialect.timestamp('?')} AND c.deleted_at IS NULL ORDER BY {created},t.task_id LIMIT 1" + suffix,
                        (_before(now, SOURCE_RETENTION_DAYS),))
             if row is None:
                 return None
@@ -172,7 +174,7 @@ class MemoryStore:
             content = parse_card_json(content, sources=(task["problem_text"] or "", task["report_markdown"] or ""))
             rating = db.execute("SELECT f.rating FROM memory_feedback f JOIN agent_conversations c ON c.conversation_id=f.conversation_id JOIN agent_conversation_runs r ON r.run_id=f.run_id WHERE f.run_id=? AND c.deleted_at IS NULL",
                                 (task["run_id"],)).fetchone()
-            if rating is None or task["created_at"] <= _before(now, SOURCE_RETENTION_DAYS):
+            if rating is None or parse_timestamp(task["created_at"]) <= parse_timestamp(_before(now, SOURCE_RETENTION_DAYS)):
                 db.execute("UPDATE memory_tasks SET status='FAILED',active=0,problem_text=NULL,report_markdown=NULL,updated_at=? WHERE task_id=?",
                            (now, task_id))
                 return False
@@ -202,9 +204,13 @@ class MemoryStore:
 
     def active_cards(self, skill_name):
         with self.repository.database_read() as db:
-            rows = db.execute("SELECT task_id,card_json,card_sha256,updated_at,skill_name FROM memory_tasks WHERE skill_name=? AND active=1 AND status='READY' AND card_json IS NOT NULL AND completed_at>? ORDER BY completed_at DESC,task_id LIMIT ?",
+            dialect = dialect_for(db)
+            completed = dialect.timestamp("completed_at")
+            rows = db.execute("SELECT task_id,card_json,card_sha256,updated_at,skill_name FROM memory_tasks "
+                              f"WHERE skill_name=? AND active=1 AND status='READY' AND card_json IS NOT NULL AND {completed}>{dialect.timestamp('?')} ORDER BY {completed} DESC,task_id LIMIT ?",
                               (skill_name, _before(self._now(), CARD_RETENTION_DAYS), MAX_TASKS)).fetchall()
-            return [dict(zip(("card_id", "card_json", "card_sha256", "updated_at", "skill_name"), row)) for row in rows]
+            return [dict(zip(("card_id", "card_json", "card_sha256", "updated_at", "skill_name"),
+                             (*row[:3], _timestamp(row[3]), row[4]))) for row in rows]
 
     def revoke_conversation(self, db, conversation_id):
         # Called inside the existing deletion transaction, before cleanup can run.
@@ -220,9 +226,12 @@ class MemoryStore:
                    (self._now(), *parameters))
 
     def _prune(self, db, now):
-        raw = db.execute("UPDATE memory_tasks SET status='FAILED',active=0,problem_text=NULL,report_markdown=NULL,updated_at=? WHERE status IN ('PENDING','RUNNING') AND created_at<=?",
+        dialect = dialect_for(db)
+        raw = db.execute("UPDATE memory_tasks SET status='FAILED',active=0,problem_text=NULL,report_markdown=NULL,updated_at=? "
+                         f"WHERE status IN ('PENDING','RUNNING') AND {dialect.timestamp('created_at')}<={dialect.timestamp('?')}",
                          (now, _before(now, SOURCE_RETENTION_DAYS))).rowcount
-        cards = db.execute("UPDATE memory_tasks SET active=0,card_json=NULL,card_sha256=NULL WHERE card_json IS NOT NULL AND completed_at<=?",
+        cards = db.execute("UPDATE memory_tasks SET active=0,card_json=NULL,card_sha256=NULL "
+                           f"WHERE card_json IS NOT NULL AND {dialect.timestamp('completed_at')}<={dialect.timestamp('?')}",
                            (_before(now, CARD_RETENTION_DAYS),)).rowcount
         # Natural Case retention removes source runs. Completed cards have their
         # own lifetime; failed/deleted tasks and feedback receipts can go now.

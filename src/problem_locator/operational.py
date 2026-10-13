@@ -3,11 +3,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
 import threading
 
 from problem_locator.contracts import ApplicationError, ApplicationErrorDetail, ApplicationPortError, ErrorCode
 from problem_locator.contracts.errors import ERROR_SPECS
+from problem_locator.timestamps import now_timestamp
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +41,7 @@ class OperationalState:
     """Shared fail-closed admission latch and safe evidence for this process epoch."""
 
     def __init__(self, now: Callable[[], str] | None = None) -> None:
-        self._now = now or (lambda: datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"))
+        self._now = now or now_timestamp
         self._lock = threading.RLock()
         self._accepting = True
         self._runtime_epoch: str | None = None

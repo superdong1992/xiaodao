@@ -638,6 +638,33 @@ def test_case_failure_projects_typed_evidence_location_without_rejected_values(s
     assert "SECRET" not in snapshot.model_dump_json()
 
 
+def test_case_failure_selects_latest_record_across_timestamp_offsets(store):
+    conversation = _conversation(store)
+    store.bind_case(conversation, CASE_ID)
+    aggregate = _populate(store.repository)
+    diagnostic = "50000000-0000-4000-8000-000000000001"
+    records = {}
+    for failure_id, recorded_at, field in (
+        ("older", "2026-10-10T07:59:59.999+08:00", "findings[0]"),
+        ("newer", "2026-10-10T00:00:00.000Z", "findings[1]"),
+    ):
+        failure = ExecutionFailure(stage="OUTCOME_VALIDATE", code="OUTCOME_INVALID",
+            message="证据不符合要求。", retryable=False, diagnostic_id=diagnostic,
+            reason_code="METHOD_VALIDATION_FAILED", details=[ApplicationErrorDetail(
+                field=field, actual=None, expected=None, resource_type=None,
+                resource_id=None, resource_ref=None, limit=None, observed=None)])
+        records[failure_id] = SimpleNamespace(failure_id=failure_id, job_id=JOB_ID,
+            recorded_at=recorded_at, failure=failure)
+    case = aggregate.case.model_copy(update={"status": CaseStatus.FAILED, "active_job_id": None,
+        "case_revision": 2, "failure": SimpleNamespace(source_outcome_id=None, source_job_id=JOB_ID,
+            diagnostic_id=diagnostic, reason_code="METHOD_VALIDATION_FAILED", code="OUTCOME_INVALID")})
+    failed = aggregate.model_copy(update={"case": case, "outcomes": {}, "execution_failure_records": records})
+    with store.repository.database_transaction() as db:
+        store._project_case(db, store._load(db, conversation), failed)
+    failure = store.get_conversation(conversation).failure
+    assert {item["actual"] for item in failure.details if item["field"] == "location"} == {"findings[1]"}
+
+
 def test_notification_failure_cannot_reject_a_committed_message(store):
     conversation = _conversation(store)
     store.on_change = lambda _: (_ for _ in ()).throw(RuntimeError("subscriber failed"))

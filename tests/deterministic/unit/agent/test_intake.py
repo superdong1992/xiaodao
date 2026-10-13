@@ -483,7 +483,9 @@ def test_engine_reuses_backend_with_no_tools_broker_or_job(tmp_path: Path, prefi
     assert call["backend_phase"] == "INTAKE"
     assert call["broker_environment"] is None
     assert call["resource_limits"] == INTAKE_RESOURCE_LIMITS
-    assert call["resource_limits"].wall_time_seconds == 120
+    assert call["resource_limits"].wall_time_seconds == 180
+    asset = Path(__file__).resolve().parents[4] / "src/problem_locator/runtime/assets/intake/asset.json"
+    assert json.loads(asset.read_text(encoding="utf-8"))["wall_time_seconds"] == 180
     assert call["resource_limits"].context_bytes <= ROUTER_CONTEXT_BYTES
     assert "job" not in call
     assert uuid.UUID(call["workspace_root"].name)

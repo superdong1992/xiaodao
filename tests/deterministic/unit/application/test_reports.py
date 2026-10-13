@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from problem_locator.application.reports import MAX_REPORT_BYTES, read_published_report
+from problem_locator.application.reports import MAX_REPORT_BYTES, published_artifacts, read_published_report
 from problem_locator.contracts import (
     ApplicationPortError, Artifact, ArtifactKind, CandidateConclusion, Case,
     CaseAggregate, CaseStatus, ErrorCode, GenericResult, GenericResultV2,
@@ -98,6 +98,16 @@ def generic_report(version=2, *, content="# 定位报告\r\n\r\n保留原始换�
     artifact = _artifact(content, kind=ArtifactKind.GENERIC_REPORT, name="report.md", content_type="text/markdown")
     return _aggregate(_case(status=CaseStatus.RESOLVED, selected_skill_ref=None,
         generic_result_v2=result), artifact), BytesStore(content), result
+
+
+def test_published_artifacts_sort_mixed_offsets_by_instant():
+    aggregate, _, _ = specialist_report()
+    original = aggregate.artifacts[ARTIFACT_ID]
+    first = original.model_copy(update={"created_at": "2026-10-11T00:00:00.000+08:00"})
+    second = original.model_copy(update={"artifact_id": OTHER_ID,
+        "created_at": "2026-10-10T16:00:00.001Z"})
+    aggregate = aggregate.model_copy(update={"artifacts": {OTHER_ID: second, ARTIFACT_ID: first}})
+    assert [item.artifact_id for item in published_artifacts(aggregate)] == [ARTIFACT_ID, OTHER_ID]
 
 
 @pytest.mark.parametrize("status", ["COMPLETED", "PARTIAL", "INCONCLUSIVE"])

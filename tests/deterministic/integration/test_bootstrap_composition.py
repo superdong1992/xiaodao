@@ -163,7 +163,7 @@ def test_production_app_starts_with_empty_diagnosis_skill_catalog(
 def test_production_clock_ids_and_notifier_follow_frozen_shapes() -> None:
     timestamp = ProductionClock().now()
     assert re.fullmatch(
-        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z",
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+08:00",
         timestamp,
     )
 

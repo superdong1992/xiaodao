@@ -7,7 +7,6 @@ import logging
 import threading
 import time
 from collections.abc import Mapping
-from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, Literal, TextIO
@@ -20,10 +19,11 @@ from problem_locator.contracts.models import (
     JobOutcome,
     NonEmptyText,
     OpaqueId,
-    UtcTimestamp,
+    ServiceTimestamp,
 )
 from problem_locator.diagnostics import current_diagnostics_context, log_event
 from problem_locator.storage.log_rotation import BoundedJsonlFile
+from problem_locator.timestamps import now_timestamp
 
 
 JOURNEY_SCHEMA_VERSION = 1
@@ -39,7 +39,7 @@ class JourneyEvent(BaseModel):
 
     schema_version: Literal[1]
     sequence: Annotated[int, Field(gt=0, strict=True)]
-    timestamp: UtcTimestamp
+    timestamp: ServiceTimestamp
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
     event: NonEmptyText
     correlation_id: NonEmptyText | None
@@ -235,11 +235,7 @@ def journey_enabled() -> bool:
 
 
 def _timestamp_now() -> str:
-    return (
-        datetime.now(timezone.utc)
-        .isoformat(timespec="milliseconds")
-        .replace("+00:00", "Z")
-    )
+    return now_timestamp()
 
 
 def _context_text(context: Mapping[str, Any], key: str) -> str | None:

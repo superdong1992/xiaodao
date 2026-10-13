@@ -63,6 +63,21 @@ def _write(log_dir: Path, events: list[JourneyEvent]) -> None:
     )
 
 
+def test_render_journey_preserves_mixed_offsets_and_computes_elapsed_time(tmp_path):
+    log_dir = tmp_path / "logs"
+    _write(log_dir, [
+        _event(1, "case.created", timestamp="2026-12-31T15:59:59.000Z"),
+        _event(2, "case.status.changed", timestamp="2027-01-01T00:00:01.000+08:00",
+               data={"from_status": "NEW", "to_status": "RUNNING"}),
+    ])
+    receipt = render_journey(log_dir, CASE_ID)
+    assert receipt.as_of == "2027-01-01T00:00:01.000+08:00"
+    detailed = Path(receipt.detailed_log).read_text(encoding="utf-8")
+    assert "2026-12-31T15:59:59.000Z" in detailed
+    assert "2027-01-01T00:00:01.000+08:00" in detailed
+    assert analyze_timing(load_journey(log_dir / "journey.jsonl")).elapsed_ms == 2000
+
+
 def test_render_journey_generates_detailed_and_nonterminal_brief_snapshots(
     tmp_path: Path,
 ) -> None:

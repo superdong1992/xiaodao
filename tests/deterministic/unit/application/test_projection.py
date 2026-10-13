@@ -364,6 +364,18 @@ def test_artifact_downloadability_and_summary_hide_internal_storage() -> None:
     ) == [diagnostic_summary, logparse_summary]
 
 
+def test_artifact_summaries_sort_mixed_offsets_by_instant():
+    case = _case(status=CaseStatus.WAITING_INPUT)
+    first = _diagnostic_artifact(60, SOURCE_JOB_ID, "6").model_copy(
+        update={"created_at": "2026-10-11T00:00:00.000+08:00"})
+    second = _diagnostic_artifact(61, SOURCE_JOB_ID, "7").model_copy(
+        update={"created_at": "2026-10-10T16:00:00.001Z"})
+    summaries = project_artifact_summaries(case, [second, first])
+    assert [item.artifact_id for item in summaries] == [first.artifact_id, second.artifact_id]
+    assert summaries[0].created_at == first.created_at
+    assert summaries[1].created_at == second.created_at
+
+
 def test_user_result_is_downloadable_only_for_the_accepted_candidate_job() -> None:
     review_job = _model("job-review.json", Job)
     candidate_payload = review_job.context_snapshot.candidate_conclusion.model_dump(
@@ -474,6 +486,16 @@ def test_snapshot_indexes_replacements_and_selects_latest_unreplaced_interrupt()
     assert snapshot.replacement_job_ids_by_source == {
         old.job_id: replacement.job_id
     }
+
+
+def test_snapshot_selects_latest_interrupt_by_instant_across_offsets():
+    earlier = _diagnose_job(SOURCE_JOB_ID, status=JobStatus.INTERRUPTED,
+        finished_at="2026-10-11T00:00:00.000+08:00")
+    latest = _diagnose_job(SECOND_JOB_ID, status=JobStatus.INTERRUPTED,
+        finished_at="2026-10-10T16:00:00.001Z")
+    state = _state(_aggregate(_case(status=CaseStatus.INTERRUPTED),
+        jobs={earlier.job_id: earlier, latest.job_id: latest}))
+    assert build_case_snapshot(state, CASE_ID).resume_source_job == latest
 
 
 def test_outcome_continuation_builds_stable_validated_dependency_closure() -> None:

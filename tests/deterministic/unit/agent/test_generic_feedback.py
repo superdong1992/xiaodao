@@ -72,7 +72,7 @@ def test_replay_and_same_vote_do_not_increment_or_restore_an_old_vote(system):
     assert put(system, "same-vote") == first
     assert len(task_rows(system)) == 1
     down = put(system, "down", "DISLIKE")
-    assert down.updated_at == system.clock.value and down.rating == "DISLIKE"
+    assert down.updated_at == "2026-09-22T08:00:00.000+08:00" and down.rating == "DISLIKE"
     assert put(system) == down
     assert len(task_rows(system)) == 1
     with pytest.raises(AgentStoreError, match="request_id") as conflict:
@@ -216,6 +216,83 @@ def test_pending_source_expires_after_seven_days(system):
     assert system.memory.claim_task() is None
     put(system, "up-again")
     assert system.memory.claim_task() is None
+
+
+def test_feedback_and_extraction_timestamps_use_local_offset_without_rewriting_history(system):
+    assert put(system).updated_at == "2026-09-21T08:00:00.000+08:00"
+    task = system.memory.claim_task()
+    assert system.memory.finish_task(task["task_id"], CARD)
+    with system.repository.database_transaction() as db:
+        assert db.execute("SELECT created_at,updated_at,completed_at FROM memory_tasks").fetchone() == (
+            "2026-09-21T08:00:00.000+08:00",) * 3
+        db.execute("UPDATE memory_feedback SET updated_at=?", (NOW,))
+        db.execute("UPDATE memory_tasks SET updated_at=?", (NOW,))
+    feedback = system.memory.get_feedback(system.created.conversation_id, system.created.run_id,
+        owner_key=OWNER, can_rate=True)
+    assert feedback.updated_at == "2026-09-21T08:00:00.000+08:00"
+    assert system.memory.active_cards(system.source.skill_name)[0]["updated_at"] == feedback.updated_at
+    with system.repository.database_read() as db:
+        assert db.execute("SELECT updated_at FROM memory_feedback").fetchone()[0] == NOW
+        assert db.execute("SELECT updated_at FROM memory_tasks").fetchone()[0] == NOW
+    assert MemoryStore(system.repository)._now().endswith("+08:00")
+
+
+@pytest.mark.parametrize("created_at", ["2026-09-21T00:00:00.001Z", "2026-09-21T08:00:00.001+08:00"])
+def test_memory_source_expiry_compares_instants_across_offsets(system, created_at):
+    put(system)
+    with system.repository.database_transaction() as db:
+        db.execute("UPDATE memory_tasks SET created_at=?", (created_at,))
+    system.clock.value = "2026-09-28T08:00:00.000+08:00"
+    assert system.memory.prune()["expired_sources"] == 0
+    task = system.memory.claim_task()
+    assert task is not None
+    assert system.memory.finish_task(task["task_id"], CARD)
+    with system.repository.database_read() as db:
+        assert db.execute("SELECT created_at FROM memory_tasks").fetchone()[0] == created_at
+
+
+@pytest.mark.parametrize("completed_at", ["2026-09-21T00:00:00.001Z", "2026-09-21T08:00:00.001+08:00"])
+def test_memory_card_expiry_and_relike_compare_instants_across_offsets(system, completed_at):
+    put(system)
+    task = system.memory.claim_task()
+    assert system.memory.finish_task(task["task_id"], CARD)
+    with system.repository.database_transaction() as db:
+        db.execute("UPDATE memory_tasks SET completed_at=?", (completed_at,))
+    system.clock.value = "2026-12-20T08:00:00.000+08:00"
+    assert len(system.memory.active_cards(system.source.skill_name)) == 1
+    assert system.memory.prune()["expired_cards"] == 0
+    put(system, "down", "DISLIKE")
+    put(system, "up-again")
+    assert len(system.memory.active_cards(system.source.skill_name)) == 1
+    system.clock.value = "2026-12-20T08:00:00.001+08:00"
+    assert system.memory.active_cards(system.source.skill_name) == []
+    assert system.memory.prune()["expired_cards"] == 1
+
+
+def test_memory_queue_and_card_order_follow_instants_across_offsets(system):
+    put(system)
+    with system.repository.database_transaction() as db:
+        db.execute("UPDATE memory_tasks SET created_at=?", ("2026-09-21T07:00:00.000+08:00",))
+    newer = system.agent_store.create_conversation("newer", owner_key=OWNER)
+    newer_source = replace(system.source, case_id="00000000-0000-0000-0000-000000000099")
+    with system.repository.database_transaction() as db:
+        db.execute("UPDATE agent_conversation_runs SET case_id=? WHERE run_id=?", (newer_source.case_id, newer.run_id))
+    system.memory.put_feedback(newer.conversation_id, newer.run_id, owner_key=OWNER,
+        request_id="newer-vote", rating="LIKE", source=newer_source)
+    with system.repository.database_transaction() as db:
+        db.execute("UPDATE memory_tasks SET created_at=? WHERE run_id=?", (NOW, newer.run_id))
+    first = system.memory.claim_task()
+    second = system.memory.claim_task()
+    assert first["run_id"] == system.created.run_id
+    assert second["run_id"] == newer.run_id
+    assert system.memory.finish_task(first["task_id"], CARD)
+    assert system.memory.finish_task(second["task_id"], CARD)
+    with system.repository.database_transaction() as db:
+        db.execute("UPDATE memory_tasks SET completed_at=? WHERE task_id=?",
+            ("2026-09-21T07:00:00.000+08:00", first["task_id"]))
+        db.execute("UPDATE memory_tasks SET completed_at=? WHERE task_id=?", (NOW, second["task_id"]))
+    assert [row["card_id"] for row in system.memory.active_cards(system.source.skill_name)] == [
+        second["task_id"], first["task_id"]]
 
 
 def test_card_survives_natural_source_retention_but_expires_after_ninety_days(system):

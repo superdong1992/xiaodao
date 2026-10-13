@@ -10,11 +10,12 @@ import hashlib
 import json
 import uuid
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from problem_locator.agent.models import AgentStoreError
 from problem_locator.storage.database import (dialect_for, lock_conversation, lock_key,
     table_names, try_lock_conversation)
+from problem_locator.timestamps import format_timestamp, now_timestamp, parse_timestamp
 
 from .context import build_prompt
 from .models import (ACTIVE, MAX_TURNS, FollowupEvent, FollowupEventBatch, FollowupFailure,
@@ -55,8 +56,7 @@ def _one(db, query, values=()):
 
 
 def timestamp(value):
-    return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc).isoformat(
-        timespec="milliseconds").replace("+00:00", "Z")
+    return format_timestamp(parse_timestamp(str(value)))
 
 
 def fail(code, message, status=409):
@@ -84,11 +84,11 @@ class FollowupStore:
                 db.execute("INSERT INTO agent_followup_metadata(key,value) VALUES ('storage_version','1')")
 
     def now(self):
-        return timestamp(self.clock.now() if self.clock is not None else datetime.now(timezone.utc))
+        return timestamp(self.clock.now()) if self.clock is not None else now_timestamp()
 
     def expired(self, source):
-        cutoff = datetime.fromisoformat(self.now().replace("Z", "+00:00")) - timedelta(days=7)
-        return datetime.fromisoformat(source.occurred_at.replace("Z", "+00:00")) <= cutoff
+        cutoff = parse_timestamp(self.now()) - timedelta(days=7)
+        return parse_timestamp(source.occurred_at) <= cutoff
 
     @staticmethod
     def alive(db, cid, rid):
@@ -154,9 +154,11 @@ class FollowupStore:
 
     def claim_snapshot(self):
         with self.repository.database_transaction() as db:
-            suffix = " FOR UPDATE OF s SKIP LOCKED" if dialect_for(db).postgres else ""
+            dialect = dialect_for(db)
+            suffix = " FOR UPDATE OF s SKIP LOCKED" if dialect.postgres else ""
             row = _one(db, "SELECT s.* FROM agent_followup_snapshots s JOIN agent_conversations c USING(conversation_id) "
-                "JOIN agent_conversation_runs r ON r.run_id=s.run_id WHERE s.status='PENDING' AND c.deleted_at IS NULL ORDER BY s.created_at,s.run_id LIMIT 1" + suffix)
+                "JOIN agent_conversation_runs r ON r.run_id=s.run_id WHERE s.status='PENDING' AND c.deleted_at IS NULL "
+                f"ORDER BY {dialect.timestamp('s.created_at')},s.run_id LIMIT 1" + suffix)
             if row is None:
                 return None
             if not try_lock_conversation(db, row["conversation_id"]) or not self.alive(db, row["conversation_id"], row["run_id"]):

@@ -10,13 +10,14 @@ import logging
 import threading
 import uuid
 from contextlib import ExitStack, nullcontext
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from pathlib import PurePosixPath
 
 from pydantic import TypeAdapter
 
 from problem_locator.contracts import OpaqueId
 from problem_locator.diagnostics import log_event
+from problem_locator.timestamps import format_timestamp, parse_timestamp
 from .database import dialect_for, lock_conversation, lock_key
 from .paths import job_workspace_names
 
@@ -50,7 +51,7 @@ class HistoryRetentionService:
 
     @staticmethod
     def _time(value):
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+        return parse_timestamp(value)
 
     @classmethod
     def _expired(cls, body, cutoff):
@@ -150,8 +151,10 @@ class HistoryRetentionService:
     def _prune_keys_and_tombstones(self, cutoff):
         changed = False
         with self.repository.database_read() as db:
+            dialect = dialect_for(db)
+            expired_key = f"{dialect.timestamp('t.created_at')}<={dialect.timestamp('?')}"
             expired = db.execute("SELECT k.request_hash,k.conversation_id FROM agent_create_keys k "
-                "JOIN agent_create_key_times t USING(request_hash) WHERE t.created_at<=?", (cutoff,)).fetchall()
+                f"JOIN agent_create_key_times t USING(request_hash) WHERE {expired_key}", (cutoff,)).fetchall()
         for key, cid in expired:
             with self.repository.database_transaction() as db:
                 # Creation uses this same order. Each expired key owns a short
@@ -159,7 +162,7 @@ class HistoryRetentionService:
                 lock_key(db, "create-request", key)
                 lock_conversation(db, cid)
                 if db.execute("SELECT 1 FROM agent_create_keys k JOIN agent_create_key_times t USING(request_hash) "
-                        "WHERE k.request_hash=? AND k.conversation_id=? AND t.created_at<=?", (key, cid, cutoff)).fetchone() is None:
+                        f"WHERE k.request_hash=? AND k.conversation_id=? AND {expired_key}", (key, cid, cutoff)).fetchone() is None:
                     continue
                 changed = db.execute("DELETE FROM agent_create_keys WHERE request_hash=?", (key,)).rowcount > 0 or changed
                 db.execute("DELETE FROM agent_create_key_times WHERE request_hash=?", (key,))
@@ -169,8 +172,10 @@ class HistoryRetentionService:
                     db.execute("UPDATE agent_conversations SET request_id=? WHERE conversation_id=?",
                                ("expired:" + cid, cid))
         with self.repository.database_read() as db:
+            dialect = dialect_for(db)
+            expired_deleted = f"{dialect.timestamp('deleted_at')}<={dialect.timestamp('?')}"
             rows = db.execute("SELECT conversation_id FROM agent_conversations WHERE cleanup_status='DELETED' "
-                "AND deleted_at<=?", (cutoff,)).fetchall()
+                f"AND {expired_deleted}", (cutoff,)).fetchall()
         for (cid,) in rows:
             with self.repository.database_transaction() as db:
                 keys = db.execute("SELECT request_hash FROM agent_create_keys WHERE conversation_id=? ORDER BY request_hash", (cid,)).fetchall()
@@ -178,7 +183,7 @@ class HistoryRetentionService:
                     lock_key(db, "create-request", key)
                 lock_conversation(db, cid)
                 if db.execute("SELECT 1 FROM agent_conversations WHERE conversation_id=? AND cleanup_status='DELETED' "
-                        "AND deleted_at<=?", (cid, cutoff)).fetchone() is None:
+                        f"AND {expired_deleted}", (cid, cutoff)).fetchone() is None:
                     continue
                 db.execute("DELETE FROM agent_create_key_times WHERE request_hash IN "
                     "(SELECT request_hash FROM agent_create_keys WHERE conversation_id=?)", (cid,))
@@ -297,10 +302,11 @@ class HistoryRetentionService:
 
     def _expire_uploads(self, cutoff):
         with self.repository.database_read() as db:
-            created = dialect_for(db).json_text("a.body", "$.created_at")
+            dialect = dialect_for(db)
+            created = dialect.timestamp(dialect.json_text("a.body", "$.created_at"))
             rows = db.execute("SELECT a.attachment_id,a.conversation_id FROM agent_attachments a "
                 "JOIN agent_conversations c USING(conversation_id) WHERE c.deleted_at IS NULL "
-                f"AND {created}<=?", (cutoff,)).fetchall()
+                f"AND {created}<={dialect.timestamp('?')}", (cutoff,)).fetchall()
         changed, failures = False, []
         for aid, cid in rows:
             try:
@@ -323,7 +329,7 @@ class HistoryRetentionService:
                 lock_conversation(db, cid)
                 dialect = dialect_for(db)
                 row = db.execute("SELECT body FROM agent_attachments WHERE attachment_id=? AND conversation_id=?", (aid, cid)).fetchone()
-                if row is None or json.loads(row[0])["created_at"] > cutoff:
+                if row is None or self._time(json.loads(row[0])["created_at"]) > self._time(cutoff):
                     return False
                 # A retained run may still display or use its selected
                 # attachment, even after the original upload is seven days old.
@@ -386,7 +392,7 @@ class HistoryRetentionService:
             return False
         try:
             now = self._time(self.clock.now())
-            cutoff = (now - timedelta(seconds=HISTORY_RETENTION_SECONDS)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+            cutoff = format_timestamp(now - timedelta(seconds=HISTORY_RETENTION_SECONDS))
             changed, failures = self._retry_paths()
             def attempt(action):
                 try:
@@ -399,9 +405,10 @@ class HistoryRetentionService:
                 dialect = dialect_for(db)
                 completed = dialect.json_text("r.body", "$.completed_at")
                 updated = dialect.json_text("r.body", "$.updated_at")
+                finished = dialect.timestamp(f"coalesce({completed},{updated})")
                 rows = db.execute("SELECT r.conversation_id,r.run_id,r.case_id,c.current_run_id "
                     "FROM agent_conversation_runs r JOIN agent_conversations c USING(conversation_id) "
-                    f"WHERE c.deleted_at IS NULL AND coalesce({completed},{updated})<=? "
+                    f"WHERE c.deleted_at IS NULL AND {finished}<={dialect.timestamp('?')} "
                     f"ORDER BY {dialect.order_column('r')}", (cutoff,)).fetchall()
             for cid, run_id, case_id, current in rows:
                 if run_id == current:

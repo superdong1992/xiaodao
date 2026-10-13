@@ -525,7 +525,7 @@ Logparse 运行的 claim、parse 参数和资源 metadata 需要相互一致，�
 | 文件 | 职责与调用关系 |
 | --- | --- |
 | [input-profile/profile.json](../../src/problem_locator/runtime/assets/input-profile/profile.json) | `builtin-global-v1`：毫秒 UTC `problem_time`；各角色 slot、process_name、可选 pid；一个 gzip/zip/tar 日志附件。`input_profile.py` 校验并展开，供专用流程使用，不能外推为 GENERIC 前置要求。 |
-| [intake/asset.json](../../src/problem_locator/runtime/assets/intake/asset.json) | intake 配置版本 `1.1.0`，绑定 profile/合同入口；每条消息最多一次后端调用、`file_access=none`、`131072` 上下文、120 秒、1 MiB 输出与 2 MiB 工作区限制。 |
+| [intake/asset.json](../../src/problem_locator/runtime/assets/intake/asset.json) | intake 配置版本 `1.1.0`，绑定 profile/合同入口；每条消息最多一次后端调用、`file_access=none`、`131072` 上下文、180 秒、1 MiB 输出与 2 MiB 工作区限制。 |
 | [intake/profile.md](../../src/problem_locator/runtime/assets/intake/profile.md) | 当前正文标题 `1.3.1`。角色只整理已有任务的补充事实，查看全部 USER 来源；不能诊断、读文件、建案或更改冻结事实。部分有效参数可先提交，换题或更正已冻结事实需新任务。 |
 | [intake/output-contract.md](../../src/problem_locator/runtime/assets/intake/output-contract.md) | 当前正文标题 `1.3.1`。规定五字段 JSON、NEED_CLARIFICATION/SUBMIT_SUPPLEMENT/NEW_CASE_REQUIRED、来源 message/quote 校验和逐项采纳规则。内建时间转换由服务端限定处理；不能用模型改写值代替用户原文。 |
 

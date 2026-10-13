@@ -58,7 +58,7 @@ from .models import (
     VersionedRef,
     WaitSeconds,
     WorkspaceInputManifest,
-    UtcTimestamp,
+    ServiceTimestamp,
 )
 from .outcomes import (
     CaseSnapshot,
@@ -438,7 +438,7 @@ class StateAdminPort(Protocol):
 
 @runtime_checkable
 class Clock(Protocol):
-    def now(self) -> UtcTimestamp: ...
+    def now(self) -> ServiceTimestamp: ...
 
 
 @runtime_checkable

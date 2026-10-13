@@ -10,6 +10,7 @@ from problem_locator.contracts import (
     UserResultPayloadV3, parse_canonical_json_bytes,
 )
 from problem_locator.contracts.ports import ResourceStore
+from problem_locator.timestamps import parse_timestamp
 
 from .errors import raise_port_error
 from .projection import project_artifact_summary
@@ -53,7 +54,7 @@ def published_artifacts(aggregate: CaseAggregate) -> list[ArtifactSummary]:
         result.append(summary)
     if len({item.artifact_id for item in result}) != len(result):
         raise_port_error(ErrorCode.STATE_CORRUPT, "会话产物标识重复。")
-    return sorted(result, key=lambda item: (item.created_at, item.artifact_id))
+    return sorted(result, key=lambda item: (parse_timestamp(item.created_at), item.artifact_id))
 
 
 @dataclass(frozen=True, slots=True)

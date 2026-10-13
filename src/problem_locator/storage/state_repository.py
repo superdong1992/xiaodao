@@ -11,11 +11,11 @@ import threading
 import weakref
 from contextlib import contextmanager, nullcontext, ExitStack
 from collections.abc import Callable, Mapping
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic import TypeAdapter, ValidationError
+from problem_locator.timestamps import parse_timestamp
 
 from problem_locator.contracts import (
     CONTRACT_REVISION, SCHEMA_VERSION, ApplicationError, ApplicationPortError,
@@ -308,7 +308,7 @@ class CaseStateRepository:
             result.cases.update(state.cases)
             result.idempotency_records.update(state.idempotency_records)
             result.generation = max(result.generation, state.generation)
-            result.updated_at = max(result.updated_at, state.updated_at)
+            result.updated_at = max(result.updated_at, state.updated_at, key=parse_timestamp)
         return result
 
     def read_case(self, case_id: str) -> CaseAggregate:
@@ -685,9 +685,11 @@ class CaseStateRepository:
         """Read an age index plus live idle Cases, never deserialize all history."""
         self._backfill_history_case_ages()
         with self._database_lock:
+            dialect = dialect_for(self._db)
+            retained = dialect.timestamp('retained_at')
             selected = [row[0] for row in self._db.execute(
-                'SELECT case_id FROM completed_case_retention WHERE retained_at<=? '
-                'ORDER BY retained_at,case_id', (cutoff,))]
+                f'SELECT case_id FROM completed_case_retention WHERE {retained}<={dialect.timestamp("?")} '
+                f'ORDER BY {retained},case_id', (cutoff,))]
         with self._index_lock:
             live = tuple(self._live)
         for case_id in live:
@@ -696,7 +698,7 @@ class CaseStateRepository:
                 if state is None:
                     continue
                 case = state.cases[case_id].case
-                if case.active_job_id is None and case.updated_at <= cutoff:
+                if case.active_job_id is None and parse_timestamp(case.updated_at) <= parse_timestamp(cutoff):
                     selected.append(case_id)
         return list(dict.fromkeys(selected))
 
@@ -727,8 +729,7 @@ class CaseStateRepository:
                     case = state.cases[case_id].case
                     if case.status not in _TERMINAL or case.active_job_id is not None:
                         continue
-                    retained_at = datetime.fromisoformat(case.updated_at.replace('Z', '+00:00')).isoformat(
-                        timespec='milliseconds').replace('+00:00', 'Z')
+                    retained_at = case.updated_at
                 except (ValidationError, ValueError, TypeError):
                     continue
                 with self.database_transaction() as db:
@@ -748,7 +749,7 @@ class CaseStateRepository:
             archive = self._db.execute("SELECT 1 FROM archive_tasks WHERE case_id=? "
                 "AND status IN ('PENDING','RUNNING')", (case_id,)).fetchone()
         age_anchor = retained[0] if retained is not None else case.updated_at
-        if (case.active_job_id is not None or age_anchor > cutoff or archive is not None
+        if (case.active_job_id is not None or parse_timestamp(age_anchor) > parse_timestamp(cutoff) or archive is not None
                 or case.status not in _TERMINAL | {CaseStatus.INTERRUPTED, CaseStatus.WAITING_INPUT, CaseStatus.WAITING_ATTACHMENT}):
             return None
         jobs = sorted(aggregate.jobs)

@@ -27,12 +27,13 @@
 | --- | --- | --- |
 | [__init__.py](../../src/problem_locator/__init__.py) | `__version__` | 公开软件版本 `8.2.0`。导入包不建目录、不启动线程、不获取实例锁。 |
 | [__main__.py](../../src/problem_locator/__main__.py) | `main(argv, stdout, stderr)` | 支持 `python -m problem_locator`。延迟导入 `bootstrap.main`，保留可注入字节输出流和退出码，模块导入与真正启动分开。 |
-| [bootstrap.py](../../src/problem_locator/bootstrap.py) | `build_service`、`create_app`、`create_state_admin`、`ServiceComposition`、`cli_hooks` | 唯一生产装配点。提供 UTC 时钟、随机/派生 ID、按 generation 通知的 Condition、延迟 Dispatcher、在线/离线状态管理、保留 Worker 和生命周期管理。失败时以 `_StartupFailureOwner` 持有已取得的资源，向接口暴露不可用状态。 |
+| [bootstrap.py](../../src/problem_locator/bootstrap.py) | `build_service`、`create_app`、`create_state_admin`、`ServiceComposition`、`cli_hooks` | 唯一生产装配点。提供固定 `+08:00` 时钟、随机/派生 ID、按 generation 通知的 Condition、延迟 Dispatcher、在线/离线状态管理、保留 Worker 和生命周期管理。失败时以 `_StartupFailureOwner` 持有已取得的资源，向接口暴露不可用状态。 |
 | [operational.py](../../src/problem_locator/operational.py) | `OperationalState`、`OperationalFault` | 用线程锁维护本进程是否接单、故障关联与已确认 Job。`record()` 记录失败即停止接收新任务；`require_accepting()` 返回不泄漏其他 Case 标识的错误。它不写业务终态，不跨 epoch 复用。 |
 | [diagnostics.py](../../src/problem_locator/diagnostics.py) | `configure_diagnostics`、`bind_diagnostics`、`log_event`、`HttpDiagnosticsMiddleware` | 用 `contextvars` 关联请求、Case、Job；格式化单行 JSON，记录 HTTP 状态、耗时和异常。格式化器处理递归、不可序列化值和自身异常；文件输出交给 `storage/log_rotation.py`。 |
 | [journey.py](../../src/problem_locator/journey.py) | `JourneyEvent`、`record_journey_event`、`record_stage_*` | 定义版本化语义事件和递增序号，文件模式从已有最后一条记录续接；将阶段开始、完成和失败写入受限 JSONL。对合同对象生成适合旅程分析的投影，与 DFX 共用关联上下文。 |
 | [journey_renderer.py](../../src/problem_locator/journey_renderer.py) | `load_journey`、`render_detailed`、`render_brief`、`render_journey` | 严格读取 Journey，按 Case 汇总问题、状态、阶段、Methods 结论和故障，输出详细/简要文本及 `RenderJourneyReceipt`。输出使用原子替换，引用原始行号供核查；不调用模型。 |
 | [journey_timing.py](../../src/problem_locator/journey_timing.py) | `analyze_timing`、`TimingReport`、`JobTiming` | 从事件时间、阶段跨度和后端遥测拆分排队、处理、交付、用户等待与未分类耗时。按优先级分配重叠区间，避免简单相加重复计算；保留证据行号和数据缺口说明。 |
+| [timestamps.py](../../src/problem_locator/timestamps.py) | `LOCAL_TIMEZONE`、`now_timestamp`、`format_timestamp`、`parse_timestamp` | 统一生成毫秒精度、固定 `+08:00` 的服务时间，不依赖操作系统时区。解析时要求明确时区；格式化时保持同一时刻并转换偏移。历史 `Z` 时间仍可读取，排序、分页和保留期判断按实际时刻比较。 |
 
 ## 2. 配置、命令与离线操作
 

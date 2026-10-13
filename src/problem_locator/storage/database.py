@@ -40,6 +40,10 @@ def _path(value: str) -> tuple[str, ...]:
 class SqlDialect:
     postgres: bool = False
 
+    def timestamp(self, expression: str) -> str:
+        """Compare explicit-offset timestamps by instant, including legacy UTC rows."""
+        return f"({expression})::timestamptz" if self.postgres else f"julianday({expression})"
+
     def json_text(self, column: str, path: str) -> str:
         parts = _path(path)
         if not self.postgres:

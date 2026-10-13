@@ -209,7 +209,7 @@ Release 从 GENESIS 和新的空 V11 `DATA_ROOT` 开始，只执行一条网站 
 
 Route、Upload、Diagnose 连续使用同一服务，不在活动 Case 中间重启，也不复用这几个阶段的 checkpoint。报告和 ZIP 均已持久化后才重启服务；新实例用 `Last-Event-ID` 重放相同的末尾事件，核对会话完成态、Case 和两项产物不变，再用原生 Claude MCP Client 只读查询和重新下载。七工具扁平 schema、服务端 DFX 和 MCP 对应关系继续校验，不增加客户端代理或 Hook。原始 SSE 字节、接收游标及摘要均封入证据，阶段公开事件不能从内部 Journey 拼造。
 
-`--plan-only` 明确列出 2 次 INTAKE（补充事实、补附件）、3 次服务角色（ROUTE、Specialist、Reviewer）、1 次 Skill 生成和 1 次重启后的 MCP Client 调用，总计 7 次，不允许隐式 repair。创建 Case 不调用 INTAKE；INTAKE 每次最多 1 turn、100000 total tokens、1 USD、120 秒。实际用量从独立 UUID 工作区的原始 CLI terminal 审计，禁止工具和 CREATE_CASE 动作。其余预算以计划中的独立角色上限为准。host-client 绑定 Google Chrome；显式 Linux Client 绑定官方 Chrome Headless Shell 的 product、版本、归档和可执行文件 SHA-256。浏览器脚本不设置 `Content-Length`，超时后必须收尾整个私有进程组并证明无残留。
+`--plan-only` 明确列出 2 次 INTAKE（补充事实、补附件）、3 次服务角色（ROUTE、Specialist、Reviewer）、1 次 Skill 生成和 1 次重启后的 MCP Client 调用，总计 7 次，不允许隐式 repair。创建 Case 不调用 INTAKE；INTAKE 每次最多 1 turn、100000 total tokens、1 USD、180 秒。实际用量从独立 UUID 工作区的原始 CLI terminal 审计，禁止工具和 CREATE_CASE 动作。其余预算以计划中的独立角色上限为准。host-client 绑定 Google Chrome；显式 Linux Client 绑定官方 Chrome Headless Shell 的 product、版本、归档和可执行文件 SHA-256。浏览器脚本不设置 `Content-Length`，超时后必须收尾整个私有进程组并证明无残留。
 
 正式用例的日志归档不是假设外部 Logparse 已预装业务产品配置。容器初始化会从已审阅 Diagnosis Skill 的 `logparse_product`、anchors 和 journey driver 机械生成独立的只读运行时配置，并把每份原始附件无损投影为当前 Logparse loose-diagnostic 输入；初始化阶段先用冻结 Logparse 提交完成一次无模型 smoke parse，逐一证明 module/slot/process anchor 可解析。配置摘要、归档投影版本和归档摘要写入 Release case 与容器收据，服务只使用该独立配置，外部 Logparse Git 快照仍保持未修改。
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -10,10 +11,33 @@ import pytest
 from problem_locator.storage import log_rotation
 
 from problem_locator.diagnostics import (
+    JsonDiagnosticFormatter,
     bind_diagnostics,
     configure_diagnostics,
     log_event,
 )
+
+
+def test_diagnostic_timestamp_uses_record_instant_in_utc_plus_eight():
+    record = logging.LogRecord("test", logging.INFO, __file__, 0, "ok", (), None)
+    record.created = datetime(2026, 12, 31, 16, 0, 0, 123000, timezone.utc).timestamp()
+    event = json.loads(JsonDiagnosticFormatter().format(record))
+    assert event["timestamp"] == "2027-01-01T00:00:00.123+08:00"
+
+
+def test_diagnostic_fallback_keeps_local_offset(monkeypatch):
+    from problem_locator import timestamps
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 12, 31, 16, 0, tzinfo=timezone.utc).astimezone(tz)
+
+    monkeypatch.setattr(timestamps, "datetime", FixedDatetime)
+    record = logging.LogRecord("test", logging.INFO, __file__, 0, "%d", ("bad",), None)
+    event = json.loads(JsonDiagnosticFormatter().format(record))
+    assert event["event"] == "diagnostics.serialization_failed"
+    assert event["timestamp"] == "2027-01-01T00:00:00.000+08:00"
 
 
 def test_http_diagnostics_redact_cookie_and_authentication_headers(monkeypatch):

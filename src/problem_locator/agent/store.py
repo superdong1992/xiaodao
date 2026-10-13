@@ -11,13 +11,13 @@ import json
 import threading
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timezone
 from dataclasses import dataclass
 from contextlib import contextmanager
 
 from problem_locator.contracts import StateFile
 from problem_locator.application.projection import project_artifact_summaries
 from problem_locator.diagnostics import log_event
+from problem_locator.timestamps import now_timestamp, parse_timestamp
 from problem_locator.storage.database import (
     dialect_for, index_definition, lock_conversation, lock_key,
     table_columns, table_exists,
@@ -211,7 +211,7 @@ class AgentStore:
         repository.on_case_committed = self._case_committed
 
     def _now(self):
-        return self.clock.now() if self.clock else datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        return self.clock.now() if self.clock else now_timestamp()
 
     def _id(self, kind):
         return self.ids.new(kind) if self.ids else str(uuid.uuid4())
@@ -694,19 +694,25 @@ class AgentStore:
         values = [] if cursor is None else self._decode_cursor(cursor)
         if cursor is not None and (not isinstance(values, list) or len(values) != 3 or values[0] != owner_tag or any(not isinstance(v, str) for v in values)):
             raise AgentStoreError("AGENT_INVALID_CURSOR", "分页游标不属于当前用户。", 400)
+        if values:
+            try:
+                cursor_timestamp = parse_timestamp(values[1]).isoformat()
+            except ValueError:
+                raise AgentStoreError("AGENT_INVALID_CURSOR", "分页游标中的时间无效。", 400) from None
         with self.repository.database_read() as db:
             d = dialect_for(db)
             params = [owner_key]
             where = "c.owner_key IS NOT DISTINCT FROM ? AND c.deleted_at IS NULL"
+            updated_instant = d.timestamp("c.updated_at")
             if values:
-                where += " AND (c.updated_at,c.conversation_id)<(?,?)"
-                params += values[1:]
+                where += f" AND ({updated_instant},c.conversation_id)<({d.timestamp('?')},?)"
+                params += [cursor_timestamp, values[2]]
             fields = ["run_id", "ordinal", "status", "case_id", "job_id", "case_status", "archive_status", "created_at", "updated_at", "report_available"]
             projection = ",".join(f"'{field}',{d.json_int('r.body', '$.' + field) if field in {'ordinal', 'report_available'} else d.json_text('r.body', '$.' + field)}" for field in fields)
             rows = db.execute(f"SELECT c.conversation_id,c.updated_at,c.title,{d.json_object(projection)},"
                 f"coalesce({d.json_text('r.body', '$.conversation_created_at')},{d.json_text('r.body', '$.created_at')}) "
                 "FROM agent_conversations c JOIN agent_conversation_runs r ON r.run_id=c.current_run_id "
-                f"WHERE {where} ORDER BY c.updated_at DESC,c.conversation_id DESC LIMIT ?", (*params, limit + 1)).fetchall()
+                f"WHERE {where} ORDER BY {updated_instant} DESC,c.conversation_id DESC LIMIT ?", (*params, limit + 1)).fetchall()
             items = []
             for cid, updated, title, raw, created in rows[:limit]:
                 body = json.loads(raw)
@@ -1398,7 +1404,7 @@ class AgentStore:
                     if record.job_id == case_failure.source_job_id and record.failure.code == case_failure.code
                     and (case_failure.diagnostic_id is None or record.failure.diagnostic_id == case_failure.diagnostic_id)]
                 if records:
-                    execution_failure = max(records, key=lambda item: (item.recorded_at, item.failure_id)).failure
+                    execution_failure = max(records, key=lambda item: (parse_timestamp(item.recorded_at), item.failure_id)).failure
             if case_failure is None and case.status.value == "INTERRUPTED":
                 execution_failure = interrupted_execution_failure(aggregate)
             failure = public_failure(

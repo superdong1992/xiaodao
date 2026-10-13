@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from problem_locator.contracts.models import OpaqueId, UtcTimestamp
+from problem_locator.contracts.models import OpaqueId, ServiceTimestamp
 
 MAX_TEXT_BYTES = 65_536
 MAX_CONTEXT_BYTES = 262_144
@@ -52,8 +52,8 @@ class FollowupItem(FollowupModel):
     text: str
     answer_markdown: str | None = None
     failure: FollowupFailure | None = None
-    created_at: UtcTimestamp
-    updated_at: UtcTimestamp
+    created_at: ServiceTimestamp
+    updated_at: ServiceTimestamp
 
     @model_validator(mode="after")
     def coherent_result(self):
@@ -105,7 +105,7 @@ class FollowupEvent(FollowupModel):
     run_id: OpaqueId
     followup_id: OpaqueId
     type: Literal["followup.accepted", "followup.updated"]
-    created_at: UtcTimestamp
+    created_at: ServiceTimestamp
     data: FollowupItem
 
     @model_validator(mode="after")

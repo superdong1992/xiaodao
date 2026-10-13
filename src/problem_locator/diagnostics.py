@@ -11,12 +11,13 @@ import time
 import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, TextIO
 
 from problem_locator.storage.log_rotation import JsonlFileHandler
+from problem_locator.timestamps import LOCAL_TIMEZONE, format_timestamp, now_timestamp
 
 
 _LOGGER_NAME = "problem_locator.dfx"
@@ -79,10 +80,10 @@ class JsonDiagnosticFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         try:
             payload: dict[str, Any] = {
-                "timestamp": datetime.fromtimestamp(
+                "timestamp": format_timestamp(datetime.fromtimestamp(
                     record.created,
-                    timezone.utc,
-                ).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                    LOCAL_TIMEZONE,
+                )),
                 "level": record.levelname,
                 "event": getattr(record, "dfx_event", record.name),
                 "message": record.getMessage(),
@@ -104,9 +105,7 @@ class JsonDiagnosticFormatter(logging.Formatter):
         except BaseException as exc:  # pragma: no cover - last-resort diagnostics
             return json.dumps(
                 {
-                    "timestamp": datetime.now(timezone.utc)
-                    .isoformat(timespec="milliseconds")
-                    .replace("+00:00", "Z"),
+                    "timestamp": now_timestamp(),
                     "level": "ERROR",
                     "event": "diagnostics.serialization_failed",
                     "message": _safe_repr(exc),

@@ -33,6 +33,7 @@ from problem_locator.contracts import (
 from problem_locator.runtime.server_outcome_finalizer import (
     ServerFinalizedOutcomeMarker,
 )
+from problem_locator.timestamps import parse_timestamp
 
 from .audit_bundle import AuditBundleSource, BuiltAuditBundle, build_audit_bundle
 
@@ -173,9 +174,10 @@ def _audit_job_ids(
         sorted(
             selected,
             key=lambda job_id: (
-                aggregate.jobs[job_id].created_at
+                job_id in aggregate.jobs,
+                parse_timestamp(aggregate.jobs[job_id].created_at)
                 if job_id in aggregate.jobs
-                else "",
+                else None,
                 job_id,
             ),
         )

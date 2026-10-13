@@ -68,6 +68,17 @@ def _candidate_pairs(scanner: RetentionScanner) -> set[tuple[str, Path]]:
     return {(candidate.kind, candidate.path) for candidate in scanner.discover()}
 
 
+def test_local_clock_keeps_exact_filesystem_expiry_boundary(tmp_path):
+    layout = _layout(tmp_path)
+    expired, expired_marker = _staged_directory(layout.uploads, UPLOAD_OLD_ID)
+    exact, exact_marker = _staged_directory(layout.uploads, UPLOAD_EXACT_ID)
+    _set_age(expired_marker, UPLOAD_TEMP_RETENTION_SECONDS + 1)
+    _set_age(exact_marker, UPLOAD_TEMP_RETENTION_SECONDS)
+    local_clock = FixedClock("2026-01-10T20:00:00.000+08:00")
+    assert _candidate_pairs(RetentionScanner(layout, local_clock)) == {("UPLOAD", expired)}
+    assert exact.exists()
+
+
 def _staged_directory(parent: Path, identifier: str) -> tuple[Path, Path]:
     directory = parent / identifier
     directory.mkdir(parents=True)

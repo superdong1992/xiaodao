@@ -14,6 +14,8 @@
 
 调用关系：网站前端 → 网站后端 → Linux 上的 xiaodao REST API。网站原有问答功能保持独立。网站后端默认透传 Cookie；xiaodao 从 Redis 会话读取工号，统一校验登录和会话、附件、订阅、文件的用户归属。UUID 不是授权凭据。不要把 xiaodao 内部地址或下载地址直接交给浏览器。
 
+会话、轮次、SSE 事件、反馈、追问和文件的服务生成时间统一使用毫秒精度 RFC 3339，固定偏移 `+08:00`，例如 `2026-10-10T12:34:56.789+08:00`，不受服务器操作系统时区影响。历史记录仍可返回 `Z` 格式；前端按字符串中的时区解析，不要再加 8 小时。诊断输入 `problem_time`、日志事件时间和证据时间范围仍使用毫秒精度 UTC。
+
 ## 1. 网站开发者需要实现的流程
 
 1. 网站后端透传 Cookie；xiaodao 根据 `sessionid` 查询 Redis 中的 `user.userid`，识别登录用户，再创建会话并保存归属，网站不再单独维护一份会话目录。
@@ -207,7 +209,7 @@ Content-Type: application/json
       "size": 1024,
       "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "status": "RESERVED",
-      "created_at": "2026-09-07T08:00:00.000Z",
+      "created_at": "2026-09-07T16:00:00.000+08:00",
       "case_attachment_id": null
     },
     "upload": {
@@ -349,7 +351,7 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `FeedbackView` | `run_id` | 被评价报告的轮次 UUID，必须与请求路径一致。 |
 | `FeedbackView` | `can_rate` | 当前是否支持评价；已交付的通用和专用 `direct` 的 V2 Markdown 正式报告默认可评价，不受经验库开关或提炼条件影响。旧 V1 报告和专用 `strict` / `advisory` 的结构化报告为 `false`。 |
 | `FeedbackView` | `rating` | 当前保存的 `LIKE` 或 `DISLIKE`；尚未评价时为 `null`。旧请求重放也返回最新投票。 |
-| `FeedbackView` | `updated_at` | 最近一次投票变化的 UTC 时间，精确到毫秒；尚未评价时为 `null`。 |
+| `FeedbackView` | `updated_at` | 最近一次投票变化的服务时间，精确到毫秒；尚未评价时为 `null`。 |
 
 两个接口不接受查询参数，GET 不接受请求体，PUT 只接受表中的两个字段。同一报告的提交应串行处理，重复同票不累计票数、不重复提炼经验。反馈只对当前用户可见，响应不包含其他用户的报告。
 
@@ -375,8 +377,8 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `FollowupItem` | `text` | 保存的原始追问文字。 |
 | `FollowupItem` | `answer_markdown` | 完成后返回 Markdown 答复，最多 65536 UTF-8 字节；其他状态为 null。 |
 | `FollowupItem` | `failure` | 失败或中断时返回 `FollowupFailure`，其他状态为 null。 |
-| `FollowupItem` | `created_at` | 追问首次保存的 UTC 时间。 |
-| `FollowupItem` | `updated_at` | 追问状态最近变化的 UTC 时间。 |
+| `FollowupItem` | `created_at` | 追问首次保存的服务时间。 |
+| `FollowupItem` | `updated_at` | 追问状态最近变化的服务时间。 |
 | `FollowupView` | `schema_version` | 追问快照版本，固定为 `1`。 |
 | `FollowupView` | `conversation_id` | 路径指定的会话 UUID。 |
 | `FollowupView` | `run_id` | 路径指定的报告轮次 UUID。 |
@@ -488,9 +490,9 @@ curl --no-buffer --fail-with-body \
 ```text
 : connected
 
-data: {"schema_version":2,"run_id":"50000000-0000-0000-0000-000000000001","sequence":13,"conversation_id":"10000000-0000-0000-0000-000000000001","case_id":"40000000-0000-0000-0000-000000000001","job_id":null,"type":"case.updated","created_at":"2026-09-07T08:00:01.000Z","data":{"status":"WAITING_INPUT","case_revision":2}}
+data: {"schema_version":2,"run_id":"50000000-0000-0000-0000-000000000001","sequence":13,"conversation_id":"10000000-0000-0000-0000-000000000001","case_id":"40000000-0000-0000-0000-000000000001","job_id":null,"type":"case.updated","created_at":"2026-09-07T16:00:01.000+08:00","data":{"status":"WAITING_INPUT","case_revision":2}}
 
-data: {"schema_version":2,"run_id":"50000000-0000-0000-0000-000000000001","sequence":14,"conversation_id":"10000000-0000-0000-0000-000000000001","case_id":"40000000-0000-0000-0000-000000000001","job_id":null,"type":"assistant.question","created_at":"2026-09-07T08:00:02.000Z","data":{"questions":["问题发生在哪个时间段？"]}}
+data: {"schema_version":2,"run_id":"50000000-0000-0000-0000-000000000001","sequence":14,"conversation_id":"10000000-0000-0000-0000-000000000001","case_id":"40000000-0000-0000-0000-000000000001","job_id":null,"type":"assistant.question","created_at":"2026-09-07T16:00:02.000+08:00","data":{"questions":["问题发生在哪个时间段？"]}}
 
 : heartbeat
 
@@ -752,7 +754,7 @@ node --test examples/website-agent/server.test.mjs
 | `ConversationReportView` | `source_job_id` | 生成正式报告的任务 UUID；报告未就绪时为 null。 |
 | `PublicArtifactData` | `artifact_id` | 不可变公开产物的 UUID。 |
 | `PublicArtifactData` | `content_type` | 产物原始字节的媒体类型。 |
-| `PublicArtifactData` | `created_at` | 创建时间，使用 UTC RFC 3339，精确到毫秒。 |
+| `PublicArtifactData` | `created_at` | 创建时间，使用带 `+08:00` 偏移的 RFC 3339，精确到毫秒；历史记录可返回 `Z`。 |
 | `PublicArtifactData` | `created_by_job_id` | 生成产物的任务 UUID，必须与报告的 source_job_id 一致。 |
 | `PublicArtifactData` | `downloadable` | 是否允许下载；本接口返回的报告产物固定为 true。 |
 | `PublicArtifactData` | `kind` | 产物种类；报告使用 USER_RESULT 或 GENERIC_REPORT。 |
@@ -768,7 +770,7 @@ node --test examples/website-agent/server.test.mjs
 | `ConversationDownloadArtifact` | `size` | 文件实际字节数；下载时据此核对内容。 |
 | `ConversationDownloadArtifact` | `sha256` | 原始文件的 64 位小写 SHA-256；不是会话响应哈希。 |
 | `ConversationDownloadArtifact` | `created_by_job_id` | 来源任务，与当前会话响应的 source_job_id 一致。 |
-| `ConversationDownloadArtifact` | `created_at` | 文件发布的 UTC 时间。 |
+| `ConversationDownloadArtifact` | `created_at` | 文件发布的服务时间。 |
 | `ConversationDownloadArtifact` | `downloadable` | 固定为 true；会话仅提供可下载的正式产物。 |
 | `ConversationDownloadArtifact` | `download_url` | 已核验标识构成的文件入口；网站后端重写为授权后的同源 URL。 |
 | `AgentProgressData` | `stage` | 当前最新的公开执行阶段，例如 ROUTE、LOGPARSE、DIAGNOSE、REVIEW、ARCHIVE 或 INTAKE。 |

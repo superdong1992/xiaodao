@@ -13,6 +13,7 @@ from problem_locator.application.audit_bundle import (
     build_audit_bundle,
 )
 from problem_locator.application.audit_bundle_assembler import (
+    _audit_job_ids,
     _source_draft_filename,
     _validated_decision_evidence_bytes,
     _validated_review_subject_bytes,
@@ -21,12 +22,30 @@ from problem_locator.contracts import (
     DecisionAuditV2,
     Job,
     JobOutcome,
+    StateFile,
     WorkspaceInputManifest,
     canonical_json_bytes,
 )
 
 
 FIXTURES = Path(__file__).resolve().parents[4] / "tests/fixtures/contracts/positive"
+
+
+def test_audit_job_closure_sorts_mixed_offsets_by_instant() -> None:
+    source = Job.model_validate_json((FIXTURES / "job-diagnose.json").read_bytes())
+    prior = Job.model_validate_json((FIXTURES / "job-route.json").read_bytes())
+    prior_outcome = JobOutcome.model_validate_json((FIXTURES / "job-outcome-route.json").read_bytes())
+    prior = prior.model_copy(update={"created_at": "2026-10-11T00:00:00.000+08:00"})
+    source = source.model_copy(update={
+        "created_at": "2026-10-10T16:00:00.001Z",
+        "previous_outcome_refs": [prior_outcome.outcome_id],
+    })
+    aggregate = StateFile.model_validate_json((FIXTURES / "state.json").read_bytes()).cases[source.case_id]
+    aggregate = aggregate.model_copy(update={
+        "jobs": {source.job_id: source, prior.job_id: prior},
+        "outcomes": {prior_outcome.outcome_id: prior_outcome},
+    })
+    assert _audit_job_ids(aggregate, source) == (prior.job_id, source.job_id)
 
 
 @pytest.mark.parametrize(

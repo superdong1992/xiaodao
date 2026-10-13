@@ -11,7 +11,6 @@ import sqlite3
 import sys
 import uuid
 from contextlib import closing
-from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,6 +27,7 @@ from problem_locator.storage.layout import DATA_FORMAT_MARKER_BYTES, StorageLayo
 from problem_locator.storage.platform import PlatformFileSync, chmod_no_follow
 from problem_locator.storage.postgres_layout import marker_bytes, root_identity
 from problem_locator.storage.state_repository import CaseStateRepository
+from problem_locator.timestamps import now_timestamp
 from . import data_upgrade as safety
 
 RECEIPT_FILENAME = "postgresql-import.receipt.json"
@@ -308,7 +308,7 @@ def import_data_root(source_root: Path, target_root: Path, *, database_url_env="
             for key, mode in sorted(inventory["directories"].items(), reverse=True):
                 if key != ".":
                     chmod_no_follow(payload / key, mode)
-            clock = SimpleNamespace(now=lambda: datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"))
+            clock = SimpleNamespace(now=now_timestamp)
             ids = SimpleNamespace(new=lambda kind: str(uuid.uuid4()))
             with closing(sqlite3.connect((database_copy / "completed.sqlite3").as_uri() + "?mode=ro", uri=True)) as sqlite:
                 sqlite.execute("PRAGMA trusted_schema=OFF")

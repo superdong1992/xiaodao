@@ -127,6 +127,65 @@ def test_old_report_submit_does_not_make_surviving_logs_eligible_for_a_new_snaps
     assert view(system).items[0].context_mode == "REPORT_ONLY"
 
 
+@pytest.mark.parametrize("occurred_at,expected", [
+    ("2026-09-24T00:59:59.999Z", False),
+    ("2026-09-24T08:59:59.999+08:00", False),
+    ("2026-09-24T01:00:00.000Z", True),
+    ("2026-09-24T09:00:00.000+08:00", True),
+])
+def test_snapshot_admission_uses_same_enable_instant_for_utc_and_local_reports(system, occurred_at, expected):
+    assert system.service.enabled_at == "2026-09-24T09:00:00.000+08:00"
+    system.source = replace(system.source, occurred_at=occurred_at)
+    assert system.service.observe_report(system.cid, system.rid) is expected
+    snapshot = system.service.store.snapshot(system.rid)
+    assert (snapshot is not None) is expected
+    if snapshot is not None:
+        assert snapshot["status"] == "PENDING"
+
+
+def test_followup_items_events_and_snapshots_use_local_offset(system):
+    submit(system)
+    local_now = "2026-09-24T09:00:00.000+08:00"
+    item = view(system).items[0]
+    assert item.created_at == item.updated_at == local_now
+    snapshot = system.service.store.snapshot(system.rid)
+    assert snapshot["created_at"] == snapshot["updated_at"] == local_now
+    system.clock.value = "2026-09-24T01:00:01.000Z"
+    task = system.service.store.claim_task()
+    assert task is not None
+    assert system.service.store.finish_task(task["followup_id"], answer="依据报告补充解释。")
+    item = view(system).items[0]
+    assert item.created_at == local_now
+    assert item.updated_at == "2026-09-24T09:00:01.000+08:00"
+    events = system.service.list_events(system.cid, system.rid, owner_key=OWNER).events
+    assert all(event.created_at.endswith("+08:00") for event in events)
+    assert all(event.data.created_at.endswith("+08:00") for event in events)
+    assert FollowupStore(system.repository).now().endswith("+08:00")
+
+
+@pytest.mark.parametrize("occurred_at", ["2026-09-17T01:00:00.001Z", "2026-09-17T09:00:00.001+08:00"])
+def test_followup_expiry_preserves_seven_day_boundary_across_offsets(system, occurred_at):
+    system.source = replace(system.source, occurred_at=occurred_at)
+    system.clock.value = "2026-09-24T09:00:00.000+08:00"
+    assert view(system).can_ask
+    system.clock.value = "2026-09-24T09:00:00.001+08:00"
+    assert view(system).reason == "EXPIRED"
+
+
+def test_snapshot_queue_orders_mixed_offsets_by_instant_without_rewriting_history(system):
+    store = system.service.store
+    assert store.enqueue_snapshot(system.cid, system.rid, system.source)
+    newer = system.agent.store.create_conversation("newer", owner_key=OWNER)
+    assert store.enqueue_snapshot(newer.conversation_id, newer.run_id, system.source)
+    with system.repository.database_transaction() as db:
+        db.execute("UPDATE agent_followup_snapshots SET created_at=? WHERE run_id=?",
+            ("2026-09-24T08:00:00.000+08:00", system.rid))
+        db.execute("UPDATE agent_followup_snapshots SET created_at=? WHERE run_id=?", (NOW, newer.run_id))
+    assert store.claim_snapshot()["run_id"] == system.rid
+    assert store.claim_snapshot()["run_id"] == newer.run_id
+    assert store.snapshot(newer.run_id)["created_at"] == NOW
+
+
 @pytest.mark.parametrize("kind", ["GENERIC", "SKILL_DIRECT"])
 def test_snapshot_is_async_verified_and_model_only_reads_the_copied_inputs(system, kind):
     original, job = make_logs(system, kind=kind)

@@ -88,6 +88,7 @@ from .methods_reason_v2 import (
 
 UUID_PATTERN = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 UTC_TIMESTAMP_PATTERN = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$"
+SERVICE_TIMESTAMP_PATTERN = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}(?:Z|\+08:00)$"
 SHA256_PATTERN = r"^[0-9a-f]{64}$"
 CONTENT_TYPE_PATTERN = r"^[a-z0-9][a-z0-9!#$&^_.+\-]{0,62}/[a-z0-9][a-z0-9!#$&^_.+\-]{0,62}$"
 NAME_PATTERN = r"^[a-z][a-z0-9_]{0,63}$"
@@ -127,6 +128,15 @@ def _validate_utc_timestamp(value: str) -> str:
         raise ValueError("timestamp must be a real millisecond UTC RFC 3339 value") from exc
     if len(value.rsplit(".", 1)[-1]) != 4:  # exactly ``sssZ``
         raise ValueError("timestamp precision must be exactly milliseconds")
+    return value
+
+
+def _validate_service_timestamp(value: str) -> str:
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("时间戳必须是有效的毫秒精度 RFC 3339 时间，使用 +08:00 或历史 Z 格式。") from exc
+    # Preserve persisted UTC bytes and newly generated +08:00 bytes exactly.
     return value
 
 
@@ -284,6 +294,11 @@ UtcTimestamp: TypeAlias = Annotated[
     str,
     StringConstraints(pattern=UTC_TIMESTAMP_PATTERN, strict=True),
     AfterValidator(_validate_utc_timestamp),
+]
+ServiceTimestamp: TypeAlias = Annotated[
+    str,
+    StringConstraints(pattern=SERVICE_TIMESTAMP_PATTERN, strict=True),
+    AfterValidator(_validate_service_timestamp),
 ]
 Sha256: TypeAlias = Annotated[str, StringConstraints(pattern=SHA256_PATTERN, strict=True)]
 ContentType: TypeAlias = Annotated[str, StringConstraints(pattern=CONTENT_TYPE_PATTERN, strict=True)]
@@ -1194,7 +1209,7 @@ class CaseFailure(ContractModel):
     message: NonEmptyText
     source_job_id: OpaqueId | None
     source_outcome_id: OpaqueId | None
-    occurred_at: UtcTimestamp
+    occurred_at: ServiceTimestamp
     reason_code: MethodsValidationReasonCode | MethodsTerminalReasonCodeV2 | None = Field(
         default=None,
         description="Stable machine-readable reason for a classified Methods failure.",
@@ -1223,7 +1238,7 @@ class UnresolvedResultDraft(ContractModel):
     evidence_bindings: list[EvidenceBinding]
     user_result_proposal_key: NonEmptyText
     recommended_next_step: NonEmptyText
-    occurred_at: UtcTimestamp
+    occurred_at: ServiceTimestamp
 
     @model_validator(mode="after")
     def validate_refs(self) -> UnresolvedResultDraft:
@@ -1253,7 +1268,7 @@ class UnresolvedResult(ContractModel):
     evidence_refs: list[OpaqueId]
     user_result_artifact_id: OpaqueId
     recommended_next_step: NonEmptyText
-    occurred_at: UtcTimestamp
+    occurred_at: ServiceTimestamp
     audit_artifact_id: OpaqueId
 
     @model_validator(mode="after")
@@ -1291,7 +1306,7 @@ class GenericResult(ContractModel):
     skill_name: SkillName
     source_job_id: OpaqueId
     source_outcome_id: OpaqueId
-    occurred_at: UtcTimestamp
+    occurred_at: ServiceTimestamp
 
 
 class GenericResultV2Draft(ContractModel):
@@ -1303,7 +1318,7 @@ class GenericResultV2Draft(ContractModel):
     skill_name: SkillName
     source_job_id: OpaqueId
     source_outcome_id: OpaqueId
-    occurred_at: UtcTimestamp
+    occurred_at: ServiceTimestamp
 
     @model_validator(mode="after")
     def validate_report(self) -> GenericResultV2Draft:
@@ -1325,7 +1340,7 @@ class GenericResultV2(ContractModel):
     skill_name: SkillName
     source_job_id: OpaqueId
     source_outcome_id: OpaqueId
-    occurred_at: UtcTimestamp
+    occurred_at: ServiceTimestamp
 
     @model_validator(mode="after")
     def validate_report(self) -> GenericResultV2:
@@ -1370,8 +1385,8 @@ class Case(ContractModel):
         exclude_if=lambda value: value is None,
     )
     failure: CaseFailure | None
-    created_at: UtcTimestamp
-    updated_at: UtcTimestamp
+    created_at: ServiceTimestamp
+    updated_at: ServiceTimestamp
 
     @model_validator(mode="after")
     def validate_terminal_fields(self) -> Case:
@@ -1525,9 +1540,9 @@ class Job(ContractModel):
     )
     replacement_for_job_id: OpaqueId | None
     resource_limits: ResourceLimits
-    created_at: UtcTimestamp
-    started_at: UtcTimestamp | None
-    finished_at: UtcTimestamp | None
+    created_at: ServiceTimestamp
+    started_at: ServiceTimestamp | None
+    finished_at: ServiceTimestamp | None
     runtime_epoch: OpaqueId | None
 
     @model_validator(mode="after")
@@ -1709,8 +1724,8 @@ class Attachment(ContractModel):
     size: Annotated[int, Field(ge=0, le=MAX_ATTACHMENT_BYTES, strict=True)] | None
     sha256: Sha256 | None
     storage_key: RelativePosixPath | None
-    created_at: UtcTimestamp
-    updated_at: UtcTimestamp
+    created_at: ServiceTimestamp
+    updated_at: ServiceTimestamp
 
     @model_validator(mode="after")
     def validate_attachment(self) -> Attachment:
@@ -1801,7 +1816,7 @@ class Evidence(ContractModel):
     source_ref: OpaqueId
     locator: EvidenceLocator
     summary: NonEmptyText
-    collected_at: UtcTimestamp
+    collected_at: ServiceTimestamp
     content_hash: Sha256 | None
     resource_ref: ResourceRef | None
 
@@ -1910,7 +1925,7 @@ class Artifact(ContractModel):
     storage_key: RelativePosixPath
     metadata: ArtifactMetadata
     created_by_job_id: OpaqueId
-    created_at: UtcTimestamp
+    created_at: ServiceTimestamp
 
     @model_validator(mode="after")
     def validate_artifact(self) -> Artifact:
@@ -3696,7 +3711,7 @@ class AgentJobOutcome(ContractModel):
     proposed_evidence_drafts: list[AgentEvidenceProposalDraft]
     proposed_artifact_drafts: list[AgentArtifactProposalDraft]
     error: AgentExecutionFailure | None
-    produced_at: UtcTimestamp
+    produced_at: ServiceTimestamp
     decision_audit: DecisionAuditV2 | None = None
 
     @model_validator(mode="after")
@@ -3750,7 +3765,7 @@ class JobOutcome(ContractModel):
     proposed_evidence: list[EvidenceProposal]
     proposed_artifacts: list[ArtifactProposal]
     error: ExecutionFailure | None
-    produced_at: UtcTimestamp
+    produced_at: ServiceTimestamp
     decision_audit: DecisionAuditV2 | None = None
     methods_review_target: MethodsReviewTargetV2 | None = Field(
         default=None,
@@ -4439,8 +4454,8 @@ class JobLifecycleUpdate(ContractModel):
     job_id: OpaqueId
     expected_status: JobStatus
     target_status: JobStatus
-    started_at: UtcTimestamp | None
-    finished_at: UtcTimestamp | None
+    started_at: ServiceTimestamp | None
+    finished_at: ServiceTimestamp | None
     runtime_epoch: OpaqueId | None
 
 
@@ -4764,7 +4779,7 @@ class ValidatedTrigger(ContractModel):
     payload: TriggerPayload
     continuation_resources: ContinuationResourceView
     runtime_bindings_by_job_type: dict[JobType, RuntimeBindings]
-    occurred_at: UtcTimestamp
+    occurred_at: ServiceTimestamp
 
     @model_validator(mode="after")
     def validate_trigger(self) -> ValidatedTrigger:
@@ -5078,7 +5093,7 @@ class IdempotencyRecord(ContractModel):
     request_hash: Sha256
     business_receipt: BusinessReceipt
     case_id: OpaqueId | None
-    created_at: UtcTimestamp
+    created_at: ServiceTimestamp
 
 
 class OutcomeProcessingRecord(ContractModel):
@@ -5101,7 +5116,7 @@ class OutcomeProcessingRecord(ContractModel):
         description="Trusted finalized reference, or caller-claimed receipt reference for an untrusted technical rejection."
     )
     disposition: OutcomeDisposition
-    processed_at: UtcTimestamp
+    processed_at: ServiceTimestamp
     error_code: ErrorCode | None
     accepted_evidence_ids: list[OpaqueId]
     accepted_artifact_ids: list[OpaqueId]
@@ -5152,14 +5167,14 @@ class ExecutionFailureRecord(ContractModel):
     job_id: OpaqueId
     runtime_epoch: OpaqueId
     failure: ExecutionFailure
-    recorded_at: UtcTimestamp
+    recorded_at: ServiceTimestamp
 
 
 class RuntimeEpochRecord(ContractModel):
     runtime_epoch: OpaqueId
-    started_at: UtcTimestamp
+    started_at: ServiceTimestamp
     recovery_id: OpaqueId
-    recovery_completed_at: UtcTimestamp | None
+    recovery_completed_at: ServiceTimestamp | None
 
 
 class RecoveryProcessingRecord(ContractModel):
@@ -5167,7 +5182,7 @@ class RecoveryProcessingRecord(ContractModel):
     current_runtime_epoch: OpaqueId
     interrupted_job_ids: list[OpaqueId]
     pending_job_ids: list[OpaqueId]
-    completed_at: UtcTimestamp | None
+    completed_at: ServiceTimestamp | None
 
     @model_validator(mode="after")
     def validate_job_ids(self) -> RecoveryProcessingRecord:
@@ -5801,8 +5816,8 @@ class StateFile(ContractModel):
     contract_revision: Literal[CONTRACT_REVISION]
     generation: NonNegativeInt
     installation_id: OpaqueId
-    created_at: UtcTimestamp
-    updated_at: UtcTimestamp
+    created_at: ServiceTimestamp
+    updated_at: ServiceTimestamp
     runtime_epochs: list[RuntimeEpochRecord]
     recovery_processing_records: dict[OpaqueId, RecoveryProcessingRecord]
     cases: dict[OpaqueId, CaseAggregate]
@@ -5970,9 +5985,9 @@ class JobSummary(ContractModel):
     status: JobStatus
     goal: NonEmptyText
     base_state_revision: PositiveInt
-    created_at: UtcTimestamp
-    started_at: UtcTimestamp | None
-    finished_at: UtcTimestamp | None
+    created_at: ServiceTimestamp
+    started_at: ServiceTimestamp | None
+    finished_at: ServiceTimestamp | None
 
     @model_validator(mode="after")
     def validate_lifecycle(self) -> JobSummary:
@@ -6003,7 +6018,7 @@ class ArtifactSummary(ContractModel):
     size: NonNegativeInt
     sha256: Sha256
     created_by_job_id: OpaqueId
-    created_at: UtcTimestamp
+    created_at: ServiceTimestamp
     downloadable: bool
 
     @model_validator(mode="after")
@@ -6055,7 +6070,7 @@ class ArtifactView(ContractModel):
     content_type: ContentType
     size: NonNegativeInt
     sha256: Sha256
-    created_at: UtcTimestamp
+    created_at: ServiceTimestamp
     download_url: NonEmptyText
 
 
@@ -6084,8 +6099,8 @@ class CaseView(ContractModel):
     )
     failure: CaseFailure | None
     artifacts: list[ArtifactSummary]
-    created_at: UtcTimestamp
-    updated_at: UtcTimestamp
+    created_at: ServiceTimestamp
+    updated_at: ServiceTimestamp
 
     @model_validator(mode="after")
     def validate_view(self) -> CaseView:
@@ -7072,6 +7087,7 @@ __all__ = [model.__name__ for model in _CONTRACT_MODEL_TYPES] + [
     "TriggerPayload",
     "UNTRUSTED_OUTCOME_REJECTION_CODES",
     "UtcTimestamp",
+    "ServiceTimestamp",
     "UserResultArchiveMetadata",
     "UserResultMetadata",
     "UserResultPayload",

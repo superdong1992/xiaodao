@@ -21,7 +21,7 @@ from problem_locator.storage.paths import ensure_no_symlink_ancestors
 CARD_VERSION = 1
 MAX_CARD_BYTES = 4096
 MAX_SOURCE_BYTES = 65536
-EXTRACTION_LIMITS = ResourceLimits(context_bytes=262144, wall_time_seconds=120,
+EXTRACTION_LIMITS = ResourceLimits(context_bytes=262144, wall_time_seconds=180,
     stdout_stderr_bytes=65536, workspace_bytes=65536)
 _FIELDS = {"problem_features": (8, 96), "applicability": (6, 256),
     "steps": (8, 256), "limitations": (6, 256)}

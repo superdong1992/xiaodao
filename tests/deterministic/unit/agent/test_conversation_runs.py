@@ -134,6 +134,57 @@ def test_owner_directory_cursor_and_rename_are_isolated(store):
         store.require_owner(legacy.conversation_id, owner)
 
 
+def test_directory_and_cursor_compare_mixed_offsets_by_instant(store, monkeypatch):
+    owner = "a" * 64
+    ids = []
+    for index, timestamp in enumerate((
+        "2026-09-18T07:00:00.000+08:00",
+        "2026-09-18T00:00:00.000Z",
+        "2026-09-18T08:00:00.001+08:00",
+    )):
+        monkeypatch.setattr(store, "_now", lambda value=timestamp: value)
+        ids.append(store.create_conversation(f"mixed-{index}", owner_key=owner).conversation_id)
+    assert [item.conversation_id for item in store.list_conversations(owner).items] == ids[::-1]
+    cursor, paged = None, []
+    for _ in ids:
+        page = store.list_conversations(owner, cursor=cursor, limit=1)
+        paged.append(page.items[0].conversation_id)
+        cursor = page.next_cursor
+    assert paged == ids[::-1]
+    assert cursor is None
+    first = store.list_conversations(owner, limit=1)
+    original = store._decode_cursor(first.next_cursor)
+    alternate = [original[0], original[1].replace("2026-09-18", "2026-W38-5"), original[2]]
+    assert store.list_conversations(owner, cursor=store._cursor(alternate)) == store.list_conversations(
+        owner, cursor=first.next_cursor)
+    for timestamp in ("invalid timestamp", "2026-09-18T08:00:00.001", "2026-99-99T08:00:00.001+08:00"):
+        invalid = [original[0], timestamp, original[2]]
+        with pytest.raises(AgentStoreError) as failure:
+            store.list_conversations(owner, cursor=store._cursor(invalid))
+        assert failure.value.code == "AGENT_INVALID_CURSOR"
+
+
+def test_directory_cursor_normalization_preserves_legacy_microseconds(store, monkeypatch):
+    owner = "a" * 64
+    monkeypatch.setattr(store, "_now", lambda: "2026-09-18T08:00:00.000+08:00")
+    store.create_conversation("first", owner_key=owner)
+    store.create_conversation("second", owner_key=owner)
+    values = store._decode_cursor(store.list_conversations(owner, limit=1).next_cursor)
+    values[1] = "2026-W38-5T08:00:00.123456+08:00"
+    statements = []
+    with store.repository.database_read() as db:
+        db.set_trace_callback(statements.append)
+        try:
+            result = store.list_conversations(owner, cursor=store._cursor(values))
+        finally:
+            db.set_trace_callback(None)
+    assert len(result.items) == 2
+    selects = [sql for sql in statements if sql.startswith("SELECT c.conversation_id,")]
+    assert len(selects) == 1
+    assert "2026-09-18T08:00:00.123456+08:00" in selects[0]
+    assert "2026-W38-5" not in selects[0]
+
+
 def test_history_is_bounded_chronological_and_uses_index_without_case_reads(store, monkeypatch):
     created = store.create_conversation("create")
     cid = created.conversation_id
@@ -171,12 +222,20 @@ def test_directory_reads_indexed_summaries_without_loading_private_drafts(store,
     store.set_draft(created.conversation_id, {"large_private_input": "x" * 1000000})
     monkeypatch.setattr(store, "_load", lambda *a, **kw: pytest.fail("directory must not load a full run"))
     monkeypatch.setattr(store.repository, "read_case_snapshot_with", lambda *a: pytest.fail("directory must not read Case"))
-    result = store.list_conversations(owner)
+    statements = []
+    with store.repository.database_read() as db:
+        db.set_trace_callback(statements.append)
+        try:
+            result = store.list_conversations(owner)
+        finally:
+            db.set_trace_callback(None)
     assert result.items[0].current_run.run_id == created.run_id
     assert len(result.model_dump_json()) < 2000
+    selects = [sql for sql in statements if sql.startswith("SELECT")]
+    assert len(selects) == 1
     with store.repository.database_read() as db:
-        plan = db.execute("EXPLAIN QUERY PLAN SELECT conversation_id,updated_at FROM agent_conversations WHERE owner_key IS ? AND deleted_at IS NULL ORDER BY updated_at DESC,conversation_id DESC LIMIT ?", (owner, 21)).fetchall()
-    assert any("agent_directory" in row[-1] for row in plan)
+        plan = db.execute("EXPLAIN QUERY PLAN " + selects[0]).fetchall()
+    assert any("agent_directory" in row[-1] and "owner_key=? AND deleted_at=?" in row[-1] for row in plan)
 
 
 def test_work_discovery_keeps_uncovered_input_and_current_dispatch_without_idle_runs(store):

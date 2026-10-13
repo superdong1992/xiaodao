@@ -62,7 +62,7 @@ def test_content_type_accepts_the_exact_127_ascii_character_boundary() -> None:
         "2026-07-31T00:00:00.000z",
     ],
 )
-def test_utc_timestamp_requires_millisecond_z_form(timestamp: str) -> None:
+def test_service_timestamp_rejects_noncanonical_time_forms(timestamp: str) -> None:
     payload = load_json(FIXTURE_ROOT / "positive" / "job-route.json")
     payload["created_at"] = timestamp
     with pytest.raises((TypeError, ValueError, ValidationError)):

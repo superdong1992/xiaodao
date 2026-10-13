@@ -1,9 +1,29 @@
 # 已修复问题台账
 
-更新时间：2026-09-30
+更新时间：2026-10-10
 
 本文件记录已经在当前工作区验证、修复并由专项回归测试保护的问题。活跃待办仍只写入
 [`TODO.md`](TODO.md)；同一问题再次回归时更新原条目，不另建一个缺少历史关联的条目。
+
+## PL-FIX-080：将 Intake 和经验提炼的执行时限调整为 180 秒
+
+- **状态**：参数和对应断言已更新；正式验证以本条最新 Test Flow 元数据为准。
+- **症状、受影响版本与确认**：8.2.0 / `e1de505` 当前工作区中，`INTAKE_RESOURCE_LIMITS` 与 `EXTRACTION_LIMITS` 的 `wall_time_seconds` 均为 120；Intake 资产和 Test Flow 预算声明同为 120。已核对实际后端调用路径；本次按用户要求调整为 180 秒，不将参数核对等同于线上超时事件已复现。
+- **根因与修复历史（2026-10-10）**：执行时限分别声明在生产资源限制、Intake 资产和测试运行配置中。同步调整为 180 秒，并更新审计收据的限时说明和活跃文档；实际截止时间仍由后端按传入的 `ResourceLimits` 计算。
+- **不可回归行为**：Intake 和经验提炼传给后端的执行时限均为 180 秒；Intake 资产、Test Flow 限时预算与审计声明一致；不改变调用次数、模型回合、token、费用和其他任务的时限。
+- **专项回归测试**：`test_intake.py::test_engine_reuses_backend_with_no_tools_broker_or_job` 检查真实调用参数及资产声明；`test_experience_memory.py::test_extraction_preserves_source_and_has_no_tools_files_or_raw_logs` 检查经验提炼调用参数；`tools/test-flow/tests/intake-usage.test.mjs` 检查 Intake 限额收据。
+- **最新 Test Flow verdict（PL-FIX-080）**：`dev.default` [run-20261010T093901Z-138684c7](.tmp/walltime-dev-evidence-20261010/run-20261010T093901Z-138684c7/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，唯一警告为 performance `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:d45ccfe20feb6f36f4be28345bf444701f4aabf2985c06288f1397f1456d4655`（955 files），verdict 文件 SHA-256 `8bdd592518c3555c05299f0b848a6a3d7cd922fbcd0cd420ad6fe041c04abad5`。受影响范围按编排规则交完整轨覆盖，全部确定性 Gate 通过；模型调用、token 和费用均为 0。独立 Ubuntu 22.04 / Python 3.12.10 / PostgreSQL 15.19，Linux 与本地源码逐文件一致，101 份证据复制后哈希一致。本行仅为验证后的元数据回填，不属于所引用源码快照；不代表真实模型 Release 或线上部署验收。
+
+## PL-FIX-079：服务时间固定输出 UTC，与本地 UTC+08:00 不一致
+
+- **状态**：实现和专项回归已完成；正式验证以本条最新 Test Flow 元数据为准。
+- **症状、受影响版本与确认**：8.2.0 / `e1de505` 中，当前工作区的 `ProductionClock.now()` 实际返回 `2026-10-10T08:25:55.603Z`，没有使用用户要求的 `+08:00`。诊断日志、Journey、独立存储时钟和离线工具也各自生成 UTC 时间；原合同拒绝 `+08:00`，部分排序和过期判断直接比较字符串，无法安全混用历史 UTC 与本地时间。
+- **根因**：服务生成时间与问题发生时间共用严格 UTC 类型，缺少统一的服务时间格式化入口；存储及查询依赖所有时间字符串使用相同时区。
+- **修复历史（2026-10-10）**：新增统一时间模块，生产时钟、诊断日志及兜底、Journey、运行故障、会话、经验反馈、报告追问和离线回执统一生成毫秒精度 `+08:00`。新增 `ServiceTimestamp`，接受新格式及历史 `Z`，不重写旧数据；同步 schema、OpenAPI 和活跃接口文档。Python 与 SQLite/PostgreSQL 按实际时刻比较，覆盖会话分页、最新故障与恢复任务选择、产物排序和历史清理。
+- **不可回归行为**：固定 `UTC+08:00`，不依赖服务器或容器默认时区；转换不改变实际时刻，保留毫秒精度，正确跨日、跨年；历史 `Z` 与新 `+08:00` 可混用，排序和到期边界准确到毫秒。问题时间、日志证据时间和 Test Flow 的 UTC 协议字段保留原合同。
+- **专项回归测试**：`test_timestamps.py` 覆盖固定偏移、精度、日历边界及无时区输入；`test_service_timestamps.py` 覆盖模型和持久化往返及 UTC 业务边界；`test_diagnostics.py`、`test_journey.py`、`test_journey_renderer.py`、`test_bootstrap_composition.py` 覆盖真实输出和耗时计算；`test_conversation_runs.py`、`test_store.py`、`test_projection.py`、`test_reports.py`、`test_audit_bundle.py`、`test_generic_feedback.py`、`test_report_followup.py`、`test_history_retention.py`、`test_retention.py` 覆盖混合时区排序、分页、选择与到期，PostgreSQL 专项复用真实数据库分页断言。
+- **查询边界**：混合时区需数据库按实际时刻换算、排序时间元数据，原文本时间索引不再直接承担全部时间范围扫描或排序。会话仍按归属索引筛选，不逐个读取 Case、报告或私有草稿；专项检查实际 SQL，不能用旧查询计划宣称排序性能保持不变。
+- **最新 Test Flow verdict（PL-FIX-079）**：`dev.default` [run-20261010T084331Z-a530274e](.tmp/timestamp-dev-evidence-20261010/run-20261010T084331Z-a530274e/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，唯一警告为 performance `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:46446dde08132da69406a1bee149c0191f44771e21bbe6653671912dd7d86607`（955 files），verdict 文件 SHA-256 `f39da75a50f1a7a5522d17057c82b7eb0469a230ec9610e87881fe28e77283b1`。受影响范围按编排规则交完整轨覆盖：合同 612、单元 3,566、PostgreSQL 61、集成 198、Core 32、SameJob 5、MCP 2、Web API 2 项通过；单元 2 项平台跳过，网站示例与框架检查通过。独立 Ubuntu 22.04 / Python 3.12.10 / PostgreSQL 15.19，模型调用、token 和费用均为 0；Linux 与本地源码逐文件一致，101 份证据复制后哈希一致。本行仅为验证后的元数据回填，不属于所引用源码快照；本次 Dev 结论不替代真实模型 Release 或线上部署验收。
 
 ## PL-FIX-078：报告赞踩被经验库开关和提炼条件阻断
 

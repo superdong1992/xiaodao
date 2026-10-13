@@ -48,7 +48,7 @@
 | --- | --- | --- |
 | `uuid` | `string` | 小写规范 UUID：`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`。所有 `case_id`、`job_id`、`attachment_id`、`artifact_id` 等资源 ID 均使用此格式。 |
 | `sha256` | `string` | 原始字节的 SHA-256，小写十六进制，恰好 64 位：`^[0-9a-f]{64}$`。 |
-| `timestamp` | `string` | UTC RFC 3339，必须恰好毫秒精度，例如 `2026-08-18T02:30:00.000Z`。 |
+| `timestamp` | `string` | 服务生成时间使用 RFC 3339，必须恰好毫秒精度，固定偏移 `+08:00`，例如 `2026-08-18T10:30:00.000+08:00`；历史记录仍可返回 `Z` 格式。 |
 | `name` | `string` | `^[a-z][a-z0-9_]{0,63}$`，用于事实、输入和 requirement 名称。 |
 | `text` | `string` | 非空、不能全为空白、最多 65,536 UTF-8 字节；前端不要自动 trim 或改写用户文本。 |
 | `content_type` | `string` | 小写规范 media type，不带参数；归档上传使用 `application/zip`、`application/x-tar` 或 `application/gzip`。 |
@@ -59,6 +59,8 @@
 
 OpenAPI 对受 UTF-8 字节数约束的字符串同时给出 `maxLength` 和
 `x-max-utf8-bytes`；前者是字符长度提示，后者才是多字节文本也必须遵守的实际字节上限。
+
+创建、更新、执行、结果产生等服务时间统一使用 `+08:00`，不受服务器操作系统时区影响。前端应按字符串中的时区解析，不能自行再加 8 小时；历史 `Z` 记录保留原格式。诊断输入 `problem_time`、日志事件时间和证据时间范围仍使用毫秒精度 UTC，避免改变日志检索与证据比对规则。
 
 ### 2.3 JSON 响应格式
 
@@ -335,8 +337,8 @@ GET /api/v1/cases/10000000-0000-4000-8000-000000000001?wait_for_job_id=20000000-
       "artifacts": [],
       "archive_status": "NOT_REQUIRED",
       "attachments": [],
-      "created_at": "2026-08-18T02:30:00.000Z",
-      "updated_at": "2026-08-18T02:31:00.000Z"
+      "created_at": "2026-08-18T10:30:00.000+08:00",
+      "updated_at": "2026-08-18T10:31:00.000+08:00"
     },
     "wait_timed_out": false
   },
@@ -533,7 +535,7 @@ GET /api/v1/cases/10000000-0000-4000-8000-000000000001/artifacts
         "content_type": "application/json",
         "size": 512,
         "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "created_at": "2026-08-18T02:35:00.000Z",
+        "created_at": "2026-08-18T10:35:00.000+08:00",
         "download_url": "https://locator.example/api/v1/artifacts/40000000-0000-4000-8000-000000000001/content?case_id=10000000-0000-4000-8000-000000000001"
       },
       {
@@ -543,7 +545,7 @@ GET /api/v1/cases/10000000-0000-4000-8000-000000000001/artifacts
         "content_type": "application/zip",
         "size": 4096,
         "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-        "created_at": "2026-08-18T02:35:00.000Z",
+        "created_at": "2026-08-18T10:35:00.000+08:00",
         "download_url": "https://locator.example/api/v1/artifacts/40000000-0000-4000-8000-000000000002/content?case_id=10000000-0000-4000-8000-000000000001"
       }
     ]
@@ -1302,7 +1304,7 @@ latestCaseRevision = ready.case_revision;
 | `GenericResultV2` | `skill_name` | `text` | 产生报告的固定定位定义名称，可为专有或通用定位定义。 |
 | `GenericResultV2` | `source_job_id` | `uuid` | 产生报告的 Job。 |
 | `GenericResultV2` | `source_outcome_id` | `uuid` | 产生报告的 Outcome。 |
-| `GenericResultV2` | `occurred_at` | `timestamp` | 结果产生的 UTC 时间。 |
+| `GenericResultV2` | `occurred_at` | `timestamp` | 结果产生的服务时间。 |
 | `CaseView` | `failure` | `CaseFailure \| null` | 仅 `FAILED` 非空。 |
 | `CaseView` | `artifacts` | `ArtifactSummary[]` | 可见产物摘要；下载仍应先调用列表端点。 |
 | `CaseView` | `created_at` | `timestamp` | 创建时间。 |

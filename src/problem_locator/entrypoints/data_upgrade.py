@@ -17,7 +17,6 @@ import stat
 import sys
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 
 from problem_locator.agent.models import AgentAttachment, AgentMessage, ConversationView, MessageReceipt
@@ -29,6 +28,7 @@ from problem_locator.storage.paths import ensure_no_symlink_ancestors
 from problem_locator.storage.platform import PlatformFileSync, chmod_no_follow
 from problem_locator.storage.resource_files import validate_formal_resource
 from problem_locator.storage.layout import DATA_FORMAT_MARKER_BYTES
+from problem_locator.timestamps import now_timestamp
 
 
 SOURCE_REVISION = "v11-contract-r1"
@@ -531,7 +531,7 @@ def upgrade_data_root(source_root: Path, target_root: Path, *, execute: bool = F
             _require(_inventory(source) == inventory, "验证期间源目录发生变化。")
             result.update(status="UPGRADED", database_and_resource_validation="VERIFIED",
                 source_manifest=inventory, immutable_manifest_sha256=hashlib.sha256(canonical_json_bytes(immutable)).hexdigest(),
-                upgraded_at=datetime.now(timezone.utc).isoformat(),
+                upgraded_at=now_timestamp(),
                 next_step="请显式切换 DATA_ROOT 后启动新版本；回滚时重新使用原目录。")
             with (staging / RECEIPT_FILENAME).open("xb") as handle:
                 handle.write(canonical_json_bytes(result))

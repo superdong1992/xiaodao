@@ -17,12 +17,12 @@ import stat
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
+from problem_locator.timestamps import now_timestamp
 
 from problem_locator.application.preparation import fixed_asset_refs
 from problem_locator.contracts import (
@@ -266,14 +266,8 @@ class _ReplayProgress:
             final_case_status=self.final_case_status,
             stages=list(self.stages),
             error=error,
-            completed_at=_utc_now(),
+            completed_at=now_timestamp(),
         )
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
-        "+00:00", "Z"
-    )
 
 
 def _sha256(value: bytes | None) -> str | None:
@@ -656,7 +650,7 @@ def _project_case(source: Case, job: Job) -> Case:
         final_result=None,
         unresolved_result=None,
         failure=None,
-        updated_at=_utc_now(),
+        updated_at=now_timestamp(),
     )
     return Case.model_validate(payload)
 
@@ -1007,7 +1001,7 @@ def _build_projected_state(
         evidence=evidence,
         artifacts=artifacts,
     )
-    now = _utc_now()
+    now = now_timestamp()
     return StateFile(
         schema_version=SCHEMA_VERSION,
         contract_revision=CONTRACT_REVISION,
@@ -1204,7 +1198,7 @@ def _prepare_projection(
             source_fixed_asset_refs=fixed_asset_refs(source_job),
             replay_fixed_asset_refs=fixed_asset_refs(rebound_job),
             asset_diff=_asset_diff(source_job, rebound_job),
-            created_at=_utc_now(),
+            created_at=now_timestamp(),
         )
         return projected_state, rebound_job, manifest
     except (OSError, ValueError) as exc:

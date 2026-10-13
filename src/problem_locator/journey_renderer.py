@@ -13,7 +13,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
-from problem_locator.contracts.models import NonEmptyText, OpaqueId, UtcTimestamp
+from problem_locator.contracts.models import NonEmptyText, OpaqueId, ServiceTimestamp
 from problem_locator.journey import JourneyEvent
 from problem_locator.journey_timing import (
     JobTiming,
@@ -119,7 +119,7 @@ class RenderJourneyReceipt(BaseModel):
     case_id: OpaqueId
     case_status: NonEmptyText
     terminal: bool
-    as_of: UtcTimestamp
+    as_of: ServiceTimestamp
     events_rendered: int
     last_sequence: int
     unknown_event_count: int

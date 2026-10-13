@@ -17,7 +17,6 @@ import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -53,6 +52,7 @@ from problem_locator.contracts import (
 )
 from problem_locator.dispatch import RecoveryResult, SchedulerService
 from problem_locator.diagnostics import log_event
+from problem_locator.timestamps import now_timestamp
 from problem_locator.domain import DomainCoordinator, PureContextSnapshotProjector
 from problem_locator.entrypoints.cli import CliHooks, main as cli_main, run_uvicorn
 from problem_locator.entrypoints.replay import (
@@ -169,12 +169,10 @@ def _invalid_report(error: ApplicationError) -> ValidationReport:
 
 
 class ProductionClock:
-    """UTC clock with the frozen millisecond RFC 3339 representation."""
+    """Fixed UTC+08:00 clock with millisecond RFC 3339 timestamps."""
 
     def now(self) -> str:
-        return datetime.now(timezone.utc).isoformat(
-            timespec="milliseconds"
-        ).replace("+00:00", "Z")
+        return now_timestamp()
 
 
 class UuidIdGenerator:
