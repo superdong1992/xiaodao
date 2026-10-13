@@ -1,4 +1,4 @@
-"""Seven-day business history expiry with durable, exact-path cleanup receipts.
+"""Configurable business history expiry with durable, exact-path cleanup receipts.
 
 Only this installation's Case, run and upload metadata identifies candidates.
 No model is invoked, and no codeagent or external installation path is visited.
@@ -16,12 +16,13 @@ from pathlib import PurePosixPath
 from pydantic import TypeAdapter
 
 from problem_locator.contracts import OpaqueId
+from problem_locator.contracts.limits import DEFAULT_HISTORY_RETENTION_DAYS
 from problem_locator.diagnostics import log_event
 from problem_locator.timestamps import format_timestamp, parse_timestamp
 from .database import dialect_for, lock_conversation, lock_key
 from .paths import job_workspace_names
 
-HISTORY_RETENTION_SECONDS = 7 * 24 * 60 * 60
+HISTORY_RETENTION_SECONDS = DEFAULT_HISTORY_RETENTION_DAYS * 24 * 60 * 60
 _ID = TypeAdapter(OpaqueId)
 
 
@@ -34,7 +35,10 @@ class HistoryRetentionService:
 
     def __init__(self, repository, store, quarantine, usage_guard, clock, *,
                  dispatcher=None, archive=None, attachment_registry=None,
-                 coordination_lock=None):
+                 coordination_lock=None, retention_days=DEFAULT_HISTORY_RETENTION_DAYS):
+        if type(retention_days) is not int or not 1 <= retention_days <= 3650:
+            raise ValueError("retention_days 必须是 1–3650 之间的整数")
+        self.retention_days = retention_days
         self.repository, self.store, self.quarantine = repository, store, quarantine
         self.usage_guard, self.clock = usage_guard, clock
         self.dispatcher, self.archive = dispatcher, archive
@@ -392,7 +396,7 @@ class HistoryRetentionService:
             return False
         try:
             now = self._time(self.clock.now())
-            cutoff = format_timestamp(now - timedelta(seconds=HISTORY_RETENTION_SECONDS))
+            cutoff = format_timestamp(now - timedelta(days=self.retention_days))
             changed, failures = self._retry_paths()
             def attempt(action):
                 try:

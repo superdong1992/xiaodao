@@ -1,6 +1,6 @@
 # 网站 API：会话与附件
 
-诊断记录、报告和附件默认保留 **7 天**，每轮独立到期。页面应提示用户及时下载；到期轮次不再可查。创建请求幂等记录和已删除会话的最小凭据也有 7 天保留期。SSE 返回 `409 / AGENT_EVENT_CURSOR_EXPIRED` 时，先读取会话快照，再用其 `last_event_id` 作为 `Last-Event-ID` 重新订阅。完整策略见[服务端文件保留与清理](storage-retention.md)。
+诊断记录、报告和附件默认保留 **30 天**，可用服务端 `HISTORY_RETENTION_DAYS` 调整，每轮独立到期。页面应提示用户及时下载；到期轮次不再可查。创建请求幂等记录和已删除会话的最小凭据也使用该保留期。SSE 返回 `409 / AGENT_EVENT_CURSOR_EXPIRED` 时，先读取会话快照，再用其 `last_event_id` 作为 `Last-Event-ID` 重新订阅。完整策略见[服务端文件保留与清理](storage-retention.md)。
 
 已有网站升级请先读 [8.2 前端必改清单](website-agent-upgrade-8.2.md)，再按本文核对完整接口说明。
 
@@ -241,7 +241,7 @@ curl --fail-with-body --request PUT "$UPLOAD_URL" \
   --data-binary @logs.zip
 ```
 
-上传成功响应的 `data` 是状态为 `READY` 的完整 `AgentAttachment`。`expires_at` 固定为 `null`，表示接口未提供独立的到期时间，不能理解为永久保留。未被保留轮次引用的附件在预约满 7 天后回收；已引用的附件随所属轮次保留，详见[保留策略](storage-retention.md)。`READY` 表示上传校验完成，**不表示诊断已经采用**。随后发送消息引用该附件：
+上传成功响应的 `data` 是状态为 `READY` 的完整 `AgentAttachment`。`expires_at` 固定为 `null`，表示接口未提供独立的到期时间，不能理解为永久保留。未被保留轮次引用的附件在预约满保留期后回收（默认 30 天）；已引用的附件随所属轮次保留，详见[保留策略](storage-retention.md)。`READY` 表示上传校验完成，**不表示诊断已经采用**。随后发送消息引用该附件：
 
 ```json
 {

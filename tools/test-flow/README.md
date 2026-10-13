@@ -1,14 +1,14 @@
 # Test Flow 操作说明
 
-本目录是仓库测试活动的唯一操作入口。测试架构及不变量见
-[`design/test-flow-architecture.md`](../../design/test-flow-architecture.md)；本文件只说明如何规划、运行和读取结果，不复制底层 pytest 命令。
+本目录是正式 Test Flow 的唯一操作入口。日常修改允许直接运行仓库已有的最小专项测试，推送前再统一完整验证。测试架构及不变量见
+[`design/test-flow-architecture.md`](../../design/test-flow-architecture.md)；本文件说明测试时机、操作方式和结果边界。
 
 ## 公开 Goal
 
 | Goal | Track | 含义 |
 | --- | --- | --- |
-| `dev.quick` | `dev` | 框架自测、仓库静态检查和可安全缩小的受影响确定性测试；只提供快速反馈，不替代提交或发布前验证 |
-| `dev.default` | `dev` | 框架自测、仓库静态检查、受影响确定性测试和完整确定性测试；不调用真实模型 |
+| `dev.quick` | `dev` | 可选的框架自测、仓库静态检查和可安全缩小的受影响确定性测试；只提供快速反馈，不替代推送或发布前验证 |
+| `dev.default` | `dev` | 推送前统一运行的框架自测、仓库静态检查、受影响确定性测试和完整确定性测试；不调用真实模型 |
 | `dev.real` | `dev` | 在 `dev.default` 闭包之外，显式选择一个真实 Proof/Stage |
 | `dev.macos-codex-luna-methods` | `dev` | 原生 macOS 或密封 Ubuntu 22.04 中，用一次 Codex CLI + gpt-5.6-luna 调用生成并冻结 Methods package |
 | `dev.macos-codex-luna-e2e` | `dev` | P2：默认只运行 Specialist，正常一次调用、最多一次 repair |
@@ -67,7 +67,17 @@ Agent API。当前 `release.full` 执行完整网站路径，用户 Agent 只在
 因此该 Release 不能宣称已覆盖用户 Agent 从建单开始的完整 MCP 诊断。这个缺口及真实环境输入
 记录在根目录 `TODO.md`，不能用上述零模型测试或旧 provider model-cert 代替。
 
-日常迭代可以先运行快速检查：
+### 日常修改：只跑最小测试
+
+每次修改按实际影响范围选择具体用例或相关测试文件；跨模块改动补充直接相关的集成用例。
+允许直接运行仓库已有的 pytest、Node 专项测试和静态检查，记录所用命令、覆盖范围及结果。
+纯文档修改只需相关文档检查和 `git diff --check`。本地提交不要求完整测试。
+
+专项通过只说明这些用例通过。日常修复在根目录 `TODO.md` 记录
+“专项通过，待推送前完整验证”和具体用例，集中到准备推送时再整理修复台账。
+
+需要编排器提供受影响范围检查时，可以显式选择 `dev.quick`；它仍包含框架自测和仓库静态检查，
+并非每次修改都要运行。其范围包含基线以来及当前工作区的改动，可能大于本次修改：
 
 ```sh
 ./tools/test-flow/run.sh --track dev --goal dev.quick --plan-only
@@ -76,12 +86,16 @@ Agent API。当前 `release.full` 执行完整网站路径，用户 Agent 只在
 
 `dev.quick` 只在受影响范围可以安全缩小时运行对应测试。如果选择范围达到完整套件的一半，或包含整个
 `tests/deterministic/integration` 目录，结果会以
-`AFFECTED_SCOPE_REQUIRES_FULL` 收口，不会把 0 个测试记成 PASS；此时必须运行 `dev.default`。
+`AFFECTED_SCOPE_REQUIRES_FULL` 结束，不会把 0 个测试记成 PASS。日常修改保留这一未完成结论，
+改用直接相关的专项测试；不要自动升级到 `dev.default`，完整验证留到推送前。
 `dev.default` 将这类宽范围交给已有的 full 阶段，完整执行原套件；单个集成测试文件仍可走 affected。
 这条 quick → default 升级是预期控制流，不受同身份失败重试策略阻止，也不要求填写新的失败假设。
 `dev.quick` 是不完整的开发反馈，不得用于 Release、修复台账或源码快照验证。
 
-先看计划，再运行同一 Goal：
+### 推送前：统一完整验证
+
+本次待推送的修改准备好后，先整理 `FIXED_ISSUES.md` 的修复正文、专项用例及对应的 `TODO.md`
+调整，明确本次修复尚待完整验证。然后对最终源码运行一次 `dev.default`。先看计划，再运行同一 Goal：
 
 ```sh
 ./tools/test-flow/run.sh --track dev --goal dev.default --plan-only
@@ -89,6 +103,15 @@ Agent API。当前 `release.full` 执行完整网站路径，用户 Agent 只在
 ```
 
 PowerShell 使用同参数的 `tools/test-flow/run.ps1`。计划会列出 Goal、Proof、Stage、Gate、依赖、身份、复用决定、性能身份、预计资源和 admission blocker。
+
+完整 verdict 通过后才能推送；此时只回填修复台账的 verdict 引用元数据行，包含 run ID、
+source snapshot digest 和本次已验证状态。失败则仍为待验证，不得沿用历史 PASS。
+若验证后又修改了源码，先跑受影响的最小测试，下一次推送前重新完整验证。
+只有验证后的 verdict 引用元数据可按 `AGENTS.md` 的规定回填，不算作其引用快照中的源码。
+Release 仍是单独的发布验收，不因普通推送自动触发。
+
+注意：省略 `--goal` 时，Dev 入口仍默认选择完整的 `dev.default`。日常最小测试应显式选择用例，
+需要编排检查时显式选择 `dev.quick`，不要直接运行无 Goal 的 Test Flow 命令。
 
 完整确定性测试还需要 PostgreSQL 15 或更高版本。将 `PROBLEM_LOCATOR_TEST_DATABASE_URL` 指向独立的测试管理库，库名须包含 `_test`，测试账号需要 `CREATEDB`。连接地址放在私有环境变量中，不写进命令、日志或收据。每例 PostgreSQL 测试新建 `pl_test_*` 数据库，不复用已有业务库，不自动删除测试数据库；`deterministic.full` 每次重新执行。原 SQLite 用例继续覆盖旧格式和既有业务合同，`det.postgres` 单独验证生产数据库，并将实际服务端版本写入 JUnit 证据。未配置测试库时该 Gate 失败，不会跳过后宣称通过。
 

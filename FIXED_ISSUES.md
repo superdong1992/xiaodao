@@ -3006,6 +3006,21 @@
 
 ## PL-FIX-070：服务运行文件缺少完整的保留与空间回收策略
 
+### 2026-10-13：历史保留期改为默认 30 天，并支持部署配置
+
+- **最新 Test Flow verdict（2026-10-13，推送前统一验证）**：Linux `dev.default` [run-20261013T095455Z-a9580c72](.tmp/push-current-evidence-20261013/run-20261013T095455Z-a9580c72/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`（性能基线尚未校准）。源码快照 `git-visible-worktree-v1:7b6d27e5402c426bcf8e5d1ed04c32ef93c4fcf0ede0888d6eaed721bad52986`（961 文件），verdict SHA-256 `634a927b9070208e1d843df36eedba9d60aad1d69abd2183cf14879f21c2ee15`。最终源码的完整确定性轨通过，模型调用、token 和费用均为 0；10 个入口脚本保留 Git 中的执行权限。交付工作区与测试副本的文件内容逐项一致，提交索引同时核对文件权限。仅本行是验证后追加的引用元数据，不属于所引用源码快照；统计参考文件尚未完成独立 PostgreSQL 专项和生产验收，本次不是 Release。
+
+- **本次推送复核范围**：本次统一交付历史保留期配置、推送前测试约束文档和长期统计参考文件；最终源码尚待本轮完整 `dev.default` 验证，结论以随后补充的推送验证元数据为准。下方较早的 PASS 仅覆盖其对应快照；统计参考 SQL 仍未完成生产字段适配和 PostgreSQL 专项验收。
+
+- **最新 Test Flow verdict（2026-10-13，30 天保留配置）**：中央 Linux `dev.default` [run-20261013T090702Z-3b05ac8b](.tmp/history-month-dev-evidence-20261013/run-20261013T090702Z-3b05ac8b/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，唯一警告是 performance `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:0e826b7f1a3336d7c29140e0f0054d0cd6b1a948d702bb958a9cc6ac4286e18e`（955 文件），verdict SHA-256 `c15b7ee401f0de3cb144f0c655c0fd25d8d7852754fe84438fc4b0e673068ba0`。affected 按编排规则由完整轨覆盖，完整确定性轨耗时 290.10 秒，全部所需 Gate 通过；模型调用、token 和费用均为 0。框架与静态阶段由编排器复核并复用本轮早先证据。Ubuntu 22.04 / Python 3.12.10 / PostgreSQL 15.19，Linux 副本与交付工作区源码一致，三轮共 259 份证据复制后逐文件哈希一致。仅本行是验证后追加的引用元数据，不属于所引用源码快照；未部署到线上，不代表真实模型 Release 或生产验收。
+
+- **症状与受影响版本**：8.2.0，基于 `e1de505c` 的当前工作区；历史轮次、报告及附件到第 7 天便进入清理，无法按部署需要保留一个月。
+- **当前版本确认与根因**：`HistoryRetentionService.run_once` 使用固定的 `7 * 24 * 60 * 60` 截止时间；`Settings.load` 拒绝所有保留期覆盖参数，启动装配也未传入保留期限。
+- **修复历史**：新增服务端 `HISTORY_RETENTION_DAYS`，默认 30 天，接受 1–3650 的整数；`.env` 和进程环境变量按既有优先级加载，重启后生效。统一应用于业务历史、闲置上传、创建幂等键和删除凭据；临时目录、无主资源和经验卡仍按各自规则清理。
+- **不可回归行为**：默认第 7 天仍可访问，第 30 天才到期；自定义天数必须传入实际清理服务；各轮独立计时，重命名或新轮次不续期旧历史，正在使用的资源继续受保护。旧记录按原时间计算新保留期，已删除内容不恢复。
+- **验证与修正历史**：`run-20261013T084859Z-66b82865` 为 `FAIL`，源码快照 `95ffdac7ca2dad3ec0079c25ff6773bed81a93e3cad99f67673f23f476f18de3`；新增保留期专项通过，但公开配置清单漏加新参数，合同清单中的 `limits.py` 摘要未更新。补齐后，`run-20261013T085700Z-faa7687f`（快照 `a20ec09ba9eae2050642c28eb0cc6090c591398add2e97ec5fb54476fe23a369`）仅剩同一配置测试后续“禁止全部保留期参数”的旧断言失败。将该断言精确排除新增的公开参数，其他限额仍禁止覆盖；测试范围、性能门槛和两轮失败证据保留，再执行完整 Dev。
+- **专项回归测试**：`test_history_retention.py::test_default_month_and_configured_expiry_preserve_history_until_boundary` 覆盖默认 30 天、自定义 7/60 天、精确到期边界、报告文件、上传、旧轮隔离及创建键；`test_default_month_keeps_deletion_receipt_until_thirty_days` 覆盖删除凭据。`test_settings.py` 覆盖默认值、合法/非法输入及环境变量覆盖 `.env`；`test_bootstrap_composition.py::test_unique_object_graph_recovery_export_and_shutdown_lock_order` 覆盖 30/60 天的生产接线。既有清理竞态、失败重试及独立保留期用例继续以显式 7 天配置执行。
+
 - **状态**：实现与专项用例已补齐，正式结论以本条最终 Test Flow 元数据为准。
 - **症状、受影响版本与确认**：8.2.0 / `0217d486` 的已完成 Case、网站旧轮次、报告、附件和幂等凭据没有自动到期机制；数据库引用阻止孤儿清理生效，DFX/Journey 只追加而不轮转。当前扫描器把 `<job_id>.logparse-preprocess` 当 UUID 校验，最小复现会在处理任何候选前抛错。无主资源和 proposal 叶节点删除后还会留下空父目录；启动快照及网站下载临时文件只依赖正常退出清理。
 - **根因**：临时文件、历史业务记录、数据库空闲页、日志和异常退出残留没有统一的生命周期；已有删除流程只覆盖用户显式删除会话。关联 PL-FIX-068，本条补充自动到期和有限期删除凭据，不取代原停止、归属隔离和崩溃恢复要求。

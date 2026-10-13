@@ -1,7 +1,7 @@
 # Test Flow 终态架构
 
 状态：当前权威设计  
-更新时间：2026-09-02
+更新时间：2026-10-13
 
 本文定义 Test Flow 的最终结构与不变量。操作命令只在
 [`tools/test-flow/README.md`](../tools/test-flow/README.md) 维护。
@@ -44,7 +44,8 @@ cross-validator 对未知字段、悬空引用、DAG 环、孤儿、不可达 cl
 
 公开 Goal 由配置冻结。当前主发布入口如下：
 
-- `dev.default`：framework/config、仓库静态检查、affected、Methods V1 Core 子收据与 full deterministic；不使用真实模型。
+- `dev.quick`：可选的框架自测、仓库静态检查和受影响确定性测试；范围无法安全缩小时保留未完成状态。
+- `dev.default`：推送前统一运行 framework/config、仓库静态检查、affected、Methods V1 Core 子收据与 full deterministic；不使用真实模型。
 - `dev.real`：完整 Dev 确定性闭包，加一个显式选择的真实 Proof/Stage。
 - `dev.macos-codex-luna-methods`：Darwin arm64 上恰好一次 Codex CLI + `gpt-5.6-luna`/medium 调用，独立生成并校验 Methods package，再按完整 producer identity 写入不可变缓存；不执行诊断旅程。
 - `dev.macos-codex-luna-e2e` 与 `dev.macos-claude-deepseek-e2e`：默认运行 P2/P1 Specialist-only model cert，正常一次调用，最多一次 repair。
@@ -158,7 +159,11 @@ Server Gate evidence contract 要求：
 
 ## 11. 完成与发布定义
 
-框架代码“存在”、deterministic PASS 和某个历史发布都不能证明新的源码快照。终态变更完成需要：
+日常修改只运行直接相关的最小专项测试，结果只说明所选范围的验证情况；本地提交不触发完整测试。
+推送前对最终源码统一运行 `dev.default` 并取得通过的权威 verdict，之后才能把修复登记为已验证。
+Release 是独立的发布验收，不因日常修改或普通推送自动触发。
+
+框架代码“存在”、专项测试通过和某个历史发布都不能证明新的源码快照已具备发布条件。发布验收需要：
 
 1. 六配置与全部 schema/cross-validation、自测和确定性产品测试通过；
 2. 文档只有本架构和操作说明两处当前 Test Flow 权威，且职责不重复；
@@ -166,6 +171,6 @@ Server Gate evidence contract 要求：
 4. planning 冻结当前 Git 可见工作树的 exact source snapshot；
 5. 对该快照、实际平台和冻结 runtime/external inputs 执行 Reviewer 开启的 fresh `release.full`；
 6. 最后生成且可重新验证的 verdict 满足全部 Proof；
-7. 如需 Git 持久化，在测试完成后提交完全相同的 path/字节；提交前后 snapshot digest 必须一致，提交动作本身不构成新的测试证明。
+7. 若验证后创建发布提交，只能提交完全相同的 path/字节；提交前后 snapshot digest 必须一致，提交动作本身不构成新的测试证明。日常本地提交不受此发布顺序约束。
 
 原分阶段优化在这里收敛为一套架构：cheap deterministic 先行、五个逻辑 Stage/四个 checkpoint boundary、producer/proof/performance identity 分离、语义心跳与双时限、真实模型最小抽样，以及版本化瀑布/性能策略。样本积累或 policy mode 变化是同一框架的运行状态，不再保留第二套 runner 或过渡语义。

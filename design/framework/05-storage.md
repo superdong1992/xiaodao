@@ -93,7 +93,7 @@ stdout/stderr 使用成对的追加 sink 和共享总字节预算。日志超预
 | --- | --- | --- |
 | 上传暂存、proposal 暂存、工作区、状态临时文件 | 严格超过 86,400 秒且无活动/引用保护 | `RetentionScanner` + `StorageRetentionCleaner` |
 | 孤儿正式资源与 Job 目录 | 严格超过 604,800 秒且不再被业务索引引用 | 同上 |
-| 完成轮次、Case 历史、过期会话附件、删除请求历史 | 7 天，并需空闲、无未完成归档/追问等活动 | `HistoryRetentionService` |
+| 完成轮次、Case 历史、过期会话附件、删除请求历史 | 默认 30 天（`HISTORY_RETENTION_DAYS` 可配），并需空闲、无未完成归档/追问等活动 | `HistoryRetentionService` |
 | 用户显式删除会话 | 先撤销访问，等待活动结束，再按持久清单删除 | `ConversationCleanupService`，见 [会话服务设计](04-services-interfaces.md) |
 | 经验原文与经验卡 | 来源 7 天，卡片 90 天；显式删除与自然到期语义不同 | `MemoryStore`，见 [会话服务设计](04-services-interfaces.md) |
 
@@ -143,7 +143,7 @@ stdout/stderr 使用成对的追加 sink 和共享总字节预算。日志超预
 | [storage/retention.py](../../src/problem_locator/storage/retention.py) | `RetentionScanner.discover` 根据注入 Clock 枚举 `_RetentionCandidate(kind, path, age_seconds, retention_seconds)`。使用纳秒计算严格过期边界；上传/proposal 优先以最终 staged marker 时间为锚，正式资源以资源父目录时间为锚。它只发现候选，不能判断业务引用，更不直接删除。 |
 | [storage/retention_cleaner.py](../../src/problem_locator/storage/retention_cleaner.py) | `StorageRetentionCleaner.run_once` 记录候选元数据，在发布屏障内重查身份、仓库引用、活跃上传/Job/工作区和 stage 租约，再移入隔离目录。锁外删除；`CleanupRunResult` 返回观察、隔离、删除与失败信息，失败路径可再次处理。空父目录清理由专门受保护流程完成，不递归清除尚有内容的 parent。 |
 | [storage/quarantine.py](../../src/problem_locator/storage/quarantine.py) | `QuarantineMover.move_if` 只接受固定资源布局内的精确候选，在持有协调锁时执行最后一次 predicate 并原子移动。`discover` 找到以前遗留的隔离节点；`delete` 要求锁外执行，校验隔离根与普通节点后删除，逐级同步并清除空回执目录。用户传入的任意路径不能直接成为候选。 |
-| [storage/history_retention.py](../../src/problem_locator/storage/history_retention.py) | `HistoryRetentionService` 是 7 天业务历史清理入口，管理旧 run、整会话、闲置上传、Core Case 以及创建键/删除标记。`_expire_run` 获得会话与 Case 清理租约后，构造包含 Intake/追问工作区的 manifest；`commit_history_cleanup` 原子保存清单并删除引用；`_finish_paths`、`_retry_paths` 重试文件清理。活动诊断、归档、上传、追问及快照构建都能阻止到期删除；结束后可在事务外整理数据库。 |
+| [storage/history_retention.py](../../src/problem_locator/storage/history_retention.py) | `HistoryRetentionService` 是可配置的业务历史清理入口（`HISTORY_RETENTION_DAYS` 默认 30 天），管理旧 run、整会话、闲置上传、Core Case 以及创建键/删除标记。`_expire_run` 获得会话与 Case 清理租约后，构造包含 Intake/追问工作区的 manifest；`commit_history_cleanup` 原子保存清单并删除引用；`_finish_paths`、`_retry_paths` 重试文件清理。活动诊断、归档、上传、追问及快照构建都能阻止到期删除；结束后可在事务外整理数据库。 |
 
 ## 8. 修改存储时的核对点
 

@@ -1,9 +1,10 @@
-"""Seven-day expiry must remove owned history without racing active work."""
+"""Configured expiry must remove owned history without racing active work."""
 from __future__ import annotations
 
 import hashlib
 import json
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +21,7 @@ from problem_locator.storage.coordination import AttachmentUploadRegistry, Stora
 from problem_locator.storage.history_retention import HistoryRetentionService
 from problem_locator.storage.quarantine import QuarantineMover
 from problem_locator.storage.state_repository import CaseStateRepository
+from problem_locator.timestamps import format_timestamp, parse_timestamp
 from tests.deterministic.unit.storage.fakes import DeterministicIdGenerator, FakeFileSync, FaultInjectingReplace
 from tests.deterministic.unit.storage.test_state_repository import CASE_ID, JOB_ID, _empty_mutation, _finish, _populate
 from tests.deterministic.unit.storage.test_case_store_v10 import _create as _create_distinct, _cancel
@@ -47,7 +49,7 @@ def stack(tmp_path):
     registry = AttachmentUploadRegistry()
     quarantine = QuarantineMover(repository.layout, coordination, FakeFileSync(), FaultInjectingReplace())
     history = HistoryRetentionService(repository, store, quarantine, usage, clock,
-        attachment_registry=registry, coordination_lock=coordination)
+        attachment_registry=registry, coordination_lock=coordination, retention_days=7)
     cleanup = ConversationCleanupService(store, repository, quarantine, usage)
     yield SimpleNamespace(root=tmp_path, repository=repository, store=store, clock=clock,
         usage=usage, registry=registry, quarantine=quarantine, history=history, cleanup=cleanup)
@@ -77,6 +79,61 @@ def _completed(stack):
 def _close_run(store, cid, rid):
     store.request_stop(cid, "stop:" + rid, rid)
     store.finish_stop(cid, rid)
+
+
+@pytest.mark.parametrize("retention_days", [None, 7, 60])
+def test_default_month_and_configured_expiry_preserve_history_until_boundary(stack, retention_days):
+    options = {} if retention_days is None else {"retention_days": retention_days}
+    history = HistoryRetentionService(stack.repository, stack.store, stack.quarantine,
+        stack.usage, stack.clock, attachment_registry=stack.registry, **options)
+    days = 30 if retention_days is None else retention_days
+    created = stack.store.create_conversation("month-history")
+    stack.store.submit_message(created.conversation_id, "old", "旧问题")
+    stack.store.bind_case(created.conversation_id, CASE_ID)
+    paths = _completed(stack)
+    upload = stack.store.reserve_attachment(created.conversation_id, "upload", "log.zip",
+        "application/zip", 3, hashlib.sha256(b"log").hexdigest())
+    upload_path = _file(stack.root, f"resources/conversations/{upload.attachment_id}/payload", b"log")
+    stack.store.complete_attachment(upload.attachment_id, str(upload_path))
+    boundary = parse_timestamp(OLD) + timedelta(days=days)
+    checkpoints = [boundary - timedelta(milliseconds=1)]
+    if days > 7:
+        checkpoints.insert(0, parse_timestamp(OLD) + timedelta(days=7))
+    for checkpoint in checkpoints:
+        stack.clock.value = format_timestamp(checkpoint)
+        assert not history.run_once()
+        assert stack.store.get_run(created.conversation_id, created.run_id)
+        assert stack.repository.read_snapshot(CASE_ID).cases
+        assert all(path.exists() for path in paths) and upload_path.exists()
+        assert stack.store.create_conversation("month-history").conversation_id == created.conversation_id
+    newer = stack.store.submit_message(created.conversation_id, "new", "新问题")
+    stack.clock.value = format_timestamp(boundary)
+    assert history.run_once()
+    with pytest.raises(AgentStoreError) as gone:
+        stack.store.get_run(created.conversation_id, created.run_id)
+    assert gone.value.code == "AGENT_RUN_NOT_FOUND"
+    assert stack.store.get_run(created.conversation_id)["run_id"] == newer.run_id
+    assert not stack.repository.read_snapshot(CASE_ID).cases
+    assert all(not path.exists() for path in paths) and not upload_path.exists()
+    assert stack.store.create_conversation("month-history").conversation_id != created.conversation_id
+
+
+def test_default_month_keeps_deletion_receipt_until_thirty_days(stack):
+    history = HistoryRetentionService(stack.repository, stack.store, stack.quarantine,
+        stack.usage, stack.clock)
+    created = stack.store.create_conversation("deleted-month")
+    stack.store.request_delete(created.conversation_id)
+    stack.store.finish_stop(created.conversation_id, created.run_id)
+    assert stack.cleanup.run_once()
+    for elapsed in (timedelta(days=7), timedelta(days=30, milliseconds=-1)):
+        stack.clock.value = format_timestamp(parse_timestamp(OLD) + elapsed)
+        history.run_once()
+        assert stack.store.request_delete(created.conversation_id).status == "DELETED"
+    stack.clock.value = format_timestamp(parse_timestamp(OLD) + timedelta(days=30))
+    history.run_once()
+    with pytest.raises(AgentStoreError) as gone:
+        stack.store.request_delete(created.conversation_id)
+    assert gone.value.status_code == 404
 
 
 def _old_and_new_runs(stack):

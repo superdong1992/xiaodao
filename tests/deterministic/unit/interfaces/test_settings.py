@@ -22,6 +22,19 @@ def environment(tmp_path: Path) -> dict[str, str]:
     }
 
 
+@pytest.mark.parametrize("days", [1, 7, 30, 60, 3650])
+def test_history_retention_days_are_configurable(tmp_path, days):
+    assert Settings.load(environ=environment(tmp_path)).history_retention_days == 30
+    settings = Settings.load(environ={**environment(tmp_path), "HISTORY_RETENTION_DAYS": str(days)})
+    assert settings.history_retention_days == days
+
+
+@pytest.mark.parametrize("value", ["", "0", "-1", "30.5", "030", "+30", "30 ", "3651", "999999999", "month"])
+def test_invalid_history_retention_days_fail_startup(tmp_path, value):
+    with pytest.raises(SettingsError, match="HISTORY_RETENTION_DAYS"):
+        Settings.load(environ={**environment(tmp_path), "HISTORY_RETENTION_DAYS": value})
+
+
 def test_website_redis_auth_defaults_and_private_configuration(tmp_path):
     settings = Settings.load(environ=environment(tmp_path))
     assert settings.website_auth.mode == "redis"
@@ -128,16 +141,19 @@ def test_process_environment_overrides_utf8_env_file(tmp_path: Path) -> None:
                 f"LOGPARSE_REPO={tmp_path / '日志 repo'}",
                 f"LOGPARSE_CONFIG_PATH={tmp_path / '配置.toml'}",
                 "PORT=9000",
+                "HISTORY_RETENTION_DAYS=60",
             )
         ),
         encoding="utf-8",
     )
-    process = {"DATA_ROOT": str(tmp_path / "process-data"), "PORT": "8123"}
+    assert Settings.load(env_file=env_file, environ={}).history_retention_days == 60
+    process = {"DATA_ROOT": str(tmp_path / "process-data"), "PORT": "8123", "HISTORY_RETENTION_DAYS": "30"}
 
     settings = Settings.load(env_file=env_file, environ=process)
 
     assert settings.data_root == tmp_path / "process-data"
     assert settings.port == 8123
+    assert settings.history_retention_days == 30
     assert settings.public_base_url == "https://env.example.test/base"
     assert settings.bind_host == "127.0.0.1"
     assert settings.claude_command == "claude"

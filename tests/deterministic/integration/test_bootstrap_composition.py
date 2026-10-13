@@ -205,10 +205,12 @@ def test_production_clock_ids_and_notifier_follow_frozen_shapes() -> None:
     assert observed == [True]
 
 
+@pytest.mark.parametrize("history_days", [30, 60])
 def test_unique_object_graph_recovery_export_and_shutdown_lock_order(
     tmp_path: Path,
+    history_days: int,
 ) -> None:
-    graph = build_service(_settings(tmp_path / "data"))
+    graph = build_service(replace(_settings(tmp_path / "data"), history_retention_days=history_days))
     try:
         assert str(tmp_path) not in repr(graph)
         assert graph.instance_lock.is_acquired()
@@ -232,6 +234,7 @@ def test_unique_object_graph_recovery_export_and_shutdown_lock_order(
             graph.attachment_registry
         )
         assert graph.retention.history is not None
+        assert graph.retention.history.retention_days == history_days
         assert graph.retention._interval_seconds == 3_600
         assert graph.asset_catalog._logparse_broker_factory is (
             graph.logparse_broker_factory

@@ -23,6 +23,7 @@ EXPECTED_ENV_KEYS = {
     "DATA_ROOT",
     "DATABASE_URL",
     "DATABASE_POOL_SIZE",
+    "HISTORY_RETENTION_DAYS",
     "DFX_LOG_LEVEL",
     "GENERIC_SKILL_NAME",
     "GENERIC_LOGPARSE_PRODUCT",
@@ -122,6 +123,7 @@ def test_env_example_contains_only_the_public_settings() -> None:
     assert assignments["METHODS_EVIDENCE_VALIDATION"] == "off"
     assert assignments["DATABASE_URL"].startswith("postgresql://")
     assert assignments["DATABASE_POOL_SIZE"] == "8"
+    assert assignments["HISTORY_RETENTION_DAYS"] == "30"
     assert assignments["GENERIC_MEMORY_ENABLED"] == "false"
     assert assignments["REPORT_FOLLOWUP_ENABLED"] == "false"
     assert assignments["REPORT_FOLLOWUP_SNAPSHOT_BYTES"] == "1073741824"
@@ -137,6 +139,7 @@ def test_env_example_contains_only_the_public_settings() -> None:
     assert all(
         fragment not in key
         for key in assignments
+        if key != "HISTORY_RETENTION_DAYS"
         for fragment in forbidden_fragments
     )
     assert all(

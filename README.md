@@ -78,11 +78,11 @@ Logparse 产品可以省略，此时运行时将实际使用的产品记录为 `
 
 ### 发布验收
 
-仓库测试的统一入口见 [`tools/test-flow/README.md`](tools/test-flow/README.md)，最终结果结构见 [`design/test-flow-architecture.md`](design/test-flow-architecture.md)。Dev 默认运行受影响的确定性测试和完整确定性套件，不调用真实模型；SameJob 已纳入确定性测试流程。
+仓库测试操作见 [`tools/test-flow/README.md`](tools/test-flow/README.md)，最终结果结构见 [`design/test-flow-architecture.md`](design/test-flow-architecture.md)。日常每次修改只跑直接覆盖改动的最小测试，纯文档改动只做文档检查；推送前再对最终源码统一运行一次 `dev.default`，完成受影响测试和完整确定性套件，不调用真实模型。SameJob 已纳入完整确定性测试流程。
 
 Release 制订计划时，会将 Git 可见的工作区文件保存为不可变源码快照，其中可以包含尚未提交的更改。发布验收还须使用当前平台内置的 Client→Linux 适配器，完成全部确定性测试和平台验证，并从 GENESIS 和全新空 `DATA_ROOT` 开始，运行一条不使用模拟组件的 CrossJob 流程。
 
-每次运行的本地证据保存在 `.tmp/test-flow-evidence/<run-id>`。验证结论只以 `verdict.json` 为准；缺少该文件就视为 `UNFINALIZED`。复用证据前，会按当前配置、密钥扫描器和事件格式要求重新审计。测试证据不会自动删除。
+每次正式 Test Flow 运行的本地证据保存在 `.tmp/test-flow-evidence/<run-id>`。完整验证结论只以 `verdict.json` 为准；缺少该文件就视为 `UNFINALIZED`。日常专项测试只提供其覆盖范围内的反馈。复用证据前，会按当前配置、密钥扫描器和事件格式要求重新审计。测试证据不会自动删除。
 
 真实模型认证必须在不调用模型的 Core 测试通过后单独执行。默认 P1/P2 只认证 Specialist；盲评认证须显式选择。Provider 认证必须绑定同一份源码快照、Methods V1 合同摘要和 Core 验证结论摘要。旧 Evidence V2 Fast E2E 或缓存结果不能用作当前版本的认证证据。独立运行生成的 verdict 只证明它声明的短流程，不代表完整 Test Flow、Release 或实际局域网部署已通过验收。
 
@@ -92,7 +92,7 @@ Problem Locator 8.2 将活动 Case、Job 和核心命令的幂等记录保存在
 
 ## 环境要求与安装
 
-历史诊断、报告和附件默认保留 **7 天**。服务启动时及每小时清理到期数据，临时工作区按 24 小时清理，DFX/Journey 日志按大小轮转。完整范围、并发保护和部署要求见[服务端文件保留与清理](docs/storage-retention.md)。
+历史诊断、报告和附件默认保留 **30 天**，可用服务端 `HISTORY_RETENTION_DAYS` 调整，重启后生效。服务启动时及每小时清理到期数据，临时工作区按 24 小时清理，DFX/Journey 日志按大小轮转。完整范围、并发保护和部署要求见[服务端文件保留与清理](docs/storage-retention.md)。
 
 - CPython 3.12（项目要求 `>=3.12,<3.13`）
 - `uv`，并使用仓库中已提交的 `uv.lock`

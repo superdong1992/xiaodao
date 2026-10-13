@@ -1349,7 +1349,8 @@ def _assemble(
         retention.history = HistoryRetentionService(repository, agent_store,
             QuarantineMover(layout, coordination_lock, file_sync, replacer), agent.usage_guard,
             clock, dispatcher=scheduler, archive=archive,
-            attachment_registry=attachment_registry, coordination_lock=coordination_lock)
+            attachment_registry=attachment_registry, coordination_lock=coordination_lock,
+            retention_days=settings.history_retention_days)
         return ServiceComposition(
             settings=settings,
             clock=clock,

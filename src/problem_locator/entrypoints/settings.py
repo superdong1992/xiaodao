@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 from .env_file import EnvFileError, merged_environment
 from problem_locator.interfaces.session_auth import WebsiteAuthConfig
+from problem_locator.contracts.limits import DEFAULT_HISTORY_RETENTION_DAYS
 
 
 _REQUIRED = (
@@ -119,6 +120,7 @@ class Settings:
     report_followup_storage_bytes: int = 5 * 1024 ** 3
     database_url: str | None = field(default=None, repr=False)
     database_pool_size: int = 8
+    history_retention_days: int = DEFAULT_HISTORY_RETENTION_DAYS
     website_auth: WebsiteAuthConfig = field(default_factory=WebsiteAuthConfig, repr=False)
 
     @classmethod
@@ -136,7 +138,9 @@ class Settings:
         forbidden = sorted(
             key
             for key in values
-            if key == "JOB_CONCURRENCY" or _FORBIDDEN_LIMIT_KEY.fullmatch(key)
+            if key == "JOB_CONCURRENCY" or (
+                _FORBIDDEN_LIMIT_KEY.fullmatch(key) and key != "HISTORY_RETENTION_DAYS"
+            )
         )
         if forbidden:
             raise SettingsError("runtime limit overrides are not supported")
@@ -152,6 +156,10 @@ class Settings:
 
         database_url, database_pool_size = load_database_configuration(values)
         website_auth = load_website_auth_configuration(values)
+        raw_history_days = values.get("HISTORY_RETENTION_DAYS", str(DEFAULT_HISTORY_RETENTION_DAYS))
+        if (re.fullmatch(r"[1-9][0-9]{0,3}", raw_history_days) is None
+                or int(raw_history_days) > 3650):
+            raise SettingsError("HISTORY_RETENTION_DAYS 必须是 1–3650 之间的整数")
 
         paths: dict[str, Path] = {}
         for key in _PATH_KEYS:
@@ -281,6 +289,7 @@ class Settings:
             data_root=paths["DATA_ROOT"],
             database_url=database_url,
             database_pool_size=database_pool_size,
+            history_retention_days=int(raw_history_days),
             website_auth=website_auth,
             public_base_url=base_url.rstrip("/"),
             bind_host=bind_host,
@@ -309,6 +318,7 @@ class Settings:
             f"{self.public_base_url!r}, bind_host={self.bind_host!r}, port={self.port}, "
             "database_url=<redacted>, "
             f"database_pool_size={self.database_pool_size}, "
+            f"history_retention_days={self.history_retention_days}, "
             "claude_command=<configured>, "
             "route_claude_command=<configured>, "
             "diagnose_claude_command=<configured>, "

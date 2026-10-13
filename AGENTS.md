@@ -19,10 +19,15 @@
 
 ## 修复登记与回归测试
 
-- 每个已确认并完成的修复都必须新增或更新根目录 `FIXED_ISSUES.md`。同一问题再次回归时，
+- 每个已确认并完成实现的修复都必须在推送前新增或更新根目录 `FIXED_ISSUES.md`。同一问题再次回归时，
   在原条目追加受影响版本、回归原因和再次修复记录，不得割裂成没有历史关联的新条目。
 - 每条记录必须包含症状、受影响版本、根因、不可回归行为、修复历史、专项回归测试和最新
-  Test Flow verdict。活跃未完成事项仍只进入 `TODO.md`。
+  Test Flow verdict。日常开发中的活跃事项只进入 `TODO.md`。
+- 日常修改只要求完成直接覆盖问题的专项回归。专项通过但尚未准备推送时，在 `TODO.md` 记录
+  “专项通过，待推送前完整验证”，并列出用例和结果；不得为提前关闭待办而每次运行完整测试。
+- 准备推送时，先整理 `FIXED_ISSUES.md` 的修复正文和专项用例，并完成对应的 `TODO.md` 调整，
+  明确本次修复尚待完整验证，不能沿用历史 PASS 宣称本次已验证。然后运行完整 Test Flow；
+  通过后只回填 verdict 引用元数据行，本次是否已验证以该行结论为准，失败则仍为待验证。
 - 每个修复必须新增能直接复现原问题的测试，或明确列出已经直接覆盖该问题的既有测试；
   泛化的全量 PASS、代码存在或文档声明不能替代专项回归用例。
 - 修复只有在规定的 Test Flow 入口产生对应源码快照的权威 `verdict.json` 后才能登记为已验证；
@@ -48,10 +53,13 @@
 ## 测试活动约束
 
 - 正式 Test Flow、Release、源码快照证明和修复台账的最终验证以 `tools/test-flow/run.sh` 或 `tools/test-flow/run.ps1` 为唯一入口。Goal、Proof、Stage、Gate、identity、policy 与 runtime profile 由 `tools/test-flow/config/*v2.json` 定义，不得绕过编排器拼装发布结论。
-- Linux/macOS 开发期 Fast E2E 是唯一例外：只能使用仓库拥有的 `tools/test-flow/quick-validation/<provider>/run.sh`，或密封 Ubuntu 22.04 的 `tools/test-flow/quick-validation/wsl/run.sh`。standalone `verdict.json` 只证明其计划声明的 Fast E2E，不得外推为 Release、完整 Test Flow 或产品修复登记结论；不得把 Fast E2E 重新接入中央 Goal/Proof/Stage/Gate。
-- 默认先执行 Dev 的 affected + full deterministic 轨，不调用真实模型。SameJob 属于确定性旅程；Release 只保留一条从空 `DATA_ROOT` 开始的真实 CrossJob 旅程。
+- 日常每次修改只跑直接覆盖本次改动的最小测试：优先选择具体用例，其次选择相关测试文件；跨模块改动补充相关集成用例，纯文档改动只做文档检查。允许直接运行仓库已有的 pytest、Node 专项测试或静态检查，记录命令、范围和结果；这些结果只用于开发反馈，不代表完整 Test Flow、Release 或修复台账的最终验证。
+- `dev.quick` 是可选的编排检查，不是每次修改的必跑项。若返回 `AFFECTED_SCOPE_REQUIRES_FULL`，保留其未完成结论，继续用专项测试验证本次改动，将完整测试留到推送前；不得自动升级为 `dev.default`，也不得把未执行或零用例记成通过。
+- 每次推送前，对本次待推送的最终源码统一运行一次 `dev.default`（affected + full deterministic），先查看 `--plan-only`，再执行并核对权威 `verdict.json`；不调用真实模型。完整验证未通过不得推送。验证后若继续修改源码，先补跑受影响的最小测试，下一次推送前重新完整验证。日常编辑和本地提交不触发完整测试。
+- Linux/macOS 开发期 Fast E2E 只能使用仓库拥有的 `tools/test-flow/quick-validation/<provider>/run.sh`，或密封 Ubuntu 22.04 的 `tools/test-flow/quick-validation/wsl/run.sh`。standalone `verdict.json` 只证明其计划声明的 Fast E2E，不得外推为 Release、完整 Test Flow 或产品修复登记结论；不得把 Fast E2E 重新接入中央 Goal/Proof/Stage/Gate。
+- SameJob 属于确定性旅程；Release 是独立的发布验收，仍保留一条从空 `DATA_ROOT` 开始的真实 CrossJob 旅程，不因普通修改或推送自动触发。
 - Windows、macOS 与显式 Linux Client 只能使用仓库拥有的 built-in adapter；不得从 CLI 注入任意 adapter 或为测试增加本地 MCP、代理、Hook、客户端专用 DFX。
 - 任何真实模型活动必须先查看对应入口 `--plan-only` 中的身份、调用数、模型预算、预计 token/cost 与 admission blocker；中央 Test Flow 还必须查看 Proof、Stage、Gate 和复用决定。不得盲重试；同一失败身份再次运行前必须给出新的 reason、hypothesis 和 expected evidence。
-- `verdict.json` 是唯一权威结论。无 verdict、半成品目录、可独立编辑的摘要、未按当前扫描器和事件合同重审的旧 PASS 都不得复用或宣称通过。
-- Release 必须在 planning 时冻结 Git 可见工作树（tracked 当前字节与未忽略的 untracked 文件）的不可变源码快照，并绑定其 SHA-256 清单、当前 Client/Server/Logparse/MCP/Skill/模型上下文身份，从 GENESIS 和新空数据根开始。工作树无需预先提交，但从 planning 到 verdict 期间源码发生漂移必须失败；Git 提交只在全部验证完成后用于持久化完全相同的快照。Dev checkpoint 只能加速诊断，不能替代 fresh Release。
+- `verdict.json` 是正式 Test Flow 的唯一权威结论。无 verdict、半成品目录、可独立编辑的摘要、未按当前扫描器和事件合同重审的旧 PASS 都不得复用或宣称完整验证通过；日常专项测试必须明确标注其有限范围。
+- Release 必须在 planning 时冻结 Git 可见工作树（tracked 当前字节与未忽略的 untracked 文件）的不可变源码快照，并绑定其 SHA-256 清单、当前 Client/Server/Logparse/MCP/Skill/模型上下文身份，从 GENESIS 和新空数据根开始。工作树无需预先提交，但从 planning 到 verdict 期间源码发生漂移必须失败；若验证后创建发布提交，只能持久化完全相同的快照。日常本地提交不要求提前执行 Release。Dev checkpoint 只能加速诊断，不能替代 fresh Release。
 - 测试证据不得自动删除。只能先用 `tools/test-flow/evidence.mjs report` 或 `prune` 的 dry-run 查看，再以精确 `--run-id --execute` 人工删除；被 verdict 引用的 source receipt 不得删除。
