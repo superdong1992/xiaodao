@@ -45,7 +45,14 @@ class GuardedAgent:
             self.active -= 1
             self.exited += 1
 
-    def get_conversation(self, conversation_id, *, include, run_id=None, owner_key=None):
+    @contextmanager
+    def read_lease(self, conversation_id, *, owner_key=None, share=False):
+        assert share is False
+        with self.operation_lease(conversation_id, owner_key=owner_key):
+            yield
+
+    def get_conversation(self, conversation_id, *, include, run_id=None, owner_key=None, share=False):
+        assert share is False
         assert conversation_id == CONVERSATION and include == ("artifacts",) and run_id == RUN
         self.authorize_case(CASE, owner_key)
         assert self.active == 1

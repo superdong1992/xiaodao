@@ -24,7 +24,7 @@ from .intake import (
     intake_processing_receipt,
 )
 from .models import (AgentPublicFailure, AgentStoreError, ConversationReportView, PublicArtifactData,
-                     ConversationDetail, ConversationArtifact, SendMessageRequest)
+                     ConversationCapabilities, ConversationDetail, ConversationArtifact, SendMessageRequest)
 from .failures import exception_code, exception_details
 from .uploads import ConversationUploads
 from .usage import ConversationUsageGuard
@@ -126,6 +126,17 @@ class AgentConversationService:
     def operation_lease(self, conversation_id, *, owner_key=None):
         with self.usage_guard.acquire(conversation_id):
             self.store.require_owner(conversation_id, owner_key)
+            yield
+
+    @contextmanager
+    def read_lease(self, conversation_id, *, owner_key=None, share=False):
+        if type(share) is not bool:
+            raise AgentStoreError("VALIDATION_ERROR", "share 必须是布尔值。", 400)
+        if share and not owner_key:
+            raise AgentStoreError("AUTH_REQUIRED", "请先登录。", 401)
+        # Sharing relaxes ownership only for authenticated detail/file reads.
+        # The existing lease still checks existence/deletion and protects bytes.
+        with self.operation_lease(conversation_id, owner_key=None if share else owner_key):
             yield
 
     def send_message(self, conversation_id, request_id, text="", attachment_ids=None, *, owner_key=None, target_run_id=None):
@@ -311,11 +322,16 @@ class AgentConversationService:
         return receipt
 
     def get_conversation(self, conversation_id, include=("history", "report", "artifacts"), *,
-                         run_id=None, history_before=None, history_limit=50, owner_key=None) -> ConversationDetail:
-        with self.operation_lease(conversation_id, owner_key=owner_key):
+                         run_id=None, history_before=None, history_limit=50, owner_key=None,
+                         share=False) -> ConversationDetail:
+        with self.read_lease(conversation_id, owner_key=owner_key, share=share):
             result = self._conversation_detail(conversation_id, include, run_id=run_id,
                 history_before=history_before, history_limit=history_limit)
-            self.store.require_owner(conversation_id, owner_key)
+            self.store.require_owner(conversation_id, None if share else owner_key)
+            if share:
+                result = result.model_copy(update={"capabilities": ConversationCapabilities(
+                    can_send=False, can_stop=False, can_rediagnose=False, can_rename=False, can_delete=False,
+                )})
             return result
 
     def _conversation_detail(self, conversation_id, include, *, run_id, history_before, history_limit):

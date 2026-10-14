@@ -1,9 +1,18 @@
 # 已修复问题台账
 
-更新时间：2026-10-10
+更新时间：2026-10-14
 
 本文件记录已经在当前工作区验证、修复并由专项回归测试保护的问题。活跃待办仍只写入
 [`TODO.md`](TODO.md)；同一问题再次回归时更新原条目，不另建一个缺少历史关联的条目。
+
+## PL-FIX-081：网站会话缺少跨用户只读分享入口
+
+- **状态**：分享参数、SDK、BFF、接口文档和专项回归已完成；正式验证以本条最新 Test Flow 元数据为准。
+- **症状、受影响版本与确认**：8.2.0 / `647dc6a` 中，详情 `GET /api/v1/agent/conversations/{id}?share=true` 返回 `400 VALIDATION_ERROR`；已登录的另一用户读取已有会话返回 `404 AGENT_CONVERSATION_NOT_FOUND`。当前代码路径和最小复现均确认原接口只支持所有者访问，尚无分享参数。
+- **根因与修复历史（2026-10-14）**：按用户确认的新需求，为详情和会话文件下载 GET 增加严格的 `share` 查询参数。`true` 要求有效登录，但允许跨归属只读访问；省略或 `false` 保持原归属校验。独立读取租约保留会话存在、删除状态和资源生命周期检查；分享详情的五项 `capabilities` 均为 false。浏览器 SDK、BFF、下载链接、文档与 OpenAPI 快照同步支持该参数。
+- **不可回归行为**：未登录或登录过期仍被拒绝；非法值、空值和重复参数返回 400；默认读取仍隔离用户。分享详情和下载保留指定轮次、产物归属及已删除会话检查；写操作、列表、SSE、反馈、追问和底层 Case/Artifact 接口不因 share 参数放行。只读视图不改变持久权限，也不启动模型。按已确认的产品语义，任意已登录用户知道会话 ID 即可使用 `share=true` 查看，没有额外发布开关、分享 token 或撤销接口。
+- **专项回归测试**：`tests/deterministic/unit/interfaces/test_agent_sharing.py` 34 项全部通过，使用真实会话服务、存储和 HTTP 路由及 Redis 会话夹具，直接覆盖上述行为与下载字节。`test_agent_http.py`、`test_agent_file_access.py`、`test_conversation_detail.py`、`test_session_auth.py` 合计 189 项通过；OpenAPI 快照用例 1 项通过。网站 SDK/BFF 分享与下载专项 18 项通过；网站及 REST 接入文档检查 46 项通过。上述专项仅用于开发反馈，不代表完整 Test Flow 或生产部署验收。
+- **最新 Test Flow verdict（PL-FIX-081）**：`dev.default` [run-20261014T023623Z-379b76b7](.tmp/share-push-evidence-20261014/run-20261014T023623Z-379b76b7/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，唯一警告为 performance `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:3d05694e243050a6831dbd94968fb6c98aeee10f702e0e441f9ac5638e87d558`（962 files），verdict 文件 SHA-256 `be7266ffe6b8d3f3add447dd46b719a6ffec4e07b5cb03fa01b1ddf2bab52ee3`。受影响范围按编排规则交完整轨覆盖；完整 pytest 4532 项通过、2 项规定的平台跳过，PostgreSQL 61 项通过，全部确定性 Gate 通过。Ubuntu 22.04 / Python 3.12.10 / PostgreSQL 15.19，完整轨 294.950 秒，真实模型调用、token 和费用均为 0。待推送提交与被测源码逐文件一致，101 份证据复制后哈希一致，当前证据工具复核为 PASS。本行仅为验证后的元数据回填，不属于所引用源码快照；不代表真实模型 Release 或生产部署验收。
 
 ## PL-FIX-080：将 Intake 和经验提炼的执行时限调整为 180 秒
 

@@ -383,8 +383,10 @@ function includesFromUrl(url) {
         "include",
         "run_id",
         "history_before",
-        "history_limit"
+        "history_limit",
+        "share"
     ]);
+    checkShare(url.searchParams.get("share"));
     if (url.searchParams.has("run_id") && !UUID.test(url.searchParams.get("run_id"))) throw new HttpError(400, "轮次标识无效。");
     checkLimit(url.searchParams.get("history_limit"));
     const value = url.searchParams.get("include");
@@ -406,6 +408,9 @@ function validateQuery(url, allowed) {
 }
 function checkLimit(value) {
     if (value !== null && (!/^[1-9][0-9]{0,2}$/.test(value) || Number(value) > 100)) throw new HttpError(400, "分页条数必须是 1 到 100 的整数。");
+}
+function checkShare(value) {
+    if (value !== null && !["true", "false"].includes(value)) throw new HttpError(400, "share 只接受 true 或 false。");
 }
 function validateResult(result, conversation) {
     if (!result || result.schema_version !== 1 || result.conversation_id !== conversation.conversation_id || result.case_id !== conversation.case_id || result.report_state !== conversation.report_state || result.source_job_id !== conversation.source_job_id) {
@@ -495,7 +500,7 @@ export function createAgentBackend(options) {
         }
         return envelope.data;
     };
-    function validatedArtifacts(conversation) {
+    function validatedArtifacts(conversation, share) {
         const caseId = conversation.case_id, sourceJob = conversation.source_job_id;
         const result = [];
         const seen = new Set();
@@ -527,7 +532,7 @@ export function createAgentBackend(options) {
                 created_by_job_id: artifact.created_by_job_id,
                 created_at: artifact.created_at,
                 downloadable: true,
-                download_url: `/api/agent/conversations/${conversation.conversation_id}/files/${artifact.artifact_id}/content?run_id=${conversation.selected_run_id}`,
+                download_url: `/api/agent/conversations/${conversation.conversation_id}/files/${artifact.artifact_id}/content?run_id=${conversation.selected_run_id}${share ? "&share=true" : ""}`,
                 download_notice: artifact.kind === "USER_RESULT_ARCHIVE" ? ZIP_NOTICE : artifact.kind === "AUDIT_BUNDLE" ? AUDIT_NOTICE : null
             });
         }
@@ -545,7 +550,7 @@ export function createAgentBackend(options) {
             throw new HttpError(502, "定位服务返回的会话详情不符合约定。");
         }
         if (included.includes("report")) validateResult(result.result, result);
-        if (included.includes("artifacts")) result.artifacts = validatedArtifacts(result);
+        if (included.includes("artifacts")) result.artifacts = validatedArtifacts(result, new URLSearchParams(query).get("share") === "true");
         if (included.includes("history")) for (const entry of result.history){
             if (entry?.result?.failure) entry.result.failure = safeError(entry.result.failure, true);
         }
@@ -851,18 +856,22 @@ export function createAgentBackend(options) {
                 validateQuery(url, [
                     "run_id",
                     "download",
-                    "acknowledge_raw_logs"
+                    "acknowledge_raw_logs",
+                    "share"
                 ]);
+                const share = url.searchParams.get("share");
+                checkShare(share);
                 const runId = url.searchParams.get("run_id");
                 if (runId !== null && !UUID.test(runId)) throw new HttpError(400, "轮次标识无效。");
                 const current = await conversationDetail(authContext, conversationId, [
                     "artifacts"
-                ], `?include=artifacts${runId ? `&run_id=${runId}` : ""}`);
+                ], `?include=artifacts${runId ? `&run_id=${runId}` : ""}${share !== null ? `&share=${share}` : ""}`);
                 const artifact = current.artifacts.find((item)=>item.artifact_id === artifactId);
                 if (!artifact) throw new HttpError(404, "产物不存在。");
                 // 响应 URL 没有寻址权；仅用配置前缀和已核验的身份构造目标。
                 const target = upstreamUrl(`/api/v1/agent/conversations/${conversationId}/files/${artifact.artifact_id}/content`);
                 target.searchParams.set("run_id", current.selected_run_id);
+                if (share !== null) target.searchParams.set("share", share);
                 artifact.download_url = target.href;
                 if ([
                     "USER_RESULT_ARCHIVE",
@@ -875,10 +884,12 @@ export function createAgentBackend(options) {
                     const allowed = expected === "archive" ? [
                         "run_id",
                         "download",
-                        "acknowledge_raw_logs"
+                        "acknowledge_raw_logs",
+                        "share"
                     ] : [
                         "run_id",
-                        "download"
+                        "download",
+                        "share"
                     ];
                     if (new Set(keys).size !== keys.length || keys.some((key)=>!allowed.includes(key))) {
                         throw new HttpError(400, "下载参数无效。");
@@ -888,7 +899,7 @@ export function createAgentBackend(options) {
                     }
                 } else if ([
                     ...url.searchParams.keys()
-                ].some((key)=>key !== "run_id")) throw new HttpError(400, "此报告不接受下载参数。");
+                ].some((key)=>!["run_id", "share"].includes(key))) throw new HttpError(400, "此报告不接受下载参数。");
                 const downloadHeaders = {
                     "Content-Type": artifact.content_type,
                     "Content-Length": artifact.size,

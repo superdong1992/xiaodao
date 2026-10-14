@@ -102,6 +102,30 @@ test("browser get rejects malformed includes before sending a request", () => {
   }
 });
 
+test("browser share reads serialize only explicit booleans and retain selected history and cancellation", async () => {
+  const calls = [], signal = new AbortController().signal;
+  const client = createAgentClient({ fetchImpl: async (path, init) => {
+    calls.push({ path, init });
+    return envelope({ capabilities: { can_send: false, can_delete: false } });
+  } });
+  for (const share of [true, false]) {
+    const detail = await client.conversations.get(conversationId, {
+      include: ["history", "artifacts"], run_id: otherId, history_before: "cursor", history_limit: 20, share, signal,
+    });
+    assert.deepEqual(detail.capabilities, { can_send: false, can_delete: false });
+    assert.equal(calls.at(-1).path,
+      `${prefix}?include=history,artifacts&run_id=${otherId}&history_before=cursor&history_limit=20&share=${share}`);
+    assert.equal(calls.at(-1).init.signal, signal);
+    assert.equal(calls.at(-1).init.credentials, "same-origin");
+  }
+  await client.conversations.get(conversationId);
+  assert.equal(calls.at(-1).path, prefix);
+  for (const share of [null, "true", "false", "", 1, 0, [], {}, new Boolean(true)]) {
+    assert.throws(() => client.conversations.get(conversationId, { share }), TypeError);
+  }
+  assert.equal(calls.length, 3, "无效 share 不能发起请求。");
+});
+
 test("browser management and history keep cursors and stop request identities unchanged", async () => {
   const calls = [];
   const client = createAgentClient({ headers: { "X-Agent-Owner-Key": "browser-supplied" }, fetchImpl: async (path, init) => {

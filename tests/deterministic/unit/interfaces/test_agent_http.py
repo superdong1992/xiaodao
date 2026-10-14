@@ -254,7 +254,7 @@ def test_include_selection_is_explicit_and_canonical(query, expected):
     assert (data["attachments"] is not None) == ("history" in expected)
     assert (data["result"] is not None) == ("report" in expected)
     assert (data["artifacts"] is not None) == ("artifacts" in expected)
-    assert fake.calls == [("get", {"conversation_id": CONVERSATION, "include": expected, "owner_key": OWNER, "run_id": None, "history_before": None, "history_limit": 50})]
+    assert fake.calls == [("get", {"conversation_id": CONVERSATION, "include": expected, "owner_key": OWNER, "run_id": None, "history_before": None, "history_limit": 50, "share": False})]
 
 
 def test_lightweight_conversation_delegates_without_loading_history_or_report():
@@ -265,7 +265,7 @@ def test_lightweight_conversation_delegates_without_loading_history_or_report():
     assert data["report_state"] == "PENDING"
     assert data["failure"] is None
     assert all(data[key] is None for key in ("history", "attachments", "result", "artifacts"))
-    assert fake.calls == [("get", {"conversation_id": CONVERSATION, "include": (), "owner_key": OWNER, "run_id": None, "history_before": None, "history_limit": 50})]
+    assert fake.calls == [("get", {"conversation_id": CONVERSATION, "include": (), "owner_key": OWNER, "run_id": None, "history_before": None, "history_limit": 50, "share": False})]
 
 
 @pytest.mark.parametrize("state", ["PENDING", "UNAVAILABLE"])
@@ -277,7 +277,7 @@ def test_report_waiting_and_unavailable_are_successful_read_states(state):
     data = response.json()["data"]["result"]
     assert data["report_state"] == state
     assert all(data[key] is None for key in ("format", "report", "markdown", "artifact", "source_job_id"))
-    assert fake.calls == [("get", {"conversation_id": CONVERSATION, "include": ("report",), "owner_key": OWNER, "run_id": None, "history_before": None, "history_limit": 50})]
+    assert fake.calls == [("get", {"conversation_id": CONVERSATION, "include": ("report",), "owner_key": OWNER, "run_id": None, "history_before": None, "history_limit": 50, "share": False})]
 
 
 def ready_report(format="problem-locator-diagnosis-v3", status="COMPLETED"):
@@ -323,7 +323,7 @@ def test_ready_report_formats_do_not_wait_for_archive(format, status, archive):
     response = run_request(fake, "GET", VIEW + "?include=report")
     assert response.status_code == 200
     assert response.json()["data"]["result"] == expected
-    assert fake.calls == [("get", {"conversation_id": CONVERSATION, "include": ("report",), "owner_key": OWNER, "run_id": None, "history_before": None, "history_limit": 50})]
+    assert fake.calls == [("get", {"conversation_id": CONVERSATION, "include": ("report",), "owner_key": OWNER, "run_id": None, "history_before": None, "history_limit": 50, "share": False})]
 
 
 @pytest.mark.parametrize("change", [
@@ -719,7 +719,7 @@ def test_history_and_report_run_selectors_forward_without_extra_reads():
     response = run_request(fake, "GET", VIEW + "?include=history,report&run_id=" + RUN + "&history_before=opaque%2Bbefore&history_limit=100")
     assert response.status_code == 200, response.text
     assert fake.calls == [("get", dict(conversation_id=CONVERSATION, owner_key=OWNER,
-        include=("history", "report"), run_id=RUN, history_before="opaque+before", history_limit=100))]
+        include=("history", "report"), run_id=RUN, history_before="opaque+before", history_limit=100, share=False))]
 
 
 @pytest.mark.parametrize("suffix", ["?run_id=bad", "?history_limit=0", "?history_limit=101", "?history_before=",

@@ -107,6 +107,7 @@ JSON 报告使用 `conversation.result.report` 的固定字段填充组件。下
 | `conversations.get(id)` | 一次恢复状态、追问、进度、消息、附件、报告和下载信息 |
 | `conversations.get(id, {include: []})` | 仅读取基本状态，不加载历史、报告或产物列表 |
 | `conversations.get(id, {include: ["report"]})` | 从同一会话读取报告；也可选择 `history`、`artifacts` 或组合 |
+| `conversations.get(id, {share: true, include: ["report", "artifacts"]})` | 分享只读访问；接收者仍须登录，但不要求是会话所有者 |
 | `conversations.getFeedback(id, runId, {signal})` | 读取指定报告的评价资格和当前投票，`signal` 可选 |
 | `conversations.setFeedback(id, runId, {request_id, rating})` | 提交 `LIKE` 或 `DISLIKE`；重试保留原 ID 和内容，换票使用新 ID |
 | `conversations.eventsUrl(id)` | 返回会话 SSE 路径，交给订阅和游标处理代码 |
@@ -196,6 +197,26 @@ async function submitLogs() {
 
 `diagnosis.result` 也包含因失败、取消或中断而没有报告的诊断轮次。此时 `result.report_state=UNAVAILABLE`，应展示 `status` 和可选的 `failure`。点击卡片仍可读取该轮详情，不能显示为“结果仍在生成”。
 
+### 分享报告
+
+网站分享页读取详情时，在 SDK 选项中传入布尔值 `share: true`：
+
+```javascript
+const conversation = await client.conversations.get(conversationId, {
+  share: true,
+  include: ["report", "artifacts"],
+});
+renderReport(container, conversation.result);
+```
+
+对应请求是 `GET /api/agent/conversations/{id}?include=report,artifacts&share=true`。`share` 是查询参数，不是 JSON payload 字段。接收者须先登录，使用自己的 Cookie；省略 `share` 或传 `false` 时仍校验会话归属。HTTP 参数仅接受小写 `true`、`false`，空值、非法值和重复参数返回 `400`。
+
+分享响应的 `capabilities` 全部为 `false`。页面应只展示读取到的内容，不启用发送、停止、重新诊断、重命名、删除、赞踩、报告追问或 SSE。会话列表和这些操作仍按原规则校验归属，均不支持 `share`。刷新、切换历史轮次或加载更早的历史时，继续调用 `conversations.get` 并保留 `share: true`。
+
+下载使用分享响应中的网站同源 `artifacts[].download_url`，其中已带 `share=true` 和 `run_id`。追加 ZIP 确认或审计包参数时保留它们。分享下载仍校验文件内容，原始日志的下载确认也保持不变。
+
+此版本没有保存“开启分享”状态，也没有独立分享 token 或撤销分享接口。任何已登录用户只要知道会话 ID，就能添加 `share=true` 读取详情及可下载文件；省略 `include` 时会返回完整会话视图。分享不会转移所有权或加入接收者的会话列表，删除和历史到期规则不变。完整参数说明见 [Agent API 参考](../../docs/website-agent-api.md)。
+
 ## 4. 接入真实网站后端
 
 生产配置和更新步骤见[Redis 会话接入部署说明](../../docs/website-redis-deployment.md)。
@@ -246,7 +267,7 @@ node examples/website-agent/server.ts
 
 后端示例固定监听 `127.0.0.1`，默认端口为 `8787`；`PORT` 只能修改端口。将网站同源 `/api/agent/` 反向代理到此服务，或把 `createAgentBackend` 接入现有的 Node HTTP 后端。SSE 代理需关闭响应缓冲，将读取超时设为大于 15 秒心跳间隔的值，例如 60 秒。上传代理需保留原始字节、长度和校验请求头。
 
-登录会话缺失、过期或 `user.userid` 无效时返回 `401`；访问其他用户的数据仍返回 `404`；Redis 地址未配置或连接不可用时返回 `503`。Cookie 的 Domain、Path 等属性须允许浏览器向网站的 `/api/agent/` 携带它。
+登录会话缺失、过期或 `user.userid` 无效时返回 `401`；未启用分享读取时，访问其他用户的数据返回 `404`；Redis 地址未配置或连接不可用时返回 `503`。Cookie 的 Domain、Path 等属性须允许浏览器向网站的 `/api/agent/` 携带它。
 
 旧部署可继续使用 `WEBSITE_AUTH_MODE=trusted_header` 和原 BFF 的 `WEBSITE_AUTH_MODULE`。该 `.mjs` 模块具名导出 `access`，实现异步 `authenticate(request)` 并返回 `{id: string}` 或 `null`。
 
@@ -256,7 +277,7 @@ xiaodao 的诊断、MCP 和其他内部 API 保持现有内网部署方式，浏
 
 浏览器调用网站的 `/api/agent`，网站后端访问 xiaodao 的 `/api/v1/agent`。后端只向配置的 `XIAODAO_BASE_URL` 发送请求，每次读取会话只请求一次上游接口。`included` 标明本次实际加载了哪些部分。未请求的 `history`、`attachments`、`result` 或 `artifacts` 为 null，页面应保留此前的内容；空数组则表示确实没有记录。
 
-原始产物的下载地址使用已核验的会话、轮次和产物 ID 构造，不使用上游返回的 `download_url`。因此，内部地址可以与服务端 `PUBLIC_BASE_URL` 不同，配置的路径前缀会保留。上传地址也会改写为网站同源路径。
+原始产物的下载地址使用已核验的会话、轮次和产物 ID 构造，分享模式同时保留 `share=true`，不使用上游返回的 `download_url`。因此，内部地址可以与服务端 `PUBLIC_BASE_URL` 不同，配置的路径前缀会保留。上传地址也会改写为网站同源路径。
 
 ## 5. 最后接实时进度和下载
 

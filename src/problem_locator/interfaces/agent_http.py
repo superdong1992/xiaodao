@@ -50,6 +50,9 @@ _UUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\Z")
 _OWNER_PARAMETER = {"name": "X-Agent-Owner-Key", "in": "header", "required": True,
                     "schema": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
                     "description": "可信网站后端从已认证身份派生的稳定归属键；禁止采用浏览器自报值。"}
+_SHARE_PARAMETER = {"name": "share", "in": "query", "required": False,
+                    "schema": {"type": "boolean", "default": False},
+                    "description": "仅接受 true 或 false；true 允许已登录用户跨归属只读查看会话及下载文件。"}
 
 
 class _AgentHttpModel(BaseModel):
@@ -175,7 +178,7 @@ def _limit(value: str | None, default: int) -> int:
 
 
 def _conversation_include(request: Request) -> tuple[str, ...]:
-    _query(request, {"include", "run_id", "history_before", "history_limit"})
+    _query(request, {"include", "run_id", "history_before", "history_limit", "share"})
     values = request.query_params.getlist("include")
     if not values:
         return _CONVERSATION_INCLUDES
@@ -187,6 +190,13 @@ def _conversation_include(request: Request) -> tuple[str, ...]:
     if len(selected) != len(set(selected)) or any(item not in _CONVERSATION_INCLUDES for item in selected):
         raise ValueError("include 必须是 none 或不重复的 history、report、artifacts 组合。")
     return tuple(item for item in _CONVERSATION_INCLUDES if item in selected)
+
+
+def _share(request: Request) -> bool:
+    value = request.query_params.get("share", "false")
+    if value not in {"true", "false"}:
+        raise ValueError("share 仅支持 true 或 false。")
+    return value == "true"
 
 
 def _event_cursor(request: Request) -> int:
@@ -284,7 +294,7 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
                 if run_id is not None and _UUID.fullmatch(run_id) is None:
                     raise ValueError("轮次标识无效。")
                 kwargs.update(run_id=run_id, history_before=query.get("history_before"),
-                              history_limit=_limit(query.get("history_limit"), 50))
+                              history_limit=_limit(query.get("history_limit"), 50), share=_share(request))
             elif function == "list_conversations":
                 query = _query(request, {"cursor", "limit"})
                 kwargs.update(cursor=query.get("cursor"), limit=_limit(query.get("limit"), 20))
@@ -321,7 +331,7 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
                         **artifact.model_dump(exclude={"download_url"}),
                         download_url=append_public_path(
                             public_base_url, f"{_PREFIX}/conversations/{result.conversation_id}/files/{artifact.artifact_id}/content",
-                        ) + f"?run_id={result.selected_run_id}",
+                        ) + f"?run_id={result.selected_run_id}" + ("&share=true" if kwargs["share"] else ""),
                     ) for artifact in artifacts]
                 # All source fields and the newly built descriptors are typed;
                 # preserve the already-validated report model by reference.
@@ -332,7 +342,8 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
             if function in {"get_feedback", "put_feedback"} and (
                     result.conversation_id != kwargs["conversation_id"] or result.run_id != kwargs["run_id"]):
                 raise RuntimeError("Feedback response identity does not match the request")
-            return JSONResponse(success_envelope(result))
+            return JSONResponse(success_envelope(result),
+                                headers={"Cache-Control": "no-store"} if kwargs.get("share") else None)
         except AgentStoreError as exc:
             return _failure(exc.code, exc.message, exc.status_code, details=exc.details, retryable=exc.retryable)
         except ApplicationPortError as exc:
@@ -424,13 +435,14 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
         summary="读取会话、报告和下载入口",
         description=("默认返回消息和附件历史、正式报告及产物下载入口；include=none 只读轻量状态。"
                      "可按需选择 history、report、artifacts，未加载的字段为 null。"
+                     "share=true 允许已登录用户跨归属只读查看，所有操作能力均为 false。"
                      "读取不运行模型，报告就绪后即可展示，无需等待归档。"),
         operation_id="get_agent_conversation",
         openapi_extra={"parameters": [{
             "name": "include", "in": "query", "required": False,
             "schema": {"type": "string", "default": "history,report,artifacts"},
             "description": "none 或以逗号分隔、不重复的 history、report、artifacts；不得重复指定参数。",
-        }, *[{"name": name, "in": "query", "required": False, "schema": schema}
+        }, _SHARE_PARAMETER, *[{"name": name, "in": "query", "required": False, "schema": schema}
              for name, schema in (("run_id", {"type": "string", "format": "uuid"}),
                                   ("history_before", {"type": "string"}),
                                   ("history_limit", {"type": "integer", "default": 50, "minimum": 1, "maximum": 100}))]]},
@@ -583,9 +595,9 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
     @app.get(f"{_PREFIX}/conversations/{{conversation_id}}/files/{{artifact_id}}/content", tags=["Agent"],
              response_class=StreamingResponse, response_model=None, responses=errors,
              operation_id="download_agent_file", summary="下载指定会话轮次的文件",
-             description="校验归属及轮次中的产物身份后传输不可变字节；资源使用租约保持到传输结束。",
+             description="默认校验归属；share=true 允许已登录用户跨归属下载。始终校验轮次中的产物身份，资源使用租约保持到传输结束。",
              openapi_extra={"parameters": [{"name": "run_id", "in": "query", "required": False,
-                                            "schema": {"type": "string", "format": "uuid"}}]})
+                                            "schema": {"type": "string", "format": "uuid"}}, _SHARE_PARAMETER]})
     async def download_file(conversation_id: Annotated[OpaqueId, Path()], artifact_id: Annotated[OpaqueId, Path()],
                             request: Request):
         from .http_app import _ClosingStreamingResponse
@@ -593,7 +605,8 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
 
         try:
             owner_key = _owner_key(request)
-            query = _query(request, {"run_id"})
+            query = _query(request, {"run_id", "share"})
+            share = _share(request)
             run_id = query.get("run_id")
             if run_id is not None and _UUID.fullmatch(run_id) is None:
                 raise ValueError("轮次标识无效。")
@@ -603,11 +616,11 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
             return _failure("AGENT_UNAVAILABLE", "Agent 服务尚未配置。", 503)
 
         def open_owned():
-            lease = service.operation_lease(conversation_id, owner_key=owner_key)
+            lease = service.read_lease(conversation_id, owner_key=owner_key, share=share)
             lease.__enter__()
             try:
                 detail = service.get_conversation(conversation_id, include=("artifacts",),
-                                                  run_id=run_id, owner_key=owner_key)
+                                                  run_id=run_id, owner_key=owner_key, share=share)
                 artifact = next((item for item in detail.artifacts or [] if item.artifact_id == artifact_id), None)
                 if artifact is None or detail.case_id is None:
                     raise AgentStoreError("ARTIFACT_NOT_FOUND", "产物不存在。", 404)

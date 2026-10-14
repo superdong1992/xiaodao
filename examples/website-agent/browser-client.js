@@ -110,8 +110,9 @@ export function createAgentClient({ basePath = "/api/agent", fetchImpl = globalT
         requestHeaders: { "Content-Type": "application/json" } }),
       stop: (id, { request_id, run_id }) => post(`${conversationPath(id)}/stop`, { request_id, run_id }),
       delete: (id) => request(conversationPath(id), { method: "DELETE" }),
-      get(id, { include, run_id, history_before, history_limit, signal } = {}) {
+      get(id, { include, run_id, history_before, history_limit, share, signal } = {}) {
         const query = new URLSearchParams();
+        if (share !== undefined && typeof share !== "boolean") throw new TypeError("share 必须是布尔值。");
         if (include !== undefined) {
           if (!Array.isArray(include) || new Set(include).size !== include.length ||
               include.some((item) => !["history", "report", "artifacts"].includes(item))) {
@@ -123,6 +124,7 @@ export function createAgentClient({ basePath = "/api/agent", fetchImpl = globalT
         if (run_id !== undefined) query.set("run_id", run_id);
         if (history_before !== undefined) query.set("history_before", history_before);
         if (history_limit !== undefined) query.set("history_limit", history_limit);
+        if (share !== undefined) query.set("share", String(share));
         return request(withQuery(conversationPath(id), query), { signal });
       },
       async getFeedback(id, runId, { signal } = {}) {

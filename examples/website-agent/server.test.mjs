@@ -345,6 +345,114 @@ test("full conversation uses one native read and returns history, result and aut
   });
   assert.deepEqual(fixture.calls, [`${base}/api/v1/agent/conversations/${conversation}`]);
 });
+
+for (const share of [true, false]) {
+  test(`share=${share} detail retains credentials, read capabilities and local artifact links`, async () => {
+    const calls = [], capabilities = { can_send: false, can_stop: false, can_rediagnose: false, can_rename: false, can_delete: false };
+    await withServer({ fetchImpl: async (url, init) => {
+      calls.push(String(url));
+      assertCookieHeaders(init);
+      assert.equal(new URL(url).search, `?include=history,artifacts&run_id=${runId}&history_limit=20&share=${share}`);
+      return envelope(nativeDetail(["history", "artifacts"], { capabilities }));
+    } }, async (origin) => {
+      const response = await fetch(`${origin}${conversationPath}?include=artifacts,history&run_id=${runId}&history_limit=20&share=${share}`,
+        { headers: { ...cookieHeaders, "X-Agent-Owner-Key": "spoof" } });
+      assert.equal(response.status, 200);
+      const detail = (await response.json()).data;
+      assert.deepEqual(detail.capabilities, capabilities);
+      assert.deepEqual(detail.history, nativeDetail().history);
+      assert.equal(detail.artifacts[0].download_url, `${reportDownloadPath}?run_id=${runId}${share ? "&share=true" : ""}`);
+    });
+    assert.equal(calls.length, 1);
+  });
+}
+
+test("share rejects malformed flags on detail and files before contacting upstream", async () => {
+  let calls = 0;
+  await withServer({ access, fetchImpl: async () => { calls++; assert.fail("无效分享参数不能转发。"); } }, async (origin) => {
+    for (const path of [conversationPath, reportDownloadPath]) {
+      for (const query of ["share", "share=", "share=1", "share=0", "share=True", "share=FALSE", "share=null",
+        "share=%20true", "share=true%20", "share=true&share=false", "share=true&share=true"]) {
+        assert.equal((await fetch(`${origin}${path}?${query}`)).status, 400, `${path}?${query}`);
+      }
+    }
+  });
+  assert.equal(calls, 0);
+});
+
+test("share stays limited to detail and file reads", async () => {
+  let calls = 0;
+  await withServer({ access, fetchImpl: async () => { calls++; assert.fail("分享参数不能改变其他接口的权限。"); } }, async (origin) => {
+    for (const [path, method] of [["/api/agent/conversations", "GET"], [conversationPath, "PATCH"],
+      [conversationPath, "DELETE"], [`${conversationPath}/messages`, "POST"], [`${conversationPath}/stop`, "POST"],
+      [`${conversationPath}/events`, "GET"], [`${conversationPath}/runs/${runId}/feedback`, "GET"]]) {
+      assert.equal((await fetch(`${origin}${path}?share=true`, { method })).status, 400, `${method} ${path}`);
+    }
+  });
+  assert.equal(calls, 0);
+});
+
+test("share preserves backend login and ownership denial and explicit access still requires login", async () => {
+  const received = [];
+  await withServer({ fetchImpl: async (url, init) => {
+    received.push({ url: String(url), cookie: new Headers(init.headers).get("Cookie") });
+    return authFailure(401, "AUTHENTICATION_REQUIRED");
+  } }, async (origin) => {
+    for (const path of [conversationPath, reportDownloadPath]) {
+      assert.equal((await fetch(`${origin}${path}?share=true`)).status, 401);
+    }
+  });
+  assert.equal(received.length, 2);
+  assert.ok(received.every(({ url, cookie }) => new URL(url).searchParams.get("share") === "true" && cookie === null));
+  let calls = 0;
+  await withServer({ access: { authenticate: async () => null }, fetchImpl: async () => { calls++; } }, async (origin) => {
+    for (const path of [conversationPath, reportDownloadPath]) {
+      assert.equal((await fetch(`${origin}${path}?share=true`)).status, 401);
+    }
+  });
+  assert.equal(calls, 0);
+  await withServer({ access, fetchImpl: async (url, init) => {
+    assert.equal(new Headers(init.headers).get("X-Agent-Owner-Key"), ownerKey);
+    assert.notEqual(new URL(url).searchParams.get("share"), "true");
+    return authFailure(403, "AGENT_OWNERSHIP_REQUIRED");
+  } }, async (origin) => {
+    for (const path of [conversationPath, reportDownloadPath]) {
+      for (const query of ["", "?share=false"]) assert.equal((await fetch(`${origin}${path}${query}`)).status, 403);
+    }
+  });
+});
+
+for (const kind of ["USER_RESULT", "GENERIC_REPORT", "USER_RESULT_ARCHIVE", "AUDIT_BUNDLE"]) {
+  for (const share of [true, false]) {
+    test(`share=${share} ${kind} download keeps the selected run, credentials and configured upstream prefix`, async () => {
+      const payload = Buffer.from(`合成 ${kind} 产物\r\n`), calls = [];
+      const artifact = { ...publicArtifact(kind, payload), download_url: "http://evil.invalid/private" };
+      const oldRun = "50000000-0000-0000-0000-000000000002";
+      await withServer({ upstream: `${base}/internal`, fetchImpl: async (url, init) => {
+        const parsed = new URL(url); calls.push(parsed.href);
+        assertCookieHeaders(init);
+        assert.equal(parsed.origin, base);
+        assert.equal(parsed.searchParams.get("run_id"), oldRun);
+        assert.equal(parsed.searchParams.get("share"), String(share));
+        if (calls.length === 1) {
+          assert.equal(parsed.pathname, `/internal/api/v1/agent/conversations/${conversation}`);
+          assert.equal(parsed.searchParams.get("include"), "artifacts");
+          return envelope(nativeDetail(["artifacts"], { selected_run_id: oldRun, artifacts: [artifact] }));
+        }
+        assert.equal(parsed.pathname, `/internal/api/v1/agent/conversations/${conversation}/files/${artifactId}/content`);
+        assert.deepEqual([...parsed.searchParams.keys()], ["run_id", "share"]);
+        return new Response(payload, { headers: { "Content-Type": artifact.content_type } });
+      } }, async (origin) => {
+        const download = kind === "USER_RESULT_ARCHIVE" ? "&download=archive&acknowledge_raw_logs=true" :
+          kind === "AUDIT_BUNDLE" ? "&download=audit" : "";
+        const response = await fetch(`${origin}${reportDownloadPath}?run_id=${oldRun}&share=${share}${download}`, { headers: cookieHeaders });
+        assert.equal(response.status, 200);
+        assert.deepEqual(Buffer.from(await response.arrayBuffer()), payload);
+      });
+      assert.equal(calls.length, 2);
+    });
+  }
+}
 for (const included of [[], ["history"], ["report"], ["artifacts"], ["history", "report"], ["history", "artifacts"], ["report", "artifacts"]]) {
   const query = `?include=${included.length ? included.join(",") : "none"}`;
   test(`conversation ${query} reads once and leaves excluded fields null`, async () => {

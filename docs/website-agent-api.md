@@ -12,7 +12,7 @@
 
 首次接入先读 [部署后快速接入与联调清单](website-agent-quickstart.md)。本文是完整接口参考。在线入口是 xiaodao 服务的 `/docs` 和 `/openapi.json`；仓库保存 [OpenAPI 快照](../schemas/v2/web-api.openapi.snapshot.json)。快照保留底层 `trusted_header` 接口合同，生产默认 Redis 模式的在线文档会改为 Cookie 鉴权。联调前核对线上 `info.version`、路由和鉴权配置，不能假设已部署服务与当前源码一致。
 
-调用关系：网站前端 → 网站后端 → Linux 上的 xiaodao REST API。网站原有问答功能保持独立。网站后端默认透传 Cookie；xiaodao 从 Redis 会话读取工号，统一校验登录和会话、附件、订阅、文件的用户归属。UUID 不是授权凭据。不要把 xiaodao 内部地址或下载地址直接交给浏览器。
+调用关系：网站前端 → 网站后端 → Linux 上的 xiaodao REST API。网站原有问答功能保持独立。网站后端默认透传 Cookie；xiaodao 从 Redis 会话读取工号，所有请求均校验登录，默认还会校验会话、附件、订阅、文件的用户归属。仅会话详情和对应文件下载支持 `share=true`，允许其他已登录用户只读访问，具体范围见下文“分享只读访问”。不要把 xiaodao 内部地址或下载地址直接交给浏览器。
 
 会话、轮次、SSE 事件、反馈、追问和文件的服务生成时间统一使用毫秒精度 RFC 3339，固定偏移 `+08:00`，例如 `2026-10-10T12:34:56.789+08:00`，不受服务器操作系统时区影响。历史记录仍可返回 `Z` 格式；前端按字符串中的时区解析，不要再加 8 小时。诊断输入 `problem_time`、日志事件时间和证据时间范围仍使用毫秒精度 UTC。
 
@@ -57,7 +57,7 @@
 | 会话 | `POST /api/v1/agent/conversations/{conversation_id}/stop` | 停止指定轮次，JSON：稳定 `request_id` 和 `run_id` |
 | 会话 | `DELETE /api/v1/agent/conversations/{conversation_id}` | 删除会话，无请求体；按会话 ID 幂等 |
 | 会话 | `POST /api/v1/agent/conversations/{conversation_id}/messages` | 发送问题、补充回答或附件引用，JSON：`request_id`、可空 `text`、`attachment_ids`、可选 `target_run_id` |
-| 会话 | `GET /api/v1/agent/conversations/{conversation_id}` | 一次返回状态、进度、追问、失败、历史、完整报告和下载信息 |
+| 会话 | `GET /api/v1/agent/conversations/{conversation_id}` | 一次返回状态、进度、追问、失败、历史、完整报告和下载信息；`share=true` 允许已登录的非所有者只读访问 |
 | 会话 | `GET /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/feedback` | 指定报告的评价资格与当前投票，无请求体 |
 | 会话 | `PUT /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/feedback` | JSON：`request_id`、`rating`（`LIKE` 或 `DISLIKE`） |
 | 会话 | `GET /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups` | 指定报告的追问快照，支持 `cursor`、`limit`，默认最新 50 条、最大 100 条 |
@@ -65,13 +65,13 @@
 | 会话 | `GET /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups/events` | 独立追问 SSE，可带 `Last-Event-ID`，不混入诊断事件流 |
 | 会话 | `POST /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups/{followup_id}/stop` | 停止指定追问，JSON：稳定 `request_id` |
 | 会话 | `GET /api/v1/agent/conversations/{conversation_id}/events` | SSE 历史回放和实时订阅；可带 `Last-Event-ID` |
-| 会话 | `GET /api/v1/agent/conversations/{conversation_id}/files/{artifact_id}/content` | 下载文件，可用 `run_id` 固定历史轮次 |
+| 会话 | `GET /api/v1/agent/conversations/{conversation_id}/files/{artifact_id}/content` | 下载文件，可用 `run_id` 固定历史轮次；分享下载携带 `share=true` |
 | 附件 | `POST /api/v1/agent/attachments` | 预约日志上传，JSON 含 `conversation_id` 和文件元数据 |
 | 附件 | `PUT /api/v1/agent/attachments/{attachment_id}/content` | 上传文件原始字节 |
 
 赞踩接入、响应格式、换票和错误处理见[通用定位经验库与网站赞踩接入](generic-feedback-memory.md)。评价接口不接受查询参数，`request_id` 最多 128 个 Unicode 字符；已交付的通用和专用 `direct` 的 V2 Markdown 正式报告支持评价，资格由服务端判断。前端负责按钮，不新增 SSE 事件。
 
-会话 GET 支持 `include`、`run_id`、`history_before`、`history_limit`。不传时加载 `history,report,artifacts`；`include=none` 只返回状态、追问、最新阶段和事件游标；也可传 `include=report`、`include=artifacts` 或不重复的逗号组合。目录和追问列表查询支持 `cursor`、`limit`；文件支持 `run_id`；其余路由不接受查询参数。未知项、重复项和重复 `include` 参数返回明确校验错误。
+会话详情 GET 支持 `include`、`run_id`、`history_before`、`history_limit`、`share`。不传 `include` 时加载 `history,report,artifacts`；`include=none` 只返回状态、追问、最新阶段和事件游标；也可传 `include=report`、`include=artifacts` 或不重复的逗号组合。目录和追问列表查询支持 `cursor`、`limit`；文件支持 `run_id`、`share`；其余路由不接受查询参数。未知项、重复项和重复 `include` 参数返回明确校验错误。
 
 返回字段固定，`included` 明确本次加载的部分。未加载的 `history`、`attachments`、`result`、`artifacts` 为 null；空数组表示已加载且没有记录。前端只更新本次加载的部分，不能用 null 清空此前的报告。`report_state` 表示业务可用性，`READY` 与 `result=null` 可以同时出现，含义是本次没有请求报告。
 
@@ -104,7 +104,7 @@
 }
 ```
 
-常见 HTTP 状态：`400` 参数错误；`401` 登录缺失、过期或会话身份无效；`404` 不存在或属于其他用户；`409` 状态或幂等冲突；`413` 超出限制；`422` 文件校验失败；`503` Redis 地址未配置、连接不可用或其他服务暂时不可用。BFF 保留这些鉴权状态，页面应按原因提示用户，不能把 Redis 故障当成退出登录。
+常见 HTTP 状态：`400` 参数错误；`401` 登录缺失、过期或会话身份无效；`404` 不存在，或默认归属校验下属于其他用户；`409` 状态或幂等冲突；`413` 超出限制；`422` 文件校验失败；`503` Redis 地址未配置、连接不可用或其他服务暂时不可用。BFF 保留这些鉴权状态，页面应按原因提示用户，不能把 Redis 故障当成退出登录。
 
 ### Cookie、Redis 与用户归属
 
@@ -118,9 +118,37 @@ xiaodao 后端的 `WEBSITE_AUTH_MODE` 默认是 `redis`。网站 BFF 透传 Cook
 
 Redis 地址在 Linux 后端预留为 `WEBSITE_REDIS_HOST=`，内网部署时填 IP 或主机名；`WEBSITE_REDIS_PORT=6379`、`WEBSITE_REDIS_DB=0`，可选 `WEBSITE_REDIS_USERNAME`、`WEBSITE_REDIS_PASSWORD`，`WEBSITE_REDIS_SSL=false`。完整配置见[部署说明](website-redis-deployment.md)。
 
-会话、上传、下载、反馈、追问和两类 SSE 请求均透传 Cookie，后端使用同一工号识别用户。原有会话归属检查继续生效。
+会话、上传、下载、反馈、追问和两类 SSE 请求均透传 Cookie，后端使用同一工号识别用户。除下述分享读取外，原有会话归属检查继续生效。
 
 旧 BFF 仍可配合 `WEBSITE_AUTH_MODE=trusted_header` 和原 `WEBSITE_AUTH_MODULE` 使用。切换时保留原命名空间，并确认旧 `user.id` 对应 Redis 中的 `user.userid`，以继续访问历史会话。旧模式会改写创建请求的 `request_id`，切换前先确认未完成创建请求的结果。
+
+### 分享只读访问
+
+分享参数放在 GET 请求的查询字符串中，不放入 JSON payload。接收者仍须登录网站，使用自己的 Cookie；网站后端照常透传 Cookie，无需传递分享者的身份。
+
+| `share` 查询参数 | 行为 |
+| --- | --- |
+| 省略或 `share=false` | 保持原有归属校验，其他用户读取返回 `404`。 |
+| `share=true` | 已登录用户可读取指定会话及其文件，不要求是会话所有者。 |
+| 空值、其他值或重复参数 | 返回 `400`；仅接受小写 `true`、`false`，不接受 `1`、`True` 等写法。 |
+
+例如，读取分享会话的报告和下载信息：
+
+```http
+GET /api/v1/agent/conversations/{conversation_id}?share=true&include=report,artifacts&run_id={run_id}
+```
+
+`share=true` 可与 `include`、`run_id`、历史分页参数组合。省略 `include` 仍返回完整会话视图，分享范围不局限于报告正文。响应中的 `capabilities` 全部为 `false`，即使当前登录用户就是所有者也一样；页面应隐藏发送、停止、重新诊断、重命名和删除操作。分享页不要订阅 SSE，也不要调用赞踩或报告追问接口；需要刷新时重新请求带 `share=true` 的详情。
+
+分享响应中的 `artifacts[].download_url` 会保留 `share=true` 和所选 `run_id`。下载时使用返回的网站同源地址，追加 ZIP 确认或审计包参数时保留已有查询参数。对应的上游文件路径示例：
+
+```http
+GET /api/v1/agent/conversations/{conversation_id}/files/{artifact_id}/content?run_id={run_id}&share=true
+```
+
+只有这两个 GET 路由接受 `share`。会话列表、SSE、赞踩、报告追问、上传和其他写操作均不支持此参数，继续按原规则校验归属。分享不会把会话加入接收者的会话列表，也不会转移会话所有权。会话删除、轮次到期和文件不可用的限制仍然生效。
+
+此版本没有持久化的“开启分享”状态、独立分享 token 或撤销分享接口。任何已登录用户只要知道会话 ID，就可以添加 `share=true` 读取该会话及可下载文件；网站上的分享按钮只负责生成链接。
 
 ### 创建与发送消息
 
@@ -465,7 +493,7 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `RunStoppingData` | `status` | 固定 CANCELLING。 |
 | `ConversationDetailResponse` | `title` | 会话标题。 |
 | `ConversationDetailResponse` | `current_run` | 当前轮摘要，历史读取也不改变。 |
-| `ConversationDetailResponse` | `capabilities` | 当前允许的管理操作。 |
+| `ConversationDetailResponse` | `capabilities` | 当前允许的管理操作；`share=true` 时全部为 false。 |
 | `ConversationDetailResponse` | `selected_run_id` | 当前状态、报告和文件的所属轮次。 |
 | `ConversationDetailResponse` | `run_id` | 所选轮次 UUID。 |
 | `ConversationDetailResponse` | `history_next_cursor` | 更早记录游标，可空。 |
@@ -687,25 +715,25 @@ node examples/website-agent/server.ts
 
 Linux 启动命令、Redis 配置及反向代理要求见 [示例 README](../examples/website-agent/README.md)。示例固定监听 `127.0.0.1`，不是可以直接暴露给所有浏览器的完整网站。
 
-默认不需要 `WEBSITE_AUTH_MODULE`，Redis 连接配置位于 xiaodao 后端。BFF 只需透传 Cookie；登录会话缺失或工号无效返回 `401`，Redis 不可用返回 `503`，其他用户的会话仍返回 `404`。
+默认不需要 `WEBSITE_AUTH_MODULE`，Redis 连接配置位于 xiaodao 后端。BFF 只需透传 Cookie；登录会话缺失或工号无效返回 `401`，Redis 不可用返回 `503`，未启用分享读取时，其他用户的会话返回 `404`。
 
 网站示例前缀是 `/api/agent`，xiaodao 上游前缀是 `/api/v1/agent`。两者的会话和附件操作一致；BFF 负责受控转发、受控错误和同源下载地址，不再额外生成中文 sections。
 
 | 网站示例路径 | 用途 |
 | --- | --- |
-| `GET /api/agent/conversations/{id}` | 一次返回完整会话，支持与上游相同的 include 参数 |
+| `GET /api/agent/conversations/{id}` | 一次返回完整会话，支持与上游相同的查询参数，包括 include 和 share |
 | `GET /api/agent/conversations/{id}/runs/{run_id}/followups` | 查询所选报告的追问快照和更早页 |
 | `POST /api/agent/conversations/{id}/runs/{run_id}/followups` | 提交文字追问 |
 | `GET /api/agent/conversations/{id}/runs/{run_id}/followups/events` | 独立追问 SSE，透传 Last-Event-ID |
 | `POST /api/agent/conversations/{id}/runs/{run_id}/followups/{followup_id}/stop` | 停止指定追问 |
 | `POST /api/agent/attachments` | 预约上传；JSON 必须带 conversation_id，先检查该会话是否属于当前用户 |
-| `GET /api/agent/conversations/{id}/files/{artifact_id}/content` | 从会话核验文件身份后下载 |
+| `GET /api/agent/conversations/{id}/files/{artifact_id}/content` | 从会话核验文件身份后下载，支持 run_id 和 share |
 | 上一下载路径加 `?download=archive&acknowledge_raw_logs=true` | 用户确认原始日志提示后下载结果 ZIP |
 | 上一下载路径加 `?download=audit` | 用户主动下载审计包 |
 
 文件下载仍流式传输，与会话 JSON 分开；下载入口由会话提供，属于会话能力。旧独立读取路径和旧 SDK 方法不再提供。
 
-示例只向配置的 `XIAODAO_BASE_URL` 发请求。检查会话所属用户、Case ID、Artifact ID 和来源 Job 后，根据固定 API 路径构造内部下载地址。响应中的 `download_url` 不用于构造请求地址，也不能指定主机、路径或重定向目标。网站访问的内部上游地址可以与服务端 `PUBLIC_BASE_URL` 不同，配置中的路径前缀会保留；浏览器始终使用网站同源接口。
+示例只向配置的 `XIAODAO_BASE_URL` 发请求。按普通或分享模式读取会话并核对 Case ID、Artifact ID 和来源 Job 后，根据固定 API 路径构造内部下载地址，同时保留 `run_id` 和 `share`。响应中的 `download_url` 不用于构造请求地址，也不能指定主机、路径或重定向目标。网站访问的内部上游地址可以与服务端 `PUBLIC_BASE_URL` 不同，配置中的路径前缀会保留；浏览器始终使用网站同源接口。
 
 运行接入示例确定性测试：
 
