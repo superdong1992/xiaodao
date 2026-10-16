@@ -100,3 +100,14 @@ def test_telemetry_accepts_grep_only_for_read_search_and_rejects_write_tools():
     assert not telemetry.permits_file_access("none")
     telemetry.write(b'{"type":"assistant","message":{"content":[{"type":"tool_use","id":"call2","name":"Write","input":{}}]}}\n')
     assert not telemetry.permits_file_access("read-search")
+
+
+def test_correction_memory_uses_same_strict_read_search_policy(tmp_path):
+    invocation = ClaudeCommand(("claude", "--dangerously-skip-permissions", "--mcp-config", "ambient.json", "--tools", "Bash"), {})
+    result = apply_final_response_policy(invocation, file_access="read-search", workspace_root=tmp_path, phase="MEMORY_CORRECTION")
+    assert result.argv[result.argv.index("--tools") + 1] == "Read,Grep"
+    assert result.argv[result.argv.index("--mcp-config") + 1] == '{"mcpServers":{}}'
+    assert "--dangerously-skip-permissions" not in result.argv
+    assert "--no-session-persistence" in result.argv
+    assert "--disable-slash-commands" in result.argv
+    assert result.environment["PROBLEM_LOCATOR_AGENT_PHASE"] == "MEMORY_CORRECTION"

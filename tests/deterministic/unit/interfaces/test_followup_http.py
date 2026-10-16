@@ -45,7 +45,7 @@ class Followups:
 
 @pytest.fixture
 def agent():
-    return SimpleNamespace(followups=Followups())
+    return SimpleNamespace(followups=Followups(), feedback=Feedback())
 
 
 def test_submit_list_stop_keep_identity_and_owner(agent):
@@ -114,4 +114,88 @@ def test_new_routes_do_not_change_existing_sse_or_detail_versions():
     assert schemas["ConversationDetailResponse"]["properties"]["schema_version"]["const"] == 3
     assert schemas["FollowupEvent"]["properties"]["schema_version"]["const"] == 1
     assert schemas["FollowupRequest"]["additionalProperties"] is False
-    assert set(schemas["FollowupRequest"]["properties"]) == {"request_id", "text"}
+    assert set(schemas["FollowupRequest"]["properties"]) == {"request_id", "text", "intent", "target_followup_id"}
+
+
+class Feedback:
+    def __init__(self):
+        self.calls = []
+
+    def get_followup_feedback(self, cid, rid, fid, **kwargs):
+        self.calls.append(("get", cid, rid, fid, kwargs))
+        return dict(schema_version=1, conversation_id=cid, run_id=rid, followup_id=fid,
+                    can_rate=True, rating=None, updated_at=None)
+
+    def put_followup_feedback(self, cid, rid, fid, **kwargs):
+        self.calls.append(("put", cid, rid, fid, kwargs))
+        return dict(schema_version=1, conversation_id=cid, run_id=rid, followup_id=fid,
+                    can_rate=True, rating=kwargs["rating"], updated_at=WHEN)
+
+
+def test_answer_feedback_routes_bind_exact_answer_and_trusted_owner(agent):
+    path = ROOT + f"/{FID}/feedback"
+    result = run_request(agent, "GET", path)
+    assert result.status_code == 200
+    assert set(result.json()["data"]) == {"schema_version", "conversation_id", "run_id", "followup_id", "can_rate", "rating", "updated_at"}
+    assert agent.feedback.calls[-1] == ("get", CONVERSATION, RUN, FID, {"owner_key": OWNER})
+    result = run_request(agent, "PUT", path, json={"request_id": "vote-1", "rating": "LIKE"})
+    assert result.status_code == 200
+    assert agent.feedback.calls[-1] == ("put", CONVERSATION, RUN, FID,
+        {"owner_key": OWNER, "request_id": "vote-1", "rating": "LIKE"})
+    assert not agent.followups.calls
+
+
+@pytest.mark.parametrize("method,suffix,kwargs", [
+    ("GET", "?limit=1", {}), ("GET", "?share=true", {}), ("GET", "", {"content": b"{}"}),
+    ("PUT", "?share=true", {"json": {"request_id": "vote-1", "rating": "LIKE"}}),
+    ("PUT", "", {"json": {"request_id": "vote-1", "rating": "LIKE", "text": "不对"}}),
+    ("PUT", "", {"json": {"request_id": "vote-1", "rating": None}}),
+    ("PUT", "", {"json": {"request_id": " ", "rating": "LIKE"}}),
+])
+def test_answer_feedback_rejects_invalid_input_before_service(agent, method, suffix, kwargs):
+    result = run_request(agent, method, ROOT + f"/{FID}/feedback" + suffix, **kwargs)
+    assert result.status_code == 400
+    assert not agent.feedback.calls
+
+
+def test_answer_feedback_rejects_response_for_another_answer(agent):
+    original = agent.feedback.get_followup_feedback
+    agent.feedback.get_followup_feedback = lambda *args, **kwargs: {
+        **original(*args, **kwargs), "followup_id": "60000000-0000-0000-0000-000000000002"}
+    result = run_request(agent, "GET", ROOT + f"/{FID}/feedback")
+    assert result.status_code == 500
+
+
+def test_correction_post_forwards_optional_target_without_changing_receipt(agent):
+    body = {"request_id": "correct-1", "text": "不是连接超时，是认证失败。", "intent": "CORRECTION", "target_followup_id": FID}
+    result = run_request(agent, "POST", ROOT, json=body)
+    assert result.status_code == 200
+    assert agent.followups.calls[-1] == ("submit", CONVERSATION, RUN, {"owner_key": OWNER, **body})
+    assert set(result.json()["data"]) == {"conversation_id", "run_id", "followup_id", "request_id", "event_id", "status"}
+    invalid = run_request(agent, "POST", ROOT, json={"request_id": "ordinary", "text": "解释", "target_followup_id": FID})
+    assert invalid.status_code == 400
+    schemas = app_for(FakeAgent()).openapi()["components"]["schemas"]
+    assert set(schemas["FeedbackView"]["properties"]) == {"schema_version", "conversation_id", "run_id", "can_rate", "rating", "updated_at"}
+    assert set(schemas["FollowupFeedbackView"]["properties"]) == set(schemas["FeedbackView"]["properties"]) | {"followup_id"}
+
+
+@pytest.mark.parametrize("options", [
+    {"intent": None}, {"target_followup_id": None},
+    {"intent": None, "target_followup_id": None},
+    {"intent": "CORRECTION", "target_followup_id": None},
+])
+def test_correction_optional_null_fields_match_ordinary_or_report_target(agent, options):
+    body = {"request_id": "nullable", "text": "进一步说明", **options}
+    result = run_request(agent, "POST", ROOT, json=body)
+    assert result.status_code == 200
+    assert agent.followups.calls[-1][3] == {"owner_key": OWNER, **body}
+
+
+@pytest.mark.parametrize("options", [
+    {"intent": ""}, {"intent": False}, {"intent": "CORRECTION", "target_followup_id": ""},
+    {"intent": None, "target_followup_id": FID},
+])
+def test_correction_invalid_optional_fields_fail_before_submit(agent, options):
+    result = run_request(agent, "POST", ROOT, json={"request_id": "bad-options", "text": "说明", **options})
+    assert result.status_code == 400
+    assert not agent.followups.calls

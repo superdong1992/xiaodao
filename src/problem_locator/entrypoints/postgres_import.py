@@ -20,7 +20,7 @@ from problem_locator.agent.report_archive import ReportArchive
 from problem_locator.contracts import canonical_json_bytes
 from problem_locator.followup.models import FollowupEvent, FollowupItem, FollowupSource
 from problem_locator.followup.store import FollowupStore
-from problem_locator.memory.store import MemoryStore
+from problem_locator.memory.store import LEGACY_DEFAULTS, MemoryStore
 from problem_locator.storage.atomic import read_stable_file_bytes, write_synced_file
 from problem_locator.storage.coordination import StorageCoordinationLock
 from problem_locator.storage.database import table_columns, table_names
@@ -67,9 +67,19 @@ def _source_schema(db):
         "源数据库已经包含其他存储后端标记。", "VERSION_UNSUPPORTED")
     if "agent_conversations" in tables:
         _require(metadata.get("agent_storage_version") == "2", "请先用原版本工具将会话存储升级到 v2。", "VERSION_UNSUPPORTED")
+    _require("memory_storage_version" not in metadata or _MEMORY <= tables,
+        "源反馈存储标记存在，但数据表缺失。", "VERSION_UNSUPPORTED")
+    if _MEMORY <= tables:
+        memory_version = metadata.get("memory_storage_version")
+        _require(memory_version in {None, "2"}, "源反馈存储版本不受支持。", "VERSION_UNSUPPORTED")
+        _require(("answer_key" in table_columns(db, "memory_feedback")) == (memory_version == "2"),
+            "源反馈版本与表结构不一致。", "VERSION_UNSUPPORTED")
     if _FOLLOWUP <= tables:
-        _require(dict(db.execute("SELECT key,value FROM agent_followup_metadata")).get("storage_version") == "1",
+        followup_version = dict(db.execute("SELECT key,value FROM agent_followup_metadata")).get("storage_version")
+        _require(followup_version in {"1", "2"},
             "源报告追问存储版本不受支持。", "VERSION_UNSUPPORTED")
+        _require(("correction_json" in table_columns(db, "agent_followup_tasks")) == (followup_version == "2"),
+            "源追问版本与表结构不一致。", "VERSION_UNSUPPORTED")
     return tables, metadata
 
 
@@ -215,11 +225,23 @@ def _import_source_rows(sqlite, table, columns, target_columns):
     # Older feedback stored its one-shot receipt only in memory_tasks. Derive
     # the new compact receipt without changing the read-only SQLite source.
     derived = ["extraction_attempted"] if table == "memory_feedback" and "extraction_attempted" not in columns else []
-    _require(set(columns) | set(derived) == target_columns - {"storage_order"},
+    defaults = _projection_defaults(table, [*columns, *derived], target_columns)
+    projection = ""
+    if derived:
+        feedback_answer = "memory_feedback.answer_key" if "answer_key" in columns else "''"
+        task_answer = "t.answer_key" if "answer_key" in table_columns(sqlite, "memory_tasks") else "''"
+        projection = (",EXISTS(SELECT 1 FROM memory_tasks t WHERE t.run_id=memory_feedback.run_id "
+            f"AND {task_answer}={feedback_answer} AND t.report_sha256=memory_feedback.report_sha256)")
+    return derived, defaults, sqlite.execute(f'SELECT rowid,*{projection} FROM "{table}" ORDER BY rowid')
+
+
+def _projection_defaults(table, columns, target_columns):
+    """Only the two explicit additive migrations may supply missing columns."""
+    defaults = {**LEGACY_DEFAULTS, "agent_followup_tasks": {"correction_json": "{}"}}.get(table, {})
+    missing = target_columns - {"storage_order"} - set(columns)
+    _require(set(columns) <= target_columns and (not missing or missing == set(defaults)),
         "源数据库列定义与当前版本不一致。", "VERSION_UNSUPPORTED")
-    projection = ",EXISTS(SELECT 1 FROM memory_tasks t WHERE t.run_id=memory_feedback.run_id " \
-        "AND t.report_sha256=memory_feedback.report_sha256)" if derived else ""
-    return derived, sqlite.execute(f'SELECT rowid,*{projection} FROM "{table}" ORDER BY rowid')
+    return {column: defaults[column] for column in sorted(missing)}
 
 
 def _import_rows(sqlite, repository, tables, source, target, mappings):
@@ -235,10 +257,10 @@ def _import_rows(sqlite, repository, tables, source, target, mappings):
         for table in sorted(tables):
             columns = [row[1] for row in sqlite.execute(f'PRAGMA table_info("{table}")')]
             target_columns = table_columns(db, table)
-            derived, rows = _import_source_rows(sqlite, table, columns, target_columns)
+            derived, defaults, rows = _import_source_rows(sqlite, table, columns, target_columns)
             kinds = dict(db.execute("SELECT column_name,data_type FROM information_schema.columns "
                 "WHERE table_schema=current_schema() AND table_name=?", (table,)))
-            selected = [*columns, *derived, *(["storage_order"] if "storage_order" in target_columns else [])]
+            selected = [*columns, *derived, *defaults, *(["storage_order"] if "storage_order" in target_columns else [])]
             names = ",".join('"' + column + '"' for column in selected)
             placeholders = ",".join("?" for _ in selected)
             override = " OVERRIDING SYSTEM VALUE" if "storage_order" in target_columns else ""
@@ -257,6 +279,9 @@ def _import_rows(sqlite, repository, tables, source, target, mappings):
                     aid = values[columns.index("attachment_id")]
                     if aid in mappings:
                         values[columns.index("storage_path")] = mappings[aid]
+                if table == "agent_followup_metadata" and values[columns.index("key")] == "storage_version":
+                    values[columns.index("value")] = "2"
+                values.extend(defaults.values())
                 if "storage_order" in target_columns:
                     values.append(row[0])
                     maximum = max(maximum, row[0])
@@ -273,6 +298,8 @@ def _import_rows(sqlite, repository, tables, source, target, mappings):
                     ("data_root_identity", root_identity(StorageLayout.at(target)))]
                 if "agent_storage_version" not in metadata:
                     additions.append(("agent_storage_version", "2"))
+                if "memory_storage_version" not in metadata:
+                    additions.append(("memory_storage_version", "2"))
                 db.executemany(insert, additions)
                 expected_hashes.extend(_row_hash(row) for row in additions)
             if "storage_order" in target_columns:

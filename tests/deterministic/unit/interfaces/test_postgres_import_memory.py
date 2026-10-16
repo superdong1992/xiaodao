@@ -22,12 +22,13 @@ def test_legacy_feedback_import_derives_attempt_only_from_same_report(system, ta
         original = db.execute("SELECT rowid,* FROM memory_feedback").fetchall()
         db.execute("PRAGMA query_only=ON")
         try:
-            derived, rows = migration._import_source_rows(db, "memory_feedback", columns,
+            derived, defaults, rows = migration._import_source_rows(db, "memory_feedback", columns,
                 set(columns) | {"extraction_attempted"})
             imported = list(rows)
         finally:
             db.execute("PRAGMA query_only=OFF")
         assert derived == ["extraction_attempted"]
+        assert defaults == {}
         assert imported == [(*original[0], expected)]
         assert db.execute("SELECT rowid,* FROM memory_feedback").fetchall() == original
         assert migration._digest(row[1:1 + len(columns)] for row in imported) == migration._digest(
@@ -42,8 +43,9 @@ def test_current_feedback_import_keeps_receipt_after_task_was_pruned(system):
         assert db.execute("SELECT count(*) FROM memory_tasks").fetchone()[0] == 0
         columns = [row[1] for row in db.execute("PRAGMA table_info(memory_feedback)")]
         original = db.execute("SELECT rowid,* FROM memory_feedback").fetchall()
-        derived, rows = migration._import_source_rows(db, "memory_feedback", columns, set(columns))
+        derived, defaults, rows = migration._import_source_rows(db, "memory_feedback", columns, set(columns))
         assert derived == []
+        assert defaults == {}
         assert list(rows) == original
         assert original[0][1 + columns.index("extraction_attempted")] == 1
 

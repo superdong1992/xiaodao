@@ -1,5 +1,6 @@
-import { validFollowupId, validFollowupRequestId, validFollowupText, validateFollowupView,
-  validateFollowupReceipt, validateFollowupEvent } from "./followup-contract.js";
+import { validFollowupId, validFollowupRequestId, validateFollowupView,
+  validateFollowupReceipt, validateFollowupEvent, validFollowupInput, validFeedbackInput,
+  validateFollowupFeedback } from "./followup-contract.js";
 import { validateContinuationInput, validateContinuationDraft, validateContinuationReceipt,
   validateReportVersions } from "./continuation-contract.js";
 
@@ -153,6 +154,21 @@ export function createAgentClient({ basePath = "/api/agent", fetchImpl = globalT
           requestHeaders: { "Content-Type": "application/json" } });
         return feedbackResult(data, id, runId);
       },
+      async getFollowupFeedback(id, runId, followupId, { signal } = {}) {
+        const path = followupPath(id, runId);
+        if (!validFollowupId(followupId)) throw new TypeError("追问标识必须是小写规范 UUID。");
+        const data = await request(path + "/" + followupId + "/feedback", { signal });
+        return checked(() => validateFollowupFeedback(data, id, runId, followupId));
+      },
+      async setFollowupFeedback(id, runId, followupId, feedback) {
+        const path = followupPath(id, runId);
+        if (!validFollowupId(followupId) || !validFeedbackInput(feedback))
+          throw new TypeError("追问评价需要有效 followup_id，以及 request_id 和 LIKE 或 DISLIKE 的 rating。");
+        const data = await request(path + "/" + followupId + "/feedback", { method: "PUT",
+          body: JSON.stringify({ request_id: feedback.request_id, rating: feedback.rating }),
+          requestHeaders: { "Content-Type": "application/json" } });
+        return checked(() => validateFollowupFeedback(data, id, runId, followupId));
+      },
       eventsUrl: (id) => `${conversationPath(id)}/events`,
     },
     followups: {
@@ -166,9 +182,9 @@ export function createAgentClient({ basePath = "/api/agent", fetchImpl = globalT
       },
       async send(id, runId, input) {
         const path = followupPath(id, runId);
-        if (!input || Object.keys(input).length !== 2 || !validFollowupRequestId(input.request_id) || !validFollowupText(input.text))
-          throw new TypeError("追问只接受 request_id 和非空 text；request_id 最多 128 个字符，text 最多 65536 UTF-8 字节。");
-        const data = await post(path, { request_id: input.request_id, text: input.text });
+        if (!validFollowupInput(input))
+          throw new TypeError("追问需要 request_id 和非空 text；纠正可加 intent=CORRECTION 和 target_followup_id，其他字段不受支持。");
+        const data = await post(path, input);
         return checked(() => validateFollowupReceipt(data, id, runId, input.request_id));
       },
       async stop(id, runId, followupId, input) {

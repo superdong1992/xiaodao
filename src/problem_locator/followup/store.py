@@ -1,7 +1,7 @@
 """Additive follow-up storage on the repository's transactional database.
 
-Every mutation stays in agent_followup_* tables. Cleanup hooks accept the
-caller's transaction so revocation and the conversation tombstone are atomic.
+Completed corrections enqueue their memory check in the same transaction.
+Cleanup hooks keep revocation and the conversation tombstone atomic.
 """
 from __future__ import annotations
 
@@ -13,8 +13,9 @@ from dataclasses import asdict
 from datetime import timedelta
 
 from problem_locator.agent.models import AgentStoreError
+from problem_locator.diagnostics import log_event
 from problem_locator.storage.database import (dialect_for, lock_conversation, lock_key,
-    table_names, try_lock_conversation)
+    table_columns, table_names, try_lock_conversation)
 from problem_locator.timestamps import format_timestamp, now_timestamp, parse_timestamp
 
 from .context import build_prompt
@@ -29,7 +30,7 @@ _SCHEMA = (
     "CREATE INDEX agent_followup_snapshots_work ON agent_followup_snapshots(status,created_at)",
     "CREATE INDEX agent_followup_snapshots_conversation ON agent_followup_snapshots(conversation_id)",
     "CREATE INDEX agent_followup_snapshots_job ON agent_followup_snapshots(source_job_id,status)",
-    "CREATE TABLE agent_followup_tasks (followup_id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,run_id TEXT NOT NULL,request_id TEXT NOT NULL,fingerprint TEXT NOT NULL,ordinal BIGINT NOT NULL,status TEXT NOT NULL,body TEXT NOT NULL,receipt TEXT NOT NULL,workspace_id TEXT NOT NULL,epoch TEXT,UNIQUE(conversation_id,request_id),UNIQUE(run_id,ordinal))",
+    "CREATE TABLE agent_followup_tasks (followup_id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,run_id TEXT NOT NULL,request_id TEXT NOT NULL,fingerprint TEXT NOT NULL,ordinal BIGINT NOT NULL,status TEXT NOT NULL,body TEXT NOT NULL,receipt TEXT NOT NULL,workspace_id TEXT NOT NULL,epoch TEXT,correction_json TEXT NOT NULL DEFAULT '{}',UNIQUE(conversation_id,request_id),UNIQUE(run_id,ordinal))",
     "CREATE INDEX agent_followup_tasks_work ON agent_followup_tasks(status,run_id,ordinal)",
     "CREATE UNIQUE INDEX agent_followup_one_active ON agent_followup_tasks(conversation_id) WHERE status IN ('QUEUED','RUNNING','CANCELLING')",
     "CREATE INDEX agent_followup_tasks_workspace ON agent_followup_tasks(workspace_id,status)",
@@ -64,11 +65,12 @@ def fail(code, message, status=409):
 
 
 class FollowupStore:
-    def __init__(self, repository, clock=None, *, retention_days=15):
+    def __init__(self, repository, clock=None, *, retention_days=15, memory_store=None):
         if type(retention_days) is not int or not 1 <= retention_days <= 3650:
             raise ValueError("retention_days 必须是 1–3650 之间的整数")
         self.retention_days = retention_days
         self.repository, self.clock = repository, clock
+        self.memory_store = memory_store
         self.epoch = str(uuid.uuid4())
         self.notify = lambda: None
         with repository.database_transaction() as db:
@@ -77,14 +79,19 @@ class FollowupStore:
             if existing:
                 marker = None if "agent_followup_metadata" not in existing else db.execute(
                     "SELECT value FROM agent_followup_metadata WHERE key='storage_version'").fetchone()
-                if existing != set(_TABLES) or marker is None or marker[0] != "1":
+                if existing != set(_TABLES) or marker is None or marker[0] not in {"1", "2"}:
                     raise AgentStoreError("STATE_SCHEMA_UNSUPPORTED", "报告追问数据版本不受支持，请保留原目录。", 503)
+                if marker[0] == "1":
+                    db.execute("ALTER TABLE agent_followup_tasks ADD COLUMN correction_json TEXT NOT NULL DEFAULT '{}'")
+                    db.execute("UPDATE agent_followup_metadata SET value='2' WHERE key='storage_version'")
+                if "correction_json" not in table_columns(db, "agent_followup_tasks"):
+                    raise AgentStoreError("STATE_SCHEMA_UNSUPPORTED", "报告追问数据结构不完整，请保留原目录。", 503)
             else:
                 for statement in _SCHEMA:
                     if dialect_for(db).postgres and statement.startswith("CREATE TABLE agent_followup_tasks "):
                         statement = statement[:-1] + ",storage_order BIGINT GENERATED ALWAYS AS IDENTITY)"
                     db.execute(statement)
-                db.execute("INSERT INTO agent_followup_metadata(key,value) VALUES ('storage_version','1')")
+                db.execute("INSERT INTO agent_followup_metadata(key,value) VALUES ('storage_version','2')")
 
     def now(self):
         return timestamp(self.clock.now()) if self.clock is not None else now_timestamp()
@@ -148,6 +155,12 @@ class FollowupStore:
             if (previous["conversation_id"], previous["source_job_id"], previous["report_sha256"]) != (
                     cid, source.source_job_id, source.report_sha256):
                 raise fail("SOURCE_CHANGED", "报告来源发生变化，请刷新会话。")
+            saved = json.loads(previous["source_json"])
+            if not saved.get("skill_name") and source.skill_name:
+                # The current published result proves the old Skill identity.
+                # Never substitute the deployment's current Skill setting.
+                saved["skill_name"] = source.skill_name
+                db.execute("UPDATE agent_followup_snapshots SET source_json=? WHERE run_id=?", (_json(saved), rid))
             if enqueue and previous["status"] == "UNAVAILABLE" and previous["error_code"] is None:
                 db.execute("UPDATE agent_followup_snapshots SET status='PENDING',updated_at=? WHERE run_id=?", (self.now(), rid))
             return
@@ -224,16 +237,18 @@ class FollowupStore:
             db.execute("UPDATE agent_followup_snapshots SET status='FAILED',error_code=?,updated_at=? WHERE run_id=? AND status IN ('PENDING','BUILDING')", (code, self.now(), rid))
 
     @staticmethod
-    def _fingerprint(rid, text):
-        return hashlib.sha256(_json([rid, text]).encode()).hexdigest()
+    def _fingerprint(rid, text, *, intent=None, target_followup_id=None):
+        # Existing ordinary requests must replay after the storage upgrade.
+        value = [rid, text] if intent is None else [rid, text, intent, target_followup_id]
+        return hashlib.sha256(_json(value).encode()).hexdigest()
 
-    def request(self, cid, rid, request_id, text, owner):
+    def request(self, cid, rid, request_id, text, owner, *, intent=None, target_followup_id=None):
         with self.repository.database_read() as db:
             self.scope(db, cid, rid, owner)
             row = _one(db, "SELECT * FROM agent_followup_tasks WHERE conversation_id=? AND request_id=?", (cid, request_id))
             if row is None:
                 return None
-            if row["fingerprint"] != self._fingerprint(rid, text):
+            if row["fingerprint"] != self._fingerprint(rid, text, intent=intent, target_followup_id=target_followup_id):
                 raise AgentStoreError("AGENT_IDEMPOTENCY_CONFLICT", "同一 request_id 的内容不能更改。", 409)
             return FollowupReceipt.model_validate_json(row["receipt"])
 
@@ -257,7 +272,7 @@ class FollowupStore:
             lock_conversation(db, cid)
             self.scope(db, cid, rid, owner)
             previous = _one(db, "SELECT * FROM agent_followup_tasks WHERE conversation_id=? AND request_id=?", (cid, request.request_id))
-            fingerprint = self._fingerprint(rid, request.text)
+            fingerprint = self._fingerprint(rid, request.text, intent=request.intent, target_followup_id=request.target_followup_id)
             if previous is not None:
                 if previous["fingerprint"] != fingerprint:
                     raise AgentStoreError("AGENT_IDEMPOTENCY_CONFLICT", "同一 request_id 的内容不能更改。", 409)
@@ -266,6 +281,7 @@ class FollowupStore:
                 raise fail("EXPIRED", "本轮相关资料已清理或到期，历史内容仍可查看，请发起新的诊断。")
             if self.active(db, cid) is not None:
                 raise fail("BUSY", "本会话有追问正在处理，请等待完成或先停止。")
+            correction = self._correction(db, cid, rid, request, source)
             history = self._history(db, rid)
             if len(history) >= MAX_TURNS:
                 raise fail("LIMIT_EXCEEDED", "本报告的追问次数已达到上限，请新建对话。", 429)
@@ -273,7 +289,7 @@ class FollowupStore:
             snapshot = _one(db, "SELECT * FROM agent_followup_snapshots WHERE run_id=?", (rid,))
             mode = "REPORT_AND_LOGS" if logs_supported and snapshot["status"] == "READY" and source.has_logs else "REPORT_ONLY"
             try:
-                build_prompt(source, history, request.text, mode, read_search=logs_supported)
+                build_prompt(source, history, request.text, mode, read_search=logs_supported, correction=correction)
             except ValueError:
                 raise fail("CONTEXT_LIMIT", "追问上下文已达到上限，请新建对话。", 413) from None
             fid, now = str(uuid.uuid4()), self.now()
@@ -282,10 +298,64 @@ class FollowupStore:
             sequence = self._append(db, cid, item, "followup.accepted")
             receipt = FollowupReceipt(conversation_id=cid, run_id=rid, followup_id=fid,
                 request_id=request.request_id, event_id=sequence)
-            db.execute("INSERT INTO agent_followup_tasks(followup_id,conversation_id,run_id,request_id,fingerprint,ordinal,status,body,receipt,workspace_id,epoch) VALUES (?,?,?,?,?,?,?,?,?,?,NULL)",
-                (fid, cid, rid, request.request_id, fingerprint, item.ordinal, "QUEUED", _json(item), _json(receipt), fid))
+            db.execute("INSERT INTO agent_followup_tasks(followup_id,conversation_id,run_id,request_id,fingerprint,ordinal,status,body,receipt,workspace_id,epoch,correction_json) VALUES (?,?,?,?,?,?,?,?,?,?,NULL,?)",
+                (fid, cid, rid, request.request_id, fingerprint, item.ordinal, "QUEUED", _json(item), _json(receipt), fid, _json(correction)))
         self.notify()
         return receipt
+
+    @staticmethod
+    def _correction(db, cid, rid, request, source):
+        if request.intent != "CORRECTION":
+            return {}
+        target = source.report_markdown
+        if request.target_followup_id is not None:
+            row = _one(db, "SELECT * FROM agent_followup_tasks WHERE conversation_id=? AND run_id=? AND followup_id=?",
+                (cid, rid, request.target_followup_id))
+            if row is None:
+                raise fail("NOT_FOUND", "要纠正的回答不存在。", 404)
+            item = FollowupItem.model_validate_json(row["body"])
+            if item.status != "COMPLETED":
+                raise fail("UNSUPPORTED", "只能纠正已经完成的回答。")
+            target = item.answer_markdown
+        return {"intent": "CORRECTION", "target_followup_id": request.target_followup_id,
+            "target_answer_markdown": target}
+
+    def learning_source(self, cid, rid, fid, owner):
+        """Private source only; public follow-up item and SSE schemas stay fixed."""
+        with self.repository.database_read() as db:
+            self.scope(db, cid, rid, owner)
+            row = _one(db, "SELECT * FROM agent_followup_tasks WHERE conversation_id=? AND run_id=? AND followup_id=?", (cid, rid, fid))
+            if row is None:
+                raise fail("NOT_FOUND", "这条追问不存在。", 404)
+            item = FollowupItem.model_validate_json(row["body"])
+            snapshot = _one(db, "SELECT * FROM agent_followup_snapshots WHERE run_id=?", (rid,))
+            return (None if snapshot is None else self._source(snapshot), item,
+                json.loads(row["correction_json"]), self._history(db, rid, row["ordinal"]))
+
+    def _enqueue_correction(self, db, row, item):
+        if self.memory_store is None:
+            return
+        correction = json.loads(row["correction_json"])
+        if not correction:
+            return
+        snapshot = _one(db, "SELECT * FROM agent_followup_snapshots WHERE run_id=?", (row["run_id"],))
+        if snapshot is None:
+            return
+        source = self._source(snapshot)
+        if source.source_kind != "GENERIC" or not source.skill_name:
+            return
+        from problem_locator.memory.models import FeedbackSource
+        history = self._history(db, row["run_id"], row["ordinal"])
+        context = {"original_problem": source.problem_text, "original_report": source.report_markdown,
+            "prior_turns": [{"question": item["text"], "answer": item.get("answer_markdown"),
+                "status": item["status"]} for item in history],
+            "question": item.text, "answer": item.answer_markdown, "correction": correction}
+        self.memory_store.enqueue_correction_in_transaction(db, row["conversation_id"], row["run_id"],
+            FeedbackSource(case_id=source.case_id, source_job_id=source.source_job_id, skill_name=source.skill_name,
+                problem_text=source.problem_text, report_markdown=item.answer_markdown,
+                report_sha256=hashlib.sha256(item.answer_markdown.encode("utf-8")).hexdigest(),
+                answer_key=item.followup_id, source_kind="CORRECTION", context_json=_json(context),
+                replaces_answer_key=correction["target_followup_id"] or ""))
 
     @staticmethod
     def active(db, cid):
@@ -391,7 +461,15 @@ class FollowupStore:
             elif code is not None:
                 self._transition(db, row, "FAILED", code=code)
             else:
-                self._transition(db, row, "COMPLETED", answer=answer)
+                item = self._transition(db, row, "COMPLETED", answer=answer)
+                db.execute("SAVEPOINT followup_memory_enqueue")
+                try:
+                    self._enqueue_correction(db, row, item)
+                except Exception as exc:
+                    db.execute("ROLLBACK TO SAVEPOINT followup_memory_enqueue")
+                    log_event("agent.followup.memory_enqueue_failed", error_type=type(exc).__name__)
+                finally:
+                    db.execute("RELEASE SAVEPOINT followup_memory_enqueue")
         self.notify()
         return True
 
@@ -479,9 +557,17 @@ class FollowupStore:
     @staticmethod
     def workspace_ids(db, cid, run_id=None):
         tail, args = ("", (cid,)) if run_id is None else (" AND run_id=?", (cid, run_id))
-        return [row[0] for row in db.execute("SELECT workspace_id FROM agent_followup_tasks WHERE conversation_id=?" + tail, args)]
+        workspaces = {row[0] for row in db.execute("SELECT workspace_id FROM agent_followup_tasks WHERE conversation_id=?" + tail, args)}
+        if "memory_tasks" in table_names(db):
+            # Correction checks copy private logs into their task workspace.
+            # Include every state: success/failure/deletion does not remove those files.
+            workspaces.update(row[0] for row in db.execute(
+                "SELECT task_id FROM memory_tasks WHERE source_kind='CORRECTION' AND conversation_id=?" + tail, args))
+        return sorted(workspaces)
 
     def workspace_in_use(self, workspace_id):
         with self.repository.database_read() as db:
             return (db.execute("SELECT 1 FROM agent_followup_snapshots WHERE source_job_id=? AND status IN ('PENDING','BUILDING') LIMIT 1", (workspace_id,)).fetchone() is not None
-                or db.execute("SELECT 1 FROM agent_followup_tasks WHERE workspace_id=? AND status IN ('QUEUED','RUNNING','CANCELLING') LIMIT 1", (workspace_id,)).fetchone() is not None)
+                or db.execute("SELECT 1 FROM agent_followup_tasks WHERE workspace_id=? AND status IN ('QUEUED','RUNNING','CANCELLING') LIMIT 1", (workspace_id,)).fetchone() is not None
+                or ("memory_tasks" in table_names(db) and db.execute(
+                    "SELECT 1 FROM memory_tasks WHERE task_id=? AND status='RUNNING' LIMIT 1", (workspace_id,)).fetchone() is not None))

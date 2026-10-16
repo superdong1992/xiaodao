@@ -1357,10 +1357,6 @@ def _assemble(
             memory_store=memory_store, memory_enabled=settings.generic_memory_enabled,
             model_configuration_fingerprint=diagnose_backend.model_configuration_fingerprint)
         agent.uploads.capacity = capacity
-        memory_worker = MemoryExtractionWorker(
-            memory_store, settings.diagnose_claude_command or settings.claude_command,
-            workspace_root=layout.workspaces, enabled=settings.generic_memory_enabled,
-        )
         from problem_locator.followup.service import ReportFollowupService
         agent.followups = ReportFollowupService(
             agent, settings.diagnose_claude_command or settings.claude_command,
@@ -1370,6 +1366,13 @@ def _assemble(
             retention_days=settings.web_resource_retention_days,
         )
         agent_store.followup_store = agent.followups.store
+        from problem_locator.memory.corrections import CorrectionMemoryHandler
+        memory_worker = MemoryExtractionWorker(
+            memory_store, settings.diagnose_claude_command or settings.claude_command,
+            workspace_root=layout.workspaces, enabled=settings.generic_memory_enabled,
+            correction_handler=CorrectionMemoryHandler(
+                agent.followups, settings.diagnose_claude_command or settings.claude_command),
+        )
         runtime = DiagnosisRuntime(
             state_repository=repository,
             resource_store=resource_store,

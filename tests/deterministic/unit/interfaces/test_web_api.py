@@ -22,7 +22,8 @@ from problem_locator.contracts.models import CaseFailure
 from problem_locator.contracts.serialization import canonical_json_bytes
 from problem_locator.interfaces.error_mapping import http_status_for
 from problem_locator.interfaces.agent_http import AgentErrorEnvelope
-from problem_locator.memory.models import FeedbackRequest, FeedbackView
+from problem_locator.memory.models import FeedbackRequest, FeedbackView, FollowupFeedbackView
+from problem_locator.followup.models import FollowupRequest
 from problem_locator.interfaces.http_app import create_http_app
 from problem_locator.interfaces.mcp_server import McpAdapter
 from problem_locator.interfaces.rest_models import (
@@ -433,6 +434,8 @@ def test_openapi_and_swagger_publish_the_browser_contract() -> None:
         ("/api/v1/agent/conversations/{conversation_id}/continuation-drafts/{draft_id}", "patch"): "update_agent_continuation_draft",
         ("/api/v1/agent/conversations/{conversation_id}/continuation-drafts/{draft_id}/confirm", "post"): "confirm_agent_continuation_draft",
         ("/api/v1/agent/conversations/{conversation_id}/runs/{run_id}/report-versions", "get"): "list_agent_report_versions",
+        ("/api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups/{followup_id}/feedback", "get"): "get_agent_followup_feedback",
+        ("/api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups/{followup_id}/feedback", "put"): "put_agent_followup_feedback",
         ("/api/v1/agent/conversations/{conversation_id}/files/{artifact_id}/content", "get"): "download_agent_file",
         ("/api/v1/agent/conversations/{conversation_id}", "get"): "get_agent_conversation",
         ("/api/v1/agent/conversations/{conversation_id}/messages", "post"): "send_agent_message",
@@ -689,6 +692,7 @@ def test_openapi_examples_validate_against_the_real_rest_dtos() -> None:
     for model, schema_name in (
         (CreateCaseBody, "CreateCaseBody"),
         (FeedbackRequest, "FeedbackRequest"),
+        (FollowupRequest, "FollowupRequest"),
         (PrepareAttachmentBody, "PrepareAttachmentBody"),
         (SubmitSupplementBody, "SubmitSupplementBody"),
     ):
@@ -700,6 +704,8 @@ def test_openapi_examples_validate_against_the_real_rest_dtos() -> None:
     success_models = {
         "get_agent_feedback": SuccessEnvelope[FeedbackView],
         "put_agent_feedback": SuccessEnvelope[FeedbackView],
+        "get_agent_followup_feedback": SuccessEnvelope[FollowupFeedbackView],
+        "put_agent_followup_feedback": SuccessEnvelope[FollowupFeedbackView],
         "get_liveness": LiveSuccessEnvelope,
         "get_readiness": ReadinessSuccessEnvelope,
         "create_case": ApplicationSuccessEnvelope,
@@ -728,7 +734,7 @@ def test_openapi_examples_validate_against_the_real_rest_dtos() -> None:
                         if media["schema"].get("$ref") == "#/components/schemas/AgentErrorEnvelope":
                             parsed = AgentErrorEnvelope.model_validate(value)
                             assert {"AGENT_CONVERSATION_NOT_FOUND": 404, "AGENT_FEEDBACK_UNSUPPORTED": 409,
-                                    "AGENT_FEEDBACK_LIMIT_EXCEEDED": 429}[parsed.error.code] == int(status)
+                                    "AGENT_FEEDBACK_LIMIT_EXCEEDED": 429, "AGENT_FOLLOWUP_NOT_FOUND": 404}[parsed.error.code] == int(status)
                         else:
                             parsed = ErrorEnvelope.model_validate(value)
                             assert http_status_for(parsed.error) == int(status)
@@ -737,6 +743,8 @@ def test_openapi_examples_validate_against_the_real_rest_dtos() -> None:
     assert operations_with_error_examples == {
         "get_agent_feedback",
         "put_agent_feedback",
+        "get_agent_followup_feedback",
+        "put_agent_followup_feedback",
         "get_readiness",
         "create_case",
         "get_case",

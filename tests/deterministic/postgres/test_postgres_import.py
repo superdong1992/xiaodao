@@ -357,3 +357,70 @@ def test_postgres_import_reinstates_both_fences_after_activation_and_barrier_rem
         CaseStateRepository(target, StorageCoordinationLock(), FixedClock("2026-09-28T00:00:00.000Z"),
             DeterministicIdGenerator(), database_url=postgres_database_url)
     assert blocked.value.error.code is ErrorCode.STATE_SCHEMA_UNSUPPORTED
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_postgres_import_upgrades_feedback_and_followup_columns_without_rewriting_answers(
+        sqlite_source, tmp_path, migration_host, postgres_database_url, monkeypatch, legacy):
+    from problem_locator.followup.models import FollowupRequest, FollowupSource
+    from problem_locator.memory.models import FeedbackSource
+    from problem_locator.memory.store import LEGACY_DEFAULTS
+    source, _, _ = sqlite_source
+    clock = FixedClock("2026-09-28T00:00:00.000Z")
+    repository = _open(source)
+    try:
+        memory = MemoryStore(repository, clock)
+        followups = FollowupStore(repository, clock)
+        with repository.database_transaction() as db:
+            cid, rid = db.execute("SELECT conversation_id,run_id FROM agent_conversation_runs").fetchone()
+            db.execute("UPDATE agent_conversations SET owner_key='import-owner' WHERE conversation_id=?", (cid,))
+            case = "00000000-0000-0000-0000-000000000001"
+            db.execute("UPDATE agent_conversation_runs SET case_id=? WHERE run_id=?", (case, rid))
+        report = "# 报告\n先核对连接池等待时间。\n"
+        job = "00000000-0000-0000-0000-000000000011"
+        digest = hashlib.sha256(report.encode()).hexdigest()
+        feedback_source = FeedbackSource(case, job, "historical-skill", "请求排队原因", report, digest)
+        memory.put_feedback(cid, rid, owner_key="import-owner", request_id="legacy-up", rating="LIKE", source=feedback_source)
+        task = memory.claim_task()
+        memory.finish_task(task["task_id"], json.dumps({"problem_features": ["请求排队"], "applicability": ["连接池"],
+            "steps": ["核对连接池等待时间"], "limitations": ["需要当前日志支持"]}, ensure_ascii=False))
+        receipt = followups.submit(cid, rid, FollowupRequest(request_id="question", text="如何核对？"),
+            FollowupSource(case, job, "请求排队原因", report, digest, "GENERIC", False, clock.now(), "historical-skill"),
+            "import-owner")
+        item = followups.claim_task()
+        followups.finish_task(item["followup_id"], answer="检查当前连接池等待时长。")
+        with repository.database_read() as db:
+            expected_answer = db.execute("SELECT body FROM agent_followup_tasks WHERE followup_id=?", (receipt.followup_id,)).fetchone()[0]
+    finally:
+        repository.close()
+    if legacy:
+        with sqlite3.connect(source / "completed.sqlite3") as db:
+            db.execute("DELETE FROM metadata WHERE key='memory_storage_version'")
+            defaults = {**LEGACY_DEFAULTS, "agent_followup_tasks": {"correction_json": "{}"}}
+            for table, omitted in defaults.items():
+                columns = [row[1] for row in db.execute(f"PRAGMA table_info({table})") if row[1] not in omitted]
+                db.execute(f"CREATE TABLE {table}_legacy AS SELECT {','.join(columns)} FROM {table}")
+                db.execute(f"DROP TABLE {table}")
+                db.execute(f"ALTER TABLE {table}_legacy RENAME TO {table}")
+            db.execute("UPDATE agent_followup_metadata SET value='1' WHERE key='storage_version'")
+            raw = json.loads(db.execute("SELECT source_json FROM agent_followup_snapshots").fetchone()[0])
+            raw.pop("skill_name", None)
+            db.execute("UPDATE agent_followup_snapshots SET source_json=?", (json.dumps(raw),))
+    before = _manifest(source)
+    monkeypatch.setenv("POSTGRES_IMPORT_TEST_URL", postgres_database_url)
+    target = tmp_path / "answer-memory-target"
+    result = migration.import_data_root(source, target, execute=True, database_url_env="POSTGRES_IMPORT_TEST_URL")
+    assert _manifest(source) == before
+    repository = CaseStateRepository(target, StorageCoordinationLock(), clock, DeterministicIdGenerator(), database_url=postgres_database_url)
+    try:
+        _verify_table_proofs(repository, result)
+        memory = MemoryStore(repository, clock)
+        FollowupStore(repository, clock)
+        with repository.database_read() as db:
+            assert db.execute("SELECT value FROM metadata WHERE key='memory_storage_version'").fetchone()[0] == "2"
+            assert db.execute("SELECT value FROM agent_followup_metadata WHERE key='storage_version'").fetchone()[0] == "2"
+            assert db.execute("SELECT body,correction_json FROM agent_followup_tasks WHERE followup_id=?", (receipt.followup_id,)).fetchone() == (expected_answer, "{}")
+        memory.put_feedback(cid, rid, owner_key="import-owner", request_id="down", rating="DISLIKE", source=feedback_source)
+        assert memory.put_feedback(cid, rid, owner_key="import-owner", request_id="legacy-up", rating="LIKE", source=feedback_source).rating == "DISLIKE"
+        assert memory.claim_task() is None
+    finally:
+        repository.close()

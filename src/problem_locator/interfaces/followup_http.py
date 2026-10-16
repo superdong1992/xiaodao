@@ -9,6 +9,7 @@ from fastapi import Path, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from problem_locator.agent.models import AgentStoreError
+from problem_locator.memory.models import FeedbackRequest, FollowupFeedbackView
 from problem_locator.contracts.models import OpaqueId
 from problem_locator.contracts.serialization import canonical_json_bytes
 from problem_locator.followup.models import (
@@ -124,10 +125,10 @@ def register_followup_routes(app, agent):
 
     @app.post(_ROOT, tags=["Agent"], response_model=SuccessEnvelope[FollowupReceipt], responses=errors,
               operation_id="submit_agent_followup", summary="提交报告追问",
-              description="只接受 request_id 和 text；后台独立回答，不修改原报告。重试必须保持 ID 和原文，不得回退到普通消息接口。")
+              description="接收 request_id 和 text；纠正可加 intent=CORRECTION 和 target_followup_id。后台独立回答，不修改原报告。重试保持 ID 和全部参数，不得回退到普通消息接口。")
     async def submit(conversation_id: Annotated[OpaqueId, Path()], run_id: Annotated[OpaqueId, Path()],
                      body: FollowupRequest, request: Request):
-        return await respond("submit", FollowupReceipt, request, conversation_id, run_id, **body.model_dump())
+        return await respond("submit", FollowupReceipt, request, conversation_id, run_id, **body.model_dump(exclude_unset=True))
 
     @app.get(_ROOT, tags=["Agent"], response_model=SuccessEnvelope[FollowupView], responses=errors,
              operation_id="list_agent_followups", summary="读取报告追问记录",
@@ -147,6 +148,49 @@ def register_followup_routes(app, agent):
                    followup_id: Annotated[OpaqueId, Path()], body: FollowupStopRequest, request: Request):
         return await respond("stop", FollowupStopReceipt, request, conversation_id, run_id,
                              followup_id=followup_id, **body.model_dump())
+
+    async def feedback_response(request, cid, rid, fid, body=None):
+        try:
+            owner = _owner_key(request)
+            _no_query(request)
+            if body is None and await request.body():
+                return _invalid()
+        except ValueError:
+            return _invalid()
+        try:
+            target = getattr(agent, "feedback", None)
+            if target is None:
+                raise AgentStoreError("AGENT_UNAVAILABLE", "评价服务尚未配置。", 503)
+            if body is None:
+                raw = await _port_call(lambda: target.get_followup_feedback(cid, rid, fid, owner_key=owner))
+            else:
+                raw = await _port_call(lambda: target.put_followup_feedback(
+                    cid, rid, fid, owner_key=owner, **body.model_dump()))
+            result = FollowupFeedbackView.model_validate(model_json(raw))
+            if (result.conversation_id, result.run_id, result.followup_id) != (cid, rid, fid):
+                raise ValueError("followup feedback identity mismatch")
+            return JSONResponse(success_envelope(result))
+        except AgentStoreError as exc:
+            return _failure(exc.code, exc.message, exc.status_code, details=exc.details, retryable=exc.retryable)
+        except Exception:
+            _LOGGER.exception("Followup feedback HTTP operation failed")
+            return _failure("STATE_WRITE_FAILED", "暂时无法处理回答评价，请稍后重试。", 500, retryable=True)
+
+    @app.get(_ROOT + "/{followup_id}/feedback", tags=["Agent"],
+             response_model=SuccessEnvelope[FollowupFeedbackView], responses=errors,
+             operation_id="get_agent_followup_feedback", summary="读取指定追问回答的评价",
+             description="只读指定回答的评价资格和当前投票，不改变原报告评价，也不调用模型。")
+    async def get_feedback(conversation_id: Annotated[OpaqueId, Path()], run_id: Annotated[OpaqueId, Path()],
+                           followup_id: Annotated[OpaqueId, Path()], request: Request):
+        return await feedback_response(request, conversation_id, run_id, followup_id)
+
+    @app.put(_ROOT + "/{followup_id}/feedback", tags=["Agent"],
+             response_model=SuccessEnvelope[FollowupFeedbackView], responses=errors,
+             operation_id="put_agent_followup_feedback", summary="评价指定追问回答",
+             description="只接收 request_id 和 LIKE/DISLIKE；同票不累计，旧请求重放返回最新投票。原报告和其他回答的评价独立保存。")
+    async def put_feedback(conversation_id: Annotated[OpaqueId, Path()], run_id: Annotated[OpaqueId, Path()],
+                           followup_id: Annotated[OpaqueId, Path()], body: FeedbackRequest, request: Request):
+        return await feedback_response(request, conversation_id, run_id, followup_id, body)
 
     @app.get(_ROOT + "/events", tags=["Agent"], response_class=_SseResponse, response_model=None,
              operation_id="subscribe_agent_followup_events", summary="订阅报告追问事件",

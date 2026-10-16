@@ -263,7 +263,7 @@ def test_generic_logs_supplements_and_memory_share_one_bounded_skill_invocation(
     assert receipt.job_outcome.error is None
     assert "connection pool wait 2800ms" in receipt.job_outcome.payload.report_markdown
     assert len(backend.calls) == 1 and backend.observed
-    assert selections == [(job.generic_skill_name, job.generic_problem_text)]
+    assert selections == [(job.generic_skill_name, "\n".join([job.generic_problem_text, supplement]))]
     prompt = backend.calls[0]["prompt"]
     assert f"{job.generic_problem_text}\n<<<END_RAW_PROBLEM_TEXT>>>" in prompt
     assert f"{supplement}\n<<<END_SUPPLEMENT_TEXT>>>" in prompt

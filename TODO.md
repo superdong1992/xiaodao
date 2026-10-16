@@ -6,8 +6,11 @@
 
 ## 本次合并交付推送验收（2026-10-16）
 
+- 推送前远端已新增 `09f1481`：逐条回答反馈和纠正经验。先前本地 `603e5b9` 的完整验证为 `PASS_WITH_WARNINGS`，完整轨 268.340 秒；远端功能也有独立 verdict，但两者都不能证明合并结果。保留全部证据，解决接口、反馈保留与迁移交集后重新验证最终源码。
+- 合并专项通过，待推送前完整验证：`test_answer_memory_retention.py` 与回答学习、反馈、纠正相关文件 100 passed；真实 PostgreSQL 导入与记忆 16 passed；追问保留、装配和报告 39 passed；三个 HTTP 文件 181 passed；前端反馈、继续诊断和哈希 89 passed；接入与接口文档 50 passed。纠正回执和逐回答迁移的合并修复登记在 PL-FIX-089；8 条最新 verdict 引用统一等待最终合并源码的完整验证。
+- 合并后完整 `run-20261016T062028Z-07331a81` 因 4 项旧迁移单测的二元解包失败，101 份证据保留；真实 PostgreSQL 100 项及其余 Gate 均通过。仅适配内部三元返回值并增加默认列精确断言，未改变产品。`python -m pytest tests/deterministic/unit/interfaces/test_postgres_import_memory.py tests/deterministic/integration/test_answer_memory_retention.py -q --tb=short -p no:cacheprovider --basetemp=/tmp/continuation-merged-import-final-01`：13 passed，3.23 秒。专项通过，仍待最终源码重新完整验证。
 - **专项通过，待推送前完整验证**。按用户最新明确授权，以 `a84bc45` 为基线，一并交付报告正文与历史追问永久保存、日志资源回收与容量管理、持续诊断、多包日志、报告版本、意图分流及性能修复；保留已提交的长期统计修复。本轮不再按“仅存储”隔离交付。
-- 最终状态统一指向 `FIXED_ISSUES.md` 的 PL-FIX-070 本轮元数据及 PL-FIX-083 至 PL-FIX-088。先完成所有交付正文，再查看仓库入口的 `dev.default --plan-only`，执行 affected 与完整确定性验证，核对权威 `verdict.json` 和最终源码快照。验证完成后只回填台账预留的 verdict 元数据行；本处不预写 PASS，也不以历史失败后的专项代替完整结论。
+- 最终状态统一指向 `FIXED_ISSUES.md` 的 PL-FIX-070 本轮元数据及 PL-FIX-083 至 PL-FIX-089。先完成所有交付正文，再查看仓库入口的 `dev.default --plan-only`，执行 affected 与完整确定性验证，核对权威 `verdict.json` 和最终源码快照。验证完成后只回填台账预留的 verdict 元数据行；本处不预写 PASS，也不以历史失败后的专项代替完整结论。
 - 完整验证通过后才能推送；若仍有失败，保留证据并按新证据修正后重新验证。此前独立统计提交跳过完整验证、保留策略的功能及性能失败记录均继续保留，不能改写成已通过。此次不调用真实模型，生产部署、真实日志质量和 Release 验收仍按下方待办处理。
 - 2026-10-16 本轮完整 `dev.default` `run-20261016T051049Z-835e4391` 为 FAIL：三项附件集成暴露 strict/advisory 要求误放宽到多包，以及 INTAKE 期间的新选择被旧选择抢先采用。原断言保留，按实际能力恢复单包要求，并核对导入前及补充提交前的最新选择；失败源码快照、verdict 摘要及 101 份证据见 PL-FIX-083。修正后仍须重新查看计划并执行完整验证，七条最新 verdict 元数据均不得提前填写 PASS。
 
@@ -29,7 +32,7 @@
 - 合同与兼容性专项：`python -m pytest tests/deterministic/unit/application/test_continuation_contract_chain.py tests/deterministic/unit/application/test_preparation.py tests/deterministic/unit/application/test_generic_log_handoff.py tests/deterministic/unit/application/test_contract_readiness.py tests/deterministic/unit/domain tests/deterministic/unit/interfaces/test_data_upgrade.py tests/deterministic/unit/storage/test_postgres_compatibility.py tests/deterministic/unit/storage/test_fixtures.py tests/deterministic/unit/storage/test_state_repository.py tests/deterministic/contracts/test_schema_snapshots.py tests/deterministic/contracts/test_mcp_input_schema_flatness.py tests/deterministic/unit/interfaces/test_mcp_server.py tests/deterministic/unit/interfaces/test_replay_cli.py tests/deterministic/integration/test_failure_fixture_manifest.py tests/deterministic/integration/test_s02_contract_storage_seam.py -q --tb=short -p no:cacheprovider --basetemp=.tmp/continuation-contracts-7`：**403 passed，1 项平台跳过**。该次运行时合同链文件名为 `test_report_continuation.py`；其后仅为避免 pytest 同名收集冲突而改为当前名称，三个持续诊断文件联合收集通过。覆盖七个公开 MCP 工具扁平输入、r2/r3 数据读取与复制升级；最后受影响兼容性专项 25 passed，日志交接专项 22 passed。
 - 迁移标记补充回归：`python -m pytest tests/deterministic/postgres/test_postgres_import.py::test_postgres_import_plan_never_opens_sqlite_or_postgres_or_writes_target tests/deterministic/postgres/test_postgres_import.py::test_postgres_import_rejects_existing_target_before_any_database_access tests/deterministic/unit/interfaces/test_continuation_import.py -q --tb=short -p no:cacheprovider --basetemp=/tmp/continuation-root-linux-07`：**7 passed**。验证 r2/r3 Agent V2 标记、草稿归属和未完成任务拒绝；此组不连接真实 PostgreSQL。
 - 页面专项：`node --test examples/website-agent/server.test.mjs` 所覆盖页面与 BFF 用例 **244 passed，1 项平台跳过**；对应联合运行最初仅文档字段表失败，补齐后 `node --test tools/test-flow/tests/rest-api-guide.test.mjs tools/test-flow/tests/website-agent-guide.test.mjs` **46 passed**。本机浏览器人工核对了更正信息预览、确认生成 V2、版本切换及并排布局。
-- 本轮合同更新为 `v11-contract-r3`。上线前按[数据升级说明](docs/data-upgrade-v11-r2.md)核对旧数据；保留现有会话累计附件数量和容量限制。专项使用确定性替身，尚未验证真实模型的意图准确率和报告质量。以上专项有重叠，不累加为独立用例总数，也不替代正式验收；本次合并交付的最终状态统一见台账 PL-FIX-070、PL-FIX-083 至 PL-FIX-088 的最新 verdict 元数据。
+- 本轮合同更新为 `v11-contract-r3`。上线前按[数据升级说明](docs/data-upgrade-v11-r2.md)核对旧数据；保留现有会话累计附件数量和容量限制。专项使用确定性替身，尚未验证真实模型的意图准确率和报告质量。以上专项有重叠，不累加为独立用例总数，也不替代正式验收；本次合并交付的最终状态统一见台账 PL-FIX-070、PL-FIX-083 至 PL-FIX-089 的最新 verdict 元数据。
 
 ## Web 正文永久保存与日志资源回收验收（2026-10-16）
 
@@ -43,12 +46,18 @@
 - 推送门槛：在真实 PostgreSQL 环境核对归档表、迁移和清理事务，先查看 `dev.default --plan-only`，再由仓库入口验证最终源码。适配器导入、上述专项或历史 PASS 均不能替代本轮权威 `verdict.json`；正式结果仅回填 PL-FIX-070 的本轮元数据行，不在此预写数据库计数或完成结论。
 - 2026-10-16 真实 PostgreSQL 15.19 专项：`python -m pytest tests/deterministic/postgres/test_postgres_web_retention.py tests/deterministic/postgres/test_postgres_web_import.py -q --tb=short --maxfail=3 -p no:cacheprovider`：11 passed。覆盖报告 BYTEA 原字节、清理后重启、365 天历史、共享附件、主动删除与历史清单竞态，以及旧反馈派生列和归档的完整导入；每例新建独立测试库并保留证据。该专项不替代完整 `dev.default`。
 - 首轮完整 `dev.default`（`run-20261016T021933Z-e298f83c`）发现 9 项旧测试未适配新接口或保留策略，结果为 FAIL，证据保留。已更新清理与 ENOSPC 测试替身、HTTP 文件读取接线、ZIP 受控入口、PostgreSQL 附件元数据预期及公开配置精确清单，原有权限和资源保护断言保留。修正后专项：Linux `test_generic_log_messages.py` + `test_report_followup_faults.py` 39 passed，HTTP `test_agent_file_access.py` + `test_agent_sharing.py` 46 passed，真实 PostgreSQL `test_followup_database_concurrency.py` 10 passed，`test_no_archive_processing.py` 4 passed，`test_release_boundaries.py` 3 passed；均使用 `python -m pytest <上述文件> -q --tb=short -p no:cacheprovider`。这些结果仍只证明专项，待重新运行最终源码的完整验证。
-- 2026-10-16 推送前复核：前轮完整验证因 300 秒性能门槛失败；已完成同输入旧版—新版—旧版对照及文件同步调用采样，未发现明显源码回退。此前基于远端 `a84bc45` 隔离保留策略核查；按用户最新授权，本轮将其与持续诊断、意图分流及性能修复统一交付，保留长期统计修复及所有历史失败证据。最终工作区须重新查看 `dev.default --plan-only` 并运行完整验证，最终状态以 PL-FIX-070 及 PL-FIX-083 至 PL-FIX-088 的最新 verdict 元数据为准，不沿用历史 PASS。
+- 2026-10-16 推送前复核：前轮完整验证因 300 秒性能门槛失败；已完成同输入旧版—新版—旧版对照及文件同步调用采样，未发现明显源码回退。此前基于远端 `a84bc45` 隔离保留策略核查；按用户最新授权，本轮将其与持续诊断、意图分流及性能修复统一交付，保留长期统计修复及所有历史失败证据。最终工作区须重新查看 `dev.default --plan-only` 并运行完整验证，最终状态以 PL-FIX-070 及 PL-FIX-083 至 PL-FIX-089 的最新 verdict 元数据为准，不沿用历史 PASS。
 - 确定性夹具性能修正：`_Stack.http_app` 的按需单次装配专项先复现失败，再修为惰性缓存；`.venv/Scripts/python.exe -m pytest tests/deterministic/journey/test_rpc_timeout.py::test_stack_http_app_is_built_once_only_when_requested tests/deterministic/integration/test_website_agent.py::test_first_problem_creates_case_before_one_requirement_aware_intake tests/deterministic/journey/test_rpc_timeout.py::test_same_job_uses_initial_order_fact_and_survives_restart -q --basetemp=.tmp/lazy-http-after-20261016 -p no:cacheprovider`：4 passed。只消除测试夹具的重复装配，测试范围、业务断言和正式性能门槛不变；本轮完整结论仍待最终统一验证。
 - 测试替身导入最终专项：`test_fake_agent_import_does_not_load_unused_phase_helpers` 先复现失败；`fake_agent.py` 将 Logparse 导入推迟到预处理，移除未使用的 Outcome helper。`.venv/Scripts/python.exe -m pytest tests/deterministic/journey/test_rpc_timeout.py::test_stack_http_app_is_built_once_only_when_requested tests/deterministic/journey/test_rpc_timeout.py::test_fake_agent_import_does_not_load_unused_phase_helpers tests/deterministic/journey/test_rpc_timeout.py::test_r01_r14_rpc_timeout_is_one_durable_cross_module_path tests/deterministic/journey/test_rpc_timeout.py::test_same_job_uses_initial_order_fact_and_survives_restart tests/deterministic/integration/test_website_agent.py::test_first_problem_creates_case_before_one_requirement_aware_intake -q --basetemp=.tmp/fixture-perf-final-20261016 -p no:cacheprovider`：6 passed，零真实模型调用。Linux 交错 A/B 测量保留于 `/home/xiaodao/quick-validation/continuation-fixture-profile-20261016/results.json`；仅减少测试启动开销，不外推完整验证或产品响应速度，最终结论见 PL-FIX-070。
 - 本轮文档复核已确认并修正统计记录中的两个本机 XML 链接：证据路径仍保留，改用路径文本，避免干净检出依赖未入库文件。直接回归 `node --test tools/test-flow/tests/docs-drift.test.mjs`：4 passed；本轮正式结果仍统一见 PL-FIX-070 最新 verdict 元数据。
 - 生产接入尚待验收：备份后确认两项保留期和磁盘阈值，核对旧数据升级、正文与原报告下载、资源清理后的只读状态和页面提示。开发专项未调用真实模型，不代表线上数据库、生产日志效果或 Release 已验收。
 
+## 回答反馈与纠正经验接入验收（2026-10-16）
+
+- 开发分支 `codex/answer-feedback-learning` 保留原报告反馈，新增逐条追问反馈，并在现有追问入口接受纠正目标。后台按目标提炼或核对证据后更新经验，默认关闭，七个 MCP 输入不变。
+- 专项通过，待推送前完整验证：运行时提炼/日志联动 93 项、纠正/追问/执行策略 53 项、反馈/数据库 74 项、旧新导入 3 项、服务组合闭环及提炼分流 15 项、HTTP 35 项、网站和文档相关专项通过；完整检查发现的合同清单补齐后相关 HTTP 38 项通过，清理及取消检查修复后的纠正专项 25 项通过；均无真实模型调用。推送前须对合并后的最终源码运行中央 `dev.default --plan-only` 与 `dev.default`，以最终 `verdict.json` 为准，不复用历史 PASS。
+- 外部网站按[适配说明](docs/website-answer-feedback-upgrade.md)更新 BFF 和 SDK，按钮按各回答的 `can_rate` 显示；接入纠正时显式传 `intent=CORRECTION`。现有报告客户端无需改动。
+- 真实通用 Skill 验收仍待执行：先查看对应真实模型入口 `--plan-only`，再用同组问题比较首次定位与经验召回后的步骤、耗时、准确性和错误纠正效果。确定性测试不代表真实诊断质量已提升。
 
 ## 网站会话分享生产接入验收（2026-10-14）
 

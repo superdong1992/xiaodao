@@ -146,7 +146,14 @@ def test_conversation_and_attachment_routes_have_typed_contracts():
         f"{BASE}/conversations/{{conversation_id}}/continuation-drafts/{{draft_id}}",
         f"{BASE}/conversations/{{conversation_id}}/continuation-drafts/{{draft_id}}/confirm",
         f"{BASE}/conversations/{{conversation_id}}/runs/{{run_id}}/report-versions",
+        f"{BASE}/conversations/{{conversation_id}}/runs/{{run_id}}/followups/{{followup_id}}/feedback",
     }
+    feedback_path = f"{BASE}/conversations/{{conversation_id}}/runs/{{run_id}}/followups/{{followup_id}}/feedback"
+    assert set(schema["paths"][feedback_path]) == {"get", "put"}
+    for method in ("get", "put"):
+        assert schema["paths"][feedback_path][method]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
+            "/SuccessEnvelope_FollowupFeedbackView_")
+    assert schema["paths"][feedback_path]["put"]["requestBody"]["content"]["application/json"]["schema"]["$ref"].endswith("/FeedbackRequest")
     response = schema["paths"][f"{BASE}/conversations/{{conversation_id}}/events"]["get"]["responses"]["200"]
     assert set(response["content"]) == {"text/event-stream"}
     assert response["content"]["text/event-stream"]["schema"]["$ref"].endswith("/AgentEvent")

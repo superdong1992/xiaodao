@@ -4,7 +4,7 @@
 
 8.0 新增面向内部网站的自然语言 Agent 会话接口，支持追问、上传和 SSE 进度。新入口采用“网站前端 → 网站后端 → xiaodao”，详见 [网站 Agent API 指南](website-agent-api.md)。本文继续说明底层 Case、附件和报告接口，已有接入保持不变。
 
-通用报告的点赞、点踩使用按会话和轮次定位的 Agent 反馈接口，字段说明见[网站 Agent API 指南](website-agent-api.md)，前端调用与换票规则见[赞踩接入说明](generic-feedback-memory.md)。
+报告的点赞、点踩使用按会话和轮次定位的 Agent 反馈接口；追问回答使用其下 `/followups/{followup_id}/feedback` 的独立 GET/PUT 接口。文字纠正复用 POST followups，原报告评价与 Case 接口不变。新增能力的适配清单见[回答反馈增量接入](website-answer-feedback-upgrade.md)。字段说明见[网站 Agent API 指南](website-agent-api.md)，前端调用与换票规则见[赞踩接入说明](generic-feedback-memory.md)。
 
 目前正式支持的浏览器是**当前稳定版 Google Chrome**。服务不保证兼容 Firefox、Safari、反向代理或旧版 Chrome。本文中的 TypeScript 使用标准 `fetch`、`File`、`Blob`、Web Worker 和 Web Streams，不依赖 React、Vue 等界面框架。
 

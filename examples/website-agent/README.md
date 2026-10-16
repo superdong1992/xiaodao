@@ -10,6 +10,8 @@
 
 部署和联调步骤见[快速接入清单](../../docs/website-agent-quickstart.md)，请求、响应和 SSE 的详细说明见 [Agent API 参考](../../docs/website-agent-api.md)。
 
+每条追问回答的赞踩和文字纠正见[本次增量适配说明](../../docs/website-answer-feedback-upgrade.md)。原报告反馈接口保持不变；新能力只更新调用封装和转发，按钮及输入框由网站实现。
+
 通用报告赞踩接口及经验复用规则见[经验库接入说明](../../docs/generic-feedback-memory.md)。按钮由网站实现，本示例提供调用封装和后端转发。
 
 报告后连续解释、质疑和文字补充见[报告追问接入说明](../../docs/website-report-followup.md)。本示例提供真实请求 controller、独立问答视图和离线模拟；功能默认关闭，服务端启用后才可提交。追问使用独立接口，不改正式报告和赞踩；独立定位请新建对话。

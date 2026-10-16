@@ -6,6 +6,8 @@
 
 功能默认关闭，服务端配置 `REPORT_FOLLOWUP_ENABLED=true` 后启用。`REPORT_FOLLOWUP_SNAPSHOT_BYTES` 默认 1073741824，控制单份原日志副本的大小；可调低，最大 1 GiB。`REPORT_FOLLOWUP_STORAGE_BYTES` 默认 5368709120，控制副本总量，不能小于单份上限。副本异步准备失败或超限不会撤销已交付报告，页面仍可提供仅依据报告的问答。模型命令沿用 `DIAGNOSE_CLAUDE_COMMAND`，未设置时回退到 `CLAUDE_COMMAND`。提交追问会调用真实模型；读取、分页、订阅和恢复状态不会调用模型。
 
+每条回答支持独立赞踩，也可复用追问入口提交明确的文字纠正。原报告评价和所有追问响应字段保持不变；接入方需要更新的文件、请求示例和经验采纳边界见[回答反馈增量适配说明](website-answer-feedback-upgrade.md)。按钮和输入框由网站实现。
+
 ## 继续诊断与报告版本
 
 报告页区分两种操作：“追问报告”解释所选报告；“继续诊断”采用补充日志、更正后的信息和新目标，生成新版完整报告。继续诊断支持 Generic V2、skill-direct Markdown，从最新已发布报告开始。每轮创建独立 run 和 Case，重新路由；旧报告作为只读参考，不继承旧 Evidence、Outcome 或事实 ID。普通追问中的信息只有进入确认草稿后，才成为新一轮输入。
@@ -68,9 +70,10 @@ await controller.start();
 | 方法 | 网站路径 | 输入 |
 | --- | --- | --- |
 | GET | `/api/agent/conversations/{conversation_id}/runs/{run_id}/followups` | 可选 `cursor`、`limit`，默认最新 50 条，最大 100 条 |
-| POST | 同上 | `{request_id,text}`，只接收文字 |
+| POST | 同上 | `{request_id,text}`，只接收文字；纠正可加 `intent=CORRECTION`、`target_followup_id` |
 | GET | 上一路径加 `/events` | `Last-Event-ID` 请求头 |
 | POST | 上一路径加 `/{followup_id}/stop`（不含 `/events`） | `{request_id}` |
+| GET / PUT | 追问路径加 `/{followup_id}/feedback` | GET 无请求体；PUT 为 `{request_id,rating}`，独立评价该回答 |
 
 `run_id` 必须取当前展示报告的 `selected_run_id`，不能总取 `current_run.run_id`。切换历史报告时，销毁旧 controller，再为新报告创建实例。每个会话同时最多有一个活动追问；`active_followup` 可能属于另一份报告，停止时使用它自己的 `run_id` 和 `followup_id`，不要把它插入当前报告的问答列表。
 
@@ -144,7 +147,7 @@ controller 在提交前保存原文和稳定请求 ID，收到回执后保存回
 | `AGENT_FOLLOWUP_NOT_FOUND` | 提示追问不存在或已删除 |
 | `AGENT_IDEMPOTENCY_CONFLICT` | 核对原 ID 和文字，不将冲突请求换 ID 自动补发 |
 
-服务重启时，仍处于 `QUEUED`、尚未开始且资源仍可用的已受理追问，会在功能启用时继续执行，即使此时刚超过 15 天期限；资源清理须等任务结束。如果功能关闭，排队任务会取消。原先处于 `RUNNING` 的任务无法确认模型执行结果，会标为 `INTERRUPTED`，不会自动重跑；期限内可新发一条问题。取消、失败和中断也保留在问答记录中。新日志上传、重写正式报告、修改赞踩以及专用 `strict` / `advisory` 报告追问均不属于首版能力。
+服务重启时，仍处于 `QUEUED`、尚未开始且资源仍可用的已受理追问，会在功能启用时继续执行，即使此时刚超过 15 天期限；资源清理须等任务结束。如果功能关闭，排队任务会取消。原先处于 `RUNNING` 的任务无法确认模型执行结果，会标为 `INTERRUPTED`，不会自动重跑；期限内可新发一条问题。取消、失败和中断也保留在问答记录中。报告追问不接收新日志、不重写正式报告；需要这些操作时使用“继续诊断”。专用 `strict` / `advisory` 报告追问不属于首版能力。
 
 每条回答的 `context_mode` 为 `REPORT_ONLY` 或 `REPORT_AND_LOGS`。前者只依据报告和已有问答；后者可读取原日志副本。日志后来准备好，也不能把较早的 `REPORT_ONLY` 回答显示成已核对日志。
 

@@ -201,4 +201,3 @@ def test_missing_case_falls_back_to_archive_even_before_expiry_projection(setup)
     result = setup.service.get_conversation(setup.conversation_id)
     assert result.result == original.result
     assert result.resources_expired is False
-

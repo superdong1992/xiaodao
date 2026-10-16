@@ -85,7 +85,7 @@ def apply_final_response_policy(invocation: ClaudeCommand, *, file_access: str |
         and Path(argv[1]).name == 'cli.js')
     if file_access == 'read-search' and not native and not _followup_wrapper(argv):
         raise ClaudeCommandError('The launcher cannot enforce report follow-up tool access.')
-    followup_policy = phase == 'REPORT_FOLLOWUP' and (native or _followup_wrapper(argv))
+    followup_policy = phase in {'REPORT_FOLLOWUP', 'MEMORY_CORRECTION'} and (native or _followup_wrapper(argv))
     if followup_policy:
         from .followup_access import prepare_settings
         settings_path = prepare_settings(argv, environment, workspace_root)
