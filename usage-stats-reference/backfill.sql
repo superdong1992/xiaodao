@@ -1,25 +1,32 @@
--- 每次补录最多 1000 个缺失的终态 run。请在独立事务内设置合适的执行超时。
--- 已确认 agent_messages 只有用户消息，包含 conversation_id、run_id；COUNT(*) 即用户消息数。
--- 待核对前提：run 结束后不再新增输入，其消息未被单独清理。
--- 不恢复已经清理的历史。字段参考本地代码，生产必须先核对 README.txt。
+-- 每批修复最多 1000 个缺失或计数偏低的终态 run；已对齐项不占批次。
+-- 普通输入和报告追问分别来自两张表，每条已入库用户输入计 1，不按状态过滤。
+-- 源输入必须完整；清理前应封口并确认最新统计，不能从残缺源数据恢复历史。
+-- 请在独立事务中设置超时。字段参考本地代码，生产必须先核对 README.txt。
 -- ONLINE 标记供 writer.py 替换为固定筛选条件，本文件也可独立执行。
-WITH candidates AS MATERIALIZED (
+WITH observed AS MATERIALIZED (
     SELECT r.conversation_id, r.run_id, r.ordinal, r.status,
            NULLIF(c.owner_key, '') AS owner_key,
            CAST(r.body AS JSONB) AS run_body,
-           CAST(c.body AS JSONB) AS conversation_body
+           CAST(c.body AS JSONB) AS conversation_body,
+           (SELECT COUNT(*) FROM public.agent_messages m
+            WHERE m.conversation_id = r.conversation_id AND m.run_id = r.run_id)
+           + (SELECT COUNT(*) FROM public.agent_followup_tasks f
+              WHERE f.conversation_id = r.conversation_id AND f.run_id = r.run_id)
+           AS message_count
     FROM public.agent_conversation_runs r
     JOIN public.agent_conversations c ON c.conversation_id = r.conversation_id
     WHERE r.status IN ('COMPLETED', 'FAILED', 'INTERRUPTED', 'CANCELLED')
       -- ONLINE_FILTER
-      AND NOT EXISTS (
-          SELECT 1 FROM public.agent_run_usage_stats s
-          WHERE s.conversation_id = r.conversation_id AND s.run_id = r.run_id
-      )
-    ORDER BY r.conversation_id, r.run_id
+), candidates AS MATERIALIZED (
+    SELECT o.*
+    FROM observed o
+    LEFT JOIN public.agent_run_usage_stats s
+      ON s.conversation_id = o.conversation_id AND s.run_id = o.run_id
+    WHERE s.run_id IS NULL OR s.message_count < o.message_count
+    ORDER BY o.conversation_id, o.run_id
     LIMIT 1000 -- ONLINE_LIMIT
-), inserted AS (
-    INSERT INTO public.agent_run_usage_stats (
+), refreshed AS (
+    INSERT INTO public.agent_run_usage_stats AS saved (
         conversation_id, run_id, owner_key, created_at,
         run_created_at, completed_at, terminal_status, message_count
     )
@@ -31,11 +38,14 @@ WITH candidates AS MATERIALIZED (
            ) AS TIMESTAMPTZ),
            CAST(NULLIF(c.run_body ->> 'created_at', '') AS TIMESTAMPTZ),
            CAST(NULLIF(c.run_body ->> 'completed_at', '') AS TIMESTAMPTZ),
-           c.status,
-           (SELECT COUNT(*) FROM public.agent_messages m
-            WHERE m.conversation_id = c.conversation_id AND m.run_id = c.run_id)
+           c.status, c.message_count
     FROM candidates c
-    ON CONFLICT (conversation_id, run_id) DO NOTHING
+    -- 旧快照或源数据被清理后，不能把已保存的累计计数改小。
+    -- 只更新计数，不改变原会话归属、创建日和 run 完成时间。
+    ON CONFLICT (conversation_id, run_id) DO UPDATE
+    SET message_count = GREATEST(saved.message_count, EXCLUDED.message_count)
+    WHERE saved.message_count < EXCLUDED.message_count
     RETURNING conversation_id, run_id
 )
-SELECT COUNT(*) AS inserted_count FROM inserted;
+-- 保留旧返回列名；数值包括新增行和计数更新行。
+SELECT COUNT(*) AS inserted_count FROM refreshed;

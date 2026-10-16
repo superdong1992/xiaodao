@@ -2,7 +2,7 @@
 SELECT table_name, column_name, data_type
 FROM information_schema.columns
 WHERE table_schema = 'public'
-  AND table_name IN ('agent_conversations', 'agent_conversation_runs', 'agent_messages')
+  AND table_name IN ('agent_conversations', 'agent_conversation_runs', 'agent_messages', 'agent_followup_tasks')
 ORDER BY table_name, ordinal_position;
 
 -- false 只表示保留数据中未发现多 run，不能证明产品不支持。
@@ -19,6 +19,9 @@ GROUP BY r.status;
 
 SELECT COUNT(*) AS messages_without_run_id
 FROM public.agent_messages WHERE run_id IS NULL OR run_id = '';
+
+SELECT COUNT(*) AS followups_without_run_id
+FROM public.agent_followup_tasks WHERE run_id IS NULL OR run_id = '';
 
 -- 建表和写入后再执行；非零时先解决元数据冲突，不发布成准确的统计结果。
 SELECT COUNT(*) AS inconsistent_conversation_count

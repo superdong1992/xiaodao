@@ -10,20 +10,26 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def record_closed_run(repository, *, conversation_id: str, run_id: str) -> bool:
-    """业务事务提交后保存终态统计；普通统计失败返回 False，不向业务调用方抛出。"""
+def refresh_closed_run(repository, *, conversation_id: str, run_id: str) -> bool:
+    """关闭或追问入库提交后刷新统计；普通失败返回 False，交给补录恢复。
+
+    追问已可提交但原 run 尚未终态时返回 False，待该 run 关闭后再次调用。
+    True 也可能表示已有统计被保留，不证明已经清理的源数据完整。
+    """
     try:
         if not conversation_id or not run_id:
             raise ValueError("统计写入缺少 conversation_id 或 run_id。")
         sql = Path(__file__).with_name("backfill.sql").read_text(encoding="utf-8")
+        if sql.count("-- ONLINE_FILTER") != 1 or sql.count("LIMIT 1000 -- ONLINE_LIMIT") != 1:
+            raise ValueError("统计 SQL 缺少唯一的在线筛选或批次标记。")
         sql = sql.replace(
             "-- ONLINE_FILTER", "AND r.conversation_id = ? AND r.run_id = ?"
         ).replace("LIMIT 1000 -- ONLINE_LIMIT", "LIMIT 1")
         with repository.database_transaction() as stats_db:
             stats_db.execute("SET LOCAL statement_timeout = '1000ms'")
             stats_db.execute("SET LOCAL lock_timeout = '250ms'")
-            inserted = stats_db.execute(sql, (conversation_id, run_id)).fetchone()[0]
-            if not inserted:
+            refreshed = stats_db.execute(sql, (conversation_id, run_id)).fetchone()[0]
+            if not refreshed:
                 exists = stats_db.execute(
                     "SELECT 1 FROM public.agent_run_usage_stats "
                     "WHERE conversation_id = ? AND run_id = ?",
@@ -41,15 +47,23 @@ def record_closed_run(repository, *, conversation_id: str, run_id: str) -> bool:
         return False
 
 
+def record_closed_run(repository, *, conversation_id: str, run_id: str) -> bool:
+    """兼容旧调用名称；同样刷新普通输入和报告追问的累计计数。"""
+    return refresh_closed_run(repository, conversation_id=conversation_id, run_id=run_id)
+
+
 # 接入示意（不是现有 repository API）：
 # with <现有业务事务上下文> as db:
 #     <现有 _close、_save 等业务操作>
 #     closed_ids = (body["conversation_id"], body["run_id"])
 #
 # # 确认真正的最外层事务已经成功提交，才能执行：
-# record_closed_run(self.repository,
+# refresh_closed_run(self.repository,
 #                   conversation_id=closed_ids[0], run_id=closed_ids[1])
 #
 # 一个事务关闭多个 run 时，应收集并写入每个实际结束的 run。
 # 不能在 finally 里调用，也不能用 current_run_id 代替刚结束的旧 run_id。
 # 不要在 _close 内增加统计 SQL 后仅 try/except：SQL 错误可能使主事务失效。
+# 追问成功入库后的最外层提交点也调用 refresh_closed_run，使用回执中的两个 ID。
+# 幂等重试返回已有回执时也刷新；不要等回答成功，不要直接给计数加 1。
+# 具体挂接示例见 INTEGRATION.md；本模块不会自动注册业务回调或补录任务。
