@@ -360,7 +360,7 @@ class GenericLocatorExecutor:
         if self._experience_retriever is not None:
             try:
                 selection = self._experience_retriever.select(
-                    job.generic_skill_name, job.generic_problem_text,
+                    job.generic_skill_name, "\n".join([job.generic_problem_text, *job.generic_supplement_texts]),
                 )
                 if selection is not None and len(selection.reference_text.encode("utf-8")) <= 4096:
                     candidate = self.build_prompt(job, assets, experience_reference=selection.reference_text)

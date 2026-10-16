@@ -11,6 +11,22 @@ const bounded = (value) => typeof value === "string" && encoder.encode(value).le
 export const validFollowupId = (value) => typeof value === "string" && UUID.test(value);
 export const validFollowupRequestId = (value) => typeof value === "string" && !!value.trim() && [...value].length <= 128;
 export const validFollowupText = (value) => bounded(value) && !!value.trim() && [...value].length <= 65536;
+/** 纠正仍走追问入口；不允许普通问题悄悄携带纠正目标。 */
+export function validFollowupInput(value) {
+  return record(value) && validFollowupRequestId(value.request_id) && validFollowupText(value.text) &&
+    Object.keys(value).every((key) => ["request_id", "text", "intent", "target_followup_id"].includes(key)) &&
+    (!Object.hasOwn(value, "intent") || value.intent === null || value.intent === "CORRECTION") &&
+    (!Object.hasOwn(value, "target_followup_id") || value.target_followup_id === null || value.intent === "CORRECTION" && validFollowupId(value.target_followup_id));
+}
+export const validFeedbackInput = (value) => exact(value, ["request_id", "rating"]) &&
+  validFollowupRequestId(value.request_id) && ["LIKE", "DISLIKE"].includes(value.rating);
+export function validateFollowupFeedback(value, conversationId, runId, followupId) {
+  requireValid(exact(value, ["schema_version", "conversation_id", "run_id", "followup_id", "can_rate", "rating", "updated_at"]) &&
+    value.schema_version === 1 && value.conversation_id === conversationId && value.run_id === runId &&
+    value.followup_id === followupId && validFollowupId(value.followup_id) && typeof value.can_rate === "boolean" &&
+    [null, "LIKE", "DISLIKE"].includes(value.rating) && (value.rating === null ? value.updated_at === null : date(value.updated_at)));
+  return value;
+}
 export const FOLLOWUP_FAILURE_MESSAGES = {
   AGENT_FOLLOWUP_FAILED: "本次追问未能完成，请稍后重新提问。",
   AGENT_FOLLOWUP_INTERRUPTED: "本次追问已中断，请重新提问。",

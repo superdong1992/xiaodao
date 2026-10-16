@@ -4,6 +4,13 @@
 
 本文件是仓库活跃待办的唯一清单。已完成事项由代码、当前设计与 Git 历史证明，不在这里保留关闭项。
 
+## 回答反馈与纠正经验接入验收（2026-10-16）
+
+- 开发分支 `codex/answer-feedback-learning` 保留原报告反馈，新增逐条追问反馈，并在现有追问入口接受纠正目标。后台按目标提炼或核对证据后更新经验，默认关闭，七个 MCP 输入不变。
+- 专项通过，待推送前完整验证：运行时提炼/日志联动 93 项、纠正/追问/执行策略 53 项、反馈/数据库 74 项、旧新导入 3 项、服务组合闭环及提炼分流 15 项、HTTP 35 项、网站和文档相关专项通过；完整检查发现的合同清单补齐后相关 HTTP 38 项通过，清理及取消检查修复后的纠正专项 25 项通过；均无真实模型调用。推送前须对合并后的最终源码运行中央 `dev.default --plan-only` 与 `dev.default`，以最终 `verdict.json` 为准，不复用历史 PASS。
+- 外部网站按[适配说明](docs/website-answer-feedback-upgrade.md)更新 BFF 和 SDK，按钮按各回答的 `can_rate` 显示；接入纠正时显式传 `intent=CORRECTION`。现有报告客户端无需改动。
+- 真实通用 Skill 验收仍待执行：先查看对应真实模型入口 `--plan-only`，再用同组问题比较首次定位与经验召回后的步骤、耗时、准确性和错误纠正效果。确定性测试不代表真实诊断质量已提升。
+
 ## 网站会话分享生产接入验收（2026-10-14）
 
 - 前端按[分享接口说明](docs/website-agent-api.md#分享只读访问)生成带 `share=true` 的链接，分享页保留登录态，按只读能力隐藏操作入口；下载和历史轮次读取继续传递分享参数。
@@ -12,8 +19,8 @@
 ## 会话长期统计生产接入验收（2026-10-14）
 
 - 2026-10-16 已修复参考包的报告追问漏计（`PL-FIX-082`），**此前专项通过；本次按用户明确要求不再运行测试，跳过推送前完整验证**。未接入本项目业务，也未部署内网。替换步骤和追问提交后的挂接示例见[接入指南](usage-stats-reference/INTEGRATION.md)。
-- PostgreSQL 15.19 最终专项：`.venv/Scripts/python.exe -B -m pytest tests/deterministic/postgres/test_usage_stats_reference.py -q --tb=short --maxfail=3 -p no:cacheprovider --basetemp=.tmp/usage-stats-final-20261016 --junitxml=.tmp/usage-stats-final-20261016.xml`：**21 passed**，证据 [usage-stats-final-20261016.xml](.tmp/usage-stats-final-20261016.xml)。使用现有本机专项管理库，每例独立创建数据库；没有调用真实模型。覆盖两表计数、重复及并发请求、全部追问状态、拒绝与回滚、超时补录、终态前追问、旧 run、陈旧快照、1001 条批次、源清理、元数据保留和旧返回列名兼容。
-- 修复前首例已复现 `1 != 2`，证据 [usage-stats-before-20261016.xml](.tmp/usage-stats-before-20261016.xml)。最终专项已包含元数据和关闭前返回值的补充断言。参考包指南及本次 TODO/台账条目的相对链接检查、`git diff --check` 通过；不涉及历史台账链接的完整校验。
+- PostgreSQL 15.19 最终专项：`.venv/Scripts/python.exe -B -m pytest tests/deterministic/postgres/test_usage_stats_reference.py -q --tb=short --maxfail=3 -p no:cacheprovider --basetemp=.tmp/usage-stats-final-20261016 --junitxml=.tmp/usage-stats-final-20261016.xml`：**21 passed**，证据 `.tmp/usage-stats-final-20261016.xml`（原开发工作区的本地证据）。使用现有本机专项管理库，每例独立创建数据库；没有调用真实模型。覆盖两表计数、重复及并发请求、全部追问状态、拒绝与回滚、超时补录、终态前追问、旧 run、陈旧快照、1001 条批次、源清理、元数据保留和旧返回列名兼容。
+- 修复前首例已复现 `1 != 2`，证据 `.tmp/usage-stats-before-20261016.xml`（原开发工作区的本地证据）。最终专项已包含元数据和关闭前返回值的补充断言。参考包指南及本次 TODO/台账条目的相对链接检查、`git diff --check` 通过；不涉及历史台账链接的完整校验。
 - 已提供[生产接入指南](usage-stats-reference/INTEGRATION.md)和参考脚本；尚未挂接业务入口、持续补录或清理保护。
 - 在内网核对 run 字段、会话最初创建时间、终态、最外层提交位置、统计时区和 Dashboard 授权范围，再适配脚本。
 - 使用源数据仍完整的样本完成指南中的 PostgreSQL 专项验收，并记录历史覆盖范围。此前仓库 Dev 验证不代表该参考包已完成生产验收。

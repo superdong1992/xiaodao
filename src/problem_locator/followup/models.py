@@ -25,6 +25,15 @@ class FollowupRequest(FollowupModel):
     request_id: str = Field(min_length=1, max_length=128, pattern=r"\S")
     text: str = Field(min_length=1, max_length=MAX_TEXT_BYTES, pattern=r"\S")
 
+    intent: Literal["CORRECTION"] | None = None
+    target_followup_id: OpaqueId | None = None
+
+    @model_validator(mode="after")
+    def correction_target(self):
+        if self.target_followup_id is not None and self.intent != "CORRECTION":
+            raise ValueError("只有纠正说明可以指定目标回答。")
+        return self
+
     @field_validator("text")
     @classmethod
     def text_bytes(cls, value):
@@ -130,3 +139,4 @@ class FollowupSource:
     source_kind: Literal["GENERIC", "SKILL_DIRECT"]
     has_logs: bool
     occurred_at: str
+    skill_name: str = ""

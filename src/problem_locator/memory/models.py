@@ -43,3 +43,10 @@ class FeedbackSource:
     problem_text: str
     report_markdown: str
     report_sha256: str
+    answer_key: str = ""
+    source_kind: Literal["REPORT", "FOLLOWUP", "CORRECTION"] = "REPORT"
+    context_json: str = ""
+    replaces_answer_key: str | None = None
+
+class FollowupFeedbackView(FeedbackView):
+    followup_id: OpaqueId

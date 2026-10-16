@@ -307,6 +307,22 @@ _ERROR_EXAMPLES_BY_OPERATION = {
             "details": [], "retryable": False,
         }},
     },
+    "get_agent_followup_feedback": {
+        "404": {"ok": False, "data": None, "error": {
+            "code": "AGENT_FOLLOWUP_NOT_FOUND", "message": "这条追问不存在。",
+            "details": [], "retryable": False,
+        }},
+    },
+    "put_agent_followup_feedback": {
+        "409": {"ok": False, "data": None, "error": {
+            "code": "AGENT_FEEDBACK_UNSUPPORTED", "message": "这条回答暂不支持评价。",
+            "details": [], "retryable": False,
+        }},
+        "429": {"ok": False, "data": None, "error": {
+            "code": "AGENT_FEEDBACK_LIMIT_EXCEEDED", "message": "反馈记录已达到上限。",
+            "details": [], "retryable": False,
+        }},
+    },
     "get_readiness": {"503": _INSTANCE_LOCKED_EXAMPLE},
     "create_case": {
         "400": _VALIDATION_ERROR_EXAMPLE,
@@ -346,6 +362,14 @@ _SUCCESS_EXAMPLES: dict[str, dict[str, Any]] = {
     "put_agent_feedback": {"ok": True, "data": {
         "schema_version": 1, "conversation_id": _CASE_ID_EXAMPLE, "run_id": _JOB_ID_EXAMPLE,
         "can_rate": True, "rating": "LIKE", "updated_at": _TIME_EXAMPLE,
+    }, "error": None},
+    "get_agent_followup_feedback": {"ok": True, "data": {
+        "schema_version": 1, "conversation_id": _CASE_ID_EXAMPLE, "run_id": _JOB_ID_EXAMPLE,
+        "followup_id": _ARTIFACT_ID_EXAMPLE, "can_rate": True, "rating": None, "updated_at": None,
+    }, "error": None},
+    "put_agent_followup_feedback": {"ok": True, "data": {
+        "schema_version": 1, "conversation_id": _CASE_ID_EXAMPLE, "run_id": _JOB_ID_EXAMPLE,
+        "followup_id": _ARTIFACT_ID_EXAMPLE, "can_rate": True, "rating": "LIKE", "updated_at": _TIME_EXAMPLE,
     }, "error": None},
     "get_liveness": {
         "ok": True,
@@ -751,6 +775,15 @@ _REST_MODEL_FIELD_DESCRIPTIONS = {
         "request_id": "本次评价的幂等标识，1 到 128 个 Unicode 字符，不能全为空白；重试保留原 ID 和内容，换票使用新 ID。",
         "rating": "LIKE 表示有帮助，DISLIKE 表示没帮助；首版不支持取消评价。",
     },
+    "FollowupFeedbackView": {
+        "schema_version": "回答反馈响应合同版本，固定为 1。",
+        "conversation_id": "已核验用户归属的会话 UUID，与请求路径一致。",
+        "run_id": "被评价回答所属的诊断轮次 UUID，与请求路径一致。",
+        "followup_id": "被评价的已完成追问回答 UUID，与请求路径一致；评价不影响原报告和其他回答。",
+        "can_rate": "当前回答是否可评价；Generic 和专用 direct 的已完成回答支持评价，不受经验库开关影响。",
+        "rating": "该回答当前的 LIKE 或 DISLIKE；尚未评价时为 null；旧请求重放返回最新投票。",
+        "updated_at": "最后一次投票变化的服务时间，精确到毫秒；尚未评价时为 null。",
+    },
     "FeedbackView": {
         "schema_version": "反馈响应合同版本，固定为 1。",
         "conversation_id": "已核验用户归属的会话 UUID，与请求路径一致。",
@@ -781,6 +814,8 @@ _REST_MODEL_FIELD_DESCRIPTIONS = {
 
 _REST_FIELD_DESCRIPTIONS.update({
     "target_run_id": "诊断中补充的目标轮次；该轮已结束或改变时返回 409。省略时保持原消息行为。",
+    "intent": "CORRECTION 表示明确纠正；省略或 null 为普通追问。纠正只追加新回答，不修改原报告。",
+    "target_followup_id": "纠正目标的追问 UUID，必须为同轮已完成回答；纠正时省略或 null 表示原报告。普通追问不能带非空目标。",
     "followup_id": "独立追问的 UUID；不能用作诊断轮次或诊断事件游标。",
     "can_ask": "当前是否允许提交追问，由开关、报告类型、有效期和会话忙碌状态决定。",
     "reason": "当前不可追问的原因码，例如 DISABLED、UNSUPPORTED、EXPIRED 或 BUSY；可追问时为 null。",
@@ -817,6 +852,8 @@ _SUCCESS_RESPONSE_DESCRIPTIONS.update({
     "list_agent_followups": "返回分页问答、会话内活跃追问、可用能力和独立事件游标；读取不启动模型。",
     "stop_agent_followup": "返回指定追问的停止收据；终态不受迟到答案影响。",
     "subscribe_agent_followup_events": "回放独立追问游标之后的 data JSON，按 sequence 去重；每 15 秒发送注释心跳，终态且回放完毕后关闭。",
+    "get_agent_followup_feedback": "返回指定追问回答的评价资格和当前投票，不启动模型；报告及其他回答的评价互不影响。",
+    "put_agent_followup_feedback": "该回答的评价已持久保存，返回当前投票；同票不累计，旧请求不覆盖新投票。",
     "get_agent_feedback": "返回指定报告的评价资格和当前投票，不运行模型；尚未评价时 rating 和 updated_at 均为 null。",
     "put_agent_feedback": "评价已持久保存，返回当前投票；重复同票不累计，旧请求重放不会恢复旧投票。",
     "list_agent_conversations": "返回当前归属键的会话目录和下一页游标。",
@@ -827,8 +864,9 @@ _SUCCESS_RESPONSE_DESCRIPTIONS.update({
 })
 
 _REQUEST_BODY_DESCRIPTIONS = {
-    "submit_agent_followup": "只接受 request_id 和 text。重试保留 ID 与原文，不接受附件；只追加回答，不改正式结论。",
+    "submit_agent_followup": "接收 request_id 和 text；纠正可加 intent=CORRECTION 和 target_followup_id。重试保留 ID、原文和目标，不接受附件；只追加回答，不改正式报告。",
     "stop_agent_followup": "稳定的 request_id；同一次停止重试保持不变，停止目标由路径指定。",
+    "put_agent_followup_feedback": "只接受 request_id 和 LIKE/DISLIKE 的 rating；不接受评论。重试保留 ID 和内容，换票使用新 ID。纠正文字使用已有追问 POST。",
     "put_agent_feedback": "只接受 request_id 和 rating。request_id 为 1 到 128 个 Unicode 字符；rating 为 LIKE 或 DISLIKE。重试保留 ID 与内容，换票使用新 ID。",
     "rename_agent_conversation": "新的会话标题，1 到 80 个字符；赋值操作可安全重复。",
     "stop_agent_conversation": "稳定 request_id 和目标 run_id；重试不能改为停止另一轮。",
@@ -925,6 +963,11 @@ def _apply_rest_openapi_overlay(schema: dict[str, Any]) -> None:
         {"request_id": "feedback-like-1", "rating": "LIKE"},
         {"request_id": "feedback-dislike-2", "rating": "DISLIKE"},
     ]
+    component_schemas["FollowupRequest"]["examples"] = [
+        {"request_id": "followup-1", "text": "请解释判断依据。"},
+        {"request_id": "correction-report-1", "text": "请核对错误发生的阶段。", "intent": "CORRECTION"},
+        {"request_id": "correction-answer-1", "text": "这条解释与认证日志不一致。", "intent": "CORRECTION", "target_followup_id": _ARTIFACT_ID_EXAMPLE},
+    ]
     for schema_name, component in component_schemas.items():
         component.setdefault(
             "description",
@@ -950,11 +993,14 @@ def _apply_rest_openapi_overlay(schema: dict[str, Any]) -> None:
             if method not in {"get", "post", "put", "patch", "delete"}:
                 continue
             operation_id = operation["operationId"]
-            if operation_id in {"get_agent_feedback", "put_agent_feedback"}:
+            if operation_id in {"get_agent_feedback", "put_agent_feedback", "get_agent_followup_feedback", "put_agent_followup_feedback"}:
                 operation["description"] += " 不接受查询参数；GET 不接受请求体。归属由可信网站后端的 X-Agent-Owner-Key 确定。"
                 operation["responses"]["404"]["description"] = "会话或轮次不存在、已删除，或不属于当前用户。"
                 operation["responses"]["409"]["description"] = "报告不支持评价，或相同 request_id 的目标、内容发生变化。"
                 operation["responses"]["429"]["description"] = "反馈存储配额已满；不自动重试。"
+                if operation_id in {"get_agent_followup_feedback", "put_agent_followup_feedback"}:
+                    operation["responses"]["404"]["description"] = "会话、轮次或指定追问不存在、已删除，或不属于当前用户。"
+                    operation["responses"]["409"]["description"] = "回答尚未完成或不支持评价，或同一 request_id 的目标、内容发生变化。"
             operation["responses"]["200"]["description"] = (
                 _SUCCESS_RESPONSE_DESCRIPTIONS[operation_id]
             )

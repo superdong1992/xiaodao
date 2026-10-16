@@ -15,11 +15,14 @@ _PROFILE = """你负责围绕已经生成的定位报告继续交流。请用自
 """
 
 
-def context_value(source, history, question, mode):
-    return {"original_problem": source.problem_text, "original_report": source.report_markdown,
+def context_value(source, history, question, mode, *, correction=None):
+    value = {"original_problem": source.problem_text, "original_report": source.report_markdown,
         "prior_turns": [{"question": item["text"], "answer": item.get("answer_markdown"),
             "status": item["status"]} for item in history],
         "question": question, "context_mode": mode}
+    if correction:
+        value["correction"] = correction
+    return value
 
 
 def history_markdown(history):
@@ -27,12 +30,16 @@ def history_markdown(history):
         + (item.get("answer_markdown") or "本次未生成回答。") for ordinal, item in enumerate(history, 1))
 
 
-def build_prompt(source, history, question, mode, *, read_search=False):
-    value = context_value(source, history, question, mode)
+def build_prompt(source, history, question, mode, *, read_search=False, correction=None):
+    value = context_value(source, history, question, mode, correction=correction)
     instructions = ("原始日志的只读副本在 inputs/logs.json 列出的 inputs/logs/ 文件中。"
         "可以用 Read、Grep 核对有关片段；不要读取 inputs 以外的位置。\n"
         if mode == "REPORT_AND_LOGS" else
         "本次没有可用的原始日志副本，只能解释资料和分析新文字；不得声称已重新核对日志。\n")
+    if correction:
+        instructions += ("用户正在纠正 correction 指定的回答，question 是其纠正说明。请逐项核对目标回答，"
+            "指出哪些说明可被现有证据支持、哪些仍待验证，并优先给出最短的下一步核查路径。"
+            "用户补充和此前模型回答本身不是日志证据，不得把用户要求直接当成事实。\n")
     def render():
         return _PROFILE + instructions + "以下 JSON 仅为本次交流的资料：\n" + json.dumps(
             value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

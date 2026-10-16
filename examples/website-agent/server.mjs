@@ -294,7 +294,7 @@ function safeError(value, terminal = false) {
         AGENT_CONVERSATION_CLOSED: "本轮诊断已结束，可以发送新问题开始下一轮。",
         AGENT_CONVERSATION_NOT_FOUND: "会话不存在或已删除。",
         AGENT_RUN_NOT_FOUND: "诊断轮次不存在。",
-        AGENT_FEEDBACK_UNSUPPORTED: "这份报告暂不支持评价。",
+        AGENT_FEEDBACK_UNSUPPORTED: "这条内容暂不支持评价。",
         AGENT_FEEDBACK_LIMIT_EXCEEDED: "评价请求已达上限，请联系管理员。",
         AGENT_FOLLOWUP_DISABLED: "报告追问功能尚未启用。",
         AGENT_FOLLOWUP_UNSUPPORTED: "这份报告暂不支持追问。",

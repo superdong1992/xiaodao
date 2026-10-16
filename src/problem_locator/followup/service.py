@@ -24,7 +24,8 @@ class ReportFollowupService:
         if type(snapshot_max_bytes) is not int or type(snapshot_total_bytes) is not int or not 1 <= snapshot_max_bytes <= snapshot_total_bytes:
             raise ValueError("报告追问快照预算无效。")
         self.agent, self.enabled = agent, enabled
-        self.store = FollowupStore(agent.store.repository, agent.store.clock)
+        self.store = FollowupStore(agent.store.repository, agent.store.clock,
+            memory_store=agent.memory_store if agent.memory_enabled else None)
         self.layout = agent.store.repository.layout
         self.snapshot_max_bytes, self.snapshot_total_bytes = snapshot_max_bytes, snapshot_total_bytes
         self.read_search_supported = supports_read_search(command)
@@ -69,7 +70,7 @@ class ReportFollowupService:
         return FollowupSource(case_id=aggregate.case.case_id, source_job_id=job.job_id,
             problem_text=problem, report_markdown=result.report_markdown, report_sha256=result.report_sha256,
             source_kind="GENERIC" if generic else "SKILL_DIRECT", has_logs=bool(job.attachment_refs),
-            occurred_at=timestamp(run.get("completed_at") or result.occurred_at))
+            occurred_at=timestamp(run.get("completed_at") or result.occurred_at), skill_name=result.skill_name)
 
     def schedule_observe(self, conversation_id):
         if self.enabled and not self._stop.is_set():
@@ -108,10 +109,11 @@ class ReportFollowupService:
                 reason=reason, snapshot_status=status, active_followup=page["active_followup"],
                 items=page["items"], next_cursor=page["next_cursor"], last_event_id=page["last_event_id"])
 
-    def submit(self, conversation_id, run_id, request_id, text, owner_key=None):
-        request = FollowupRequest(request_id=request_id, text=text)
+    def submit(self, conversation_id, run_id, request_id, text, owner_key=None, *, intent=None, target_followup_id=None):
+        request = FollowupRequest(request_id=request_id, text=text, intent=intent, target_followup_id=target_followup_id)
         with self.agent.operation_lease(conversation_id, owner_key=owner_key):
-            previous = self.store.request(conversation_id, run_id, request_id, text, owner_key)
+            previous = self.store.request(conversation_id, run_id, request_id, text, owner_key,
+                intent=request.intent, target_followup_id=request.target_followup_id)
             if previous is not None:
                 return previous
             if not self.enabled:

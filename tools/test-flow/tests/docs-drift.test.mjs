@@ -15,6 +15,8 @@ const AUTHORITATIVE = [
   "docs/production-upgrade-2026-09-23.md",
   "docs/website-redis-deployment.md",
   "docs/website-report-followup.md",
+  "docs/generic-feedback-memory.md",
+  "docs/website-answer-feedback-upgrade.md",
   "docs/data-upgrade-v11-r2.md",
   "docs/postgresql-migration.md",
   "examples/website-agent/README.md",

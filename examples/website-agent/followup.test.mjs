@@ -304,3 +304,106 @@ test("followup view keeps Markdown inert, report-only notice visible and typing 
   assert.match(root.textContent, /未重新核对原日志/); assert.match(root.textContent, /<script>/);
   assert.equal(all(root).some((node) => node.tagName === "script"), false); cleanup();
 });
+
+
+const answerFeedback = (overrides = {}) => ({ schema_version: 1, conversation_id: cid, run_id: rid,
+  followup_id: fid, can_rate: true, rating: null, updated_at: null, ...overrides });
+
+test("answer feedback SDK keeps report votes separate and binds each response to its answer", async () => {
+  const calls = [], client = createAgentClient({ headers: { "X-CSRF-Token": "trusted", "X-Agent-Owner-Key": "forged" },
+    fetchImpl: async (url, init) => {
+      calls.push({ url, init });
+      const data = answerFeedback(init.method === "PUT" ? { rating: JSON.parse(init.body).rating, updated_at: timestamp } : {});
+      if (!url.includes("/followups/")) delete data.followup_id;
+      return envelope(data);
+    } });
+  const result = await client.conversations.getFollowupFeedback(cid, rid, fid);
+  assert.equal(result.followup_id, fid);
+  await client.conversations.setFollowupFeedback(cid, rid, fid, { request_id: "answer-like", rating: "LIKE" });
+  await client.conversations.setFeedback(cid, rid, { request_id: "report-dislike", rating: "DISLIKE" });
+  assert.deepEqual(calls.map(({ url }) => url), [path + "/" + fid + "/feedback", path + "/" + fid + "/feedback",
+    "/api/agent/conversations/" + cid + "/runs/" + rid + "/feedback"]);
+  assert.deepEqual(JSON.parse(calls[1].init.body), { request_id: "answer-like", rating: "LIKE" });
+  assert.equal(calls[1].init.method, "PUT");
+  assert.equal(calls[1].init.headers.get("X-CSRF-Token"), "trusted");
+  assert.equal(calls[1].init.headers.has("X-Agent-Owner-Key"), false);
+  for (const malformed of [answerFeedback({ followup_id: other }), answerFeedback({ run_id: other }),
+    answerFeedback({ rating: "LIKE" }), { ...answerFeedback(), text: "extra" }, (() => { const v=answerFeedback(); delete v.followup_id; return v; })()]) {
+    const bad = createAgentClient({ fetchImpl: async () => envelope(malformed) });
+    await assert.rejects(bad.conversations.getFollowupFeedback(cid, rid, fid), (error) => error.code === "WEBSITE_INVALID_RESPONSE");
+  }
+  const noFetch = createAgentClient({ fetchImpl: () => assert.fail("无效输入不能转发") });
+  for (const value of [{ request_id: "x", rating: null }, { request_id: "x", rating: "LIKE", text: "不对" },
+    { request_id: " ", rating: "DISLIKE" }]) await assert.rejects(noFetch.conversations.setFollowupFeedback(cid, rid, fid, value), TypeError);
+});
+
+test("correction SDK preserves explicit target and original ordinary request bytes", async () => {
+  const bodies = [], client = createAgentClient({ fetchImpl: async (_url, init) => {
+    const body = JSON.parse(init.body); bodies.push(body); return envelope(receipt({ request_id: body.request_id }));
+  } });
+  const ordinary = { request_id: "ask", text: "解释" };
+  const reportCorrection = { request_id: "correct-report", text: "失败发生在认证阶段。", intent: "CORRECTION" };
+  const answerCorrection = { ...reportCorrection, request_id: "correct-answer", target_followup_id: fid };
+  for (const body of [ordinary, reportCorrection, answerCorrection]) await client.followups.send(cid, rid, body);
+  assert.deepEqual(bodies, [ordinary, reportCorrection, answerCorrection]);
+  for (const input of [{ ...ordinary, target_followup_id: fid }, { ...ordinary, intent: "OTHER" },
+    { ...answerCorrection, target_followup_id: "bad" }, { ...ordinary, target_run_id: rid }]) {
+    await assert.rejects(client.followups.send(cid, rid, input), TypeError);
+  }
+  assert.equal(bodies.length, 3);
+});
+
+test("answer feedback BFF forwards trusted identity, exact route and correction fields", async () => {
+  const calls = [], expectedOwner = createHash("sha256").update(JSON.stringify(["xiaodao-website", "alice"])).digest("hex");
+  await withServer({ fetchImpl: async (url, init) => {
+    calls.push({ url: String(url), init });
+    assert.equal(new Headers(init.headers).get("X-Agent-Owner-Key"), expectedOwner);
+    if (init.method === "POST") return envelope(receipt({ request_id: "correct" }));
+    return envelope(answerFeedback(init.method === "PUT" ? { rating: "DISLIKE", updated_at: timestamp } : {}));
+  } }, async (base) => {
+    const target = base + path + "/" + fid + "/feedback";
+    const read = await fetch(target, { headers: { "X-Agent-Owner-Key": "forged" } });
+    assert.equal(read.status, 200); assert.equal((await read.json()).data.followup_id, fid);
+    const input = { request_id: "answer-dislike", rating: "DISLIKE" };
+    const vote = await fetch(target, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
+    assert.equal(vote.status, 200); await vote.json();
+    const correction = { request_id: "correct", text: "请核对认证阶段。", intent: "CORRECTION", target_followup_id: fid };
+    const posted = await fetch(base + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(correction) });
+    assert.equal(posted.status, 200); await posted.json();
+    assert.deepEqual(JSON.parse(calls[1].init.body), input);
+    assert.deepEqual(JSON.parse(calls[2].init.body), correction);
+    assert.equal(calls[0].url, "http://internal.invalid/api/v1/agent/conversations/" + cid + "/runs/" + rid + "/followups/" + fid + "/feedback");
+    for (const [url, method, body, status] of [
+      [target + "?share=true", "GET", undefined, 400], [target, "POST", input, 404],
+      [target, "PUT", { ...input, text: "附言" }, 400], [target, "PUT", { ...input, rating: null }, 400],
+      [base + path, "POST", { request_id: "bad", text: "问题", target_followup_id: fid }, 400],
+    ]) {
+      const response = await fetch(url, { method, headers: body ? { "Content-Type": "application/json" } : undefined,
+        body: body ? JSON.stringify(body) : undefined });
+      assert.equal(response.status, status); await response.text();
+    }
+    assert.equal(calls.length, 3);
+  });
+  await withServer({ fetchImpl: async () => envelope(answerFeedback({ followup_id: other })) }, async (base) => {
+    const response = await fetch(base + path + "/" + fid + "/feedback"); assert.equal(response.status, 502); await response.text();
+  });
+});
+
+
+test("correction null options have identical SDK and BFF semantics", async () => {
+  const options = [{ intent: null }, { target_followup_id: null }, { intent: null, target_followup_id: null },
+    { intent: "CORRECTION", target_followup_id: null }];
+  const calls = [];
+  await withServer({ fetchImpl: async (_url, init) => {
+    const body = JSON.parse(init.body); calls.push(body); return envelope(receipt({ request_id: body.request_id }));
+  } }, async (base) => {
+    const client = createAgentClient({ fetchImpl: (url, init) => fetch(base + url, init) });
+    for (const value of options) await client.followups.send(cid, rid, { request_id: "nullable", text: "说明", ...value });
+    assert.deepEqual(calls, options.map((value) => ({ request_id: "nullable", text: "说明", ...value })));
+    for (const value of [{ intent: "" }, { intent: false }, { intent: "CORRECTION", target_followup_id: "" },
+      { intent: null, target_followup_id: fid }]) {
+      await assert.rejects(client.followups.send(cid, rid, { request_id: "invalid", text: "说明", ...value }), TypeError);
+    }
+    assert.equal(calls.length, 4);
+  });
+});

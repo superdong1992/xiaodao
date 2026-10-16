@@ -89,7 +89,7 @@ class FollowupWorker:
                 if mode == "REPORT_AND_LOGS" and snapshot["status"] != "READY":
                     raise InputChanged("snapshot was revoked")
                 prompt, context = build_prompt(source, history, item["text"], mode,
-                    read_search=service.read_search_supported)
+                    read_search=service.read_search_supported, correction=json.loads(task["correction_json"]))
                 root = service.layout.workspaces
                 require_real_directory(root)
                 workspace = root / task["workspace_id"]
