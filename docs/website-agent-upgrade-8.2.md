@@ -4,6 +4,8 @@
 
 完整字段以 [Agent API 参考](website-agent-api.md)和实际部署的 `/openapi.json` 为准。可复用代码见 [browser-client.js](../examples/website-agent/browser-client.js)、[报告渲染模块](../examples/website-agent/report-view.js)和[网站示例](../examples/website-agent/README.md)。
 
+本文说明 8.1 到 8.2 的接口基础变化；截至 2026-10-16 的保留策略、持续诊断、反馈及数据兼容要求，以[累计生产升级清单](production-upgrade-2026-09-23.md)为统一入口。即使已完成早期 8.2 接入，也须核对这些增量项。
+
 ## 1. 先对齐版本与路由
 
 | 项目 | 8.2 的要求 |
@@ -12,7 +14,7 @@
 | 会话详情 | `schema_version=3`；旧正式版为 1，精简过渡版为 2 |
 | 公开 SSE 事件 | `schema_version=2`，每条事件含 `run_id`；帧格式不变 |
 | 专有 JSON 报告正文 | schema 3，不需要重新设计报告字段；通用 Markdown 和历史 Generic V1 仍按 `format` 区分 |
-| 核心数据 | State V11 / `v11-contract-r2` 不变；Agent 存储升级到 2 |
+| 核心数据 | 当前为 State V11 / `v11-contract-r3`；Agent 存储 2。已有 r2 PostgreSQL 兼容读取，SQLite 按累计清单迁移 |
 | 浏览器请求前缀 | 网站示例为 `/api/agent`，使用网站同源地址 |
 | 网站后端请求前缀 | xiaodao 服务接口为 `/api/v1/agent`，保留部署配置的路径前缀 |
 
@@ -109,13 +111,13 @@ SDK 抛出的 `AgentApiError` 保留 `status`、`code`、`message`、`details`�
 
 ## 6. 网站后端与部署方必须同步完成
 
-请求 xiaodao Agent 接口时，必须携带 `X-Agent-Owner-Key`。网站后端根据固定的 `WEBSITE_OWNER_NAMESPACE` 和已认证用户的稳定 ID，计算 `SHA-256(JSON.stringify([namespace, user.id]))`。浏览器不能自行提交该请求头或指定用户归属，SDK 会移除该请求头。xiaodao 服务只应向可信的网站后端开放。
+当前默认 `WEBSITE_AUTH_MODE=redis`，BFF 透传登录 Cookie，由服务端读取 Redis 中的 `user.userid` 并结合固定的 `WEBSITE_OWNER_NAMESPACE` 确定归属。浏览器不能指定 owner 或传入可信归属头。完整配置见[Redis 部署说明](website-redis-deployment.md)。
 
-认证模块将原来的多个用户归属回调精简为一个 `authenticate(request)`：已登录时返回稳定的 `{id}`，未登录时返回 `null`。会话列表和用户归属统一由 xiaodao 服务保存，网站不再同步维护另一份列表。Cookie 登录继续使用网站现有的 CSRF / Origin 校验。命名空间和用户 ID 不能随部署变化。
+仅在显式 `trusted_header` 兼容模式中，认证模块使用 `authenticate(request)` 返回稳定的 `{id}`，BFF 计算 `SHA-256(JSON.stringify([namespace, user.id]))` 并发送 `X-Agent-Owner-Key`；与对应后端配置成对部署。默认 Redis BFF 不执行该回调，也不验证 `X-CSRF-Token`，网站仍须保留自己的 CSRF / Origin 校验。会话列表由 xiaodao 保存，命名空间和用户 ID 不能随部署变化。
 
-已有 BFF 仍使用 `SHA-256(JSON.stringify([user.id, browserRequestId]))` 转换创建请求的幂等键，不要改用 `owner_key` 重新计算。浏览器应保存最初生成的请求 ID，不能使用 BFF 转换后返回的 `request_id` 再次创建会话。
+`trusted_header` BFF 仍使用 `SHA-256(JSON.stringify([user.id, browserRequestId]))` 转换创建请求的幂等键，不要改用 `owner_key` 重新计算。Redis BFF 透传浏览器请求 ID。浏览器始终保存最初生成的请求 ID，不能使用兼容 BFF 转换后返回的 `request_id` 再次创建会话。
 
-升级已有数据前，必须先停止服务并备份，再按[离线副本升级说明](data-upgrade-v11-r2.md)升级到独立的目标目录，使用 `--ownership-map` 导入原网站的用户归属信息。归属不明的数据不会分配给任何用户。不能直接修改目录标记、清空旧数据，或让新服务自动升级旧目录。切换前后核对实际部署版本，前后端需同时发布。
+升级前先排空、停服并备份，再按累计清单区分现有 PostgreSQL 与旧 SQLite。仅旧 SQLite 格式转换使用[离线副本升级说明](data-upgrade-v11-r2.md)，旧 Agent v1 可用 `--ownership-map` 导入归属，Agent v2 保留原归属；归属不明的数据不会分配给任何用户。不要手改目录标记或清空旧数据。切换前后核对实际提交，前后端需同时发布。
 
 网站后端的业务逻辑统一实现在 `server.mjs` 中；`server.ts` 提供 Access 类型和 Node.js 24+ 启动入口。不能只复制 `server.ts`，还需同时部署其依赖文件，具体方式见[网站示例说明](../examples/website-agent/README.md)。
 
@@ -135,15 +137,15 @@ SDK 抛出的 `AgentApiError` 保留 `status`、`code`、`message`、`details`�
 ## 8. 可直接交给前端开发的 Prompt
 
 ```text
-请将当前网站接入升级到 xiaodao 8.2.0。先阅读后端仓库的 docs/website-agent-upgrade-8.2.md、docs/website-agent-api.md、examples/website-agent/README.md，并核对实际部署的 OpenAPI。直接修改现有前端和必要的网站后端适配，保持现有技术栈与登录体系。
+请将当前网站接入升级到 xiaodao 8.2.0。先阅读后端仓库的 docs/production-upgrade-2026-09-23.md、docs/website-agent-upgrade-8.2.md、docs/website-agent-api.md、examples/website-agent/README.md，并核对实际部署的 OpenAPI。直接修改现有前端和必要的网站后端适配，保持现有技术栈与登录体系。
 
 1. 只使用会话、附件两个 API 抽象。移除旧 /status、/report、网站 /artifacts 及会话下预约附件调用，改用统一详情的 include 和独立附件接口。
 2. 会话详情按 schema_version=3 接入。history 替代 messages，恢复用户消息、追问和结果卡片并支持向前分页；实现目录分页、重命名、停止、删除。按钮统一使用 capabilities。
 3. 区分 current_run 和 selected_run_id。看旧报告不影响当前轮状态；停止用稳定 request_id + current_run.run_id，区分 CANCELLING、CANCELLED、ALREADY_FINISHED。删除受理后立即移除并关闭订阅，迟到响应不得恢复会话。
-4. 再次诊断必须由用户明确提交完整新问题，使用新的消息 request_id，并允许显式选择已有 READY/IMPORTED 附件。消息请求只传 request_id/text/attachment_ids，不添加 run_id；旧请求重试保持原 ID 和内容。
+4. 同一问题生成新版报告使用继续诊断草稿，按 can_continue 判断资格；追问报告使用 followups。原诊断期间的消息补充携带保存的 target_run_id，遇到 AGENT_RUN_CHANGED 先刷新，不能把同一请求换入口盲重试。独立的新问题由用户明确发起新轮，使用新 request_id；只复用仍可用的 READY/IMPORTED 附件。
 5. SSE 按 schema_version=2、全会话 sequence 去重、事件 run_id 分流。SSE URL 不加 run_id；旧轮事件不得覆盖新轮或关闭其订阅。新轮重新订阅，断流不等于停止诊断。
 6. 默认只展示当前轮报告，历史报告点击后按 run_id 查询。报告缓存按 conversation_id + run_id，轻量查询的 null 不清空已有内容；JSON 先展示，ZIP 不阻塞。保留结构化错误，不自动重跑模型。
-7. 浏览器只调用网站同源 API，不设置 owner_key。网站后端从登录身份派生归属头，保留旧创建请求哈希算法，与运维确认历史归属的离线升级已完成。
+7. 浏览器只调用网站同源 API，不设置 owner_key。默认 Redis 模式透传 Cookie；仅 trusted_header 兼容模式派生归属头并保留原创建请求哈希算法。与运维确认数据升级路径、历史归属和 CSRF 校验。
 8. 控制请求量：目录不做逐项详情查询，日常用 SSE/include=none，历史和报告按需读取。SDK 已返回 data，不再二次解包；文件下载使用对应轮次的同源入口。
 
 使用确定性夹具验证完整交互、停止与完成竞争、旧轮迟到事件、删除后迟到响应、分页、刷新恢复、错误状态和用户隔离。完成后列出修改文件、测试结果及部署联调事项；不调用真实模型、不增加自由聊天、报告追问或自动续办。

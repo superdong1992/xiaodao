@@ -229,7 +229,7 @@ renderReport(container, conversation.result);
 
 生产配置和更新步骤见[Redis 会话接入部署说明](../../docs/website-redis-deployment.md)。
 
-先确认网站后端可以访问 xiaodao 的 `/live`、`/ready` 和 `/openapi.json`，实际部署版本为 `8.2.0` / `v11-contract-r2`。
+先确认网站后端可以访问 xiaodao 的 `/live`、`/ready` 和 `/openapi.json`，实际部署版本为 `8.2.0` / `v11-contract-r3`，并记录 Git 提交；同为 8.2.0 的旧部署不一定包含本次增量功能。
 
 默认由 xiaodao 后端读取 Redis 会话，BFF 不需要配置 `WEBSITE_AUTH_MODULE`。升级时移除该变量；自行调用 `createAgentBackend({ access })` 的网站还需移除 `access` 参数。浏览器访问网站同源接口时携带 Cookie，BFF 将它透传给 xiaodao，包括上传、下载和两类 SSE。
 
@@ -317,6 +317,8 @@ node --test examples/website-agent/server.test.mjs
 
 自检通过不代表 Linux 环境已通过验收。向实际服务发送消息前，按 [Test Flow 说明](../../tools/test-flow/README.md)查看对应 `--plan-only` 输出中的身份和预算，再按[联调清单](../../docs/website-agent-quickstart.md)验证追问、SSE、报告、权限和重启恢复。
 
-早期 `8.0.0` 预览版曾调整 SSE 传输格式，接入方需统一使用 `onmessage`，并管理已处理事件的游标；那次调整没有改变 V11 数据规范。本次 `8.2.0` 使用 `v11-contract-r2`，SSE 为 `schema_version=2`，每条事件包含 `run_id`。已有 r1 或 r2 数据须提供 `--ownership-map`，按[副本升级说明](../../docs/data-upgrade-v11-r2.md)手动升级。原数据和历史报告需保留，不能直接修改旧目录的数据规范标记。
+早期 `8.0.0` 预览版曾调整 SSE 传输格式，接入方需统一使用 `onmessage`，并管理已处理事件的游标；那次调整没有改变 V11 数据规范。当前 `8.2.0` 使用 `v11-contract-r3`，SSE 为 `schema_version=2`，每条事件包含 `run_id`。已有 r2 PostgreSQL 兼容读取；旧 SQLite 按[累计生产升级清单](../../docs/production-upgrade-2026-09-23.md)选择离线格式升级和导入，只有旧 Agent v1 的归属迁移需要 `--ownership-map`。原数据和历史报告需保留，不能直接修改旧目录的数据规范标记。
 
-当前版本为 `8.2.0` / `v11-contract-r2`，State schema 11 与报告 schema 3 保持不变，Agent 存储版本为 2，会话详情版本为 3。已有数据必须先按副本升级流程处理，旧事件和不可变产物的原始字节会保留。原 `/status`、`/report`、产物列表和会话下预约附件路径已删除，网站需同步更新。
+旧 SQLite 的具体步骤见[离线副本升级说明](../../docs/data-upgrade-v11-r2.md)，必须先按实际存储版本选择升级路径，再执行 PostgreSQL 导入。
+
+当前版本为 `8.2.0` / `v11-contract-r3`，State schema 11 与报告 schema 3 保持不变，Agent 存储版本为 2，会话详情版本为 3。旧事件和不可变产物的原始字节会保留。原 `/status`、`/report`、产物列表和会话下预约附件路径已删除，网站需同步更新；已接入早期 8.2 的网站仍须按累计清单核对资源过期、持续诊断和回答反馈。

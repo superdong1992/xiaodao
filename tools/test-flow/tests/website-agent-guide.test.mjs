@@ -445,7 +445,8 @@ test("website guidance describes SSE v2 and explicit owned-storage upgrade", () 
     assert.match(content, /(?:处理成功|成功后才推进游标)/);
     assert.match(content, /8\.0\.0.*预览版/);
     assert.match(content, /8\.2\.0/);
-    assert.match(content, /v11-contract-r2/);
+    const revision = /CONTRACT_REVISION = "([^"]+)"/.exec(read("src/problem_locator/contracts/limits.py"))[1];
+    assert.ok(content.includes(revision), `文档必须说明当前合同 ${revision}`);
     assert.match(content, /(?:显式|手动|必须)[^\n]*升级/);
     assert.ok(content.includes("data-upgrade-v11-r2.md"));
     assert.match(content, /(?:那次|历史)[\s\S]*没有改变 V11 数据(?:合同|规范|格式)/);

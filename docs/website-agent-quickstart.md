@@ -2,7 +2,7 @@
 
 已接入旧版的网站，请先看 [8.2 前端升级清单](website-agent-upgrade-8.2.md)。其中列出了本次必须调整的接口、字段和状态处理逻辑，并附有可直接使用的开发 Prompt。
 
-本文供网站前后端开发人员和 Linux 测试环境运维人员使用，适用于 xiaodao `8.2.0` / V11 / `v11-contract-r2`。建议先用离线预览确认报告的展示效果，再复制浏览器模块，最后接入权限校验、日志上传和实时进度，完成一次完整定位。测试服务仍需按文末清单验收。
+本文供网站前后端开发人员和 Linux 测试环境运维人员使用，适用于 xiaodao `8.2.0` / V11 / `v11-contract-r3`。建议先用离线预览确认报告的展示效果，再复制浏览器模块，最后接入权限校验、日志上传和实时进度，完成一次完整定位。升级已有部署时，先核对[累计生产升级清单](production-upgrade-2026-09-23.md)中的保留策略、持续诊断、反馈与数据兼容要求。测试服务仍需按文末清单验收。
 
 网站保留原有问答功能，另建一个 Agent 入口。调用关系是：**浏览器 → 网站后端 → xiaodao**。网站无需安装 MCP 客户端，也无需将用户输入转换为 `problem_spec`。
 
@@ -40,7 +40,7 @@ renderReport(document.querySelector("#diagnosis-report"), conversation.result);
 | 准备项 | 所需信息 |
 | --- | --- |
 | 测试服务地址 | 网站后端可访问的完整地址、端口和路径前缀；不要把内部地址直接暴露给浏览器 |
-| 部署版本 | 应为 `8.2.0` / `v11-contract-r2`，同时记录部署的 commit 或源码快照；不能仅凭进程启动判断版本 |
+| 部署版本 | 应为 `8.2.0` / `v11-contract-r3`，同时记录部署的 commit 或源码快照；不能仅凭进程启动判断版本 |
 | 接口规范 | 在线 `GET /openapi.json`；可视化入口 `GET /docs`；仓库 [OpenAPI 快照](../schemas/v2/web-api.openapi.snapshot.json) |
 | 完整说明 | [Agent API 参考](website-agent-api.md)：请求响应、附件、SSE、字段、错误与报告校验 |
 | 网站接入示例 | [预览、浏览器模块和后端启动说明](../examples/website-agent/README.md)：先展示报告，再配置 Cookie 透传、Redis 会话校验、上传和 SSE |
@@ -192,7 +192,9 @@ xiaodao 读取 Cookie 的 `sessionid`，查询 `airobot2-session:{session_id}`�
 
 通过这些检查后再开放小范围试用；“Linux 服务已启动”“OpenAPI 能打开”或“确定性测试通过”都不能单独代替部署环境的端到端验收。
 
-早期的 `8.0.0` 预览版曾调整 SSE 传输格式：接入方需统一使用 `onmessage`，并自行管理已处理事件的游标。那次调整没有改变 V11 数据规范。本次 `8.2.0` 保留相同的 SSE 帧格式，公开事件升级为 `schema_version=2`，并包含 `run_id`。State V11 / `v11-contract-r2` 和报告 schema 3 不变，Agent 存储版本升级为 2。已有 r1 或 r2 数据须按副本升级说明手动升级，并从原网站的用户归属库导出 `--ownership-map`；归属不明的数据不会自动分配给用户。
+早期的 `8.0.0` 预览版曾调整 SSE 传输格式：接入方需统一使用 `onmessage`，并自行管理已处理事件的游标；那次调整没有改变 V11 数据规范。当前保留相同的 SSE 帧格式，公开事件为 `schema_version=2`，包含 `run_id`。当前合同为 `v11-contract-r3`，State schema 11、报告 schema 3、Agent 存储 2 不变。已有 r2 PostgreSQL 按兼容读取规则启动，不需要 SQLite 副本升级；旧 SQLite 按累计清单选择离线升级和导入。只有旧 Agent v1 的归属迁移需要从原网站导出 `--ownership-map`；Agent v2 保留原归属，归属不明的数据不会自动分配给用户。
+
+旧 SQLite 的具体步骤见[离线副本升级说明](data-upgrade-v11-r2.md)，必须先按实际存储版本选择升级路径，再执行 PostgreSQL 导入。
 
 网站 API 分为会话和附件两组接口。会话完整响应为 `schema_version=3`，默认包含 `history,report,artifacts`；`include=none` 仅返回状态，`include=report` 仅附带报告，`include=artifacts` 仅附带下载信息。未加载的部分为 null，`included` 会标明本次加载了哪些部分，页面不能因此清空已有内容。预约附件统一使用 `POST /api/v1/agent/attachments`，在 JSON 中添加 `conversation_id`。旧的独立查询路径和会话下的预约附件路径已删除，前后端需一起更新。旧历史事件和不可变产物的原始字节会保留，读取时按新规范转换响应。
 

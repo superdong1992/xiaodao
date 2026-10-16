@@ -154,7 +154,7 @@ MCP 写操作和默认查询返回简要进度及 `artifact_views`；完整事�
 
 上传时会合并小数据块，每次跨线程读取不超过 1 MiB，每路上传由应用分配的缓冲区不超过 2 MiB。接收过程中计算一次长度和 SHA-256，后续提交状态时复用已校验的资源记录，不重新读取历史附件。自定义 Claude wrapper 须遵循 `PROBLEM_LOCATOR_AGENT_FILE_ACCESS=none|read-only`，使用 stream-json 最终响应，并将大输入的 Read 权限限制在当前工作区的 `inputs/**`。
 
-上述四个并发配置只接受正整数，默认值适用于 4 核、8 GB 服务器。同一 Case 内的任务串行执行，不同 Case 可并行；取消操作只终止对应的 Job。其他上下文、资源和保留期限限制保持固定，不接受 `JOB_CONCURRENCY` 或未知的配置覆盖项。
+上述四个并发配置只接受正整数，默认值适用于 4 核、8 GB 服务器。同一 Case 内的任务串行执行，不同 Case 可并行；取消操作只终止对应的 Job。资源保留与磁盘阈值按[存储策略](docs/storage-retention.md)配置；不接受 `JOB_CONCURRENCY` 或未列出的配置覆盖项。
 
 新增或修改专用定位 Skill 后，需要重启服务。重启后创建的任务会使用新内容。升级或切换策略前，请先结束正在执行的任务。
 
@@ -222,7 +222,7 @@ fences are allowed. For `UNRESOLVED`, state the leading hypotheses and the missi
 information that prevents confirmation.
 ````
 
-GENERIC Job 保留 Case 中完整的 `raw_problem_text`，并可携带本轮明确选择的一份产品日志归档和单独保存的补充描述。Web 随问题提交日志时，服务端先自动导入附件，再调用 Logparse 的 `parse-only` 操作；不按时间、槽位或进程筛选，也不要求用户补齐这些参数。通用 Skill 从 `inputs/generic_logs.json` 读取文件清单，再按需检索和分段读取只读日志。原始归档保留在服务端预处理工作区，不进入通用 Skill 的输入目录。没有日志时仍按原有纯文本流程定位。
+GENERIC Job 保留 Case 中完整的 `raw_problem_text`，并可携带本轮明确选择的多份产品日志归档和单独保存的补充描述，数量与总量仍受附件额度限制。Web 随问题提交日志时，服务端先自动导入附件，再逐包调用 Logparse 的 `parse-only` 操作；不按时间、槽位或进程筛选，也不要求用户补齐这些参数。通用 Skill 从 `inputs/generic_logs.json` 读取文件清单，再按需检索和分段读取只读日志。原始归档保留在服务端预处理工作区，不进入通用 Skill 的输入目录。没有日志时仍按原有纯文本流程定位。
 
 运行中补交有效日志会取消旧 Generic Job，在同一 Case、同一会话轮次重新分析；原问题不变，补充文字单独传入，新包替换本轮旧包。旧任务退出后才启动新任务，迟到结果不能覆盖新结果。若旧报告先于重启请求完成提交，接口明确返回冲突，不能接受消息后静默丢弃日志。通用定位不接收专用 Evidence、历史 Outcome 或专用诊断状态，仍可使用 Agent 环境中已授权的工具。
 

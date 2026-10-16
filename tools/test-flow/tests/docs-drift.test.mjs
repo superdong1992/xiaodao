@@ -12,6 +12,7 @@ const AUTHORITATIVE = [
   "docs/browser-rest-api.md",
   "docs/website-agent-api.md",
   "docs/website-agent-quickstart.md",
+  "docs/website-agent-upgrade-8.2.md",
   "docs/production-upgrade-2026-09-23.md",
   "docs/website-redis-deployment.md",
   "docs/website-report-followup.md",

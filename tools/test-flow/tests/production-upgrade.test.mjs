@@ -12,6 +12,49 @@ const shellCommands = (text) => [...text.matchAll(/^```(?:bash|sh|shell)\n([\s\S
   .flatMap((match) => match[1].replace(/\\\n\s*/g, " ").split("\n"))
   .map((line) => line.trim()).filter((line) => line && !line.startsWith("#"));
 
+test("当前部署入口使用实际合同版本，并区分 PostgreSQL 兼容读取与 SQLite 迁移", () => {
+  const revision = /CONTRACT_REVISION = "([^"]+)"/.exec(read("src/problem_locator/contracts/limits.py"))[1];
+  for (const file of ["docs/website-agent-upgrade-8.2.md", "docs/website-agent-quickstart.md", "examples/website-agent/README.md"]) {
+    const doc = read(file);
+    assert.ok(doc.includes(revision), `${file} 未说明当前合同 ${revision}`);
+    assert.doesNotMatch(doc, /已有 r1 或 r2 数据须(?:提供|按)/u, `${file} 不能把所有旧库都引向 SQLite 副本升级`);
+    assert.match(doc, /production-upgrade-2026-09-23\.md/);
+  }
+  const guide = read("docs/production-upgrade-2026-09-23.md");
+  assert.match(guide, /V11 r2 或 r3 的 PostgreSQL[^\n]*不执行 SQLite 导入/u);
+  assert.match(guide, /V11 r2 或 r3、Agent storage v2 的 SQLite/u);
+  assert.match(guide, /V11 r3、Agent v2 SQLite 中间目录/u);
+  assert.ok(hasParagraph(guide, /r2 PostgreSQL/, /r3/, /回退须恢复/u));
+  const frontend = read("docs/website-agent-upgrade-8.2.md");
+  assert.match(frontend, /默认 `WEBSITE_AUTH_MODE=redis`/);
+  assert.ok(hasParagraph(frontend, /trusted_header/, /X-Agent-Owner-Key/));
+  assert.match(frontend, /target_run_id/);
+  assert.doesNotMatch(frontend, /消息请求只传 request_id\/text\/attachment_ids/);
+});
+
+test("累计清单覆盖资源清理的前端兼容和各增量功能的部署边界", () => {
+  const guide = read("docs/production-upgrade-2026-09-23.md");
+  const settings = read("src/problem_locator/entrypoints/settings.py");
+  for (const key of ["WEB_RESOURCE_RETENTION_DAYS", "HISTORY_RETENTION_DAYS",
+    "RESOURCE_DISK_LOW_FREE_BYTES", "RESOURCE_DISK_LOW_FREE_PERCENT",
+    "RESOURCE_DISK_TARGET_FREE_BYTES", "RESOURCE_DISK_TARGET_FREE_PERCENT"]) {
+    assert.ok(settings.includes(key));
+    assert.ok(guide.includes(key), `总升级清单遗漏配置 ${key}`);
+  }
+  for (const token of ["resources_expired", "AGENT_RESOURCE_EXPIRED", "AGENT_STORAGE_PRESSURE",
+    "AGENT_EVENT_CURSOR_EXPIRED", "Last-Event-ID", "can_continue", "REPLACE", "target_followup_id", "share=true"]) {
+    assert.ok(guide.includes(token), `总升级清单遗漏接入要求 ${token}`);
+  }
+  for (const target of ["storage-retention.md", "website-report-followup.md",
+    "website-answer-feedback-upgrade.md", "../usage-stats-reference/INTEGRATION.md"]) {
+    assert.ok(guide.includes(`](${target})`), `缺少专项说明入口 ${target}`);
+  }
+  assert.ok(hasParagraph(guide, /继续诊断/u, /不依赖/u, /REPORT_FOLLOWUP_ENABLED/));
+  assert.ok(hasParagraph(guide, /参考实现/u, /尚未接入/u, /追问/u));
+  assert.ok(hasParagraph(guide, /两个/u, /后台/u, /无新增/u));
+  assert.doesNotMatch(read("README.md"), /本轮明确选择的一份产品日志归档/u);
+});
+
 test("Redis 部署仍明确要求 PostgreSQL 和 DATABASE_URL", () => {
   const redis = read("docs/website-redis-deployment.md");
   assert.doesNotMatch(redis, /不引入\s*PostgreSQL|(?:不需要|无需)\s*`?DATABASE_URL`?/u,
