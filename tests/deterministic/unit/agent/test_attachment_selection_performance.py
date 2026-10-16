@@ -52,6 +52,7 @@ def test_attachment_commit_rechecks_only_the_latest_selection_without_loading_hi
     case = SimpleNamespace(case_id=CASE_ID, case_revision=1)
     submitted = []
     service = SimpleNamespace(store=store, _check_run=lambda: None,
+        _defer_attachment_work=lambda resume: None,
         _message_lock=lambda _: nullcontext(),
         uploads=SimpleNamespace(import_into_case=lambda *args, **kwargs: imported),
         application=SimpleNamespace(get_case=lambda _: SimpleNamespace(case_view=case)),

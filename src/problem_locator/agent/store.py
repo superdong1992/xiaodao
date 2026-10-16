@@ -820,12 +820,31 @@ class AgentStore:
             f"AND ({d.json_text('body', '$.type')}<>'conversation.completed' OR {d.json_text('body', '$.data.status')} IN ('FAILED','INTERRUPTED','CANCELLED')) "
             "ORDER BY sequence DESC LIMIT ?",
             (conversation_id, values[1], limit + 1)).fetchall()
+        page = [(self._event(raw, run_id), run_id, sequence)
+            for raw, run_id, sequence in reversed(rows[:limit])]
+        message_ids = list(dict.fromkeys(event.data["message_id"] for event, _, _ in page
+            if event.type == "message.accepted"))
+        terminal_runs = list(dict.fromkeys(run_id for event, run_id, _ in page
+            if event.type == "conversation.completed"))
+        # Hydrate only this page, not its extra cursor row. Both batches retain
+        # the conversation predicate even though message/run IDs are unique.
+        messages, runs = {}, {}
+        if message_ids:
+            marks = ",".join("?" for _ in message_ids)
+            messages = {row[0]: row[1:] for row in db.execute(
+                f"SELECT message_id,body FROM agent_messages WHERE conversation_id=? AND message_id IN ({marks})",
+                (conversation_id, *message_ids))}
+        if terminal_runs:
+            marks = ",".join("?" for _ in terminal_runs)
+            runs = {row[0]: row[1:] for row in db.execute(
+                f"SELECT run_id,{d.json_text('body', '$.case_status')},{d.json_document('body', '$.failure')} "
+                f"FROM agent_conversation_runs WHERE conversation_id=? AND run_id IN ({marks})",
+                (conversation_id, *terminal_runs))}
         result = []
-        for raw, run_id, sequence in reversed(rows[:limit]):
-            event = self._event(raw, run_id)
+        for event, run_id, sequence in page:
             common = dict(id=str(sequence), run_id=run_id, created_at=event.created_at)
             if event.type == "message.accepted":
-                row = db.execute("SELECT body FROM agent_messages WHERE message_id=? AND conversation_id=?", (event.data["message_id"], conversation_id)).fetchone()
+                row = messages.get(event.data["message_id"])
                 result.append(ConversationHistoryEntry(**common, type="user.message", message=self._message(row[0], run_id)))
             elif event.type == "assistant.question":
                 result.append(ConversationHistoryEntry(**common, type="assistant.question", questions=event.data["questions"]))
@@ -835,8 +854,7 @@ class AgentStore:
                     status="COMPLETED", report_state="READY", case_id=event.case_id, case_status=event.data["status"],
                     source_job_id=None if not artifacts else artifacts[0]["created_by_job_id"])))
             else:
-                row = db.execute(f"SELECT {d.json_text('body', '$.case_status')},{d.json_document('body', '$.failure')} "
-                    "FROM agent_conversation_runs WHERE conversation_id=? AND run_id=?", (conversation_id, run_id)).fetchone()
+                row = runs.get(run_id)
                 result.append(ConversationHistoryEntry(**common, type="diagnosis.result", result=ConversationResultSummary(
                     status=event.data["status"], report_state="UNAVAILABLE", case_id=event.case_id,
                     case_status=row[0], failure=None if row[1] is None else json.loads(row[1]))))

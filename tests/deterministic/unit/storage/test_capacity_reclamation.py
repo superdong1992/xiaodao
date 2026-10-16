@@ -15,12 +15,16 @@ def service(tmp_path, free, *, low=10, target=20, reclaimable=True):
     instance.capacity = SimpleNamespace(snapshot=lambda path: SimpleNamespace(
         free=disk["free"], target=target, under_pressure=disk["free"] < low))
     instance._run_once = lambda: calls.append("normal_cleanup")
-    def reclaim(*, limit):
-        assert limit == 1
-        calls.append("completed_run")
-        if reclaimable:
+    def reclaim(*, limit, should_continue):
+        assert limit is None
+        changed = False
+        while should_continue():
+            calls.append("completed_run")
+            if not reclaimable:
+                break
             disk["free"] += 4
-        return reclaimable
+            changed = True
+        return changed
     instance.history = SimpleNamespace(reclaim_web_resources=reclaim)
     return instance, disk, calls
 

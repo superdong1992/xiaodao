@@ -853,9 +853,8 @@ class RetentionService:
                 return
             if not precleaned:
                 self._run_once()
-            while not self._stop.is_set() and self.capacity.snapshot(root).free < target:
-                if not self.history.reclaim_web_resources(limit=1):
-                    break
+            self.history.reclaim_web_resources(limit=None, should_continue=lambda:
+                not self._stop.is_set() and self.capacity.snapshot(root).free < target)
             free = self.capacity.snapshot(root).free
             log_event("storage.capacity.reclaimed", target_free_bytes=target,
                       free_bytes=free, target_reached=free >= target)

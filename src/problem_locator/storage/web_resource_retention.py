@@ -9,6 +9,7 @@ from .database import dialect_for, lock_conversation
 
 _CLOSED = ("COMPLETED", "FAILED", "INTERRUPTED", "CANCELLED")
 _RESULT = ("RESOLVED", "PARTIALLY_RESOLVED", "UNRESOLVED")
+_CANDIDATE_BATCH_SIZE = 128
 
 
 def _json(value):
@@ -20,16 +21,34 @@ class WebResourceRetention:
         self.history = history
 
     def candidates(self, cutoff=None):
+        """Visit bounded, ordered batches without keeping a database lease open.
+
+        The cursor belongs only to this pass. Busy runs are retried from the
+        beginning next time, and removal of earlier rows cannot shift a page.
+        """
         h = self.history
-        with h.repository.database_read() as db:
-            d = dialect_for(db)
-            finished = d.timestamp(f"coalesce({d.json_text('r.body', '$.completed_at')},{d.json_text('r.body', '$.updated_at')})")
-            tail, params = ("", ()) if cutoff is None else (f" AND {finished}<={d.timestamp('?')}", (cutoff,))
-            return db.execute("SELECT r.conversation_id,r.run_id,r.case_id FROM agent_conversation_runs r "
-                "JOIN agent_conversations c USING(conversation_id) WHERE c.deleted_at IS NULL "
-                "AND r.status IN ('COMPLETED','FAILED','INTERRUPTED','CANCELLED') "
-                f"AND coalesce({d.json_int('r.body', '$.resources_expired')},0)=0" + tail +
-                f" ORDER BY {finished},r.run_id", params).fetchall()
+        after = None
+        while True:
+            with h.repository.database_read() as db:
+                d = dialect_for(db)
+                completed = f"coalesce({d.json_text('r.body', '$.completed_at')},{d.json_text('r.body', '$.updated_at')})"
+                finished = d.timestamp(completed)
+                tail, params = ("", ()) if cutoff is None else (f" AND {finished}<={d.timestamp('?')}", (cutoff,))
+                if after is not None:
+                    tail += f" AND ({finished},r.run_id)>({d.timestamp('?')},?)"
+                    params += after
+                rows = db.execute(f"SELECT r.conversation_id,r.run_id,r.case_id,{completed} FROM agent_conversation_runs r "
+                    "JOIN agent_conversations c USING(conversation_id) WHERE c.deleted_at IS NULL "
+                    "AND r.status IN ('COMPLETED','FAILED','INTERRUPTED','CANCELLED') "
+                    f"AND coalesce({d.json_int('r.body', '$.resources_expired')},0)=0" + tail +
+                    f" ORDER BY {finished},r.run_id LIMIT ?", (*params, _CANDIDATE_BATCH_SIZE)).fetchall()
+            for cid, rid, case_id, completed_at in rows:
+                yield cid, rid, case_id
+            if len(rows) < _CANDIDATE_BATCH_SIZE:
+                return
+            # Compare timestamps by instant, using exactly the ORDER BY
+            # expression; lexical ISO ordering differs for legacy UTC offsets.
+            after = rows[-1][3], rows[-1][1]
 
     @staticmethod
     def upload_in_use(db, cid, aid, *, excluding_run=None):

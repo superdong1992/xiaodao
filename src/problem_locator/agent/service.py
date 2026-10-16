@@ -28,6 +28,7 @@ from .models import (AgentPublicFailure, AgentStoreError, ConversationReportView
 from .failures import exception_code, exception_details
 from .uploads import ConversationUploads
 from .usage import ConversationUsageGuard
+from .attachment_worker import AttachmentTask, AttachmentWorkRequired, AttachmentWorkers
 
 _CLOSED = {"COMPLETED", "FAILED", "INTERRUPTED", "CANCELLED"}
 _CASE_DONE = {"RESOLVED", "PARTIALLY_RESOLVED", "UNRESOLVED", "FAILED", "CANCELLED", "INTERRUPTED"}
@@ -78,9 +79,20 @@ class AgentConversationService:
         self._thread = None
         self._control_thread = None
         self._continuation_thread = None
+        self._attachment_workers = AttachmentWorkers(self)
         self._failure = None
         self._phase = "AGENT"
         store.on_change = self._changed
+
+    @property
+    def _phase(self):
+        return getattr(getattr(self, "_local", None), "phase", "AGENT")
+
+    @_phase.setter
+    def _phase(self, value):
+        if not hasattr(self, "_local"):
+            self._local = threading.local()
+        self._local.phase = value
 
     def _changed(self, _conversation_id):
         self._wake.set()
@@ -103,6 +115,7 @@ class AgentConversationService:
             self.continuations.recover()
             if self.followups is not None:
                 self.followups.start()
+            self._attachment_workers.start()
             self._thread = threading.Thread(target=self._run, name="agent-intake", daemon=True)
             self._control_thread = threading.Thread(target=self._run_control, name="agent-management", daemon=True)
             self._continuation_thread = threading.Thread(target=self._run_continuations,
@@ -122,13 +135,14 @@ class AgentConversationService:
         with self._run_lock:
             for signal in self._active_runs.values():
                 signal.cancel(CancellationReason.SERVICE_SHUTDOWN)
+        attachments_stopped = self._attachment_workers.shutdown(max(0.0, deadline - time.monotonic()))
         followups_stopped = self.followups is None or self.followups.shutdown(
             max(0.0, deadline - time.monotonic()))
         threads = (self._thread, self._control_thread, self._continuation_thread)
         for thread in threads:
             if thread is not None:
                 thread.join(max(0.0, deadline - time.monotonic()))
-        return followups_stopped and all(thread is None or not thread.is_alive() for thread in threads)
+        return attachments_stopped and followups_stopped and all(thread is None or not thread.is_alive() for thread in threads)
 
     def _available(self):
         if self._stop.is_set() or self._failure is not None:
@@ -638,9 +652,11 @@ class AgentConversationService:
 
     def run_once(self, conversation_id=None):
         operational = getattr(self.application, "operational_state", None)
-        if self._stop.is_set() or (operational is not None and not operational.accepting) or not self._processing.acquire(blocking=False):
+        if (self._stop.is_set() or self._failure is not None or (operational is not None and not operational.accepting)
+                or not self._processing.acquire(blocking=False)):
             return False
         progressed = False
+        attachments = []
         try:
             targets = [conversation_id] if conversation_id else self.store.pending_conversations()
             for selected in targets:
@@ -648,7 +664,14 @@ class AgentConversationService:
                     break
                 try:
                     self._phase = "AGENT"
-                    progressed = self._advance_guarded(selected) or progressed
+                    result = self._advance_guarded(selected)
+                    if isinstance(result, AttachmentTask):
+                        if self._attachment_workers.submit_background(result):
+                            progressed = True
+                        else:
+                            attachments.append(result)
+                    else:
+                        progressed = result or progressed
                 except Exception as error:
                     if operational is not None and not operational.accepting:
                         # The operational latch reports uncertain delivery over HTTP.
@@ -657,25 +680,54 @@ class AgentConversationService:
                     # Scoped execution records its failure before leaving the
                     # frozen run. Errors here are storage/control failures.
                     raise error
-            return progressed
+        except BaseException:
+            for task in attachments:
+                self._attachment_workers.discard_unsubmitted(task)
+            raise
         finally:
             self._processing.release()
+        try:
+            for task in attachments:
+                progressed = self._attachment_workers.submit(task) or progressed
+        finally:
+            # A manual task may fail before subsequent reserved tasks are
+            # submitted. Never strand their leases or cancel running workers.
+            for task in attachments:
+                self._attachment_workers.discard_unsubmitted(task)
+        return progressed
 
-    def _advance_guarded(self, conversation_id):
+    def _advance_guarded(self, conversation_id, *, attachment_task=None):
+        if attachment_task is None and self._attachment_workers.busy(conversation_id):
+            return False
+        deferred = None
         try:
             with self.usage_guard.acquire(conversation_id):
                 body = self.store.get_run(conversation_id)
                 run_id = body["run_id"]
-                signal = CancellationController()
+                if attachment_task is not None and attachment_task.run_id != run_id:
+                    return False
+                signal = attachment_task.signal if attachment_task is not None else CancellationController()
                 with self._run_lock:
-                    self._active_runs[(conversation_id, run_id)] = signal
+                    key = (conversation_id, run_id)
+                    if attachment_task is not None:
+                        if self._active_runs.get(key) is not signal:
+                            return False
+                    elif key in self._active_runs:
+                        return False
+                    else:
+                        self._active_runs[key] = signal
                 self._local.run = (conversation_id, run_id)
                 self._local.signal = signal
+                self._local.attachment_task = attachment_task
                 try:
                     with self.store.run_scope(conversation_id, run_id):
                         try:
                             self._check_run()
-                            return self._advance(conversation_id)
+                            return (self._advance(conversation_id) if attachment_task is None
+                                else attachment_task.resume())
+                        except AttachmentWorkRequired as pending:
+                            deferred = self._attachment_workers.reserve(conversation_id, run_id, signal, pending.resume)
+                            return deferred or False
                         except _RunStopped:
                             return False
                         except Exception as error:
@@ -692,13 +744,20 @@ class AgentConversationService:
                 finally:
                     self._local.run = None
                     self._local.signal = None
-                    with self._run_lock:
-                        self._active_runs.pop((conversation_id, run_id), None)
+                    self._local.attachment_task = None
+                    if deferred is None and attachment_task is None:
+                        with self._run_lock:
+                            if self._active_runs.get((conversation_id, run_id)) is signal:
+                                self._active_runs.pop((conversation_id, run_id), None)
                     self._control_wake.set()
         except AgentStoreError as error:
             if error.status_code == 404:
                 return False
             raise
+
+    def _defer_attachment_work(self, resume):
+        if getattr(self._local, "attachment_task", None) is None:
+            raise AttachmentWorkRequired(resume)
 
     def _execute_command(self, conversation_id, label, command, *, message_id=None, generic_message_ids=None):
         # A first message may already have been read while a second message
@@ -906,11 +965,23 @@ class AgentConversationService:
         self.store.set_draft(conversation_id, draft)
         inputs = {item.name: item.value for item in decision.user_facts}
         if inputs or attachment_ids:
-            submitted = self._supplement(conversation_id, case_view, inputs, attachment_ids,
-                "message-" + message.message_id, message_id=message.message_id,
-                selected_attachment_ids=selected_attachment_ids)
-            if not submitted and message.status != "APPLIED":
-                self.store.set_message_status(conversation_id, message.message_id, "APPLIED")
+            def finish(submitted):
+                if not submitted and message.status != "APPLIED":
+                    self.store.set_message_status(conversation_id, message.message_id, "APPLIED")
+                self.store.finish_intake(conversation_id, [item.message_id for item in prefix],
+                    attachment_notice=attachment_notice)
+                return True
+
+            try:
+                submitted = self._supplement(conversation_id, case_view, inputs, attachment_ids,
+                    "message-" + message.message_id, message_id=message.message_id,
+                    selected_attachment_ids=selected_attachment_ids)
+            except AttachmentWorkRequired as pending:
+                # Resume only the prepared supplement. A worker must never
+                # repeat INTAKE or expand model concurrency on a newer message.
+                resume = pending.resume
+                raise AttachmentWorkRequired(lambda: finish(resume())) from None
+            return finish(submitted)
         elif decision.action == "SUBMIT_SUPPLEMENT" and attachment_notice is None:
             raise AgentStoreError("AGENT_NO_MATCHING_INPUT", "本次内容不符合当前补充要求。", 409)
         elif message.status != "APPLIED":
@@ -944,6 +1015,7 @@ class AgentConversationService:
                     self.store.finish_intake(conversation_id, [item.message_id for item in messages], attachment_notice=notice)
                     return True
             self._phase = "IMPORT_ATTACHMENT"
+            self._defer_attachment_work(lambda: self._advance_generic_supplement(conversation_id))
             targets = [self.uploads.import_into_case(conversation_id, case_view.case_id, item, self._execute_command,
                 run_id=run_id, check_cancelled=self._check_run) for item in attachment_ids]
             with self._message_lock(conversation_id):
@@ -1031,6 +1103,10 @@ class AgentConversationService:
                     generic_supplement_text="", selected_attachment_ids=None):
         self._check_run()
         run_id = self.store.get_run(conversation_id)["run_id"]
+        if attachment_ids:
+            self._defer_attachment_work(lambda: self._supplement(conversation_id, case_view, inputs,
+                attachment_ids, label, message_id=message_id, generic_supplement_text=generic_supplement_text,
+                selected_attachment_ids=selected_attachment_ids))
         def selection_changed():
             if not attachment_ids or selected_attachment_ids is None:
                 return False

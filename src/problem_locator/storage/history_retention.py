@@ -127,12 +127,14 @@ class HistoryRetentionService:
             db.execute("DELETE FROM history_cleanup_jobs WHERE cleanup_id=?", (cleanup_id,))
         self._database_dirty = True
 
-    def _retry_paths(self):
+    def _retry_paths(self, *, should_continue=None):
         with self.repository.database_read() as db:
             order = dialect_for(db).order_column()
             rows = db.execute(f"SELECT cleanup_id,manifest FROM history_cleanup_jobs ORDER BY {order}").fetchall()
         changed, failures = False, []
         for cleanup_id, raw in rows:
+            if should_continue is not None and not should_continue():
+                break
             try:
                 changed = self._retry_path(cleanup_id, raw) or changed
             except Exception as error:
@@ -289,28 +291,39 @@ class HistoryRetentionService:
             self._finish_paths(cleanup_id, manifest)
             return True
 
-    def reclaim_web_resources(self, *, limit=1) -> bool:
-        """Release oldest completed Web runs; admission measures physical space."""
-        if type(limit) is not int or limit < 1:
+    def reclaim_web_resources(self, *, limit=1, should_continue=None) -> bool:
+        """Release ordered batches in one pass, measuring space between runs."""
+        if limit is not None and (type(limit) is not int or limit < 1):
             raise ValueError("limit 必须是正整数")
+        if limit is None and should_continue is None:
+            raise ValueError("不限轮次数时必须提供空间检查")
+        if should_continue is not None and not callable(should_continue):
+            raise TypeError("should_continue 必须可调用")
         if not self._processing.acquire(blocking=False):
             return False
         try:
-            changed, failures = self._retry_paths()
-            if changed:
+            proceed = should_continue or (lambda: True)
+            if not proceed():
+                return False
+            changed, failures = self._retry_paths(should_continue=should_continue)
+            if changed and limit is not None:
                 for error in failures:
                     log_event("history.retention.pressure_failed", level=logging.ERROR, error=error)
                 return True
             completed = 0
-            for cid, rid, case_id in self.web.candidates():
+            candidates = iter(self.web.candidates())
+            while (limit is None or completed < limit) and proceed():
+                # Check before advancing: next() may issue the next batch query.
+                try:
+                    cid, rid, case_id = next(candidates)
+                except StopIteration:
+                    break
                 try:
                     released = self.web.expire_run(cid, rid, case_id, reason="DISK_PRESSURE")
                     changed = released or changed
                     completed += int(released)
                 except Exception as error:
                     failures.append(error)
-                if completed >= limit:
-                    break
             for error in failures:
                 log_event("history.retention.pressure_failed", level=logging.ERROR, error=error)
             return changed
