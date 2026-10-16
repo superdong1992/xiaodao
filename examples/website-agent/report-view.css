@@ -38,6 +38,20 @@
 .xiaodao-report__raw { max-width: 100%; margin: 10px 0; padding: 12px; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #f1f4f8; border-radius: 6px; font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 13px; line-height: 1.7; }
 .xiaodao-report__citation { min-width: 0; }
 
+/* 继续诊断与并排报告也可独立部署，不依赖离线预览样式。 */
+.xiaodao-continuation { margin-block: 2rem; padding: 1.5rem; border: 1px solid #c7d5d6; border-radius: 12px; background: #fff; }
+.xiaodao-continuation label { display: block; margin-block: 1rem; line-height: 1.6; }
+.xiaodao-continuation textarea, .xiaodao-continuation select { display: block; box-sizing: border-box; width: 100%; margin-top: .4rem; padding: .65rem; font: inherit; border: 1px solid #adbfc2; border-radius: 5px; }
+.xiaodao-continuation button { margin: .4rem .5rem .4rem 0; padding: .55rem .9rem; font: inherit; cursor: pointer; }
+.xiaodao-continuation button:disabled { cursor: default; opacity: .6; }
+.xiaodao-continuation input[type="checkbox"] { margin-right: .6rem; }
+.xiaodao-continuation [role="alert"] { color: #a12622; }
+.xiaodao-continuation pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; background: #f4f7f8; padding: .8rem; }
+.xiaodao-continuation__versions { border-top: 1px solid #d5dce4; margin-top: 1.5rem; padding-top: 1rem; }
+.xiaodao-continuation__comparison { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1rem; }
+.xiaodao-continuation__comparison .xiaodao-report__cards { grid-template-columns: 1fr; }
+@media (max-width: 800px) { .xiaodao-continuation__comparison { grid-template-columns: 1fr; } }
+
 @media (max-width: 640px) {
   .xiaodao-report__cards { grid-template-columns: minmax(0, 1fr); }
   .xiaodao-report__card { padding: 14px; }

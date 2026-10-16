@@ -581,6 +581,9 @@ def test_rejected_agent_output_replace_failure_leaves_no_partial_file(
         "skill-direct-delivery.json",
         "method-review.draft.json",
         "logparse_broker_audit.json",
+        "generic_logparse_request.json",
+        "logparse_broker_audit.00000000-0000-4000-8000-000000000701.json",
+        "generic_logparse_request.00000000-0000-4000-8000-000000000701.json",
         "method-grounding-audit.json",
         "methods-consensus-attribution-v2.json",
         "methods-limitations-v2.json",
@@ -602,6 +605,40 @@ def test_methods_runtime_records_are_allowlisted_for_publish_and_audit_read(
 
     assert ref.relative_key == f"jobs/{DIAGNOSE_JOB_ID}/{filename}"
     assert store.read_audit_bytes(DIAGNOSE_JOB_ID, filename) == payload
+
+
+def test_archive_audit_records_remain_independent_and_immutable(tmp_path, coordination):
+    store = _store(tmp_path, coordination)
+    first = "logparse_broker_audit.00000000-0000-4000-8000-000000000701.json"
+    second = "logparse_broker_audit.00000000-0000-4000-8000-000000000702.json"
+    first_ref = store.publish_audit_bytes(DIAGNOSE_JOB_ID, first, b"first archive")
+    store.publish_audit_bytes(DIAGNOSE_JOB_ID, second, b"second archive")
+    assert store.publish_audit_bytes(DIAGNOSE_JOB_ID, first, b"first archive") == first_ref
+    with _raises_port_error(ErrorCode.IDEMPOTENCY_CONFLICT):
+        store.publish_audit_bytes(DIAGNOSE_JOB_ID, first, b"changed archive")
+    assert store.read_audit_bytes(DIAGNOSE_JOB_ID, first) == b"first archive"
+    assert store.read_audit_bytes(DIAGNOSE_JOB_ID, second) == b"second archive"
+
+
+@pytest.mark.parametrize("filename", [
+    "logparse_broker_audit.not-a-uuid.json",
+    "logparse_broker_audit.00000000000040008000000000000701.json",
+    "logparse_broker_audit.00000000-0000-4000-8000-0000000007AB.json",
+    "logparse_broker_audit.00000000-0000-4000-8000-000000000701.extra.json",
+    "logparse_broker_audit.00000000-0000-4000-8000-000000000701.json/other",
+    "logparse_broker_audit../00000000-0000-4000-8000-000000000701.json",
+    "../logparse_broker_audit.00000000-0000-4000-8000-000000000701.json",
+    "generic_logparse_request..json",
+    "generic_logparse_request.00000000-0000-4000-8000-000000000701.json\n",
+    "context.00000000-0000-4000-8000-000000000701.json",
+])
+def test_archive_audit_rejects_unapproved_or_noncanonical_names(filename, tmp_path, coordination):
+    store = _store(tmp_path, coordination)
+    with _raises_port_error(ErrorCode.EXECUTION_RECORD_FAILED):
+        store.publish_audit_bytes(DIAGNOSE_JOB_ID, filename, b"rejected")
+    with _raises_port_error(ErrorCode.EXECUTION_RECORD_FAILED):
+        store.read_audit_bytes(DIAGNOSE_JOB_ID, filename)
+    assert not (tmp_path / "jobs").exists()
 
 
 @pytest.mark.parametrize(

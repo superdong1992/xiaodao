@@ -16,6 +16,7 @@ from problem_locator.storage.atomic import (
     finalize_read_only_file, require_ordinary_file, require_real_directory,
 )
 from problem_locator.storage.platform import PlatformFileSync
+from problem_locator.storage.capacity import StorageCapacityError, capacity_reservation
 
 from .models import AgentStoreError
 
@@ -41,8 +42,9 @@ class _BorrowedStream:
 
 
 class ConversationUploads:
-    def __init__(self, store, application, layout, *, file_sync=None):
+    def __init__(self, store, application, layout, *, file_sync=None, capacity=None):
         self.store, self.application, self.layout = store, application, layout
+        self.capacity = capacity
         self._sync = file_sync or PlatformFileSync()
         self._guard = threading.Lock()
         self._locks = weakref.WeakValueDictionary()
@@ -67,9 +69,16 @@ class ConversationUploads:
 
     def prepare(self, conversation_id, request_id, name, content_type, declared_size, declared_sha256):
         derive_attachment_filename_suffix(name, content_type)
-        return self.store.reserve_attachment(
+        record = self.store.reserve_attachment(
             conversation_id, request_id, name, content_type, declared_size, declared_sha256,
         )
+        self._require_available(record)
+        return record
+
+    @staticmethod
+    def _require_available(record):
+        if record.status == "EXPIRED":
+            raise AgentStoreError("AGENT_RESOURCE_EXPIRED", "附件已清理，请重新上传。", 410)
 
     @staticmethod
     def _consume(content: BinaryIO, size: int, sha256: str, destination=None, check_active=None) -> None:
@@ -119,6 +128,7 @@ class ConversationUploads:
 
     def upload(self, attachment_id, request_id, content_type, content_length, content_sha256, content):
         record = self.store.get_attachment(attachment_id)
+        self._require_available(record)
         if (request_id, content_type, content_length, content_sha256) != (
             attachment_id, record.content_type, record.size, record.sha256,
         ):
@@ -130,6 +140,7 @@ class ConversationUploads:
         started = False
         try:
             record = self.store.get_attachment(attachment_id)
+            self._require_available(record)
             check_active = lambda: self.store.require_owner(record.conversation_id, None)
             check_active()
             if record.status in {"READY", "IMPORTED"}:
@@ -147,7 +158,8 @@ class ConversationUploads:
             else:
                 temporary = directory / ("upload-" + uuid.uuid4().hex)
                 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-                with os.fdopen(os.open(temporary, flags, 0o600), "wb") as sink:
+                with capacity_reservation(self.capacity, temporary, record.size), \
+                        os.fdopen(os.open(temporary, flags, 0o600), "wb") as sink:
                     self._consume(content, record.size, record.sha256, sink, check_active)
                     sink.flush()
                     self._sync.sync_file(sink)
@@ -161,13 +173,15 @@ class ConversationUploads:
             check_active()
             finalize_read_only_file(final, self._sync)
             return self.store.complete_attachment(attachment_id, storage_path=str(final))
-        except Exception:
+        except Exception as exc:
             if started:
                 try:
                     self.store.set_attachment_status(attachment_id, "FAILED")
                 except AgentStoreError:
                     # A concurrent terminal result owns the final visibility.
                     pass
+            if isinstance(exc, StorageCapacityError):
+                raise AgentStoreError(exc.code, str(exc), exc.status_code, retryable=True) from exc
             raise
         finally:
             if temporary is not None:
@@ -187,6 +201,7 @@ class ConversationUploads:
         record = self.store.get_attachment(attachment_id)
         if record.conversation_id != conversation_id:
             raise AgentStoreError("ATTACHMENT_CONVERSATION_MISMATCH", "附件不属于当前会话。", 409)
+        self._require_available(record)
         previous = self.store.get_attachment_import(attachment_id, run_id)
         if previous is not None:
             return previous

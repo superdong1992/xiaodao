@@ -81,8 +81,10 @@ def _verify_table_proofs(repository, result):
             assert migration._digest(db.execute(f'SELECT {selected} FROM "{table}"')) == proof["target"]
 
 
-def test_postgres_import_plan_never_opens_sqlite_or_postgres_or_writes_target(sqlite_source, tmp_path, migration_host, monkeypatch):
+@pytest.mark.parametrize("source_revision", ["v11-contract-r2", "v11-contract-r3"])
+def test_postgres_import_plan_never_opens_sqlite_or_postgres_or_writes_target(sqlite_source, tmp_path, migration_host, monkeypatch, source_revision):
     source, _, _ = sqlite_source
+    (source / "data-format.json").write_bytes(safety._marker(source_revision, agent_storage_version=2))
     before = _manifest(source)
     target = tmp_path / "target"
 
@@ -93,6 +95,8 @@ def test_postgres_import_plan_never_opens_sqlite_or_postgres_or_writes_target(sq
     monkeypatch.setattr(migration, "_empty_postgres_database", forbidden)
     result = migration.import_data_root(source, target, database_url_env="UNSET_IMPORT_TEST_URL")
     assert result["status"] == "PLANNED"
+    assert result["source_contract_revision"] == source_revision
+    assert result["target_contract_revision"] == "v11-contract-r3"
     assert result["database_and_resource_validation"] == "PENDING_EXECUTE"
     assert _manifest(source) == before
     assert not target.exists()

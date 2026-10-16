@@ -47,6 +47,7 @@ from problem_locator.contracts.limits import (
 
 from .atomic import FileSync, Replacer, require_ordinary_file, require_real_directory
 from .coordination import AttachmentUploadRegistry, StorageCoordinationLock
+from .capacity import StorageCapacityError, capacity_reservation
 from .layout import StorageLayout
 from .paths import (
     attachment_stage_path,
@@ -233,10 +234,12 @@ class FileResourceStore:
         file_sync: FileSync | None = None,
         replacer: Replacer | None = None,
         stage_registry: StagePathRegistry | None = None,
+        capacity=None,
     ) -> None:
         if not isinstance(layout, StorageLayout):
             raise TypeError("layout must be a StorageLayout")
         self.layout = layout
+        self.capacity = capacity
         self.coordination_lock = coordination_lock
         self.attachment_registry = attachment_registry
         self.stage_registry = stage_registry or StagePathRegistry()
@@ -263,6 +266,7 @@ class FileResourceStore:
             self._file_sync,
             self._replacer,
             temp_token_factory=lambda: self._id_generator.new("materialization"),
+            capacity=capacity,
         )
 
     def active_stage_directories(self) -> tuple[Path, ...]:
@@ -732,7 +736,8 @@ class FileResourceStore:
             ) from None
 
         try:
-            with self.stage_registry.acquire_stage(directory):
+            with self.stage_registry.acquire_stage(directory), capacity_reservation(
+                    self.capacity, directory, MAX_ATTACHMENT_BYTES if expected_size is None else expected_size):
                 observation = self._writer.stage_file_content(
                     directory,
                     stream,
@@ -756,6 +761,8 @@ class FileResourceStore:
                     _file_snapshot(_require_single_link_file(directory / "payload")),
                 )
                 return staged_ref
+        except StorageCapacityError as error:
+            raise _port_error(ErrorCode.UPLOAD_INCOMPLETE, str(error)) from error
         except ValueError as error:
             text = str(error).lower()
             if "byte limit" in text or "exceeds" in text:
@@ -1157,6 +1164,8 @@ class FileResourceStore:
         try:
             path = self._reader.materialize(resource_ref, Path(destination))
             return MaterializedPath(path=str(path), read_only=True)
+        except StorageCapacityError as error:
+            raise _port_error(ErrorCode.RESOURCE_PUBLISH_FAILED, str(error)) from error
         except (FileNotFoundError, OSError, TypeError, ValueError, ValidationError) as error:
             code = self._read_error_code(error)
             raise _port_error(code, "The formal resource could not be materialized.") from None

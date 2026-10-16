@@ -21,7 +21,7 @@ LOGPARSE_ROOT = SRC_ROOT / "integrations" / "logparse"
 CONTROLLED_ARCHIVE_ALLOWLIST = {
     (
         "src/problem_locator/integrations/result_archive.py",
-        "write_result_archive_file",
+        "_write_result_archive_file",
     ): frozenset({"call:zipfile.ZipFile", "call:archive.writestr", "call:archive.open"}),
     (
         "src/problem_locator/application/audit_bundle.py",

@@ -7,7 +7,7 @@ import os
 import stat
 from uuid import UUID
 
-from problem_locator.contracts import CONTRACT_REVISION, SCHEMA_VERSION
+from problem_locator.contracts import CONTRACT_REVISION, SCHEMA_VERSION, StateFile
 from .atomic import (is_reparse_point, read_stable_file_bytes, require_real_directory,
                      require_ordinary_file, write_synced_file)
 from .layout import StorageLayout, UnsupportedDataFormatError, _is_empty_fixed_layout
@@ -28,10 +28,25 @@ def root_identity(layout: StorageLayout) -> str:
     return hashlib.sha256(str(layout.data_root.resolve()).encode("utf-8")).hexdigest()
 
 
-def marker_bytes(installation_id: str) -> bytes:
+def marker_bytes(installation_id: str, *, contract_revision: str = CONTRACT_REVISION) -> bytes:
     UUID(installation_id)
-    return (json.dumps({**_FORMAT, "installation_id": installation_id},
+    return (json.dumps({**_FORMAT, "contract_revision": contract_revision, "installation_id": installation_id},
                        ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def load_postgres_state(raw: str | bytes) -> StateFile:
+    """Project only the compatible r2 header without rewriting stored history."""
+    value = json.loads(raw)
+    if isinstance(value, dict) and value.get("schema_version") == 11 and value.get("contract_revision") == "v11-contract-r2":
+        projected = StateFile.model_validate({**value, "contract_revision": CONTRACT_REVISION})
+        # r2 did not have these fields; do not accept mislabeled r3 objects.
+        for aggregate in value["cases"].values():
+            if "continuation_context" in aggregate["case"] or any(
+                "continuation_context" in job for job in aggregate["jobs"].values()
+            ):
+                raise ValueError("r2 快照不能携带持续诊断上下文。")
+        return projected
+    return StateFile.model_validate(value)
 
 
 def preflight_postgres_root(layout: StorageLayout) -> dict | None:
@@ -72,9 +87,11 @@ def preflight_postgres_root(layout: StorageLayout) -> dict | None:
         value = json.loads(raw)
         if not isinstance(value, dict) or value.keys() != (_FORMAT.keys() | {"installation_id"}):
             raise ValueError("invalid marker keys")
-        if any(value[key] != expected for key, expected in _FORMAT.items()):
+        if any(value[key] != expected for key, expected in _FORMAT.items() if key != "contract_revision"):
             raise ValueError("unsupported marker version")
-        if raw != marker_bytes(value["installation_id"]):
+        if value["contract_revision"] not in {"v11-contract-r2", CONTRACT_REVISION}:
+            raise ValueError("unsupported contract revision")
+        if raw != marker_bytes(value["installation_id"], contract_revision=value["contract_revision"]):
             raise ValueError("noncanonical marker")
         return value
     except (ValueError, TypeError, KeyError, AttributeError) as exc:
@@ -107,4 +124,4 @@ def initialize_postgres_root(layout: StorageLayout, installation_id: str, file_s
 
 
 __all__ = ["preflight_postgres_root", "validate_postgres_root", "initialize_postgres_root",
-           "marker_bytes", "root_identity"]
+           "marker_bytes", "root_identity", "load_postgres_state"]

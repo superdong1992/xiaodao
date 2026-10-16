@@ -24,6 +24,11 @@ EXPECTED_ENV_KEYS = {
     "DATABASE_URL",
     "DATABASE_POOL_SIZE",
     "HISTORY_RETENTION_DAYS",
+    "WEB_RESOURCE_RETENTION_DAYS",
+    "RESOURCE_DISK_LOW_FREE_BYTES",
+    "RESOURCE_DISK_TARGET_FREE_BYTES",
+    "RESOURCE_DISK_LOW_FREE_PERCENT",
+    "RESOURCE_DISK_TARGET_FREE_PERCENT",
     "DFX_LOG_LEVEL",
     "GENERIC_SKILL_NAME",
     "GENERIC_LOGPARSE_PRODUCT",
@@ -87,7 +92,7 @@ def test_release_metadata_requires_postgresql_with_pinned_driver_and_pool() -> N
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     required_release_boundaries = (
         "State、Job 和服务端确认的 Outcome 使用 V11",
-        "v11-contract-r2",
+        "v11-contract-r3",
         "docs/data-upgrade-v11-r2.md",
         "不重放活动任务或未确认的 Outcome",
         "PostgreSQL 15 或更新版本",
@@ -124,6 +129,11 @@ def test_env_example_contains_only_the_public_settings() -> None:
     assert assignments["DATABASE_URL"].startswith("postgresql://")
     assert assignments["DATABASE_POOL_SIZE"] == "8"
     assert assignments["HISTORY_RETENTION_DAYS"] == "30"
+    assert assignments["WEB_RESOURCE_RETENTION_DAYS"] == "15"
+    assert assignments["RESOURCE_DISK_LOW_FREE_BYTES"] == "10737418240"
+    assert assignments["RESOURCE_DISK_TARGET_FREE_BYTES"] == "21474836480"
+    assert assignments["RESOURCE_DISK_LOW_FREE_PERCENT"] == "10"
+    assert assignments["RESOURCE_DISK_TARGET_FREE_PERCENT"] == "15"
     assert assignments["GENERIC_MEMORY_ENABLED"] == "false"
     assert assignments["REPORT_FOLLOWUP_ENABLED"] == "false"
     assert assignments["REPORT_FOLLOWUP_SNAPSHOT_BYTES"] == "1073741824"
@@ -139,7 +149,7 @@ def test_env_example_contains_only_the_public_settings() -> None:
     assert all(
         fragment not in key
         for key in assignments
-        if key != "HISTORY_RETENTION_DAYS"
+        if key not in {"HISTORY_RETENTION_DAYS", "WEB_RESOURCE_RETENTION_DAYS"}
         for fragment in forbidden_fragments
     )
     assert all(

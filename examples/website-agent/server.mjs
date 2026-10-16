@@ -15,6 +15,8 @@ import { pipeline } from "node:stream/promises";
 import { clearInterval, clearTimeout, setInterval, setTimeout } from "node:timers";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { handleFollowups } from "./followup-bff.mjs";
+import { handleContinuations } from "./continuation-bff.mjs";
+import { CONTINUATION_FAILURE_MESSAGES } from "./continuation-contract.js";
 export const denyAccess = {
     authenticate: async ()=>null
 };
@@ -119,6 +121,7 @@ const KINDS = new Set([
 const ZIP_NOTICE = "该文件包含原始目标日志，可能含有业务信息。请确认后下载。";
 const AUDIT_NOTICE = "该文件是本次定位的审计包，请按内部数据管理要求保存。";
 const PUBLIC_CODES = new Set([
+    ...Object.keys(CONTINUATION_FAILURE_MESSAGES),
     "VALIDATION_ERROR",
     "CASE_NOT_FOUND",
     "JOB_NOT_FOUND",
@@ -291,6 +294,7 @@ function safeError(value, terminal = false) {
         });
     }
     const messages = {
+        ...CONTINUATION_FAILURE_MESSAGES,
         AGENT_CONVERSATION_CLOSED: "本轮诊断已结束，可以发送新问题开始下一轮。",
         AGENT_CONVERSATION_NOT_FOUND: "会话不存在或已删除。",
         AGENT_RUN_NOT_FOUND: "诊断轮次不存在。",
@@ -311,7 +315,7 @@ function safeError(value, terminal = false) {
         AGENT_CANCELLING: "正在停止本轮诊断，请稍后再发送。",
         AGENT_IDEMPOTENCY_CONFLICT: "同一 request_id 的内容不能更改。",
         AGENT_ATTACHMENT_NOT_READY: "附件未上传完成或不属于本会话。",
-        AGENT_LOG_SELECTION_INVALID: "当前仅支持一份日志归档，请合并后上传，或重新选择一个附件。",
+        AGENT_LOG_SELECTION_INVALID: "日志清单无效，请核对所选附件及当前诊断的要求。",
         AGENT_LOG_ALREADY_SELECTED: "这份日志已用于当前定位，无需重复提交。",
         AGENT_RESTART_PENDING: "日志正在接入，请稍后重试同一请求。",
         INTAKE_OUTPUT_INVALID: "补充信息整理失败，请核对输入后新建任务。",
@@ -664,6 +668,7 @@ export function createAgentBackend(options) {
                 ])).digest("hex");
             }
             const url = new URL(request.url ?? "/", "http://website.local");
+            if (await handleContinuations({ request, response, url, authContext, api, json, jsonBody, HttpError })) return;
             if (await handleFollowups({ request, response, url, authContext, api, upstreamFetch, json,
                 jsonBody, HttpError, safeError, boundedResponseJson, validateQuery, checkLimit })) return;
             const creation = url.pathname === "/api/agent/conversations";

@@ -122,6 +122,7 @@ _UUID_PATH_SCHEMA = {
     "pattern": _UUID_PATTERN,
 }
 _UUID_PARAMETER_NAMES = {
+    "draft_id",
     "followup_id",
     "conversation_id",
     "run_id",
@@ -714,6 +715,9 @@ _SUCCESS_RESPONSE_DESCRIPTIONS = {
 }
 
 _REST_MODEL_FIELD_DESCRIPTIONS = {
+    "AgentAttachment": {
+        "status": "RESERVED 待上传，UPLOADING 上传中，READY 已校验，IMPORTED 已导入，FAILED 上传失败，EXPIRED 资源已清理。EXPIRED 仍保留附件元数据，不能再次采用；旧请求重试返回 410，重新上传须使用新的请求 ID。",
+    },
     "FollowupRequest": {
         "request_id": "本次追问的幂等标识，1 到 128 个字符；重试保留原 ID 和原文。",
         "text": "本次追问或文字补充，不能为空，最多 65536 UTF-8 字节；不接受附件。",
@@ -780,6 +784,30 @@ _REST_MODEL_FIELD_DESCRIPTIONS = {
 }
 
 _REST_FIELD_DESCRIPTIONS.update({
+    "expected_revision": "用户核对的草稿版本；与当前版本不一致时拒绝修改或确认。",
+    "draft_id": "继续诊断草稿标识。",
+    "parent_run_id": "本轮所依据的上一版报告轮次；首版为 null。",
+    "root_run_id": "同一问题的首轮诊断标识。",
+    "latest_run_id": "同一问题最新已发布报告的轮次标识。",
+    "effective_problem_text": "用户确认后可独立使用的完整问题和有效补充，作为新 Case 的原始输入。",
+    "source_problem_text": "父报告实际采用的问题和有效补充，供核对更正。",
+    "change_note": "本轮补充或更正说明，供正式诊断核对。",
+    "diagnosis_goal": "本轮重点验证的问题或方向。",
+    "log_mode": "APPEND 沿用父报告日志并追加；REPLACE 使用重新选择的集合。PATCH 的 attachment_ids 始终是最终完整集合。",
+    "input_changes": "根据两轮实际输入计算的问题与日志变化。",
+    "followup_text": "识别为 FOLLOWUP 时保留的用户原始提问，发送到父报告追问接口；其余状态为空字符串。",
+    "confirmed_run_id": "草稿确认后创建的新轮次；尚未确认时为 null。",
+    "failure_message": "草稿整理失败的说明；可直接编辑后重新确认。",
+    "before_problem_text": "上一轮采用的完整问题信息。",
+    "after_problem_text": "本轮采用的完整问题信息。",
+    "added_attachments": "按内容摘要比较后本轮新增的日志。",
+    "removed_attachments": "按内容摘要比较后本轮不再采用的日志。",
+    "runtime_changes": "Skill、模型执行配置和解析器变化，或历史记录不足以比较的说明。",
+    "versions": "同一问题已发布的报告版本，按诊断轮次排序。",
+    "can_continue": "当前所选报告是否可作为新一轮继续诊断的起点。",
+    "resources_expired": "该轮日志资源是否已到期或被容量回收；为 true 时该轮只读，报告和历史问答仍可查看。",
+    "resources_expired_at": "该轮资源清理时间，包含时区偏移；尚未清理时为 null。",
+    "resource_cleanup_reason": "该轮资源清理原因：RETENTION_EXPIRED 表示正常到期，DISK_PRESSURE 表示磁盘空间不足而提前回收；尚未清理时为 null。",
     "target_run_id": "诊断中补充的目标轮次；该轮已结束或改变时返回 409。省略时保持原消息行为。",
     "followup_id": "独立追问的 UUID；不能用作诊断轮次或诊断事件游标。",
     "can_ask": "当前是否允许提交追问，由开关、报告类型、有效期和会话忙碌状态决定。",
@@ -813,6 +841,11 @@ _REST_FIELD_DESCRIPTIONS.update({
     "history_limit": "历史分页条数，默认 50，最大 100。",
 })
 _SUCCESS_RESPONSE_DESCRIPTIONS.update({
+    "create_agent_continuation_draft": "返回待核对草稿；自然语言整理排队执行，尚未创建新轮次。",
+    "get_agent_continuation_draft": "返回最新草稿状态；读取不启动模型。",
+    "update_agent_continuation_draft": "保存用户编辑的问题和最终附件集合，返回新草稿版本。",
+    "confirm_agent_continuation_draft": "幂等创建独立诊断轮次，返回新 run_id；后续进度使用既有接口。",
+    "list_agent_report_versions": "返回同一问题已发布的报告版本、输入变化和可继续诊断状态。",
     "submit_agent_followup": "追问已持久接收；同一 request_id 重试返回原收据，不重复调用模型。",
     "list_agent_followups": "返回分页问答、会话内活跃追问、可用能力和独立事件游标；读取不启动模型。",
     "stop_agent_followup": "返回指定追问的停止收据；终态不受迟到答案影响。",
@@ -827,6 +860,9 @@ _SUCCESS_RESPONSE_DESCRIPTIONS.update({
 })
 
 _REQUEST_BODY_DESCRIPTIONS = {
+    "create_agent_continuation_draft": "request_id 和本次更正、完整问题、目标及附件选择；APPEND 默认沿用父报告日志。",
+    "update_agent_continuation_draft": "request_id、expected_revision 和待修改字段；attachment_ids 为最终完整日志集合。",
+    "confirm_agent_continuation_draft": "稳定的 request_id 和用户已核对的 expected_revision。",
     "submit_agent_followup": "只接受 request_id 和 text。重试保留 ID 与原文，不接受附件；只追加回答，不改正式结论。",
     "stop_agent_followup": "稳定的 request_id；同一次停止重试保持不变，停止目标由路径指定。",
     "put_agent_feedback": "只接受 request_id 和 rating。request_id 为 1 到 128 个 Unicode 字符；rating 为 LIKE 或 DISLIKE。重试保留 ID 与内容，换票使用新 ID。",

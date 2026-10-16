@@ -33,6 +33,7 @@ def shared_app(setup, monkeypatch):
     monkeypatch.setattr(session_auth, "Redis", lambda **_: redis)
     queries = ApplicationQueryService(setup.repository, setup.resources, SimpleNamespace(),
         operational_state=setup.operational)
+    setup.service.application.open_artifact = queries.open_artifact
     app = create_http_app(command_port=FakeApplicationService(), query_port=queries,
         state_admin=FakeStateAdmin(readiness=readiness()), agent_service=setup.service,
         public_base_url="http://local", website_auth=WebsiteAuthConfig(redis_host="redis.internal"))

@@ -6,7 +6,7 @@ import uuid
 from datetime import timedelta
 
 from problem_locator.agent.models import AgentStoreError
-from problem_locator.storage.database import dialect_for, lock_conversation, lock_key, try_lock_conversation
+from problem_locator.storage.database import dialect_for, lock_conversation, lock_key, table_columns, try_lock_conversation
 from problem_locator.timestamps import format_timestamp, now_timestamp, parse_timestamp
 
 from .models import FeedbackRequest, FeedbackSource, FeedbackView
@@ -19,7 +19,7 @@ SOURCE_RETENTION_DAYS = 7
 CARD_RETENTION_DAYS = 90
 
 _SCHEMA = (
-    "CREATE TABLE IF NOT EXISTS memory_feedback (run_id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,owner_key TEXT NOT NULL,source_job_id TEXT NOT NULL,skill_name TEXT NOT NULL,report_sha256 TEXT NOT NULL,rating TEXT NOT NULL CHECK(rating IN ('LIKE','DISLIKE')),updated_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS memory_feedback (run_id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,owner_key TEXT NOT NULL,source_job_id TEXT NOT NULL,skill_name TEXT NOT NULL,report_sha256 TEXT NOT NULL,rating TEXT NOT NULL CHECK(rating IN ('LIKE','DISLIKE')),updated_at TEXT NOT NULL,extraction_attempted INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE IF NOT EXISTS memory_feedback_requests (owner_key TEXT NOT NULL,request_id TEXT NOT NULL,conversation_id TEXT NOT NULL,run_id TEXT NOT NULL,rating TEXT NOT NULL,PRIMARY KEY(owner_key,request_id))",
     "CREATE INDEX IF NOT EXISTS memory_requests_run ON memory_feedback_requests(run_id)",
     "CREATE INDEX IF NOT EXISTS memory_feedback_conversation ON memory_feedback(conversation_id)",
@@ -55,6 +55,13 @@ class MemoryStore:
         with repository.database_transaction() as db:
             for statement in _SCHEMA:
                 db.execute(statement)
+            if "extraction_attempted" not in table_columns(db, "memory_feedback"):
+                db.execute("ALTER TABLE memory_feedback ADD COLUMN extraction_attempted INTEGER NOT NULL DEFAULT 0")
+                # Keep the one-shot receipt when an old task later reaches its
+                # own TTL. Permanent feedback must not restart extraction.
+                db.execute("UPDATE memory_feedback SET extraction_attempted=1 WHERE EXISTS "
+                           "(SELECT 1 FROM memory_tasks t WHERE t.run_id=memory_feedback.run_id "
+                           "AND t.report_sha256=memory_feedback.report_sha256)")
 
     def _now(self):
         return _timestamp(self.clock.now()) if self.clock is not None else now_timestamp()
@@ -114,9 +121,13 @@ class MemoryStore:
             if db.execute("SELECT count(*) FROM memory_feedback_requests WHERE run_id=?", (run_id,)).fetchone()[0] >= MAX_REQUESTS_PER_REPORT:
                 raise _limit()
             if current is None:
-                if db.execute("SELECT count(*) FROM memory_feedback").fetchone()[0] >= MAX_SOURCES:
+                d = dialect_for(db)
+                if db.execute("SELECT count(*) FROM memory_feedback f "
+                              "JOIN agent_conversation_runs r ON r.run_id=f.run_id AND r.conversation_id=f.conversation_id "
+                              "JOIN agent_conversations c ON c.conversation_id=f.conversation_id "
+                              f"WHERE c.deleted_at IS NULL AND coalesce({d.json_int('r.body', '$.resources_expired')},0)=0").fetchone()[0] >= MAX_SOURCES:
                     raise _limit()
-                db.execute("INSERT INTO memory_feedback VALUES (?,?,?,?,?,?,?,?)",
+                db.execute("INSERT INTO memory_feedback (run_id,conversation_id,owner_key,source_job_id,skill_name,report_sha256,rating,updated_at) VALUES (?,?,?,?,?,?,?,?)",
                            (run_id, conversation_id, owner_key, source.source_job_id, source.skill_name,
                             source.report_sha256, request.rating, now))
             elif current["rating"] != request.rating:
@@ -127,6 +138,7 @@ class MemoryStore:
             task = _one(db, "SELECT * FROM memory_tasks WHERE run_id=? AND report_sha256=?",
                         (run_id, source.report_sha256))
             if (request.rating == "LIKE" and task is None and extract_memory
+                    and (current is None or not current["extraction_attempted"])
                     and source.problem_text.strip()
                     and len(source.problem_text.encode("utf-8")) <= 65_536
                     and len(source.report_markdown.encode("utf-8")) <= 65_536
@@ -135,6 +147,7 @@ class MemoryStore:
                            (str(uuid.uuid4()), conversation_id, run_id, source.source_job_id,
                             source.skill_name, source.report_sha256, source.problem_text,
                             source.report_markdown, now, now))
+                db.execute("UPDATE memory_feedback SET extraction_attempted=1 WHERE run_id=?", (run_id,))
             elif task is not None:
                 active = (request.rating == "LIKE" and task["status"] == "READY"
                           and task["card_json"] is not None
@@ -233,11 +246,15 @@ class MemoryStore:
         cards = db.execute("UPDATE memory_tasks SET active=0,card_json=NULL,card_sha256=NULL "
                            f"WHERE card_json IS NOT NULL AND {dialect.timestamp('completed_at')}<={dialect.timestamp('?')}",
                            (_before(now, CARD_RETENTION_DAYS),)).rowcount
-        # Natural Case retention removes source runs. Completed cards have their
-        # own lifetime; failed/deleted tasks and feedback receipts can go now.
-        orphan = "NOT EXISTS (SELECT 1 FROM agent_conversation_runs r WHERE r.run_id=memory_tasks.run_id)"
-        db.execute("UPDATE memory_tasks SET status='FAILED',active=0,problem_text=NULL,report_markdown=NULL,updated_at=? WHERE status IN ('PENDING','RUNNING') AND " + orphan, (now,))
-        tasks = db.execute("DELETE FROM memory_tasks WHERE " + orphan + " AND (status IN ('FAILED','DELETED') OR (status='READY' AND card_json IS NULL))").rowcount
+        # Web runs and votes are permanent. Only live sources consume their
+        # quota; extraction tasks and cards still have independent lifetimes.
+        ended = ("NOT EXISTS (SELECT 1 FROM agent_conversation_runs r WHERE r.run_id=memory_tasks.run_id "
+                 f"AND coalesce({dialect.json_int('r.body', '$.resources_expired')},0)=0)")
+        db.execute("UPDATE memory_tasks SET status='FAILED',active=0,problem_text=NULL,report_markdown=NULL,updated_at=? WHERE status IN ('PENDING','RUNNING') AND " + ended, (now,))
+        tasks = db.execute("DELETE FROM memory_tasks WHERE "
+                           "(status='READY' AND card_json IS NULL) OR "
+                           f"(status IN ('FAILED','DELETED') AND ({ended} OR {dialect.timestamp('created_at')}<={dialect.timestamp('?')}))",
+                           (_before(now, SOURCE_RETENTION_DAYS),)).rowcount
         requests = db.execute("DELETE FROM memory_feedback_requests WHERE NOT EXISTS (SELECT 1 FROM agent_conversation_runs r WHERE r.run_id=memory_feedback_requests.run_id)").rowcount
         feedback = db.execute("DELETE FROM memory_feedback WHERE NOT EXISTS (SELECT 1 FROM agent_conversation_runs r WHERE r.run_id=memory_feedback.run_id)").rowcount
         return {"expired_sources": raw, "expired_cards": cards, "tasks": tasks, "requests": requests, "feedback": feedback}

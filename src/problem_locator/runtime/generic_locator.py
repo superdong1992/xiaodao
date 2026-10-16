@@ -38,6 +38,7 @@ from problem_locator.journey import (
 
 from .agent_backend import AgentBackend, BackendExecutionLimits
 from .context_policy import ResolvedJobAssets
+from .continuation_context import build_report_continuation_context
 from .failures import RuntimeExecutionError, runtime_failure
 from .workspace import PreparedWorkspace, WorkspaceManager
 from .generic_logs import verify_generic_logs
@@ -313,6 +314,7 @@ class GenericLocatorExecutor:
             f"{job.generic_problem_text}\n"
             "<<<END_RAW_PROBLEM_TEXT>>>\n\n"
             f"{extra}"
+            + build_report_continuation_context(job.continuation_context)
             + (experience_reference + "\n\n" if experience_reference else "")
             + f"{assets.output_contract_text.rstrip()}\n"
         )

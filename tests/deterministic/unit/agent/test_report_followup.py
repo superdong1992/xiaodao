@@ -164,11 +164,11 @@ def test_followup_items_events_and_snapshots_use_local_offset(system):
 
 
 @pytest.mark.parametrize("occurred_at", ["2026-09-17T01:00:00.001Z", "2026-09-17T09:00:00.001+08:00"])
-def test_followup_expiry_preserves_seven_day_boundary_across_offsets(system, occurred_at):
+def test_followup_expiry_preserves_fifteen_day_boundary_across_offsets(system, occurred_at):
     system.source = replace(system.source, occurred_at=occurred_at)
-    system.clock.value = "2026-09-24T09:00:00.000+08:00"
+    system.clock.value = "2026-10-02T09:00:00.000+08:00"
     assert view(system).can_ask
-    system.clock.value = "2026-09-24T09:00:00.001+08:00"
+    system.clock.value = "2026-10-02T09:00:00.001+08:00"
     assert view(system).reason == "EXPIRED"
 
 
@@ -207,6 +207,60 @@ def test_snapshot_is_async_verified_and_model_only_reads_the_copied_inputs(syste
     assert (invocation["workspace_root"] / "inputs/logs/log-000001.log").read_bytes() == snapshot_log.read_bytes()
     assert view(system).items[0].context_mode == "REPORT_AND_LOGS"
     assert original_rows(system) == before
+
+
+@pytest.mark.parametrize("kind", ["GENERIC", "SKILL_DIRECT"])
+def test_multi_archive_snapshot_preserves_sources_for_same_named_logs(system, kind):
+    original, job = make_logs(system, kind=kind)
+    second_content = b"incident_code=QUEUE_OVERFLOW\ntrace_key=two\n"
+    second = original / "inputs/logs/second/source.log"
+    second.parent.mkdir()
+    second.write_bytes(second_content)
+    name, audit, key = (("generic_logs.json", "generic_logs.json", "logs") if kind == "GENERIC"
+        else ("target_logs.json", "methods_target_logs.json", "target_logs"))
+    initial = json.loads((original / "inputs" / name).read_bytes())[key][0]
+    rows, sources = [], []
+    for ordinal, path in enumerate((original / initial["log_path"], second), 1):
+        attachment_id = f"00000000-0000-4000-8000-00000000070{ordinal}"
+        source = {"attachment_id": attachment_id, "name": "logs.zip",
+            "sha256": str(ordinal) * 64, "size": 100 + ordinal}
+        row = {"log_path": path.relative_to(original).as_posix(), "size": path.stat().st_size,
+            "sha256" if kind == "GENERIC" else "content_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        if kind == "GENERIC":
+            row.update(relative_path="same/client.log", source_attachment_id=attachment_id,
+                source_attachment_name=source["name"])
+            sources.append({"source_attachment_id": attachment_id,
+                "source_attachment_name": source["name"], "source_attachment_sha256": source["sha256"]})
+        else:
+            row.update(label="client", source_id=f"archive-{ordinal:03d}-client", source_archive=source)
+        rows.append(row)
+    value = {"schema_version": 2 if kind == "GENERIC" else 1, key: rows}
+    if sources:
+        value["sources"] = sources
+    raw = json.dumps(value, sort_keys=True).encode()
+    (original / "inputs" / name).write_bytes(raw)
+    (job / audit).write_bytes(raw)
+
+    assert system.service.observe_report(system.cid, system.rid)
+    assert system.service.snapshot_worker.run_once()
+    snapshot = json.loads((job / "followup-inputs/inputs/logs.json").read_bytes())
+    assert len(snapshot["logs"]) == 2
+    assert snapshot["logs"][0]["source_label"] == snapshot["logs"][1]["source_label"]
+    assert len({row["log_path"] for row in snapshot["logs"]}) == 2
+    for original_row, copied in zip(rows, snapshot["logs"], strict=True):
+        if kind == "GENERIC":
+            assert copied["source_attachment_id"] == original_row["source_attachment_id"]
+            assert copied["source_attachment_name"] == "logs.zip"
+        else:
+            assert copied["source_id"] == original_row["source_id"]
+            assert copied["source_archive"] == original_row["source_archive"]
+        assert (job / "followup-inputs" / copied["log_path"]).read_bytes() == (
+            original / original_row["log_path"]).read_bytes()
+    if sources:
+        assert snapshot["sources"] == sources
+    submit(system)
+    assert system.service.worker.run_once()
+    assert json.loads((system.backend.calls[0]["workspace_root"] / "inputs/logs.json").read_bytes()) == snapshot
 
 
 def test_changed_log_manifest_quota_and_missing_logs_degrade_without_touching_report(system):
@@ -376,16 +430,16 @@ def test_result_commit_failure_never_requeues_or_calls_model_again(system, monke
     assert view(system).items[0].status == "INTERRUPTED"
 
 
-def test_expired_report_rejects_new_work_and_queued_expired_work_never_calls_model(system):
+def test_expired_report_rejects_new_work_but_finishes_already_accepted_followup(system):
     submit(system)
-    system.clock.value = "2026-10-01T01:00:00.000Z"
+    system.clock.value = "2026-10-09T01:00:00.000Z"
     assert view(system).reason == "EXPIRED"
     with pytest.raises(AgentStoreError) as caught:
         submit(system, "expired")
     assert caught.value.code == "AGENT_FOLLOWUP_EXPIRED"
-    assert not system.service.worker.run_once()
-    assert not system.backend.calls
-    assert view(system).items[0].status == "CANCELLED"
+    assert system.service.worker.run_once()
+    assert len(system.backend.calls) == 1
+    assert view(system).items[0].status == "COMPLETED"
 
 
 def test_owner_pagination_sse_cursor_and_old_retry_cannot_move_to_other_run(system):

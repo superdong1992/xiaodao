@@ -40,8 +40,9 @@ def test_queued_followup_protects_old_run_then_expires_without_renewal(stack):
     assert not workspace.exists()
     assert stack.store.get_run(cid, newer.run_id)["run_id"] == newer.run_id
     with stack.repository.database_read() as db:
-        assert not db.execute("SELECT 1 FROM agent_followup_tasks").fetchall()
-        assert not db.execute("SELECT 1 FROM agent_followup_events").fetchall()
+        assert db.execute("SELECT 1 FROM agent_followup_tasks").fetchall()
+        assert db.execute("SELECT 1 FROM agent_followup_events").fetchall()
+    assert followups.page(cid, rid, OWNER)["items"][0].text == "补充解释"
 
 
 def test_whole_conversation_expiry_waits_for_snapshot_and_off_recovers_it(stack):
@@ -51,9 +52,9 @@ def test_whole_conversation_expiry_waits_for_snapshot_and_off_recovers_it(stack)
     assert not stack.history._expire_conversation(created.conversation_id, BOUNDARY)
     followups.recover(enabled=False)
     assert stack.history._expire_conversation(created.conversation_id, BOUNDARY)
-    assert stack.cleanup.run_once()
+    assert not stack.cleanup.run_once()
     with stack.repository.database_read() as db:
-        assert not db.execute("SELECT 1 FROM agent_followup_snapshots").fetchall()
+        assert db.execute("SELECT status,error_code FROM agent_followup_snapshots").fetchone() == ("UNAVAILABLE", "EXPIRED")
 
 
 def test_delete_revokes_late_answer_and_captures_followup_workspace(stack):

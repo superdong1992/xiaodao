@@ -1075,3 +1075,30 @@ def test_backend_fixture_manifest_is_exact() -> None:
         data = (FIXTURE_ROOT / entry.path).read_bytes()
         assert entry.size == len(data)
         assert entry.sha256 == hashlib.sha256(data).hexdigest()
+
+
+def test_model_configuration_fingerprint_is_stable_and_never_exposes_credentials() -> None:
+    command = "private-launcher --model configured-model --token command-secret"
+    environment = {"ANTHROPIC_MODEL": "configured-model", "ANTHROPIC_AUTH_TOKEN": "env-secret", "PATH": "/one"}
+    backend = AgentBackend(command, parent_environment=environment)
+    fingerprint = backend.model_configuration_fingerprint
+    assert len(fingerprint) == 64 and set(fingerprint) <= set("0123456789abcdef")
+    assert all(value not in fingerprint for value in (command, "configured-model", "command-secret", "env-secret"))
+    environment["ANTHROPIC_MODEL"] = "changed-after-construction"
+    assert backend.model_configuration_fingerprint == fingerprint
+    assert AgentBackend(command, parent_environment={"PATH": "/two", "ANTHROPIC_AUTH_TOKEN": "rotated-secret",
+        "ANTHROPIC_MODEL": "configured-model"}).model_configuration_fingerprint == fingerprint
+    assert AgentBackend(command + " --effort high", parent_environment={"ANTHROPIC_MODEL": "configured-model"}).model_configuration_fingerprint != fingerprint
+
+
+@pytest.mark.parametrize("key", ["ANTHROPIC_MODEL", "CLAUDE_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_EFFORT_LEVEL"])
+def test_model_configuration_fingerprint_tracks_explicit_model_environment(key, monkeypatch) -> None:
+    first = AgentBackend("claude", parent_environment={key: "first"}).model_configuration_fingerprint
+    second = AgentBackend("claude", parent_environment={key: "second"}).model_configuration_fingerprint
+    assert first != second
+    monkeypatch.setenv(key, "ambient-first")
+    ambient = AgentBackend("claude").model_configuration_fingerprint
+    monkeypatch.setenv(key, "ambient-second")
+    assert AgentBackend("claude").model_configuration_fingerprint != ambient

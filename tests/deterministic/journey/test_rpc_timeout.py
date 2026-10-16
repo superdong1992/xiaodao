@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import zipfile
+from functools import cached_property
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -440,7 +441,10 @@ class _Stack:
                 public_base_url="http://127.0.0.1:18080",
             )
         )
-        self.http_app = create_http_app(
+
+    @cached_property
+    def http_app(self):
+        return create_http_app(
             command_port=self.application,
             query_port=self.application,
             state_admin=FakeStateAdmin(readiness=readiness()),
@@ -461,6 +465,41 @@ class _Stack:
     def shutdown(self) -> None:
         assert self.scheduler.shutdown(10.0)
         self.repository.close()
+
+
+def test_stack_http_app_is_built_once_only_when_requested(tmp_path, monkeypatch) -> None:
+    calls = []
+    sentinel = object()
+
+    def create_app(**kwargs):
+        calls.append(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(sys.modules[__name__], "create_http_app", create_app)
+    stack = _Stack(tmp_path / "data", logparse_record=tmp_path / "logparse.json",
+        agent_record=tmp_path / "agent.jsonl", review_entered=tmp_path / "entered",
+        review_release=tmp_path / "released", seed="lazy-http-app")
+    try:
+        assert calls == [], "Consumers that build their own website app need no unused app."
+        assert stack.http_app is sentinel
+        assert stack.http_app is sentinel
+        assert len(calls) == 1
+        assert calls[0]["command_port"] is stack.application
+        assert calls[0]["query_port"] is stack.application
+    finally:
+        stack.repository.close()
+
+
+def test_fake_agent_import_does_not_load_unused_phase_helpers() -> None:
+    result = subprocess.run(
+        [sys.executable, "-c",
+            "import runpy,sys; runpy.run_path(sys.argv[1],run_name='import_check'); "
+            "assert 'problem_locator.integrations.logparse.cli' not in sys.modules; "
+            "assert 'problem_locator.runtime.outcome_finalizer' not in sys.modules",
+            os.fspath(FAKE_AGENT)],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def _mcp(adapter: Any, name: str, arguments: dict[str, object]) -> Any:

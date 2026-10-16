@@ -230,7 +230,9 @@ class StorageRetentionCleaner:
             return not self._state_repository.retention_in_use('active_job', owner_job_id)
         if candidate.kind == "WORKSPACE":
             job_id = workspace_owner_id(path.name)
-            return (not self.workspace_in_use(path.name)
+            return ((candidate.retention_seconds != 0
+                     or self._retention_scanner.workspace_completed(path.name))
+                    and not self.workspace_in_use(path.name)
                     and not self._state_repository.retention_in_use('active_job', job_id))
         if candidate.kind == "FORMAL_RESOURCE":
             storage_key = path.relative_to(self._layout.data_root).as_posix()
@@ -319,14 +321,15 @@ class StorageRetentionCleaner:
                 prune(case_root)
         return tuple(deleted), tuple(failed)
 
-    def run_once(self) -> CleanupRunResult:
+    def run_once(self, *, workspaces_only=False) -> CleanupRunResult:
         """Recheck each reference under the publication barrier before quarantine."""
 
         with self._coordination_lock:
             if not self._state_repository.health().valid:
                 raise _execution_record_error()
 
-        candidates = self._retention_scanner.discover()
+        candidates = (self._retention_scanner.discover_workspaces() if workspaces_only
+                      else self._retention_scanner.discover())
         observations = {
             candidate.path: self._observe_candidate(candidate)
             for candidate in candidates
@@ -385,7 +388,7 @@ class StorageRetentionCleaner:
             pending_deletions = self._quarantine_mover.discover()
 
         deleted, failed = self._delete_quarantine(pending_deletions)
-        empty_deleted, empty_failed = self._prune_empty_source_directories()
+        empty_deleted, empty_failed = ((), ()) if workspaces_only else self._prune_empty_source_directories()
         return CleanupRunResult(
             quarantined=tuple(quarantined),
             deleted=deleted,

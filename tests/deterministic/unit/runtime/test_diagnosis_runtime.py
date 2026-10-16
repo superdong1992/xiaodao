@@ -2647,6 +2647,7 @@ class _MethodsRuntimeBackend:
         )
         attachment = next(
             entry for entry in manifest.entries if entry.input_kind == "ATTACHMENT"
+            and entry.resource_id == request["attachment_id"]
         )
         assert manifest.logparse_tool_ref is not None
         self.claim = LogparseParseClaim(

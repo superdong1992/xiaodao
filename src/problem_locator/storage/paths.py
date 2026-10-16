@@ -28,15 +28,30 @@ _LOGPARSE_PREPROCESS_WORKSPACE_SUFFIX = ".logparse-preprocess"
 def workspace_owner_id(segment: str) -> str:
     """Validate a managed workspace name and return its owning Job identity."""
 
-    owner_id = segment.removesuffix(_LOGPARSE_PREPROCESS_WORKSPACE_SUFFIX)
+    marker = _LOGPARSE_PREPROCESS_WORKSPACE_SUFFIX + "."
+    if marker in segment:
+        owner_id, attachment_id = segment.split(marker, 1)
+        _OPAQUE_ID.validate_python(attachment_id)
+    else:
+        owner_id = segment.removesuffix(_LOGPARSE_PREPROCESS_WORKSPACE_SUFFIX)
     return _OPAQUE_ID.validate_python(owner_id)
 
 
-def job_workspace_names(job_id: str) -> tuple[str, str]:
+def job_workspace_names(job_id: str, workspaces: Path | None = None) -> tuple[str, ...]:
     """Enumerate only the product-owned workspace names for one Job."""
 
     owner_id = _OPAQUE_ID.validate_python(job_id)
-    return owner_id, f"{owner_id}{_LOGPARSE_PREPROCESS_WORKSPACE_SUFFIX}"
+    names = [owner_id, f"{owner_id}{_LOGPARSE_PREPROCESS_WORKSPACE_SUFFIX}"]
+    if workspaces is not None and workspaces.is_dir():
+        for path in workspaces.iterdir():
+            if not path.name.startswith(names[1] + "."):
+                continue
+            try:
+                if workspace_owner_id(path.name) == owner_id:
+                    names.append(path.name)
+            except ValueError:
+                continue
+    return tuple(sorted(set(names)))
 
 
 @dataclass(frozen=True, slots=True)

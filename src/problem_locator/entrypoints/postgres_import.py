@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 from problem_locator.agent.models import AgentAttachment, AgentMessage
 from problem_locator.agent.store import AgentStore
+from problem_locator.agent.report_archive import ReportArchive
 from problem_locator.contracts import canonical_json_bytes
 from problem_locator.followup.models import FollowupEvent, FollowupItem, FollowupSource
 from problem_locator.followup.store import FollowupStore
@@ -23,7 +24,7 @@ from problem_locator.memory.store import MemoryStore
 from problem_locator.storage.atomic import read_stable_file_bytes, write_synced_file
 from problem_locator.storage.coordination import StorageCoordinationLock
 from problem_locator.storage.database import table_columns, table_names
-from problem_locator.storage.layout import DATA_FORMAT_MARKER_BYTES, StorageLayout
+from problem_locator.storage.layout import StorageLayout
 from problem_locator.storage.platform import PlatformFileSync, chmod_no_follow
 from problem_locator.storage.postgres_layout import marker_bytes, root_identity
 from problem_locator.storage.state_repository import CaseStateRepository
@@ -37,6 +38,7 @@ _CLOSED = {"COMPLETED", "FAILED", "INTERRUPTED", "CANCELLED"}
 _MEMORY = {"memory_feedback", "memory_feedback_requests", "memory_tasks"}
 _FOLLOWUP = {"agent_followup_metadata", "agent_followup_snapshots", "agent_followup_tasks",
     "agent_followup_events", "agent_followup_stops"}
+_CONTINUATION = {"agent_continuation_drafts", "agent_continuation_requests"}
 _ENV = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -53,13 +55,13 @@ def _source_schema(db):
     objects = db.execute("SELECT type,name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").fetchall()
     _require(not any(kind in {"view", "trigger"} for kind, _ in objects), "源数据库包含不受支持的视图或触发器。")
     tables = {name for kind, name in objects if kind == "table"}
-    allowed = safety._CORE_TABLES | safety._AGENT_TABLES | safety._AGENT_V2_TABLES | _MEMORY | _FOLLOWUP | {
-        "completed_case_retention", "history_cleanup_jobs"}
-    _require(safety._CORE_TABLES <= tables and tables <= allowed, "源数据库的表结构不属于当前 V11 r2 格式。", "VERSION_UNSUPPORTED")
-    for group in (safety._AGENT_TABLES | safety._AGENT_V2_TABLES, _MEMORY, _FOLLOWUP):
+    allowed = safety._CORE_TABLES | safety._AGENT_TABLES | safety._AGENT_V2_TABLES | _MEMORY | _FOLLOWUP | _CONTINUATION | {
+        "completed_case_retention", "history_cleanup_jobs", "agent_report_archives"}
+    _require(safety._CORE_TABLES <= tables and tables <= allowed, "源数据库的表结构不属于受支持的 V11 格式。", "VERSION_UNSUPPORTED")
+    for group in (safety._AGENT_TABLES | safety._AGENT_V2_TABLES, _MEMORY, _FOLLOWUP, _CONTINUATION):
         _require(not tables.intersection(group) or group <= tables, "源数据库的业务表不完整。")
-    _require(not tables.intersection(_MEMORY | _FOLLOWUP) or safety._AGENT_TABLES <= tables,
-        "源反馈或追问数据缺少会话表。")
+    _require(not tables.intersection(_MEMORY | _FOLLOWUP | _CONTINUATION) or safety._AGENT_TABLES <= tables,
+        "源反馈、追问或继续诊断数据缺少会话表。")
     metadata = dict(db.execute("SELECT key,value FROM metadata"))
     _require("storage_backend" not in metadata and "data_root_identity" not in metadata,
         "源数据库已经包含其他存储后端标记。", "VERSION_UNSUPPORTED")
@@ -81,6 +83,7 @@ def _validate_drained(db, tables):
         "memory_tasks": "status IN ('PENDING','RUNNING')",
         "agent_followup_tasks": "status IN ('QUEUED','RUNNING','CANCELLING')",
         "agent_followup_snapshots": "status IN ('PENDING','BUILDING')",
+        "agent_continuation_drafts": "status IN ('QUEUED','RUNNING')",
         "agent_attachments": "json_extract(body,'$.status') IN ('RESERVED','UPLOADING')",
     }
     for table, condition in conditions.items():
@@ -165,6 +168,28 @@ def _row_hash(row):
     return hashlib.sha256(canonical_json_bytes(encoded)).digest()
 
 
+def _validate_continuations(db, tables):
+    if not _CONTINUATION <= tables:
+        return
+    from problem_locator.continuation.models import ContinuationDraft
+    for did, cid, parent, status, raw in db.execute(
+            "SELECT draft_id,conversation_id,parent_run_id,status,body FROM agent_continuation_drafts"):
+        value = safety._json(raw)
+        draft = ContinuationDraft.model_validate({key: value[key] for key in ContinuationDraft.model_fields if key in value})
+        _require((draft.draft_id, draft.conversation_id, draft.parent_run_id, draft.status) == (did, cid, parent, status),
+            "继续诊断草稿的标识或状态不一致。")
+        for rid in (parent, draft.confirmed_run_id):
+            if rid is not None:
+                _require(db.execute("SELECT 1 FROM agent_conversation_runs WHERE conversation_id=? AND run_id=?",
+                    (cid, rid)).fetchone() is not None, "继续诊断草稿所属轮次不存在。")
+        _require(hashlib.sha256(value["_parent_markdown"].encode("utf-8")).hexdigest() == value["_parent_sha256"],
+            "继续诊断引用的旧报告校验失败。")
+    for cid, raw in db.execute("SELECT conversation_id,body FROM agent_continuation_requests"):
+        _require(db.execute("SELECT 1 FROM agent_conversations WHERE conversation_id=?", (cid,)).fetchone() is not None,
+            "继续诊断请求所属会话不存在。")
+        _require(isinstance(safety._json(raw), dict), "继续诊断请求回执无效。")
+
+
 def _hashes_digest(hashes):
     return {"rows": len(hashes), "sha256": hashlib.sha256(b"".join(sorted(hashes))).hexdigest()}
 
@@ -186,6 +211,17 @@ def _empty_postgres_database(database_url):
             _require(existing is None, "目标 PostgreSQL 数据库必须为空，不能覆盖已有数据。", "TARGET_DATABASE_NOT_EMPTY")
 
 
+def _import_source_rows(sqlite, table, columns, target_columns):
+    # Older feedback stored its one-shot receipt only in memory_tasks. Derive
+    # the new compact receipt without changing the read-only SQLite source.
+    derived = ["extraction_attempted"] if table == "memory_feedback" and "extraction_attempted" not in columns else []
+    _require(set(columns) | set(derived) == target_columns - {"storage_order"},
+        "源数据库列定义与当前版本不一致。", "VERSION_UNSUPPORTED")
+    projection = ",EXISTS(SELECT 1 FROM memory_tasks t WHERE t.run_id=memory_feedback.run_id " \
+        "AND t.report_sha256=memory_feedback.report_sha256)" if derived else ""
+    return derived, sqlite.execute(f'SELECT rowid,*{projection} FROM "{table}" ORDER BY rowid')
+
+
 def _import_rows(sqlite, repository, tables, source, target, mappings):
     proofs = {}
     with repository.database_transaction() as db:
@@ -199,11 +235,10 @@ def _import_rows(sqlite, repository, tables, source, target, mappings):
         for table in sorted(tables):
             columns = [row[1] for row in sqlite.execute(f'PRAGMA table_info("{table}")')]
             target_columns = table_columns(db, table)
-            _require(set(columns) == target_columns - {"storage_order"},
-                "源数据库列定义与当前版本不一致。", "VERSION_UNSUPPORTED")
+            derived, rows = _import_source_rows(sqlite, table, columns, target_columns)
             kinds = dict(db.execute("SELECT column_name,data_type FROM information_schema.columns "
                 "WHERE table_schema=current_schema() AND table_name=?", (table,)))
-            selected = [*columns, *(["storage_order"] if "storage_order" in target_columns else [])]
+            selected = [*columns, *derived, *(["storage_order"] if "storage_order" in target_columns else [])]
             names = ",".join('"' + column + '"' for column in selected)
             placeholders = ",".join("?" for _ in selected)
             override = " OVERRIDING SYSTEM VALUE" if "storage_order" in target_columns else ""
@@ -212,10 +247,10 @@ def _import_rows(sqlite, repository, tables, source, target, mappings):
             maximum = batch_bytes = 0
             db.execute(f'DELETE FROM "{table}"')
             metadata = dict(sqlite.execute("SELECT key,value FROM metadata")) if table == "metadata" else None
-            for row in sqlite.execute(f'SELECT rowid,* FROM "{table}" ORDER BY rowid'):
-                source_hashes.append(_row_hash(row[1:]))
+            for row in rows:
+                source_hashes.append(_row_hash(row[1:1 + len(columns)]))
                 values = list(row[1:])
-                for index, (column, value) in enumerate(zip(columns, values, strict=True)):
+                for index, (column, value) in enumerate(zip([*columns, *derived], values, strict=True)):
                     if kinds[column] == "bytea" and isinstance(value, str):
                         values[index] = value.encode("utf-8")
                 if table == "agent_attachments":
@@ -252,6 +287,8 @@ def _import_rows(sqlite, repository, tables, source, target, mappings):
                 for key, value in db.execute("SELECT key,value FROM metadata")) if table == "metadata" else actual
             proofs[table] = {"source": _hashes_digest(source_hashes), "target": final,
                 "columns": selected, "attachment_paths_mapped": len(mappings) if table == "agent_attachments" else 0}
+            if derived:
+                proofs[table]["derived_columns"] = derived
         # No JSON payload, receipt or stored model answer is rewritten.
         _require(dict(db.execute("SELECT key,value FROM metadata"))["installation_id"] ==
             dict(sqlite.execute("SELECT key,value FROM metadata"))["installation_id"], "导入后的安装标识不一致。")
@@ -273,8 +310,11 @@ def import_data_root(source_root: Path, target_root: Path, *, database_url_env="
     try:
         source, target = safety._paths(source_root, target_root)
         with safety._source_lock(source) as verify_lock:
-            _require(read_stable_file_bytes(source / "data-format.json") == DATA_FORMAT_MARKER_BYTES,
-                "源目录必须是当前 V11 r2、会话 v2 的 SQLite 格式。", "VERSION_UNSUPPORTED")
+            source_marker = read_stable_file_bytes(source / "data-format.json")
+            source_revision = next((revision for revision in ("v11-contract-r2", safety.TARGET_REVISION)
+                if source_marker == safety._marker(revision, agent_storage_version=2)), None)
+            _require(source_revision is not None,
+                "源目录必须是 V11 r2/r3、会话 v2 的 SQLite 格式。", "VERSION_UNSUPPORTED")
             _require(not (source / _BARRIER).exists() and not (source / RECEIPT_FILENAME).exists(),
                 "源目录存在未完成的迁移标记。")
             _require(not (source / "state.json").exists() and not (source / "state.json.prev").exists(),
@@ -283,6 +323,7 @@ def import_data_root(source_root: Path, target_root: Path, *, database_url_env="
             inventory = safety._inventory(source)
             result = {"schema_version": 1, "status": "PLANNED", "source_data_root": str(source),
                 "target_data_root": str(target), "database_url_env": database_url_env,
+                "source_contract_revision": source_revision, "target_contract_revision": safety.TARGET_REVISION,
                 "source_manifest_sha256": hashlib.sha256(canonical_json_bytes(inventory)).hexdigest(),
                 "source_wal_present": "completed.sqlite3-wal" in inventory["files"],
                 "source_file_count": len(inventory["files"]),
@@ -310,19 +351,27 @@ def import_data_root(source_root: Path, target_root: Path, *, database_url_env="
                     chmod_no_follow(payload / key, mode)
             clock = SimpleNamespace(now=now_timestamp)
             ids = SimpleNamespace(new=lambda kind: str(uuid.uuid4()))
-            with closing(sqlite3.connect((database_copy / "completed.sqlite3").as_uri() + "?mode=ro", uri=True)) as sqlite:
+            # Only this private copy may be upgraded. The locked source remains
+            # unchanged and is checked against its original inventory below.
+            with closing(sqlite3.connect(database_copy / "completed.sqlite3")) as sqlite:
                 sqlite.execute("PRAGMA trusted_schema=OFF")
-                sqlite.execute("PRAGMA query_only=ON")
                 _require(sqlite.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
                     and not sqlite.execute("PRAGMA foreign_key_check").fetchall(), "源数据库完整性校验失败。")
                 tables, metadata = _source_schema(sqlite)
                 _validate_drained(sqlite, tables)
-                _, _, _, resource_count = safety._upgrade_snapshots(sqlite, payload, safety.TARGET_REVISION)
+                _, _, _, resource_count = safety._upgrade_snapshots(sqlite, payload, source_revision)
+                sqlite.commit()
+                sqlite.execute("PRAGMA query_only=ON")
                 mappings = _validate_attachments(sqlite, tables, source, payload, target)
                 _validate_followups(sqlite, tables, payload)
+                _validate_continuations(sqlite, tables)
                 repository = CaseStateRepository(staging / "bootstrap", StorageCoordinationLock(), clock, ids,
                     database_url=database_url)
                 AgentStore(repository, clock=clock)
+                ReportArchive.ensure_schema(repository)
+                from problem_locator.continuation.service import ContinuationService
+                with repository.database_transaction() as db:
+                    ContinuationService.ensure_schema(db)
                 MemoryStore(repository, clock)
                 FollowupStore(repository, clock)
                 result["tables"] = _import_rows(sqlite, repository, tables, source, target, mappings)

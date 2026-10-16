@@ -49,7 +49,7 @@ def stack(tmp_path):
     registry = AttachmentUploadRegistry()
     quarantine = QuarantineMover(repository.layout, coordination, FakeFileSync(), FaultInjectingReplace())
     history = HistoryRetentionService(repository, store, quarantine, usage, clock,
-        attachment_registry=registry, coordination_lock=coordination, retention_days=7)
+        attachment_registry=registry, coordination_lock=coordination, retention_days=7, web_retention_days=7)
     cleanup = ConversationCleanupService(store, repository, quarantine, usage)
     yield SimpleNamespace(root=tmp_path, repository=repository, store=store, clock=clock,
         usage=usage, registry=registry, quarantine=quarantine, history=history, cleanup=cleanup)
@@ -82,11 +82,11 @@ def _close_run(store, cid, rid):
 
 
 @pytest.mark.parametrize("retention_days", [None, 7, 60])
-def test_default_month_and_configured_expiry_preserve_history_until_boundary(stack, retention_days):
-    options = {} if retention_days is None else {"retention_days": retention_days}
+def test_default_web_and_configured_expiry_keep_text_after_resource_boundary(stack, retention_days):
+    options = {} if retention_days is None else {"web_retention_days": retention_days}
     history = HistoryRetentionService(stack.repository, stack.store, stack.quarantine,
-        stack.usage, stack.clock, attachment_registry=stack.registry, **options)
-    days = 30 if retention_days is None else retention_days
+        stack.usage, stack.clock, attachment_registry=stack.registry, retention_days=3650, **options)
+    days = 15 if retention_days is None else retention_days
     created = stack.store.create_conversation("month-history")
     stack.store.submit_message(created.conversation_id, "old", "旧问题")
     stack.store.bind_case(created.conversation_id, CASE_ID)
@@ -109,13 +109,12 @@ def test_default_month_and_configured_expiry_preserve_history_until_boundary(sta
     newer = stack.store.submit_message(created.conversation_id, "new", "新问题")
     stack.clock.value = format_timestamp(boundary)
     assert history.run_once()
-    with pytest.raises(AgentStoreError) as gone:
-        stack.store.get_run(created.conversation_id, created.run_id)
-    assert gone.value.code == "AGENT_RUN_NOT_FOUND"
+    assert stack.store.get_run(created.conversation_id, created.run_id)["resources_expired"]
+    assert stack.store.read_conversation(created.conversation_id, history=True).history[0].message.text == "旧问题"
     assert stack.store.get_run(created.conversation_id)["run_id"] == newer.run_id
     assert not stack.repository.read_snapshot(CASE_ID).cases
     assert all(not path.exists() for path in paths) and not upload_path.exists()
-    assert stack.store.create_conversation("month-history").conversation_id != created.conversation_id
+    assert stack.store.create_conversation("month-history").conversation_id == created.conversation_id
 
 
 def test_default_month_keeps_deletion_receipt_until_thirty_days(stack):
@@ -186,16 +185,16 @@ def test_natural_conversation_expiry_keeps_ready_memory_until_card_ttl(stack):
     stack.clock.value = BOUNDARY
     assert stack.history.run_once()
     assert history.memory.active_cards(history.source.skill_name) == cards
-    assert stack.cleanup.run_once()
+    assert not stack.cleanup.run_once()
     assert all(not path.exists() for path in history.paths)
     history.memory.prune()
     assert history.memory.active_cards(history.source.skill_name) == cards
-    # The conversation tombstone expires too; the completed card keeps its own age.
+    # Web history is permanent while the completed card keeps its own age.
     stack.clock.value = "2026-08-14T00:01:00.000Z"
-    assert stack.history.run_once()
+    stack.history.run_once()
     with stack.repository.database_read() as db:
         assert db.execute("SELECT 1 FROM agent_conversations WHERE conversation_id=?",
-                          (history.created.conversation_id,)).fetchone() is None
+                          (history.created.conversation_id,)).fetchone() is not None
     assert history.memory.active_cards(history.source.skill_name) == cards
     stack.clock.value = "2026-10-29T00:00:59.999Z"
     assert history.memory.active_cards(history.source.skill_name) == cards
@@ -214,7 +213,7 @@ def test_natural_conversation_expiry_erases_unfinished_memory_and_fences_late_re
     assert _memory_task(stack, history.task_id) == ("DELETED", None, None, None, 0)
     assert history.memory.claim_task() is None
     assert not history.memory.finish_task(history.task_id, history.card)
-    assert stack.cleanup.run_once()
+    assert not stack.cleanup.run_once()
     history.memory.prune()
     assert _memory_task(stack, history.task_id) is None
     assert not history.memory.finish_task(history.task_id, history.card)
@@ -226,14 +225,14 @@ def test_explicit_delete_after_natural_expiry_revokes_ready_memory(stack, cleanu
     stack.clock.value = BOUNDARY
     assert stack.history.run_once()
     if cleanup_finished:
-        assert stack.cleanup.run_once()
+        assert not stack.cleanup.run_once()
         history.memory.prune()
     with pytest.raises(AgentStoreError) as denied:
         stack.store.request_delete(history.created.conversation_id, owner_key="b" * 64)
     assert denied.value.status_code == 404
     assert len(history.memory.active_cards(history.source.skill_name)) == 1
     receipt = stack.store.request_delete(history.created.conversation_id, owner_key=history.owner)
-    assert receipt.status == ("DELETED" if cleanup_finished else "DELETING")
+    assert receipt.status == "DELETING"
     assert _memory_task(stack, history.task_id) == ("DELETED", None, None, None, 0)
     assert history.memory.active_cards(history.source.skill_name) == []
     assert not history.memory.finish_task(history.task_id, history.card)
@@ -383,17 +382,16 @@ def test_inflight_core_attachment_upload_blocks_history_cleanup(stack):
     assert not path.exists()
 
 
-def test_old_run_is_removed_while_new_run_stays_and_sse_cursor_expires(stack):
+def test_old_run_text_stays_while_resources_and_internal_sse_deltas_expire(stack):
     created, original, newer = _old_and_new_runs(stack)
     cid = created.conversation_id
-    old_events = [event.sequence for event in stack.store.list_events(cid) if event.run_id == original.run_id]
+    old_events = [event.sequence for event in stack.store.list_events(cid)
+        if event.run_id == original.run_id and event.type == "run.stopping"]
     with stack.usage.acquire(cid):
         stack.history.run_once()
         assert stack.store.get_run(cid, original.run_id)
     assert stack.history.run_once()
-    with pytest.raises(AgentStoreError) as gone:
-        stack.store.get_run(cid, original.run_id)
-    assert gone.value.code == "AGENT_RUN_NOT_FOUND"
+    assert stack.store.get_run(cid, original.run_id)["resources_expired"]
     assert stack.store.get_run(cid)["run_id"] == newer.run_id
     with pytest.raises(AgentStoreError) as cursor:
         stack.store.list_events(cid, after=0)
@@ -406,9 +404,10 @@ def test_old_run_is_removed_while_new_run_stays_and_sse_cursor_expires(stack):
     with pytest.raises(AgentStoreError, match="事件记录已过保留期"):
         stack.store.list_events(cid, after=0)
     with stack.repository.database_read() as db:
-        for table in ("agent_messages", "agent_events", "agent_dispatches", "agent_attachment_imports", "agent_stop_requests"):
+        for table in ("agent_dispatches", "agent_attachment_imports"):
             assert db.execute(f"SELECT count(*) FROM {table} WHERE run_id=?", (original.run_id,)).fetchone()[0] == 0
-    # The expired creation key no longer dereferences the removed ordinal=1 run.
+        assert db.execute("SELECT count(*) FROM agent_messages WHERE run_id=?", (original.run_id,)).fetchone()[0] == 1
+    # Creation retry keys still have their independent finite lifetime.
     replacement = stack.store.create_conversation("create")
     assert replacement.conversation_id != cid
 
@@ -421,8 +420,7 @@ def test_completion_age_is_not_extended_by_rename(stack):
     stack.store.rename_conversation(created.conversation_id, "仍然到期")
     assert stack.store.get_run(created.conversation_id)["completed_at"] == OLD
     assert stack.history.run_once()
-    with pytest.raises(AgentStoreError):
-        stack.store.get_run(created.conversation_id)
+    assert stack.store.get_run(created.conversation_id)["resources_expired"]
 
 
 def test_legacy_closed_run_preserves_original_age_on_first_rename(stack):
@@ -437,20 +435,22 @@ def test_legacy_closed_run_preserves_original_age_on_first_rename(stack):
     stack.store.rename_conversation(created.conversation_id, "重命名不会延长保留期")
     assert stack.store.get_run(created.conversation_id)["completed_at"] == OLD
     stack.history.run_once()
-    with pytest.raises(AgentStoreError):
-        stack.store.get_run(created.conversation_id)
+    assert stack.store.get_run(created.conversation_id)["resources_expired"]
 
 
-def test_expired_web_run_removes_its_case_and_report_but_preserves_new_run(stack):
+def test_expired_web_run_removes_case_resources_only_after_report_archive(stack):
     created = stack.store.create_conversation("web-case")
     stack.store.submit_message(created.conversation_id, "original", "旧问题")
     _populate(stack.repository)
     stack.store.bind_case(created.conversation_id, CASE_ID)
     report = _file(stack.root, f"resources/cases/{CASE_ID}/artifacts/{JOB_ID}/payload")
     _finish(stack.repository)
+    archived = []
+    stack.history.archive_run = lambda cid, rid: archived.append((cid, rid)) or True
     stack.clock.value = NOW
     newer = stack.store.submit_message(created.conversation_id, "new", "新的问题")
     assert stack.history.run_once()
+    assert archived == [(created.conversation_id, created.run_id)]
     assert not report.exists()
     assert not stack.repository.read_snapshot(CASE_ID).cases
     assert stack.store.get_run(created.conversation_id)["run_id"] == newer.run_id
@@ -473,10 +473,8 @@ def test_idle_empty_conversation_and_unadopted_upload_expire_but_fresh_conversat
     assert stack.history.run_once()
     assert not path.exists()
     assert stack.store.get_run(active.conversation_id)
-    with pytest.raises(AgentStoreError):
-        stack.store.get_run(old.conversation_id)
-    stack.store.finish_stop(old.conversation_id, old.run_id)
-    assert stack.cleanup.run_once()
+    assert stack.store.get_run(old.conversation_id)
+    assert not stack.cleanup.run_once()
 
 
 def test_selected_upload_stays_until_its_retained_run_expires(stack):

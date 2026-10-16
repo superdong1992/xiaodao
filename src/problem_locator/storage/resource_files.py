@@ -15,6 +15,8 @@ from typing import Protocol, Self, Sequence
 
 from pydantic import TypeAdapter
 
+from .capacity import capacity_reservation
+
 from problem_locator.contracts import (
     AttachmentFilenameSuffix,
     BinaryStream,
@@ -521,11 +523,13 @@ class FormalResourceReader:
         replacer: Replacer | None = None,
         *,
         temp_token_factory: Callable[[], str] | None = None,
+        capacity=None,
     ) -> None:
         self._layout = layout
         self._file_sync = file_sync
         self._replacer = replacer or PlatformReplaceOperation()
         self._temp_token_factory = temp_token_factory or (lambda: uuid.uuid4().hex)
+        self.capacity = capacity
 
     def open_file(self, resource_ref: ResourceRef) -> BinaryStream:
         if resource_ref.resource_kind is not ResourceKind.FILE:
@@ -669,7 +673,7 @@ class FormalResourceReader:
             if resource_ref.resource_kind is ResourceKind.FILE:
                 temporary = self._new_materialization_temp(destination)
                 try:
-                    with FileBinaryStream(source) as stream:
+                    with capacity_reservation(self.capacity, temporary, resource_ref.size), FileBinaryStream(source) as stream:
                         copied = copy_binary_stream(
                             stream,
                             temporary,
@@ -694,12 +698,13 @@ class FormalResourceReader:
                 assert source_tree is not None
                 temporary = self._new_materialization_temp(destination)
                 try:
-                    inspect_tree(
-                        source,
-                        copy_to=temporary,
-                        byte_limit=resource_ref.size,
-                        reject_hardlinks=True,
-                    )
+                    with capacity_reservation(self.capacity, temporary, resource_ref.size):
+                        inspect_tree(
+                            source,
+                            copy_to=temporary,
+                            byte_limit=resource_ref.size,
+                            reject_hardlinks=True,
+                        )
                     finalize_read_only_tree(temporary, self._file_sync)
                     verify_tree(
                         temporary,

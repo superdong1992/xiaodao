@@ -10,6 +10,7 @@ from problem_locator.contracts import (
     CaseAggregate,
     DiagnosisProvenanceType,
     Job,
+    is_specialized_direct,
 )
 from problem_locator.integrations.logparse.requests import Anchor, ResolvedLogparsePlan
 
@@ -103,7 +104,7 @@ def _optional_binding(value: object, facts: dict[str, str]) -> str | None:
     return _binding(value, facts)
 
 
-def _attachment_id(job: Job, plan: dict[str, Any]) -> str:
+def _attachment_ids(job: Job, plan: dict[str, Any]) -> tuple[str, ...]:
     requirement_name = plan.get("attachment_requirement")
     matching: list[str] = []
     if isinstance(requirement_name, str):
@@ -111,21 +112,23 @@ def _attachment_id(job: Job, plan: dict[str, Any]) -> str:
             if requirement.name == requirement_name:
                 matching.extend(requirement.fulfilled_by_refs)
     matching = list(dict.fromkeys(matching))
-    if not matching and len(job.attachment_refs) == 1:
+    if not matching:
         matching = list(job.attachment_refs)
     if not matching:
         raise ResolvedLogparsePlanNotReady(
             "logparse attachment is not fixed by the Job yet"
         )
-    if len(matching) != 1 or matching[0] not in job.attachment_refs:
-        raise ValueError("logparse attachment binding is not unique in the Job")
-    return matching[0]
+    if any(item not in job.attachment_refs for item in matching):
+        raise ValueError("logparse attachment binding is outside the Job")
+    return tuple(item for item in job.attachment_refs if item in matching)
 
 
 def compile_resolved_logparse_plan(
     job: Job,
     aggregate: CaseAggregate,
     assets: ResolvedJobAssets,
+    *,
+    attachment_id: str | None = None,
 ) -> ResolvedLogparsePlan | None:
     """Return the exact plan the broker must enforce for this Job."""
 
@@ -180,6 +183,8 @@ def compile_resolved_logparse_plan(
     if len(run_ids) > 1:
         raise ValueError("Job contains multiple LOGPARSE_RUN artifacts")
     if run_ids:
+        if attachment_id is not None:
+            raise ValueError("an attachment plan cannot select an existing Logparse run")
         return ResolvedLogparsePlan(
             schema_version=1,
             problem_time=problem_time,
@@ -187,16 +192,42 @@ def compile_resolved_logparse_plan(
             attachment_id=None,
             artifact_id=run_ids[0],
         )
+    attachments = _attachment_ids(job, plan)
+    if attachment_id is None:
+        if len(attachments) != 1:
+            raise ValueError("logparse attachment binding is not unique in the Job")
+        attachment_id = attachments[0]
+    elif not is_specialized_direct(job) or attachment_id not in attachments:
+        raise ValueError("a per-archive plan requires a fixed skill-direct attachment")
     return ResolvedLogparsePlan(
         schema_version=1,
         problem_time=problem_time,
         anchors=anchors,
-        attachment_id=_attachment_id(job, plan),
+        attachment_id=attachment_id,
         artifact_id=None,
+    )
+
+
+def compile_resolved_logparse_plans(
+    job: Job, aggregate: CaseAggregate, assets: ResolvedJobAssets,
+) -> tuple[ResolvedLogparsePlan, ...]:
+    """Keep each archive's broker plan independent in a direct diagnosis batch."""
+    if not is_specialized_direct(job) or len(job.attachment_refs) <= 1:
+        plan = compile_resolved_logparse_plan(job, aggregate, assets)
+        return () if plan is None else (plan,)
+    if job.logparse_tool_ref is None:
+        return ()
+    declaration = _manifest(assets)["logparse_plan"]
+    if not isinstance(declaration, dict):
+        raise ValueError("logparse Job Skill requires logparse_plan")
+    return tuple(
+        compile_resolved_logparse_plan(job, aggregate, assets, attachment_id=attachment_id)
+        for attachment_id in _attachment_ids(job, declaration)
     )
 
 
 __all__ = [
     "ResolvedLogparsePlanNotReady",
     "compile_resolved_logparse_plan",
+    "compile_resolved_logparse_plans",
 ]

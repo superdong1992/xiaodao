@@ -19,6 +19,8 @@ import "./browser-client.test.mjs";
 import "./preview.test.mjs";
 import "./onboarding.test.mjs";
 import "./followup.test.mjs";
+import "./continuation.test.mjs";
+import "./file-sha256.test.mjs";
 
 test("TypeScript compatibility entry exports the same BFF implementation", () => {
   assert.equal(createAgentBackend, createPureJsBackend);
@@ -296,7 +298,7 @@ for (const [status, code, message] of [
 }
 
 for (const [code, status, retryable, message] of [
-  ["AGENT_LOG_SELECTION_INVALID", 409, false, "当前仅支持一份日志归档，请合并后上传，或重新选择一个附件。"],
+  ["AGENT_LOG_SELECTION_INVALID", 409, false, "日志清单无效，请核对所选附件及当前诊断的要求。"],
   ["AGENT_LOG_ALREADY_SELECTED", 409, false, "这份日志已用于当前定位，无需重复提交。"],
   ["AGENT_RESTART_PENDING", 409, true, "日志正在接入，请稍后重试同一请求。"],
   ["AGENT_RESTART_PENDING", 503, true, "日志正在接入，请稍后重试同一请求。"],

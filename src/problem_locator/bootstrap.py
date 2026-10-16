@@ -668,12 +668,16 @@ class RetentionService:
             raise ValueError("cleanup interval must be positive")
         self._interval_seconds = float(interval_seconds)
         self._stop = threading.Event()
+        self._wake = threading.Event()
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._last_result: CleanupRunResult | None = None
         self._last_failure_code: ErrorCode | None = None
         self._last_failure_type: str | None = None
         self.history: Any | None = None
+        self.deletion_cleanup: Any | None = None
+        self.capacity: Any | None = None
+        self._capacity_targets: dict[Path, int] = {}
         self.cleaner = StorageRetentionCleaner(
             layout,
             coordination_lock,
@@ -730,6 +734,7 @@ class RetentionService:
         if timeout_seconds < 0:
             raise ValueError("timeout_seconds must be non-negative")
         self._stop.set()
+        self._wake.set()
         with self._lock:
             thread = self._thread
         if thread is None:
@@ -737,13 +742,26 @@ class RetentionService:
         thread.join(timeout_seconds)
         return not thread.is_alive()
 
+    def _drain_deletions(self) -> None:
+        if self.deletion_cleanup is None:
+            return
+        with self.deletion_cleanup.repository.database_read() as db:
+            pending = db.execute("SELECT count(*) FROM agent_cleanup_jobs WHERE status IN ('PENDING','FAILED')").fetchone()[0]
+        # Failed/busy tasks move to the tail. Try this initial batch once so a
+        # busy owner neither blocks other deletions nor causes a retry loop.
+        for _ in range(pending):
+            if self._stop.is_set():
+                break
+            self.deletion_cleanup.run_once()
+
     def _run_once(self) -> None:
         failed = False
-        for stage, cleaner in (("history", self.history), ("temporary", self.cleaner)):
-            if cleaner is None or self._stop.is_set():
+        for stage, operation in (("deletions", self._drain_deletions),
+                ("history", getattr(self.history, "run_once", None)), ("temporary", self.cleaner.run_once)):
+            if operation is None or self._stop.is_set():
                 continue
             try:
-                result = cleaner.run_once()
+                result = operation()
             except ApplicationPortError as exc:
                 failed = True
                 log_event(
@@ -789,10 +807,60 @@ class RetentionService:
                 self._last_failure_type = None
 
     def _run(self) -> None:
+        next_full = 0.0
         while not self._stop.is_set():
-            self._run_once()
-            if self._stop.wait(self._interval_seconds):
+            self._wake.clear()
+            full = time.monotonic() >= next_full
+            if full:
+                self._run_once()
+                next_full = time.monotonic() + self._interval_seconds
+            else:
+                try:
+                    self.cleaner.run_once(workspaces_only=True)
+                except Exception as error:
+                    log_event("retention.workspaces.failed", level=logging.ERROR, error=error)
+            self._reclaim_capacity(precleaned=full)
+            self._wake.wait(min(60.0, max(0.0, next_full - time.monotonic())))
+
+    def wake_reclaim(self, destination: Path, required_free_bytes: int) -> None:
+        with self._lock:
+            self._capacity_targets[destination] = max(required_free_bytes,
+                self._capacity_targets.get(destination, 0))
+        self._wake.set()
+
+    def _reclaim_capacity(self, *, precleaned=False) -> None:
+        if self.capacity is None or self.history is None or self._stop.is_set():
+            return
+        try:
+            with self._lock:
+                targets, self._capacity_targets = self._capacity_targets, {}
+            root = self.cleaner._layout.data_root
+            state = self.capacity.snapshot(root)
+            if state.under_pressure:
+                targets[root] = max(targets.get(root, 0), state.target)
+            # Only DATA_ROOT owns reclaimable files. A distinct target volume
+            # must never cause unrelated history to be discarded to no effect.
+            volume = root.stat().st_dev
+            target = 0
+            for path, requested in targets.items():
+                # A rejected stage may already have removed its temporary path.
+                while not path.exists() and path != path.parent:
+                    path = path.parent
+                if path.stat().st_dev != volume:
+                    continue
+                target = max(target, requested, state.target)
+            if not target:
                 return
+            if not precleaned:
+                self._run_once()
+            while not self._stop.is_set() and self.capacity.snapshot(root).free < target:
+                if not self.history.reclaim_web_resources(limit=1):
+                    break
+            free = self.capacity.snapshot(root).free
+            log_event("storage.capacity.reclaimed", target_free_bytes=target,
+                      free_bytes=free, target_reached=free >= target)
+        except Exception as error:
+            log_event("storage.capacity.reclaim_failed", level=logging.ERROR, error=error)
 
 
 @dataclass(slots=True, repr=False)
@@ -1241,6 +1309,13 @@ def _assemble(
         ) from exc
 
     try:
+        from problem_locator.storage.capacity import DiskCapacityGuard
+        capacity = DiskCapacityGuard(
+            low_free_bytes=settings.resource_disk_low_free_bytes,
+            target_free_bytes=settings.resource_disk_target_free_bytes,
+            low_free_ratio=settings.resource_disk_low_free_percent / 100,
+            target_free_ratio=settings.resource_disk_target_free_percent / 100,
+        )
         resource_store = FileResourceStore(
             layout,
             coordination_lock,
@@ -1248,6 +1323,7 @@ def _assemble(
             ids,
             file_sync=file_sync,
             replacer=replacer,
+            capacity=capacity,
         )
         repository.on_terminal = resource_store.forget_case
         operational_state = OperationalState(clock.now)
@@ -1278,7 +1354,9 @@ def _assemble(
         agent = AgentConversationService(agent_store, application,
             ClaudeIntakeEngine(settings.intake_claude_command or settings.route_claude_command
                 or settings.claude_command, workspace_root=layout.workspaces), layout,
-            memory_store=memory_store, memory_enabled=settings.generic_memory_enabled)
+            memory_store=memory_store, memory_enabled=settings.generic_memory_enabled,
+            model_configuration_fingerprint=diagnose_backend.model_configuration_fingerprint)
+        agent.uploads.capacity = capacity
         memory_worker = MemoryExtractionWorker(
             memory_store, settings.diagnose_claude_command or settings.claude_command,
             workspace_root=layout.workspaces, enabled=settings.generic_memory_enabled,
@@ -1289,6 +1367,7 @@ def _assemble(
             enabled=settings.report_followup_enabled,
             snapshot_max_bytes=settings.report_followup_snapshot_bytes,
             snapshot_total_bytes=settings.report_followup_storage_bytes,
+            retention_days=settings.web_resource_retention_days,
         )
         agent_store.followup_store = agent.followups.store
         runtime = DiagnosisRuntime(
@@ -1299,7 +1378,7 @@ def _assemble(
             execution_records=execution_records,
             clock=clock,
             id_generator=ids,
-            workspace_manager=WorkspaceManager(layout.data_root),
+            workspace_manager=WorkspaceManager(layout.data_root, capacity=capacity),
             backend=diagnose_backend,
             route_backend=route_backend,
             diagnose_backend=diagnose_backend,
@@ -1350,7 +1429,16 @@ def _assemble(
             QuarantineMover(layout, coordination_lock, file_sync, replacer), agent.usage_guard,
             clock, dispatcher=scheduler, archive=archive,
             attachment_registry=attachment_registry, coordination_lock=coordination_lock,
-            retention_days=settings.history_retention_days)
+            retention_days=settings.history_retention_days,
+            web_retention_days=settings.web_resource_retention_days,
+            archive_run=agent.report_archive.archive_run,
+            expire_waiting_run=agent.expire_waiting_run)
+        retention.capacity = capacity
+        retention.deletion_cleanup = agent.cleanup
+        capacity.set_wake_reclaim(retention.wake_reclaim)
+        from problem_locator.storage.completed_workspaces import CompletedWorkspacePolicy
+        retention.cleaner._retention_scanner.workspace_completed = CompletedWorkspacePolicy(
+            repository, agent.followups)
         return ServiceComposition(
             settings=settings,
             clock=clock,

@@ -3,7 +3,7 @@ import { createMarkdownBlock } from "./report-view.js";
 const STATUS = { QUEUED: "等待回答", RUNNING: "正在回答", CANCELLING: "正在停止", COMPLETED: "已回答",
   FAILED: "回答失败", INTERRUPTED: "已中断", CANCELLED: "已停止" };
 const REASON = { DISABLED: "报告追问功能尚未启用。", UNSUPPORTED: "这份报告暂不支持追问。",
-  EXPIRED: "这份报告已过保留期。", BUSY: "本会话仍有追问正在回答，请等待完成或停止后再发送。",
+  EXPIRED: "本轮已结束追问，报告和历史问答仍可查看。", BUSY: "本会话仍有追问正在回答，请等待完成或停止后再发送。",
   LIMIT_EXCEEDED: "这份报告的追问已达上限，请新建对话。", CONTEXT_LIMIT: "追问上下文已达上限，请新建对话。" };
 
 /** 挂载独立问答区；正式报告和赞踩仍由原页面管理。返回清理函数。 */
@@ -21,7 +21,7 @@ export function mountFollowupView(container, controller) {
   input.oninput = () => controller.setDraft(input.value);
   form.onsubmit = (event) => { event.preventDefault(); run(() => controller.submit()); };
   refresh.onclick = () => run(() => controller.refresh()); older.onclick = () => run(() => controller.loadOlder()); stop.onclick = () => run(() => controller.stop());
-  form.append(label, submit); root.append(node("h2", "报告追问"), node("p", "可解释报告、核对疑问或补充文字。回答追加在下方，原报告和评价保持原样。"),
+  form.append(label, submit); root.append(node("h2", "报告追问"), node("p", "可解释报告或核对疑问。若需更正问题或补充日志，请使用“继续诊断”。追问回答追加在下方。"),
     context, notice, error, warning, older, list, form, refresh, stop);
   container.replaceChildren(root);
   const unsubscribe = controller.subscribe((state) => {

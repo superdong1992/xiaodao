@@ -179,6 +179,39 @@ def test_plan_only_never_opens_source_sqlite_or_creates_target(legacy_root, tmp_
     assert _all_files(source) == before
 
 
+def test_current_r2_agent_v2_copy_upgrade_preserves_tables_and_business_bytes(legacy_root, tmp_path, migration_host):
+    from problem_locator.agent.store import upgrade_agent_storage_v2
+
+    source, db, conversation, _, _ = legacy_root
+    original = json.loads(db.execute("SELECT snapshot FROM completed_cases").fetchone()[0])
+    original["contract_revision"] = "v11-contract-r2"
+    db.execute("UPDATE completed_cases SET snapshot=?", (canonical_json_bytes(original),))
+    upgrade_agent_storage_v2(db, {conversation: "a" * 64})
+    (source / "data-format.json").write_bytes(upgrade._marker("v11-contract-r2", agent_storage_version=2))
+    old_receipt = b'{"old_agent_v2_upgrade":"preserve bytes"}\r\n'
+    (source / "data-upgrade.agent-v2.receipt.json").write_bytes(old_receipt)
+    schema = list(db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name"))
+    rows = {}
+    for kind, name, _, _ in schema:
+        if kind == "table":
+            rows[name] = list(db.execute(f'SELECT * FROM "{name}" ORDER BY rowid'))
+    files = _all_files(source)
+    target = tmp_path / "r3-agent-v2"
+    result = upgrade.upgrade_data_root(source, target, execute=True)
+    assert result["source_agent_storage_version"] == 2
+    assert result["target_revision"] == "v11-contract-r3"
+    assert _all_files(source) == files
+    assert (target / "data-upgrade.agent-v2.receipt.json").read_bytes() == old_receipt
+    with sqlite3.connect(target / "completed.sqlite3") as copied:
+        assert list(copied.execute("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name")) == schema
+        for name, old_rows in rows.items():
+            if name not in {"completed_cases", "agent_attachments"}:
+                assert list(copied.execute(f'SELECT * FROM "{name}" ORDER BY rowid')) == old_rows
+        migrated = json.loads(copied.execute("SELECT snapshot FROM completed_cases").fetchone()[0])
+        assert migrated == {**original, "contract_revision": "v11-contract-r3"}
+        assert not any("continuation_context" in job for case in migrated["cases"].values() for job in case["jobs"].values())
+
+
 def test_current_r2_agent_v1_upgrade_preserves_snapshot_and_imports_explicit_owner(legacy_root, tmp_path, migration_host):
     source, db, conversation, _, _ = legacy_root
     native_create_key = db.execute("SELECT request_id FROM agent_conversations WHERE conversation_id=?", (conversation,)).fetchone()[0]
@@ -223,7 +256,9 @@ def test_current_r2_agent_v1_upgrade_preserves_snapshot_and_imports_explicit_own
     assert (target / "data-upgrade.receipt.json").read_bytes() == old_receipt
     assert (target / unverified.relative_to(source) / "intake-response-original.txt").read_bytes() == content
     with sqlite3.connect(target / "completed.sqlite3") as copied:
-        assert copied.execute("SELECT snapshot FROM completed_cases").fetchone()[0] == original
+        migrated = json.loads(copied.execute("SELECT snapshot FROM completed_cases").fetchone()[0])
+        assert migrated.pop("contract_revision") == upgrade.TARGET_REVISION
+        assert migrated == {key: value for key, value in raw.items() if key != "contract_revision"}
         assert copied.execute("SELECT owner_key,current_run_id FROM agent_conversations").fetchone() == ("a" * 64, conversation)
         assert copied.execute("SELECT value FROM metadata WHERE key='agent_storage_version'").fetchone()[0] == "2"
         assert json.loads(copied.execute("SELECT body FROM agent_conversation_runs").fetchone()[0])["legacy_workspace_ids"] == [workspace_id]
@@ -286,7 +321,7 @@ def test_upgrade_preserves_wal_history_and_artifacts_and_only_maps_allowed_field
     assert result["old_exports_and_replay_supported"] is False
     assert _all_files(source) == files
     assert (target / resource_key).read_bytes() == REPORT_BYTES
-    assert json.loads((target / "data-format.json").read_bytes())["contract_revision"] == "v11-contract-r2"
+    assert json.loads((target / "data-format.json").read_bytes())["contract_revision"] == upgrade.TARGET_REVISION
     assert json.loads((target / upgrade.RECEIPT_FILENAME).read_bytes()) == result
     assert not (target / "data-format.json.tmp").exists()
     with real_connect(target / "completed.sqlite3") as db:
@@ -296,7 +331,7 @@ def test_upgrade_preserves_wal_history_and_artifacts_and_only_maps_allowed_field
         assert after[table] == rows[table]
     old_snapshot, new_snapshot = json.loads(rows["completed_cases"][0][1]), json.loads(after["completed_cases"][0][1])
     assert old_snapshot.pop("contract_revision") == SOURCE_REVISION
-    assert new_snapshot.pop("contract_revision") == "v11-contract-r2"
+    assert new_snapshot.pop("contract_revision") == upgrade.TARGET_REVISION
     assert old_snapshot == new_snapshot
     assert after["agent_attachments"][0][:-1] == rows["agent_attachments"][0][:-1]
     assert after["agent_attachments"][0][-1] == str(target / "resources/conversations" / attachment_id / "payload")
@@ -543,7 +578,7 @@ def test_incomplete_r2_staging_cannot_be_opened_as_data_root(legacy_root, tmp_pa
     before = _all_files(source)
     if failure == "before-publish":
         def reject_publication(staging, destination):
-            assert json.loads((staging / "data-format.json").read_bytes())["contract_revision"] == "v11-contract-r2"
+            assert json.loads((staging / "data-format.json").read_bytes())["contract_revision"] == upgrade.TARGET_REVISION
             raise OSError("injected pre-publication failure")
         monkeypatch.setattr(upgrade, "_publish_directory", reject_publication)
     else:

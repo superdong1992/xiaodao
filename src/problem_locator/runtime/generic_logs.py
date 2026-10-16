@@ -11,6 +11,7 @@ from typing import Any
 from problem_locator.contracts import CancellationSignal, ErrorCode, ExecutionStage, canonical_json_bytes
 from .failures import runtime_failure
 from .workspace import PreparedWorkspace, _atomic_write, _set_inputs_read_only
+from problem_locator.storage.capacity import StorageCapacityError, capacity_reservation
 
 
 def _ordinary_path(root: Path, relative: str) -> Path:
@@ -30,13 +31,13 @@ def _ordinary_path(root: Path, relative: str) -> Path:
 
 
 def _stream_verified(source: Path, size: int, sha256: str, *, destination: Path | None,
-                     cancellation: CancellationSignal) -> None:
+                     cancellation: CancellationSignal, capacity=None) -> None:
     before = source.stat(follow_symlinks=False)
     if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size != size:
         raise ValueError("generic log is not the frozen ordinary file")
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(source, flags)
-    with os.fdopen(descriptor, "rb") as stream:
+    with capacity_reservation(capacity if destination is not None else None,
+            destination or source, size), os.fdopen(os.open(source, flags), "rb") as stream:
         opened = os.fstat(stream.fileno())
         if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
             raise ValueError("generic log changed before read")
@@ -74,6 +75,23 @@ def _stream_verified(source: Path, size: int, sha256: str, *, destination: Path 
 def freeze_generic_logs(workspace: PreparedWorkspace, *, controlled_root: Path,
                         parsed: dict[str, Any], cancellation: CancellationSignal) -> bytes:
     """Return the exact input receipt, without ever buffering a complete log file."""
+    return _freeze_generic_sources(workspace, sources=[(controlled_root, parsed, None)],
+        cancellation=cancellation)
+
+
+def freeze_generic_log_batch(workspace: PreparedWorkspace, *,
+                             sources: list[tuple[Path, dict[str, Any], str]],
+                             cancellation: CancellationSignal) -> bytes:
+    """Combine independently verified archives without losing their source identities."""
+    identities = [parsed["source_attachment_id"] for _, parsed, _ in sources]
+    if len(sources) < 2 or len(set(identities)) != len(identities):
+        raise ValueError("a generic log batch requires distinct source archives")
+    return _freeze_generic_sources(workspace, sources=sources, cancellation=cancellation)
+
+
+def _freeze_generic_sources(workspace: PreparedWorkspace, *,
+                            sources: list[tuple[Path, dict[str, Any], str | None]],
+                            cancellation: CancellationSignal) -> bytes:
     inputs = workspace.root / "inputs"
     before = inputs.stat(follow_symlinks=False)
     if inputs.is_symlink() or (before.st_dev, before.st_ino) != (workspace.inputs_device, workspace.inputs_inode):
@@ -82,18 +100,29 @@ def freeze_generic_logs(workspace: PreparedWorkspace, *, controlled_root: Path,
     try:
         target_root = inputs / "generic-logs"
         target_root.mkdir(mode=0o700)
-        rows = []
-        for ordinal, entry in enumerate(parsed["logs"], start=1):
-            source = _ordinary_path(controlled_root, entry["relative_path"])
-            relative = f"inputs/generic-logs/log-{ordinal:06d}.log"
-            _stream_verified(source, entry["size"], entry["sha256"],
-                destination=workspace.root / relative, cancellation=cancellation)
-            rows.append({**entry, "log_path": relative})
-        payload = canonical_json_bytes({**parsed, "logs": rows})
+        rows, source_rows = [], []
+        for controlled_root, parsed, name in sources:
+            source_rows.append({**{key: value for key, value in parsed.items() if key != "logs"},
+                "source_attachment_name": name})
+            for entry in parsed["logs"]:
+                source = _ordinary_path(controlled_root, entry["relative_path"])
+                relative = f"inputs/generic-logs/log-{len(rows) + 1:06d}.log"
+                _stream_verified(source, entry["size"], entry["sha256"],
+                    destination=workspace.root / relative, cancellation=cancellation,
+                    capacity=getattr(workspace, "capacity", None))
+                identity = ({"source_attachment_id": parsed["source_attachment_id"],
+                    "source_attachment_name": name} if len(sources) > 1 else {})
+                rows.append({**entry, **identity, "log_path": relative})
+        value = ({**sources[0][1], "logs": rows} if len(sources) == 1 else
+            {"schema_version": 2, "sources": source_rows, "logs": rows})
+        payload = canonical_json_bytes(value)
         if len(payload) > 2_000_000:
             raise ValueError("generic log manifest exceeds its byte budget")
         _atomic_write(inputs / "generic_logs.json", payload)
         return payload
+    except StorageCapacityError as exc:
+        raise runtime_failure(stage=ExecutionStage.WORKSPACE_PREPARE,
+            code=ErrorCode.WORKSPACE_PREPARE_FAILED, message=str(exc), retryable=True) from exc
     finally:
         _set_inputs_read_only(inputs)
 

@@ -1,6 +1,6 @@
 # 网站 API：会话与附件
 
-诊断记录、报告和附件默认保留 **30 天**，可用服务端 `HISTORY_RETENTION_DAYS` 调整，每轮独立到期。页面应提示用户及时下载；到期轮次不再可查。创建请求幂等记录和已删除会话的最小凭据也使用该保留期。SSE 返回 `409 / AGENT_EVENT_CURSOR_EXPIRED` 时，先读取会话快照，再用其 `last_event_id` 作为 `Last-Event-ID` 重新订阅。完整策略见[服务端文件保留与清理](storage-retention.md)。
+Web 会话正文、报告和历史问答永久保存，用户主动删除时再清除。日志资源默认保留 **15 天**，由 `WEB_RESOURCE_RETENTION_DAYS` 控制，磁盘紧张时可提前清理已结束轮次。清理后该轮只读，报告和已有问答仍可查看。创建请求幂等记录、删除凭据及非 Web 历史仍使用 `HISTORY_RETENTION_DAYS`，默认 30 天。SSE 返回 `409 / AGENT_EVENT_CURSOR_EXPIRED` 时，先读取快照，再用 `last_event_id` 重新订阅。完整策略见[服务端文件保留与清理](storage-retention.md)。
 
 已有网站升级请先读 [8.2 前端必改清单](website-agent-upgrade-8.2.md)，再按本文核对完整接口说明。
 
@@ -8,7 +8,7 @@
 
 报告后的解释、质疑和文字补充请接入[报告追问](website-report-followup.md)。追问使用独立接口和 schema_version=1 的事件流，不修改正式报告和赞踩。新页面在同一会话内连续追问；独立定位统一新建对话。原消息接口的新轮行为仍保留兼容，但追问失败后不能退回消息接口。
 
-适用于 xiaodao `8.2.0`、V11 / `v11-contract-r2`。网站把用户原话和日志交给 xiaodao，展示追问、执行进度和经过服务端验证的定位报告。一个会话包含多轮独立诊断，历史消息、追问和结果按轮次保留。网站只需接入会话和附件两类接口：页面所需的信息从会话接口读取，文件单独流式传输。会话查询响应的版本为 `schema_version=3`；SSE 为 schema_version=2，报告内部数据格式仍为 schema 3。
+适用于 xiaodao `8.2.0`、V11 / `v11-contract-r3`。网站把用户原话和日志交给 xiaodao，展示追问、执行进度和经过服务端验证的定位报告。一个会话包含多轮独立诊断，历史消息、追问和结果按轮次保留。页面所需的信息从会话接口读取，文件单独流式传输。会话查询响应的版本为 `schema_version=3`；SSE 为 schema_version=2，报告内部数据格式仍为 schema 3。
 
 首次接入先读 [部署后快速接入与联调清单](website-agent-quickstart.md)。本文是完整接口参考。在线入口是 xiaodao 服务的 `/docs` 和 `/openapi.json`；仓库保存 [OpenAPI 快照](../schemas/v2/web-api.openapi.snapshot.json)。快照保留底层 `trusted_header` 接口合同，生产默认 Redis 模式的在线文档会改为 Cookie 鉴权。联调前核对线上 `info.version`、路由和鉴权配置，不能假设已部署服务与当前源码一致。
 
@@ -33,7 +33,7 @@
 
 先发描述、再单独发送附件也支持上述流程：服务端会检查此前是否还有未提取的文字，不会因为最新消息没有 `text` 就跳过首条描述。文字已经整理后，仅选择或补交附件不再调用提取模型。网站可以先把一个日志包上传到 `READY`，再用同一条消息发送问题文字和 `attachment_ids`。
 
-专用定位按 Skill 要求接收日志；通用定位可不带日志，有日志时只接收一份归档。尚未采用附件时，以最近一条携带 `attachment_ids` 的消息作为附件选择；只发文字不会清除已有选择。一次选了多个包时，需要选择一份或合包，不能自动取第一个。重新发送一条只引用目标附件 ID 的消息即可选择已有文件，无需重复上传。
+专用定位按 Skill 要求接收日志；通用定位可不带日志。内置日志输入支持最多 20 份归档，每个包独立解析，同名文件保留各自来源。尚未采用附件时，以最近一条携带 `attachment_ids` 的消息作为本轮完整附件选择；只发文字不会清除已有选择。重新发送引用目标附件 ID 的消息即可选择已有文件，无需重复上传。自定义 Skill 仍遵守自己的输入数量要求。
 
 通用定位会自动分析随问题提交的日志，不要求填写时间、槽位、进程或 PID，也不调用 Intake 提取这些参数。分析开始后补交有效日志，会停止旧 Job，在同一 Case 和同一轮次重新分析；新日志替换旧包，原始问题保留，随日志发送的文字作为补充描述。请求重放不会重复启动。已固定本次重启请求后，若旧报告抢先完成提交，本次重启返回 `409`，日志文件仍保留，但不会发布该消息的 `message.accepted`。请求进入服务端时若本轮已经结束，则按原消息规则处理：有文本的新请求开启新轮，只有附件则提示提供问题原话；前端须核对收据中的 `run_id`。专用定位的附件采用规则不变。
 
@@ -64,6 +64,11 @@
 | 会话 | `POST /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups` | 提交追问，JSON：稳定 `request_id` 和非空 `text`；会调用模型 |
 | 会话 | `GET /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups/events` | 独立追问 SSE，可带 `Last-Event-ID`，不混入诊断事件流 |
 | 会话 | `POST /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups/{followup_id}/stop` | 停止指定追问，JSON：稳定 `request_id` |
+| 会话 | `POST /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/continuation-drafts` | 从最新报告准备继续诊断草稿，尚未创建新轮次 |
+| 会话 | `GET /api/v1/agent/conversations/{conversation_id}/continuation-drafts/{draft_id}` | 读取草稿和整理进度，不启动模型 |
+| 会话 | `PATCH /api/v1/agent/conversations/{conversation_id}/continuation-drafts/{draft_id}` | 保存完整问题、目标和最终附件集合，携带 `expected_revision` |
+| 会话 | `POST /api/v1/agent/conversations/{conversation_id}/continuation-drafts/{draft_id}/confirm` | 确认草稿并创建新轮次；输入 `request_id`、`expected_revision` |
+| 会话 | `GET /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/report-versions` | 已发布报告版本、输入变化和继续诊断资格 |
 | 会话 | `GET /api/v1/agent/conversations/{conversation_id}/events` | SSE 历史回放和实时订阅；可带 `Last-Event-ID` |
 | 会话 | `GET /api/v1/agent/conversations/{conversation_id}/files/{artifact_id}/content` | 下载文件，可用 `run_id` 固定历史轮次；分享下载携带 `share=true` |
 | 附件 | `POST /api/v1/agent/attachments` | 预约日志上传，JSON 含 `conversation_id` 和文件元数据 |
@@ -155,6 +160,8 @@ GET /api/v1/agent/conversations/{conversation_id}/files/{artifact_id}/content?ru
 以下原生接口示例省略了会话 Cookie。网站前端使用同源 `/api/agent`，由 BFF 转发 Cookie。
 
 `current_run` 始终是当前轮；`selected_run_id` 指明这次读取的状态、报告和文件属于哪一轮。省略 `run_id` 选当前轮，传历史轮 ID 即可读取旧报告，不重新诊断。`capabilities` 给出发送、停止、重新诊断、重命名和删除按钮是否可用，前端不必自行猜测状态组合。
+
+所选轮次的 `resources_expired=true` 表示日志已清理，`resources_expired_at` 为清理时间，`resource_cleanup_reason` 区分 `RETENTION_EXPIRED`（正常到期）和 `DISK_PRESSURE`（容量回收）。页面显示“相关日志已清理，本轮仅供查看”，不再发送该轮追问；可以在同一会话新开一轮。永久报告的原下载地址和字节保持不变，已清理 ZIP 不再提供链接，旧 ZIP 地址在权限检查后返回 `410 / AGENT_RESOURCE_EXPIRED`。
 
 `history` 是唯一聊天展示序列，仅有 `user.message`、`assistant.question`、`diagnosis.result`；结果记录只含摘要，点击后按其 `run_id` 读取正文。默认取最近 50 条，最多 100 条；将 `history_next_cursor` 原样传入 `history_before` 加载更早记录。每页按时间正序返回，前端在顶部插入并按 `id` 去重。历史跨越多轮，分页不复制报告正文；不再返回 `messages`。
 
@@ -269,7 +276,7 @@ curl --fail-with-body --request PUT "$UPLOAD_URL" \
   --data-binary @logs.zip
 ```
 
-上传成功响应的 `data` 是状态为 `READY` 的完整 `AgentAttachment`。`expires_at` 固定为 `null`，表示接口未提供独立的到期时间，不能理解为永久保留。未被保留轮次引用的附件在预约满保留期后回收（默认 30 天）；已引用的附件随所属轮次保留，详见[保留策略](storage-retention.md)。`READY` 表示上传校验完成，**不表示诊断已经采用**。随后发送消息引用该附件：
+上传成功响应的 `data` 是状态为 `READY` 的完整 `AgentAttachment`。`expires_at` 固定为 `null`，表示接口未提供独立的到期时间，不能理解为永久保留。未被有效轮次引用的附件在预约满保留期后回收（默认 15 天）；已采用附件随各轮资源生命周期管理，共享原文件须等最后一个有效使用者释放，详见[保留策略](storage-retention.md)。`READY` 表示上传校验完成，**不表示诊断已经采用**。随后发送消息引用该附件：
 
 ```json
 {
@@ -320,7 +327,7 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `AgentAttachment` | `content_type` | 预约并校验的媒体类型。 |
 | `AgentAttachment` | `size` | 预约声明的字节数；`READY` 后表示上传字节数也已核对。 |
 | `AgentAttachment` | `sha256` | 预约声明的完整文件哈希；`READY` 后表示上传内容也已核对。 |
-| `AgentAttachment` | `status` | `RESERVED`、`UPLOADING`、`READY`、`IMPORTED` 或 `FAILED`。 |
+| `AgentAttachment` | `status` | `RESERVED`、`UPLOADING`、`READY`、`IMPORTED`、`FAILED` 或 `EXPIRED`。已清理附件仍保留元数据，但不能再次采用；用原请求预约重试返回 410，重新上传须新请求 ID。 |
 | `AgentAttachment` | `created_at` | 创建并保存上传预约的时间。 |
 | `AgentAttachment` | `case_attachment_id` | 导入既有 Case 后的附件 UUID；导入前为 `null`。 |
 | `PreparedAgentAttachment` | `attachment` | 本次预约的完整 `AgentAttachment`。 |
@@ -335,7 +342,7 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `ConversationDetailResponse` | `current_questions` | 当前需要展示的中文追问数组。 |
 | `ConversationDetailResponse` | `failure` | 可空的安全失败信息；终态错误持久保存，当前进程的归档交付未知只作临时投影。旧历史可为 `null`。 |
 | `ConversationDetailResponse` | `history` | 按时间排序的跨轮展示序列；仅含用户消息、追问和结果摘要；未请求 history 时为 null。 |
-| `ConversationDetailResponse` | `attachments` | 当前会话附件列表，每项为 `AgentAttachment`；未请求 history 时为 null。 |
+| `ConversationDetailResponse` | `attachments` | 本页历史引用的附件及仍占用上传额度的附件，每项为 `AgentAttachment`；未请求 history 时为 null。加载旧页时按 attachment_id 合并元数据，不要用新页列表覆盖已显示的旧附件。 |
 | `ConversationDetailResponse` | `last_event_id` | 当前最新事件序号；恢复页面时与本地已处理游标配合使用。 |
 | `ConversationDetailResponse` | `created_at` | 会话创建时间。 |
 | `ConversationDetailResponse` | `updated_at` | 最近一次会话持久更新的时间。 |
@@ -457,6 +464,9 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `ConversationRun` | `report_state` | 该轮报告是否可用。 |
 | `ConversationRun` | `created_at` | 本轮开始时间。 |
 | `ConversationRun` | `updated_at` | 本轮最近更新时间。 |
+| `ConversationRun` | `resources_expired` | 本轮资源是否已清理，默认 false。 |
+| `ConversationRun` | `resources_expired_at` | 本轮资源清理时间，未清理时为 null。 |
+| `ConversationRun` | `resource_cleanup_reason` | `RETENTION_EXPIRED` 表示正常到期，`DISK_PRESSURE` 表示磁盘空间不足而提前回收；尚未清理时为 null。 |
 | `ConversationCapabilities` | `can_send` | 是否可发送消息。 |
 | `ConversationCapabilities` | `can_stop` | 是否可停止当前轮。 |
 | `ConversationCapabilities` | `can_rediagnose` | 是否可开始新轮。 |
@@ -493,6 +503,9 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `RunStoppingData` | `status` | 固定 CANCELLING。 |
 | `ConversationDetailResponse` | `title` | 会话标题。 |
 | `ConversationDetailResponse` | `current_run` | 当前轮摘要，历史读取也不改变。 |
+| `ConversationDetailResponse` | `resources_expired` | 本次所选轮次的日志资源是否已清理；为 true 时该轮只读，报告和历史问答仍可查看。历史轮与 current_run 可以不同。 |
+| `ConversationDetailResponse` | `resources_expired_at` | 本次所选轮次的资源清理时间，尚未清理时为 null。 |
+| `ConversationDetailResponse` | `resource_cleanup_reason` | 本次所选轮次的资源清理原因：`RETENTION_EXPIRED` 为正常到期，`DISK_PRESSURE` 为磁盘空间不足而提前回收；尚未清理时为 null。 |
 | `ConversationDetailResponse` | `capabilities` | 当前允许的管理操作；`share=true` 时全部为 false。 |
 | `ConversationDetailResponse` | `selected_run_id` | 当前状态、报告和文件的所属轮次。 |
 | `ConversationDetailResponse` | `run_id` | 所选轮次 UUID。 |
@@ -501,6 +514,88 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `MessageReceipt` | `run_id` | 消息所属轮次的 UUID。 |
 | `AgentMessage` | `run_id` | 消息所属轮次。 |
 | `AgentEvent` | `run_id` | 该事件所属轮次；sequence 仍在整个会话递增。 |
+
+### 继续诊断字段
+
+主流程和页面接入见[继续诊断与报告版本](website-report-followup.md#继续诊断与报告版本)。创建、修改和确认分别使用稳定的请求 ID；草稿只是待确认输入，GET 不触发模型或诊断。普通追问继续保留原接口。
+
+在继续诊断入口填写文字时，现有 INTAKE 同时判断意图。解释结论、询问证据或讨论假设返回 FOLLOWUP；明确更正事实、提供新日志或要求重做正式诊断才进入 DRAFT。FOLLOWUP 的 `followup_text` 发送到父报告的原有追问接口，不能 PATCH 或 confirm 为新诊断。普通“追问报告”直接沿用原接口，不额外调用意图判断；直接编辑完整问题和只选日志仍由代码生成预览。
+
+| OpenAPI 模型 | 使用位置 | 内容 |
+| --- | --- | --- |
+| `ContinuationDraft` | 创建、读取、修改草稿 | 当前问题、最终日志、草稿版本与状态。 |
+| `ContinuationReceipt` | 确认成功 | 新 `run_id`、父轮次和稳定请求回执。 |
+| `InputChanges` | 草稿与报告版本 | 问题前后文本、日志增加和移除。 |
+| `ReportVersion` | 单个报告版本 | 版本号、父轮次、本轮目标与环境变化。 |
+| `ReportVersions` | 版本查询 | 问题首轮、最新报告、版本列表和 `can_continue`。 |
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `draft_id` | UUID | 继续诊断草稿标识，用于读取、编辑和确认。 |
+| `expected_revision` | 正整数 | 用户核对的草稿版本；不匹配时返回 409，需刷新核对。 |
+| `source_problem_text` | string | 父报告实际采用的问题和有效补充。 |
+| `effective_problem_text` | string | 本轮确认的完整问题；直接编辑时不调用草稿整理模型。 |
+| `change_note` | string | 本次补充或更正说明。 |
+| `diagnosis_goal` | string | 本轮需要重点检查的问题或方向。 |
+| `log_mode` | APPEND / REPLACE | 创建时 APPEND 沿用父报告日志再追加，REPLACE 使用重新选择的集合；PATCH 的附件 IDs 始终表示最终完整集合。 |
+| `confirmed_run_id` | UUID / null | 确认成功后创建的新轮次；未确认时为 null。 |
+| `followup_text` | string | FOLLOWUP 状态下保留的用户原始提问，供原报告追问使用；其余状态为空字符串。 |
+| `failure_message` | string / null | 草稿整理失败说明，用户可直接编辑后确认。 |
+| `input_changes` | object / null | 两轮实际输入的确定性比较，包含问题文字与日志增减；首版报告为 null。 |
+| `before_problem_text` | string | 上一轮采用的完整问题。 |
+| `after_problem_text` | string | 本轮采用的完整问题。 |
+| `added_attachments` | AgentAttachment[] | 按 SHA-256 比较后新增的日志元数据。 |
+| `removed_attachments` | AgentAttachment[] | 本轮不再使用的日志元数据。 |
+| `parent_run_id` | UUID / null | 本轮所依据的上一版报告；首版为 null。 |
+| `root_run_id` | UUID | 同一问题的首轮标识。 |
+| `latest_run_id` | UUID | 最新已发布报告的轮次；失败不会覆盖旧报告。 |
+| `versions` | ReportVersion[] | 按轮次排序的已发布报告列表。 |
+| `runtime_changes` | string[] | Skill、模型执行配置、解析器变化，或缺少记录导致无法比较的说明。 |
+| `can_continue` | boolean | 是否允许从当前所选报告继续诊断；必须从最新已发布的适用报告开始。 |
+
+各响应模型的完整字段对应关系如下；数组元素和可空值以上表及 OpenAPI 为准。
+
+| 模型 | 字段 | 说明 |
+| --- | --- | --- |
+| `ContinuationDraft` | `conversation_id` | 草稿所属会话。 |
+| `ContinuationDraft` | `draft_id` | 草稿标识。 |
+| `ContinuationDraft` | `parent_run_id` | 草稿依据的父报告轮次。 |
+| `ContinuationDraft` | `revision` | 当前草稿版本，更新时传入 expected_revision。 |
+| `ContinuationDraft` | `status` | PREPARING、DRAFT、FOLLOWUP、FAILED 或 CONFIRMED。FOLLOWUP 表示只需追问父报告，不能确认或修改为诊断草稿。 |
+| `ContinuationDraft` | `source_problem_text` | 原问题及已采用补充。 |
+| `ContinuationDraft` | `effective_problem_text` | 待确认的完整当前问题。 |
+| `ContinuationDraft` | `change_note` | 变更说明。 |
+| `ContinuationDraft` | `diagnosis_goal` | 本轮诊断目标。 |
+| `ContinuationDraft` | `log_mode` | 日志追加或替换模式。 |
+| `ContinuationDraft` | `attachment_ids` | 最终有效日志集合。 |
+| `ContinuationDraft` | `attachments` | 对应最终集合的 AgentAttachment 元数据。 |
+| `ContinuationDraft` | `input_changes` | 预览的 InputChanges。 |
+| `ContinuationDraft` | `followup_text` | FOLLOWUP 状态下的用户原始提问；用独立且稳定的 request_id 提交到父轮次的 followups 接口，不新建 run 或 Case。其他状态为空字符串。 |
+| `ContinuationDraft` | `confirmed_run_id` | 确认后创建的新轮次，否则为 null。 |
+| `ContinuationDraft` | `failure_message` | 整理失败原因，否则为 null。 |
+| `ContinuationDraft` | `created_at` | 草稿创建时间。 |
+| `ContinuationDraft` | `updated_at` | 草稿最后更新的时间。 |
+| `ContinuationReceipt` | `conversation_id` | 确认所属会话。 |
+| `ContinuationReceipt` | `run_id` | 新轮次；用它订阅进度。 |
+| `ContinuationReceipt` | `parent_run_id` | 所依据的报告轮次。 |
+| `ContinuationReceipt` | `request_id` | 此次幂等确认请求 ID。 |
+| `ContinuationReceipt` | `status` | 固定为 ACCEPTED，不代表诊断完成。 |
+| `InputChanges` | `before_problem_text` | 父轮采用的问题。 |
+| `InputChanges` | `after_problem_text` | 本轮采用的问题。 |
+| `InputChanges` | `added_attachments` | 本轮新增日志。 |
+| `InputChanges` | `removed_attachments` | 本轮移除日志。 |
+| `ReportVersion` | `run_id` | 这一版报告的轮次。 |
+| `ReportVersion` | `parent_run_id` | 直接父版轮次；首版为 null。 |
+| `ReportVersion` | `version` | 从 1 开始的报告版本。 |
+| `ReportVersion` | `created_at` | 这一版的完成时间，尚未记录时使用轮次创建时间。 |
+| `ReportVersion` | `input_changes` | 实际输入变化；首版为 null。 |
+| `ReportVersion` | `diagnosis_goal` | 这一版的诊断目标。 |
+| `ReportVersion` | `runtime_changes` | 实际配置变化或无法比较的原因。 |
+| `ReportVersions` | `conversation_id` | 版本所属会话。 |
+| `ReportVersions` | `root_run_id` | 同一问题的首轮。 |
+| `ReportVersions` | `latest_run_id` | 最新已发布报告。 |
+| `ReportVersions` | `versions` | ReportVersion 数组，不含未发布报告的失败轮次。 |
+| `ReportVersions` | `can_continue` | 当前所选报告是否允许继续诊断。 |
 
 ## 3. 实时事件、历史和状态显示
 
@@ -745,11 +840,11 @@ node --test examples/website-agent/server.test.mjs
 
 ## 6. 服务配置与升级
 
-当前产品版本和数据格式仍是 `8.2.0` / `v11-contract-r2`。本次网站会话查询改为 `schema_version=3`，旧查询入口已删除，网站前后端需同步升级。报告 schema 3 不变；Agent 存储升级为 2、会话详情为 3、公开事件为 2。旧事件的原始字节不改，读取时转换为 v2 格式。已有 r1 或 r2 数据必须提供 `--ownership-map`，按[副本升级说明](data-upgrade-v11-r2.md)手动升级后，才能交给新版本。请保留原数据和历史报告，不要直接修改数据格式标记或把旧目录交给新版本。
+当前产品版本和数据格式为 `8.2.0` / `v11-contract-r3`。持续诊断新增可选内部上下文，报告 schema 3、Agent 存储 2、会话详情 3 和公开事件 2 保持不变。现有 `v11-contract-r2` PostgreSQL 数据按兼容读取规则打开，仅在内存中映射外层合同版本，历史报告和嵌套记录不改写。旧 SQLite 数据按[副本升级说明](data-upgrade-v11-r2.md)显式升级，再按 PostgreSQL 迁移说明导入；已有 Agent v2 保留原归属，旧 Agent v1 仍要求 `--ownership-map`。不要手工替换版本标记。
 
 历史兼容说明：早期 `8.0.0` 预览版曾把命名事件改成只含 data 的事件帧，那次 SSE 调整本身没有改变 V11 数据格式。仍使用旧版 `event:` 监听器的网站须改用 `onmessage`，从 JSON 读取 `type` 和 `sequence`，不再依赖 `lastEventId` 或服务端 `retry:`。这段历史说明不代表本次 8.1 升级无需处理数据格式变化。
 
-`INTAKE_CLAUDE_COMMAND` 配置信息整理角色的独立命令；未设置时沿用路由角色命令。该角色只在已创建的 Case 需要补充信息时整理用户消息和公开 requirements，不负责创建任务，也没有使用诊断工具、读取日志或发布结果的权限。
+`INTAKE_CLAUDE_COMMAND` 配置信息整理角色的独立命令；未设置时沿用路由角色命令。该角色按已创建 Case 的 requirements 整理补充参数，也可在继续诊断确认前整理一次自然语言更正草稿；不使用诊断工具、不读取日志，也不发布报告。只有用户确认草稿后才创建新的正式诊断。
 
 `METHODS_EVIDENCE_VALIDATION` 当前默认为 `off`：直接交付 Skill Markdown，关闭输出后的依据核验、证据一致性复核、Candidate 语义判定和独立 Reviewer。即使旧配置仍有 `SPECIALIZED_REVIEWER_ENABLED=true`，也不会启动审核。模型执行前的 Logparse、固定日志快照、marker 扫描和命中方法卡加载保持不变。新 Job 使用创建时固定的 `agent-profile/skill-direct` 和 `output-contract/skill-direct`，保持 `SPECIALIZED` 模式与 `selected_skill_ref`；Case 使用 `generic_result_v2` 记录 Markdown 和实际 `skill_name`。已有 Job 保留创建时固定的配置标识。升级或切换策略前，应先结束活跃任务，再重启服务。
 

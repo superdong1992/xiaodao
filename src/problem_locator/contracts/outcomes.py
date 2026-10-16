@@ -433,10 +433,13 @@ def validate_outcome_for_job(
                 or requirement.requested_by_job_id != job.job_id
                 or requirement.fulfilled_by_refs
                 or requirement.supplement_policy is not SupplementPolicy.MISSING_ONLY
-                or requirement.constraints.model_dump(mode="python") != {
+                or requirement.constraints.model_dump(mode="python", exclude={"max_count"}) != {
                     "allowed_content_types": ["application/gzip", "application/zip", "application/x-tar"],
-                    "min_count": 1, "max_count": 1,
+                    "min_count": 1,
                 }
+                # Completed preflight Outcomes keep their historical bytes.
+                # Newly generated requirements use the current 20-archive limit.
+                or requirement.constraints.max_count not in {1, 20}
                 or payload.requested_attachments != [requirement.requirement_id]
             ):
                 raise ValueError("GENERIC preflight requires the product log archive contract")

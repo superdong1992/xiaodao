@@ -125,6 +125,20 @@ _AUDIT_READ_FILENAMES = _AUDIT_FILENAMES | {
     "stdout.log",
     "stderr.log",
 }
+_SOURCE_AUDIT_FILENAME = re.compile(
+    r"(?:logparse_broker_audit|generic_logparse_request)\.([^.]+)\.json\Z"
+)
+
+
+def _is_source_audit_filename(filename: str) -> bool:
+    match = _SOURCE_AUDIT_FILENAME.fullmatch(filename)
+    if match is None:
+        return False
+    try:
+        _OPAQUE_ID_ADAPTER.validate_python(match.group(1))
+    except ValueError:
+        return False
+    return True
 
 
 class _RecordConflict(Exception):
@@ -535,7 +549,7 @@ class FileExecutionRecordStore:
 
         try:
             validated_job_id = _validated_job_id(job_id)
-            if filename not in _AUDIT_FILENAMES:
+            if filename not in _AUDIT_FILENAMES and not _is_source_audit_filename(filename):
                 raise ValueError("unsupported execution audit filename")
             if type(raw_bytes) is not bytes:
                 raise TypeError("raw_bytes must be exact bytes")
@@ -568,7 +582,7 @@ class FileExecutionRecordStore:
 
         try:
             validated_job_id = _validated_job_id(job_id)
-            if filename not in _AUDIT_READ_FILENAMES:
+            if filename not in _AUDIT_READ_FILENAMES and not _is_source_audit_filename(filename):
                 raise ValueError("unsupported execution audit filename")
             with self._coordination_lock:
                 job_directory = self._find_job_directory(validated_job_id)

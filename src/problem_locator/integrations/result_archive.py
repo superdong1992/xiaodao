@@ -514,7 +514,19 @@ def prepare_result_archive(report: UserResultPayloadV3, *, problem_time: str | N
 
 
 def write_result_archive_file(destination: Path, *, plan: ArchivePlan, source_paths,
-                              cancelled=lambda: False) -> None:
+                              cancelled=lambda: False, capacity=None) -> None:
+    from problem_locator.storage.capacity import capacity_reservation
+
+    raw_size = (sum(item.size for item in plan.logs) + len(plan.result_text.encode("utf-8"))
+        + len(plan.manifest_json.encode("utf-8")))
+    # Deflate may enlarge incompressible input; include headers and ZIP64 data.
+    upper_bound = raw_size + (raw_size + 99) // 100 + 1024 * (len(plan.logs) + 2) + 1024 ** 2
+    with capacity_reservation(capacity, destination, upper_bound):
+        _write_result_archive_file(destination, plan=plan, source_paths=source_paths, cancelled=cancelled)
+
+
+def _write_result_archive_file(destination: Path, *, plan: ArchivePlan, source_paths,
+                               cancelled=lambda: False) -> None:
     """Write bounded chunks to one temporary ZIP, without rebuilding it."""
     if len(plan.logs) != len(source_paths):
         raise ValueError("archive source count differs from frozen plan")

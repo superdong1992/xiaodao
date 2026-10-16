@@ -35,6 +35,33 @@ def test_invalid_history_retention_days_fail_startup(tmp_path, value):
         Settings.load(environ={**environment(tmp_path), "HISTORY_RETENTION_DAYS": value})
 
 
+def test_web_retention_and_disk_watermarks_are_independent(tmp_path):
+    defaults = Settings.load(environ=environment(tmp_path))
+    assert defaults.web_resource_retention_days == 15
+    assert defaults.resource_disk_low_free_bytes == 10 * 1024 ** 3
+    assert defaults.resource_disk_target_free_bytes == 20 * 1024 ** 3
+    assert (defaults.resource_disk_low_free_percent, defaults.resource_disk_target_free_percent) == (10, 15)
+    configured = Settings.load(environ={**environment(tmp_path),
+        "WEB_RESOURCE_RETENTION_DAYS": "21", "HISTORY_RETENTION_DAYS": "60",
+        "RESOURCE_DISK_LOW_FREE_BYTES": "1024", "RESOURCE_DISK_TARGET_FREE_BYTES": "2048",
+        "RESOURCE_DISK_LOW_FREE_PERCENT": "5", "RESOURCE_DISK_TARGET_FREE_PERCENT": "8"})
+    assert (configured.web_resource_retention_days, configured.history_retention_days) == (21, 60)
+    assert configured.resource_disk_low_free_bytes == 1024
+    assert configured.resource_disk_target_free_percent == 8
+
+
+@pytest.mark.parametrize("overrides", [
+    {"WEB_RESOURCE_RETENTION_DAYS": "0"}, {"WEB_RESOURCE_RETENTION_DAYS": "3651"},
+    {"WEB_RESOURCE_RETENTION_DAYS": "015"}, {"WEB_RESOURCE_RETENTION_DAYS": "15.0"},
+    {"RESOURCE_DISK_LOW_FREE_BYTES": "-1"}, {"RESOURCE_DISK_LOW_FREE_PERCENT": "100"},
+    {"RESOURCE_DISK_TARGET_FREE_PERCENT": "10"}, {"RESOURCE_DISK_TARGET_FREE_BYTES": "10737418240"},
+    {"RESOURCE_DISK_LOW_FREE_BYTES": "9223372036854775808"},
+])
+def test_invalid_web_retention_or_disk_watermarks_fail_startup(tmp_path, overrides):
+    with pytest.raises(SettingsError, match="WEB_RESOURCE_RETENTION|RESOURCE_DISK"):
+        Settings.load(environ={**environment(tmp_path), **overrides})
+
+
 def test_website_redis_auth_defaults_and_private_configuration(tmp_path):
     settings = Settings.load(environ=environment(tmp_path))
     assert settings.website_auth.mode == "redis"

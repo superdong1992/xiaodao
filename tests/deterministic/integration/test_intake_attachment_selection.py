@@ -130,28 +130,63 @@ def test_multiple_archives_wait_for_explicit_selection_and_single_id_recovers(we
     assert any(event["type"] == "assistant.question" and _SELECT_ONE in event["data"]["questions"] for event in events)
 
 
-def test_selection_arriving_during_intake_is_not_covered_or_overwritten(website, monkeypatch):
-    _stack, store, engine, service, client = website
+@pytest.mark.parametrize("boundary,initial_count,facts_applied", [
+    ("intake", 2, False), ("intake", 1, False), ("import", 1, False), ("import", 1, True),
+])
+def test_selection_arriving_during_intake_is_not_covered_or_overwritten(
+    website, monkeypatch, boundary, initial_count, facts_applied,
+):
+    stack, store, engine, service, client = website
     conversation, prefix, _original, _receipt = _start(website, PARAMETER_GROUP_A, logs=False)
+    if facts_applied:
+        assert service.run_once(conversation) and len(engine.calls) == 1
+    questions_before = [event.sequence for event in store.list_events(conversation, limit=500)
+        if event.type == "assistant.question"]
     first, second = _preupload(client, prefix), _upload_another(client, prefix)
-    _post(client, prefix + "/messages", {"request_id": "multiple", "attachment_ids": [first, second]})
+    _post(client, prefix + "/messages", {"request_id": "multiple", "attachment_ids": [first, second][:initial_count]})
     intake = engine.intake
+    import_attachment = service.uploads.import_into_case
     newer = []
 
+    def replace_selection():
+        if not newer:
+            newer.append(_post(client, prefix + "/messages", {"request_id": "choose-second", "attachment_ids": [second]}))
+
     def during_intake(request):
-        newer.append(_post(client, prefix + "/messages", {"request_id": "choose-second", "attachment_ids": [second]}))
+        if boundary == "intake":
+            replace_selection()
         return intake(request)
 
+    def during_import(*args, **kwargs):
+        result = import_attachment(*args, **kwargs)
+        replace_selection()
+        return result
+
     monkeypatch.setattr(engine, "intake", during_intake)
+    if boundary == "import":
+        monkeypatch.setattr(service.uploads, "import_into_case", during_import)
     assert service.run_once(conversation)
     state = store.get_intake_state(conversation)
     assert state["pending"] and newer[0]["message_id"] not in state["covered_message_ids"]
-    assert service.get_conversation(conversation).current_questions == []
-    assert not any(event.type == "assistant.question" for event in store.list_events(conversation, limit=500))
+    waiting = service.get_conversation(conversation)
+    assert waiting.case_status == "WAITING_ATTACHMENT" and waiting.failure is None
+    assert waiting.current_questions == []
+    assert waiting.messages[-1].status == "QUEUED"
+    case = stack.application.get_case(waiting.case_id).case_view
+    assert {item.provenance.input_name: item.statement for item in case.user_facts} == PARAMETER_GROUP_A
+    assert any(item.name == "log_archive" and item.status.value == "OPEN" for item in case.pending_requirements)
+    assert [event.sequence for event in store.list_events(conversation, limit=500)
+        if event.type == "assistant.question"] == questions_before
     monkeypatch.setattr(engine, "intake", intake)
+    monkeypatch.setattr(service.uploads, "import_into_case", import_attachment)
     assert service.run_once(conversation)
     _assert_report(website, conversation, prefix, 1)
-    assert store.get_attachment(first).status == "READY" and store.get_attachment(second).status == "IMPORTED"
+    assert store.get_attachment(first).status == ("IMPORTED" if boundary == "import" else "READY")
+    assert store.get_attachment(second).status == "IMPORTED"
+    aggregate = stack.repository.read_case(waiting.case_id)
+    report_job = aggregate.jobs[aggregate.case.final_result.proposed_by_job_id]
+    assert report_job.attachment_refs == [store.get_attachment(second).case_attachment_id]
+    assert all(item.status == "APPLIED" for item in store.get_conversation(conversation).messages)
 
 
 def test_new_text_still_checks_frozen_fact_corrections_while_only_attachment_is_missing(website, monkeypatch):

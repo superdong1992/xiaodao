@@ -58,6 +58,11 @@ class GuardedAgent:
         assert self.active == 1
         return ConversationDetail.model_validate(conversation_detail(ready_report(), include))
 
+    def open_conversation_artifact(self, conversation_id, artifact_id, *, run_id=None):
+        assert conversation_id == CONVERSATION and artifact_id == ATTACHMENT and run_id == RUN
+        assert self.active == 1
+        return self.application.open_artifact(CASE, artifact_id)
+
 
 class FileQuery:
     def __init__(self):
@@ -73,6 +78,7 @@ class FileQuery:
 
 
 def app_for(agent, query):
+    agent.application = query
     return create_http_app(command_port=FakeApplicationService(), query_port=query,
         state_admin=FakeStateAdmin(readiness=readiness()), agent_service=agent, public_base_url="http://local")
 

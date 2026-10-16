@@ -142,6 +142,10 @@ def test_conversation_and_attachment_routes_have_typed_contracts():
         f"{BASE}/conversations/{{conversation_id}}/runs/{{run_id}}/followups",
         f"{BASE}/conversations/{{conversation_id}}/runs/{{run_id}}/followups/events",
         f"{BASE}/conversations/{{conversation_id}}/runs/{{run_id}}/followups/{{followup_id}}/stop",
+        f"{BASE}/conversations/{{conversation_id}}/runs/{{run_id}}/continuation-drafts",
+        f"{BASE}/conversations/{{conversation_id}}/continuation-drafts/{{draft_id}}",
+        f"{BASE}/conversations/{{conversation_id}}/continuation-drafts/{{draft_id}}/confirm",
+        f"{BASE}/conversations/{{conversation_id}}/runs/{{run_id}}/report-versions",
     }
     response = schema["paths"][f"{BASE}/conversations/{{conversation_id}}/events"]["get"]["responses"]["200"]
     assert set(response["content"]) == {"text/event-stream"}
@@ -626,6 +630,29 @@ def test_prepare_provides_raw_upload_descriptor_and_upload_uses_bounded_stream()
     assert stream.closed
     assert max(stream.read_requests) <= 1024 * 1024
     assert fake.thread_ids[-1] != threading.get_ident()
+
+
+def test_expired_attachment_retry_has_no_upload_descriptor():
+    fake = FakeAgent()
+    fake.attachment["status"] = "EXPIRED"
+    response = run_request(fake, "POST", BASE + "/attachments", json=dict(
+        conversation_id=CONVERSATION, request_id="a-1", name="logs.zip", content_type="application/zip",
+        declared_size=len(PAYLOAD), declared_sha256=DIGEST,
+    ))
+    assert response.status_code == 410
+    assert response.json()["error"]["code"] == "AGENT_RESOURCE_EXPIRED"
+    assert response.json()["data"] is None
+
+
+@pytest.mark.parametrize("code", ["AGENT_RESOURCES_CLEANING", "AGENT_STORAGE_PRESSURE"])
+def test_temporary_storage_errors_keep_chat_visible_and_advertise_retry(code):
+    class BusyAgent(FakeAgent):
+        def get_conversation(self, **kwargs):
+            raise AgentStoreError(code, "相关日志正在清理，请稍后重试。", 503, retryable=True)
+    response = run_request(BusyAgent(), "GET", VIEW)
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "5"
+    assert response.json()["error"]["retryable"] is True
 
 
 @pytest.mark.parametrize("conversation", [None, "not-a-uuid"])

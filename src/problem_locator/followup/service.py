@@ -20,11 +20,11 @@ from .worker import FollowupWorker
 
 class ReportFollowupService:
     def __init__(self, agent, command, *, enabled=False, snapshot_max_bytes=1024**3,
-                 snapshot_total_bytes=5 * 1024**3, backend=None):
+                 snapshot_total_bytes=5 * 1024**3, backend=None, retention_days=15):
         if type(snapshot_max_bytes) is not int or type(snapshot_total_bytes) is not int or not 1 <= snapshot_max_bytes <= snapshot_total_bytes:
             raise ValueError("报告追问快照预算无效。")
         self.agent, self.enabled = agent, enabled
-        self.store = FollowupStore(agent.store.repository, agent.store.clock)
+        self.store = FollowupStore(agent.store.repository, agent.store.clock, retention_days=retention_days)
         self.layout = agent.store.repository.layout
         self.snapshot_max_bytes, self.snapshot_total_bytes = snapshot_max_bytes, snapshot_total_bytes
         self.read_search_supported = supports_read_search(command)
@@ -38,6 +38,8 @@ class ReportFollowupService:
         self.snapshot_worker = SnapshotWorker(self)
 
     def _source(self, cid, rid):
+        if self.agent.store.get_run(cid, rid).get("resources_expired", False):
+            return None
         captured = self.agent.store.read_conversation(cid, case_snapshot=True, run_id=rid)
         if captured.snapshot is None or captured.view.case_id is None:
             return None
@@ -98,8 +100,9 @@ class ReportFollowupService:
     def get(self, conversation_id, run_id, owner_key=None, cursor=None, limit=50):
         with self.agent.operation_lease(conversation_id, owner_key=owner_key):
             page = self.store.page(conversation_id, run_id, owner_key, cursor=cursor, limit=limit)
-            source = self._source(conversation_id, run_id) if self.enabled else None
-            reason = ("DISABLED" if not self.enabled else "UNSUPPORTED" if source is None else
+            expired = self.agent.store.get_run(conversation_id, run_id).get("resources_expired", False)
+            source = self._source(conversation_id, run_id) if self.enabled and not expired else None
+            reason = ("DISABLED" if not self.enabled else "EXPIRED" if expired else "UNSUPPORTED" if source is None else
                 "EXPIRED" if self.store.expired(source) else "BUSY" if page["active_followup"] is not None else
                 "LIMIT_EXCEEDED" if page["count"] >= MAX_TURNS else None)
             snapshot = page["snapshot"]
@@ -119,6 +122,8 @@ class ReportFollowupService:
             if self._stop.is_set():
                 raise AgentStoreError("AGENT_UNAVAILABLE", "追问服务暂时不可用，请稍后重试。", 503)
             self.agent._available()
+            if self.agent.store.get_run(conversation_id, run_id).get("resources_expired", False):
+                raise fail("EXPIRED", "本轮相关资料已清理，历史内容仍可查看，请发起新的诊断。")
             source = self._source(conversation_id, run_id)
             if source is None:
                 raise fail("UNSUPPORTED", "这份报告暂不支持追问，请新建对话。")

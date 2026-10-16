@@ -43,6 +43,38 @@ def _finish_diagnosis(website):
     return conversation, prefix
 
 
+def test_report_and_download_survive_real_case_resource_cleanup(website):
+    from problem_locator.storage.history_retention import HistoryRetentionService
+    from problem_locator.storage.quarantine import QuarantineMover
+    from tests.deterministic.unit.storage.fakes import FakeFileSync, FaultInjectingReplace
+
+    stack, store, engine, service, client = website
+    conversation, prefix = _finish_diagnosis(website)
+    assert stack.archive.run_once()
+    original = _get(client, prefix)
+    report = original["result"]["artifact"]
+    report_url = next(item["download_url"] for item in original["artifacts"]
+        if item["artifact_id"] == report["artifact_id"])
+    original_bytes = client.get(report_url).content
+    zip_urls = [item["download_url"] for item in original["artifacts"] if item["content_type"] == "application/zip"]
+    history = HistoryRetentionService(stack.repository, store, QuarantineMover(stack.layout,
+        stack.coordination_lock, FakeFileSync(), FaultInjectingReplace()), service.usage_guard, stack.clock,
+        dispatcher=stack.scheduler, archive=stack.archive, coordination_lock=stack.coordination_lock,
+        archive_run=service.report_archive.archive_run)
+    assert history.web.expire_run(conversation, original["selected_run_id"], original["case_id"], reason="DISK_PRESSURE")
+    assert original["case_id"] not in stack.repository.read_snapshot(original["case_id"]).cases
+    retained = _get(client, prefix)
+    assert retained["resources_expired"] is True
+    assert retained["resource_cleanup_reason"] == "DISK_PRESSURE"
+    assert retained["result"] == original["result"]
+    assert retained["history"] == original["history"]
+    assert [item["artifact_id"] for item in retained["artifacts"]] == [report["artifact_id"]]
+    downloaded = client.get(report_url)
+    assert downloaded.status_code == 200 and downloaded.content == original_bytes
+    assert downloaded.headers["X-Content-SHA256"] == report["sha256"]
+    assert zip_urls and all(client.get(url).status_code == 410 for url in zip_urls)
+
+
 @pytest.mark.parametrize("result_status", ["COMPLETED", "PARTIAL", "INCONCLUSIVE"])
 def test_native_report_reads_all_published_diagnosis_results_and_same_raw_artifact(
     website, monkeypatch, result_status,

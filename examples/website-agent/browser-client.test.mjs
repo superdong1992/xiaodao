@@ -67,7 +67,7 @@ test("browser methods use website paths, unchanged request bodies and unwrapped 
   assert.deepEqual(JSON.parse(calls[0].init.body), { request_id: "create-original" });
   assert.deepEqual(JSON.parse(calls[1].init.body), message);
   assert.deepEqual(JSON.parse(calls[5].init.body), { ...metadata, conversation_id: conversationId });
-  assert.deepEqual(Object.keys(client).sort(), ["attachments", "conversations", "followups"]);
+  assert.deepEqual(Object.keys(client).sort(), ["attachments", "continuations", "conversations", "followups"]);
   assert.deepEqual(Object.keys(client.conversations).sort(), ["create", "delete", "eventsUrl", "get", "getFeedback", "list", "rename", "send", "setFeedback", "stop"]);
   assert.deepEqual(Object.keys(client.attachments).sort(), ["prepare", "upload"]);
   for (const { init } of calls) {
@@ -282,7 +282,7 @@ test("CSRF headers are refreshed on every request and protocol headers override 
 });
 
 test("upload sends the original Blob once without reading it or addressing the descriptor URL", async () => {
-  const file = noReadBlob();
+  const file = noReadBlob(), signal = new AbortController().signal;
   const calls = [];
   const client = createAgentClient({ basePath: "/website/api/agent", fetchImpl: async (path, init) => {
     calls.push({ path, init });
@@ -291,13 +291,14 @@ test("upload sends the original Blob once without reading it or addressing the d
   for (const url of ["https://outside.example/steal", "//outside.example/steal", "/admin/delete", "javascript:alert(1)"]) {
     const prepared = preparedUpload();
     prepared.upload.url = url;
-    const result = await client.attachments.upload(prepared, file);
+    const result = await client.attachments.upload(prepared, file, { signal });
     assert.equal(result.status, "READY");
   }
   assert.equal(calls.length, 4);
   for (const { path, init } of calls) {
     assert.equal(path, `/website/api/agent/attachments/${attachmentId}/content`);
     assert.equal(init.body, file);
+    assert.equal(init.signal, signal);
     assert.equal(init.method, "PUT");
     assert.equal(init.headers.get("Idempotency-Key"), attachmentId);
     assert.equal(init.headers.get("X-Content-SHA256"), sha256);

@@ -1,4 +1,4 @@
-"""Offline copy upgrade of V11 r1/r2 Agent v1 data to Agent storage v2.
+"""Offline copy upgrade of V11 r1/r2 data to r3 with Agent storage v2.
 
 Never open the source database through SQLite: even a read-only connection can
 create or recover its shared-memory file. Copy the locked database and WAL first.
@@ -32,8 +32,9 @@ from problem_locator.timestamps import now_timestamp
 
 
 SOURCE_REVISION = "v11-contract-r1"
-TARGET_REVISION = "v11-contract-r2"
-RECEIPT_FILENAME = "data-upgrade.agent-v2.receipt.json"
+TARGET_REVISION = "v11-contract-r3"
+SOURCE_REVISIONS = (SOURCE_REVISION, "v11-contract-r2")
+RECEIPT_FILENAME = "data-upgrade.v11-r3.receipt.json"
 _DATABASE_FILES = {"completed.sqlite3", "completed.sqlite3-wal", "completed.sqlite3-shm"}
 _BARRIER_FILENAME = "data-format.json.tmp"
 _MUTABLE_FILES = _DATABASE_FILES | {"data-format.json", _BARRIER_FILENAME}
@@ -59,9 +60,12 @@ def _require_linux() -> None:
     _require(sys.platform == "linux", "数据升级命令只能在 Linux Server 上运行。", "PLATFORM_UNSUPPORTED")
 
 
-def _marker(revision: str) -> bytes:
-    return canonical_json_bytes({"contract_revision": revision, "format_id": "problem-locator-data-v11",
-        "schema_version": 11, "state_schema_version": 11})
+def _marker(revision: str, *, agent_storage_version: int | None = None) -> bytes:
+    value = {"contract_revision": revision, "format_id": "problem-locator-data-v11",
+        "schema_version": 11, "state_schema_version": 11}
+    if agent_storage_version is not None:
+        value["agent_storage_version"] = agent_storage_version
+    return canonical_json_bytes(value)
 
 
 def _fingerprint(metadata):
@@ -164,11 +168,12 @@ def _inventory(root: Path, *, copy_to: Path | None = None) -> dict:
     return {"files": dict(sorted(files.items())), "directories": dict(sorted(directories.items()))}
 
 
-def _table_digests(db: sqlite3.Connection, *, original_columns=None) -> dict:
+def _table_digests(db: sqlite3.Connection, *, original_columns=None, allowed_tables=None) -> dict:
     schema = list(db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name"))
     _require(not any(row[0] in {"trigger", "view"} for row in schema), "源数据库包含不受支持的触发器或视图。")
     tables = {row[1] for row in schema if row[0] == "table"}
-    allowed = _CORE_TABLES | _AGENT_TABLES | (_AGENT_V2_TABLES if original_columns is not None else set())
+    allowed = (allowed_tables if allowed_tables is not None else
+        _CORE_TABLES | _AGENT_TABLES | (_AGENT_V2_TABLES if original_columns is not None else set()))
     _require(_CORE_TABLES <= tables and tables <= allowed,
         "源数据库表结构不受支持。")
     _require(not tables.intersection(_AGENT_TABLES) or _AGENT_TABLES <= tables, "历史会话表不完整。")
@@ -395,11 +400,48 @@ def _bind_legacy_intake_workspaces(db, root: Path) -> int:
     return sum(map(len, grouped.values()))
 
 
+def _upgrade_current_database(db, root, source, target, source_revision):
+    # The same read-only checks protect both offline copy workflows. Importing
+    # these validators does not initialize a PostgreSQL connection.
+    from .postgres_import import (
+        _source_schema, _validate_attachments, _validate_continuations, _validate_drained, _validate_followups,
+    )
+
+    tables, _ = _source_schema(db)
+    _validate_drained(db, tables)
+    mappings = _validate_attachments(db, tables, source, root, target)
+    _validate_followups(db, tables, root)
+    _validate_continuations(db, tables)
+    before = _table_digests(db, allowed_tables=tables)
+    db.execute("BEGIN IMMEDIATE")
+    cases, _, _, resource_count = _upgrade_snapshots(db, root, source_revision)
+    for attachment_id, path in mappings.items():
+        db.execute("UPDATE agent_attachments SET storage_path=? WHERE attachment_id=?", (path, attachment_id))
+    _require(_table_digests(db, allowed_tables=tables) == before,
+        "合同升级改变了历史业务数据或表结构，目标副本不会发布。", "HISTORY_CHANGED")
+    _require(list(db.execute("PRAGMA integrity_check")) == [("ok",)] and not list(db.execute("PRAGMA foreign_key_check")),
+        "升级后的数据库校验失败。")
+    conversations = (db.execute("SELECT count(*) FROM agent_conversations").fetchone()[0]
+        if "agent_conversations" in tables else 0)
+    assigned = (db.execute("SELECT count(*) FROM agent_conversations WHERE owner_key IS NOT NULL").fetchone()[0]
+        if "agent_conversations" in tables else 0)
+    db.execute("COMMIT")
+    _require(db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0, "目标数据库 WAL 无法完成同步。")
+    return {"completed_cases": len(cases), "conversations": conversations,
+        "verified_resources": resource_count, "mapped_attachment_paths": len(mappings),
+        "assigned_conversations": assigned, "unassigned_conversations": conversations - assigned,
+        "linked_legacy_intake_workspaces": 0, "preserved_table_digests": before}
+
+
 def _upgrade_database(root: Path, source: Path, target: Path, *, source_revision=SOURCE_REVISION, owner_map=None) -> dict:
     db = sqlite3.connect(root / "completed.sqlite3", isolation_level=None)
     try:
         db.execute("PRAGMA trusted_schema=OFF")
         _require(list(db.execute("PRAGMA integrity_check")) == [("ok",)], "源数据库完整性校验失败。")
+        marker = db.execute("SELECT value FROM metadata WHERE key='agent_storage_version'").fetchone()
+        if marker is not None and marker[0] == "2":
+            _require(not owner_map, "现有 v2 会话保留原归属，不能在合同升级时重新分配。", "OWNERSHIP_INVALID")
+            return _upgrade_current_database(db, root, source, target, source_revision)
         before = _table_digests(db)
         original_columns = {table: [row[1] for row in db.execute(f'PRAGMA table_info("{table}")')]
             for table in before if table != "schema"}
@@ -489,9 +531,9 @@ def upgrade_data_root(source_root: Path, target_root: Path, *, execute: bool = F
         assigned, ownership_sha256 = _ownership_map(ownership_map)
         with _source_lock(source) as verify_lock:
             source_marker = read_stable_file_bytes(source / "data-format.json")
-            source_revision = next((revision for revision in (SOURCE_REVISION, TARGET_REVISION)
-                if source_marker == _marker(revision)), None)
-            _require(source_revision is not None, "源目录必须是 V11 r1 或 r2 的旧版会话存储。", "VERSION_UNSUPPORTED")
+            source_revision = next((revision for revision in SOURCE_REVISIONS
+                if source_marker in {_marker(revision), _marker(revision, agent_storage_version=2)}), None)
+            _require(source_revision is not None, "源目录必须是 V11 r1 或 r2 的 SQLite 存储。", "VERSION_UNSUPPORTED")
             _require(not (source / "data-format.json.tmp").exists() and not (source / RECEIPT_FILENAME).exists(),
                 "源目录存在未处理的升级或格式标记文件。")
             require_ordinary_file(source / "completed.sqlite3")
@@ -502,7 +544,7 @@ def upgrade_data_root(source_root: Path, target_root: Path, *, execute: bool = F
             inventory = _inventory(source, copy_to=staging)
             result = {"schema_version": 1, "status": "PLANNED", "source_root": str(source),
                 "target_root": str(target), "source_revision": source_revision, "target_revision": TARGET_REVISION,
-                "source_agent_storage_version": 1, "target_agent_storage_version": 2,
+                "source_agent_storage_version": _json(source_marker).get("agent_storage_version", 1), "target_agent_storage_version": 2,
                 "ownership_map_sha256": ownership_sha256, "ownership_assignments": len(assigned),
                 "state_schema_version": 11, "source_manifest_sha256": hashlib.sha256(canonical_json_bytes(inventory)).hexdigest(),
                 "source_file_count": len(inventory["files"]), "source_bytes": sum(item["size"] for item in inventory["files"].values()),

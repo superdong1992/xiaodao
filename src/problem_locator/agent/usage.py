@@ -12,11 +12,15 @@ class ConversationUsageGuard:
         self._lock = threading.Lock()
         self._users: dict[str, int] = {}
         self._cleaning: set[str] = set()
+        self._temporary_cleaning: set[str] = set()
 
     @contextmanager
     def acquire(self, conversation_id):
         with self._lock:
             if conversation_id in self._cleaning:
+                if conversation_id in self._temporary_cleaning:
+                    raise AgentStoreError("AGENT_RESOURCES_CLEANING", "相关日志正在清理，请稍后重试。", 503,
+                        retryable=True)
                 raise AgentStoreError("CONVERSATION_NOT_FOUND", "会话不存在或已删除。", 404)
             self._users[conversation_id] = self._users.get(conversation_id, 0) + 1
         try:
@@ -33,11 +37,13 @@ class ConversationUsageGuard:
         with self._lock:
             return bool(self._users.get(conversation_id))
 
-    def acquire_cleanup_if_idle(self, conversation_id):
+    def acquire_cleanup_if_idle(self, conversation_id, *, temporary=False):
         with self._lock:
             if self._users.get(conversation_id) or conversation_id in self._cleaning:
                 return None
             self._cleaning.add(conversation_id)
+            if temporary:
+                self._temporary_cleaning.add(conversation_id)
         return self._cleanup_lease(conversation_id)
 
     @contextmanager
@@ -47,3 +53,4 @@ class ConversationUsageGuard:
         finally:
             with self._lock:
                 self._cleaning.remove(conversation_id)
+                self._temporary_cleaning.discard(conversation_id)

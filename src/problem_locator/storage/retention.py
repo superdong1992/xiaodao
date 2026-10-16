@@ -73,6 +73,7 @@ class RetentionScanner:
     def __init__(self, layout: StorageLayout, clock: Clock) -> None:
         self._layout = layout
         self._clock = clock
+        self.workspace_completed = lambda _workspace_id: False
 
     def _candidate(
         self,
@@ -150,17 +151,7 @@ class RetentionScanner:
                 if candidate is not None:
                     candidates.append(candidate)
 
-        for entry in self._real_directory_entries(self._layout.workspaces):
-            workspace_owner_id(entry.name)
-            path = Path(entry.path)
-            candidate = self._candidate(
-                "WORKSPACE",
-                path,
-                WORKSPACE_RETENTION_SECONDS,
-                now_ns,
-            )
-            if candidate is not None:
-                candidates.append(candidate)
+        candidates.extend(self.discover_workspaces(now_ns=now_ns))
 
         require_real_directory(self._layout.state_temporary)
         for entry in sorted(
@@ -207,6 +198,28 @@ class RetentionScanner:
                 candidates.append(candidate)
 
         return tuple(sorted(candidates, key=lambda value: (value.kind, str(value.path))))
+
+    def discover_workspaces(self, *, now_ns=None) -> tuple[_RetentionCandidate, ...]:
+        """A short scan independent of the hourly full filesystem pass."""
+        if now_ns is None:
+            now_ns = _timestamp_ns(self._clock.now())
+        candidates = []
+        for entry in self._real_directory_entries(self._layout.workspaces):
+            workspace_owner_id(entry.name)
+            path = Path(entry.path)
+            candidate = self._candidate(
+                "WORKSPACE",
+                path,
+                WORKSPACE_RETENTION_SECONDS,
+                now_ns,
+            )
+            if candidate is None and self.workspace_completed(entry.name):
+                candidate = _RetentionCandidate("WORKSPACE", path,
+                    _node_age_ns(path, now_ns) / 1_000_000_000, 0)
+            if candidate is not None:
+                candidates.append(candidate)
+
+        return tuple(candidates)
 
 
 __all__ = ["RetentionScanner"]

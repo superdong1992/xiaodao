@@ -11,6 +11,7 @@ from pydantic import TypeAdapter
 
 from problem_locator.contracts import OpaqueId
 from problem_locator.diagnostics import log_event
+from problem_locator.storage.database import dialect_for
 from problem_locator.storage.paths import job_workspace_names, workspace_owner_id
 
 _ID = TypeAdapter(OpaqueId)
@@ -67,7 +68,7 @@ class ConversationCleanupService:
         paths.update(f"tmp/workspaces/{value}" for value in workspace_ids)
         for value in job_ids:
             paths.update((f"jobs/{value}", f"tmp/proposals/{value}"))
-            paths.update(f"tmp/workspaces/{name}" for name in job_workspace_names(value))
+            paths.update(f"tmp/workspaces/{name}" for name in job_workspace_names(value, self.repository.layout.workspaces))
         cleanup_id = str(uuid.uuid5(uuid.UUID(conversation_id), "agent-conversation-cleanup-v2"))
         # Paths originate exclusively from the durable Agent/Case metadata, not
         # HTTP input. Reject malformed identities before touching the filesystem.
@@ -119,6 +120,18 @@ class ConversationCleanupService:
                 self.store.fail_cleanup(conversation_id, "CLEANUP_BUSY")
                 return False
             with lease, ExitStack() as case_leases:
+                with self.repository.database_read() as db:
+                    owner = dialect_for(db).json_text("manifest", "$.conversation_id")
+                    pending_history = db.execute(
+                        f"SELECT 1 FROM history_cleanup_jobs WHERE {owner}=? LIMIT 1",
+                        (conversation_id,),
+                    ).fetchone()
+                if pending_history is not None:
+                    # Earlier cleanup may own isolated files under a different
+                    # receipt. Keep its metadata and release this lease so the
+                    # history worker can finish before deletion is acknowledged.
+                    self.store.fail_cleanup(conversation_id, "CLEANUP_AWAITING_HISTORY")
+                    return False
                 context = self.store.cleanup_context(conversation_id)
                 case_ids = self._ids([*case_ids, *context.get("case_ids", [])])
                 for case_id in case_ids:

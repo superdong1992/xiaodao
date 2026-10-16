@@ -12,6 +12,42 @@ const html = readme.match(/<script type="module">([\s\S]*?)<\/script>/)[1]
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 function ids() { let next = 0; return { randomUUID: () => `logical-request-${++next}` }; }
 
+for (const [path, marker, entry] of [
+  ["./README.md", "把 `report-view.js`", "browser-client.js"],
+  ["../../docs/website-agent-quickstart.md", "将 `examples/website-agent/`", "browser-client.js"],
+  ["../../docs/website-report-followup.md", "复制 [示例目录]", "browser-client.js"],
+  ["../../docs/website-report-followup.md", "BFF 同步部署 `server.ts`", "server.ts"],
+  ["../../docs/website-redis-deployment.md", "同步部署 `examples/website-agent/server.ts`", "server.ts"],
+  ["../../docs/production-upgrade-2026-09-23.md", "同步部署整个", "server.mjs"],
+]) {
+  test(`部署清单包含入口的全部本地静态依赖：${path}/${entry}`, () => {
+    const document = readFileSync(new URL(path, import.meta.url), "utf8").replace(/\r\n/g, "\n");
+    const paragraph = document.split(/\n\s*\n/).find((part) => part.startsWith(marker)); assert.ok(paragraph, marker);
+    const listed = new Set([...paragraph.matchAll(/`([^`]+\.(?:m?js|ts))`/g)].map((match) => match[1].split("/").at(-1)));
+    assert.ok(listed.has(entry));
+    const checked = new Set();
+    function inspect(file) {
+      if (checked.has(file)) return; checked.add(file);
+      const source = readFileSync(new URL(file, import.meta.url), "utf8");
+      const dependencies = [...source.matchAll(/(?:from\s*|import\s*|new URL\(\s*)["']\.\/([^"']+)["']/g)].map((match) => match[1]);
+      for (const dependency of dependencies) { assert.ok(listed.has(dependency), `${file} 需要一并部署 ${dependency}`); inspect(dependency); }
+    }
+    inspect(entry);
+  });
+}
+
+test("继续诊断部署说明包含 Worker 与全部浏览器依赖", () => {
+  const guide = readFileSync(new URL("../../docs/website-report-followup.md", import.meta.url), "utf8");
+  const paragraphs = guide.split(/\r?\n\s*\r?\n/).filter((part) => part.startsWith("与现有浏览器模块一起部署") || part.startsWith("复制 [示例目录]"));
+  const files = new Set([...paragraphs.join("\n").matchAll(/`([^`]+\.m?js)`/g)].map((match) => match[1]));
+  for (const file of files) {
+    const source = readFileSync(new URL(file, import.meta.url), "utf8");
+    for (const match of source.matchAll(/(?:from\s*|import\s*|new URL\(\s*)["']\.\/([^"']+)["']/g))
+      assert.ok(files.has(match[1]), `${file} 需要一并部署 ${match[1]}`);
+  }
+  assert.ok(files.has("file-sha256-worker.js"));
+});
+
 test("copied report example passes unwrapped data directly and preserves the report on refresh failure", async () => {
   const execute = new AsyncFunction("createAgentClient", "renderReport", "document", html);
   const report = { textContent: "已有报告" }, error = { textContent: "" };

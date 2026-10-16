@@ -64,7 +64,10 @@ def fail(code, message, status=409):
 
 
 class FollowupStore:
-    def __init__(self, repository, clock=None):
+    def __init__(self, repository, clock=None, *, retention_days=15):
+        if type(retention_days) is not int or not 1 <= retention_days <= 3650:
+            raise ValueError("retention_days 必须是 1–3650 之间的整数")
+        self.retention_days = retention_days
         self.repository, self.clock = repository, clock
         self.epoch = str(uuid.uuid4())
         self.notify = lambda: None
@@ -87,8 +90,22 @@ class FollowupStore:
         return timestamp(self.clock.now()) if self.clock is not None else now_timestamp()
 
     def expired(self, source):
-        cutoff = parse_timestamp(self.now()) - timedelta(days=7)
+        cutoff = parse_timestamp(self.now()) - timedelta(days=self.retention_days)
+        with self.repository.database_read() as db:
+            row = db.execute("SELECT body FROM agent_conversation_runs WHERE case_id=?", (source.case_id,)).fetchone()
+        if row is not None:
+            run = json.loads(row[0])
+            if run.get("resources_expired", False):
+                return True
+            if run["status"] not in {"COMPLETED", "FAILED", "INTERRUPTED", "CANCELLED"}:
+                return False
+            return parse_timestamp(run.get("completed_at", run["updated_at"])) <= cutoff
         return parse_timestamp(source.occurred_at) <= cutoff
+
+    @staticmethod
+    def resources_expired(db, cid, rid):
+        row = db.execute("SELECT body FROM agent_conversation_runs WHERE conversation_id=? AND run_id=?", (cid, rid)).fetchone()
+        return row is None or bool(json.loads(row[0]).get("resources_expired", False))
 
     @staticmethod
     def alive(db, cid, rid):
@@ -119,10 +136,11 @@ class FollowupStore:
         """Capture published runs even when a legacy caller has opened another."""
         with self.repository.database_read() as db:
             available = dialect_for(db).json_int("r.body", "$.report_available")
+            expired = dialect_for(db).json_int("r.body", "$.resources_expired")
             return [row[0] for row in db.execute(
                 "SELECT r.run_id FROM agent_conversation_runs r JOIN agent_conversations c USING(conversation_id) "
                 "WHERE r.conversation_id=? AND c.deleted_at IS NULL "
-                f"AND {available}=1 ORDER BY r.ordinal", (cid,))]
+                f"AND {available}=1 AND coalesce({expired},0)=0 ORDER BY r.ordinal", (cid,))]
 
     def _register_source(self, db, cid, rid, source, *, enqueue=False):
         previous = _one(db, "SELECT * FROM agent_followup_snapshots WHERE run_id=?", (rid,))
@@ -136,7 +154,7 @@ class FollowupStore:
         # Serialize only allocations competing for this quota. Unrelated
         # conversations can still read, finish tasks and append events.
         lock_key(db, "quota", "followup-snapshot-count")
-        if db.execute("SELECT count(*) FROM agent_followup_snapshots").fetchone()[0] >= 10_000:
+        if db.execute("SELECT count(*) FROM agent_followup_snapshots WHERE status IN ('PENDING','BUILDING','READY') OR reserved_bytes>0").fetchone()[0] >= 10_000:
             raise fail("LIMIT_EXCEEDED", "追问记录已达到上限，请稍后重试。", 429)
         now = self.now()
         db.execute("INSERT INTO agent_followup_snapshots(run_id,conversation_id,case_id,source_job_id,report_sha256,source_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -146,7 +164,7 @@ class FollowupStore:
     def enqueue_snapshot(self, cid, rid, source):
         with self.repository.database_transaction() as db:
             lock_conversation(db, cid)
-            if not self.alive(db, cid, rid) or self.expired(source):
+            if not self.alive(db, cid, rid) or self.resources_expired(db, cid, rid) or self.expired(source):
                 return False
             self._register_source(db, cid, rid, source, enqueue=True)
         self.notify()
@@ -244,8 +262,8 @@ class FollowupStore:
                 if previous["fingerprint"] != fingerprint:
                     raise AgentStoreError("AGENT_IDEMPOTENCY_CONFLICT", "同一 request_id 的内容不能更改。", 409)
                 return FollowupReceipt.model_validate_json(previous["receipt"])
-            if self.expired(source):
-                raise fail("EXPIRED", "报告已过保留期，请新建对话。")
+            if self.expired(source) or self.resources_expired(db, cid, rid):
+                raise fail("EXPIRED", "本轮相关资料已清理或到期，历史内容仍可查看，请发起新的诊断。")
             if self.active(db, cid) is not None:
                 raise fail("BUSY", "本会话有追问正在处理，请等待完成或先停止。")
             history = self._history(db, rid)
@@ -341,7 +359,7 @@ class FollowupStore:
             if not try_lock_conversation(db, row["conversation_id"]) or not self.alive(db, row["conversation_id"], row["run_id"]):
                 return None
             source = _one(db, "SELECT * FROM agent_followup_snapshots WHERE run_id=?", (row["run_id"],))
-            if source is None or self.expired(self._source(source)):
+            if source is None or self.resources_expired(db, row["conversation_id"], row["run_id"]):
                 self._transition(db, row, "CANCELLED")
                 return None
             self._transition(db, row, "RUNNING")
@@ -414,7 +432,7 @@ class FollowupStore:
                 for (fid,) in tasks:
                     row = _one(db, "SELECT * FROM agent_followup_tasks WHERE followup_id=?", (fid,))
                     source = _one(db, "SELECT * FROM agent_followup_snapshots WHERE run_id=?", (row["run_id"],))
-                    fresh = source is not None and not self.expired(self._source(source))
+                    fresh = source is not None and not self.resources_expired(db, cid, row["run_id"])
                     if row["status"] == "QUEUED" and enabled and fresh and self.alive(db, cid, row["run_id"]):
                         continue
                     cancelled = row["status"] != "RUNNING" or not self.alive(db, cid, row["run_id"])
@@ -445,6 +463,18 @@ class FollowupStore:
         tail, args = ("", (cid,)) if run_id is None else (" AND run_id=?", (cid, run_id))
         for table in ("agent_followup_events", "agent_followup_stops", "agent_followup_tasks", "agent_followup_snapshots"):
             db.execute(f"DELETE FROM {table} WHERE conversation_id=?" + tail, args)
+
+    @staticmethod
+    def expire_resources(db, cid, rid):
+        """Revoke future log use without removing questions, answers or cursors."""
+        lock_conversation(db, cid)
+        db.execute("UPDATE agent_followup_snapshots SET status='UNAVAILABLE',error_code='EXPIRED' "
+            "WHERE conversation_id=? AND run_id=?", (cid, rid))
+
+    @staticmethod
+    def finish_resource_cleanup(db, cid, rid):
+        db.execute("UPDATE agent_followup_snapshots SET reserved_bytes=0,manifest_json=NULL "
+            "WHERE conversation_id=? AND run_id=? AND error_code='EXPIRED'", (cid, rid))
 
     @staticmethod
     def workspace_ids(db, cid, run_id=None):

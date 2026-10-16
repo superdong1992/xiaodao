@@ -46,11 +46,11 @@ def _with_logs(state):
     return StateFile.model_validate(payload)
 
 
-def _preflight(job, *, requirement_id=REQUIREMENT_ID):
+def _preflight(job, *, requirement_id=REQUIREMENT_ID, max_count=20):
     requirement = PendingRequirement(requirement_id=requirement_id,
         kind=RequirementKind.ATTACHMENT, name="log_archive", prompt="请补充日志归档。", required=True,
         constraints=AttachmentRequirementConstraints(allowed_content_types=["application/gzip", "application/zip", "application/x-tar"],
-            min_count=1, max_count=1), status=RequirementStatus.OPEN, requested_by_job_id=job.job_id,
+            min_count=1, max_count=max_count), status=RequirementStatus.OPEN, requested_by_job_id=job.job_id,
         fulfilled_by_refs=[], supplement_policy=SupplementPolicy.MISSING_ONLY)
     return JobOutcome.model_validate({**_generic_outcome(GenericResultStatus.UNRESOLVED).model_dump(mode="python"),
         "job_id": job.job_id, "base_state_revision": job.base_state_revision,
@@ -131,7 +131,7 @@ def _routed_state_with_historical_archives(content_types):
     (["text/plain"], False), (["text/plain", "application/zip"], False),
     (["application/zip", "text/plain", "application/zip"], False), (["text/plain"], True),
 ], ids=["no-logs", "one-archive", "two-archives", "legacy-text", "mixed-one-archive", "mixed-two-archives", "explicit-intent-legacy-text"])
-def test_specialized_history_no_capability_selects_only_an_unambiguous_archive(content_types, initial_expected):
+def test_specialized_history_no_capability_preserves_all_supported_archives(content_types, initial_expected):
     state = _routed_state_with_historical_archives(content_types)
     if initial_expected:
         payload = state.model_dump(mode="python")
@@ -152,13 +152,13 @@ def test_specialized_history_no_capability_selects_only_an_unambiguous_archive(c
     aggregate = repository.read_snapshot().cases[CASE_ID]
     job = aggregate.jobs[aggregate.case.active_job_id]
     assert job.generic_log_archive_expected is expected_logs
-    assert job.attachment_refs == (archive_ids if len(archive_ids) == 1 else [])
+    assert job.attachment_refs == archive_ids
     assert job.logparse_tool_ref == bindings.logparse_tool_ref
     assert job.previous_outcome_refs == job.evidence_refs == job.artifact_refs == []
     assert aggregate.case.failure is None
     assert service.submit_outcome(outcome, ref).disposition is OutcomeDisposition.DUPLICATE
 
-    if not expected_logs or len(archive_ids) == 1:
+    if not expected_logs or archive_ids:
         return
     control, *_ = _control_service(repository.read_snapshot(), DomainCoordinator(), repository=repository, catalog=catalog)
     assert control.claim_job(job.job_id, CURRENT_EPOCH).claimed
@@ -168,17 +168,6 @@ def test_specialized_history_no_capability_selects_only_an_unambiguous_archive(c
     assert service.submit_outcome(preflight, preflight_ref).disposition is OutcomeDisposition.APPLIED
     waiting = repository.read_snapshot()
     assert waiting.cases[CASE_ID].case.status is CaseStatus.WAITING_ATTACHMENT
-    if not archive_ids:
-        return
-    selected = archive_ids[1]
-    handler, *_ = _handler(waiting, DomainCoordinator(), repository=repository, catalog=catalog)
-    response = handler.execute(SubmitSupplement(idempotency_key="select-one-historical-archive", case_id=CASE_ID,
-        expected_case_revision=waiting.cases[CASE_ID].case.case_revision,
-        inputs={}, attachment_ids=[selected], wait_seconds=0))
-    continued = repository.read_snapshot().cases[CASE_ID].jobs[response.business_receipt.job_id]
-    assert continued.attachment_refs == [selected]
-    assert runtime_bindings_from_job(continued) == runtime_bindings_from_job(job)
-    assert len(repository.read_snapshot().cases[CASE_ID].attachments) == len(content_types)
 
 
 def test_specialized_supplement_still_preserves_multiple_plain_text_attachments():
@@ -213,7 +202,8 @@ def test_specialized_supplement_still_preserves_multiple_plain_text_attachments(
     assert not job.generic_log_archive_expected and not job.generic_supplement_texts
 
 
-def test_generic_preflight_waits_then_supplement_freezes_selected_archive_and_text():
+@pytest.mark.parametrize("archive_count", [1, 2])
+def test_generic_preflight_waits_then_supplement_freezes_selected_archive_and_text(archive_count):
     state = _with_logs(_running_generic_state())
     records = InMemoryExecutionRecordStore()
     job = state.cases[CASE_ID].jobs[DIAGNOSE_JOB_ID]
@@ -231,16 +221,22 @@ def test_generic_preflight_waits_then_supplement_freezes_selected_archive_and_te
         sha256=hashlib.sha256(b"log").hexdigest(),
         storage_key=f"resources/cases/{CASE_ID}/attachments/{ATTACHMENT_ID}/payload",
         created_at=outcome.produced_at, updated_at=outcome.produced_at)
+    attachment_ids = [ATTACHMENT_ID]
+    if archive_count == 2:
+        second_id = "00000000-0000-0000-0000-000000000153"
+        payload["cases"][CASE_ID]["attachments"][second_id] = payload["cases"][CASE_ID]["attachments"][ATTACHMENT_ID].model_copy(
+            update={"attachment_id": second_id, "storage_key": f"resources/cases/{CASE_ID}/attachments/{second_id}/payload"})
+        attachment_ids.append(second_id)
     waiting = StateFile.model_validate(payload)
     catalog = FakeAssetCatalog(assets=assets_for_bindings(_log_bindings()))
     handler, repository, *_ = _handler(waiting, DomainCoordinator(), catalog=catalog)
     command = SubmitSupplement(idempotency_key="provide-log", case_id=CASE_ID,
         expected_case_revision=waiting.cases[CASE_ID].case.case_revision,
-        inputs={}, attachment_ids=[ATTACHMENT_ID], generic_supplement_text="错误发生前刚重启。", wait_seconds=0)
+        inputs={}, attachment_ids=attachment_ids, generic_supplement_text="错误发生前刚重启。", wait_seconds=0)
     result = handler.execute(command)
     aggregate = repository.read_snapshot().cases[CASE_ID]
     continued = aggregate.jobs[result.business_receipt.job_id]
-    assert continued.attachment_refs == [ATTACHMENT_ID]
+    assert continued.attachment_refs == attachment_ids
     assert continued.generic_supplement_texts == ["错误发生前刚重启。"]
     assert continued.generic_problem_text == job.generic_problem_text
     assert runtime_bindings_from_job(continued) == runtime_bindings_from_job(job)

@@ -95,6 +95,7 @@ class PreparedWorkspace:
     evidence: tuple[Evidence, ...]
     artifacts: tuple[Artifact, ...]
     previous_outcomes: tuple[JobOutcome, ...]
+    capacity: object | None = None
 
     @property
     def context_path(self) -> Path:
@@ -1385,8 +1386,9 @@ def _methods_specialist_manifest_v2(job: Job) -> WorkspaceInputManifest:
 class WorkspaceManager:
     """Create and verify the fixed workspace tree for exactly one Job."""
 
-    def __init__(self, data_root: Path) -> None:
+    def __init__(self, data_root: Path, *, capacity=None) -> None:
         self._data_root = Path(data_root)
+        self.capacity = capacity
 
     def prepare(
         self,
@@ -1398,6 +1400,7 @@ class WorkspaceManager:
         review_subject: ReviewSubjectV2 | None = None,
         methods_evaluation_plan: MethodEvaluationPlanV2 | None = None,
         workspace_phase: Literal["logparse-preprocess"] | None = None,
+        preprocessing_attachment_id: str | None = None,
     ) -> PreparedWorkspace:
         """Prepare a fully materialized Job workspace."""
 
@@ -1412,6 +1415,7 @@ class WorkspaceManager:
             methods_evaluation_plan=methods_evaluation_plan,
             workspace_phase=workspace_phase,
             materialize_payloads=True,
+            preprocessing_attachment_id=preprocessing_attachment_id,
         )
 
     def prepare_fresh_methods_specialist_main_metadata_only(
@@ -1454,8 +1458,8 @@ class WorkspaceManager:
         resolved_logparse_plan: ResolvedLogparseParseOnlyPlanInput,
     ) -> PreparedWorkspace:
         """Keep the uploaded archive in the server's preprocessing workspace only."""
-        if job.diagnosis_mode is not DiagnosisMode.GENERIC or len(job.attachment_refs) != 1:
-            raise ValueError("generic log workspace requires one fixed attachment")
+        if job.diagnosis_mode is not DiagnosisMode.GENERIC or not job.attachment_refs:
+            raise ValueError("generic log workspace requires fixed attachments")
         return self._prepare(
             job, aggregate, None, resolved_logparse_plan=resolved_logparse_plan,
             review_subject=None, methods_evaluation_plan=None, workspace_phase=None,
@@ -1473,9 +1477,17 @@ class WorkspaceManager:
         methods_evaluation_plan: MethodEvaluationPlanV2 | None,
         workspace_phase: Literal["logparse-preprocess"] | None,
         materialize_payloads: bool,
+        preprocessing_attachment_id: str | None = None,
     ) -> PreparedWorkspace:
         if materialize_payloads and resource_store is None:
             raise TypeError("materialized Workspace requires a ResourceStore")
+        if preprocessing_attachment_id is not None and (
+            workspace_phase != "logparse-preprocess"
+            or preprocessing_attachment_id not in job.attachment_refs
+            or resolved_logparse_plan is None
+            or resolved_logparse_plan.attachment_id != preprocessing_attachment_id
+        ):
+            raise ValueError("per-archive workspace must match its fixed Logparse plan")
         if aggregate.case.case_id != job.case_id or aggregate.jobs.get(job.job_id) != job:
             raise runtime_failure(
                 stage=ExecutionStage.OUTCOME_VALIDATE,
@@ -1504,6 +1516,8 @@ class WorkspaceManager:
             if workspace_phase is None
             else f"{job.job_id}.{workspace_phase}"
         )
+        if preprocessing_attachment_id is not None:
+            workspace_name += "." + preprocessing_attachment_id
         root = self._data_root / "tmp" / "workspaces" / workspace_name
         try:
             root.mkdir(parents=True, exist_ok=False)
@@ -1534,7 +1548,9 @@ class WorkspaceManager:
                 attachment.attachment_id,
                 filename_suffix,
             )
-            if materialize_payloads:
+            if materialize_payloads and (
+                preprocessing_attachment_id is None or attachment.attachment_id == preprocessing_attachment_id
+            ):
                 assert resource_store is not None
                 destination = _safe_destination(root, relative)
                 _verify_materialized(resource_store, reference, destination)
@@ -1719,6 +1735,7 @@ class WorkspaceManager:
             evidence=tuple(evidence),
             artifacts=tuple(artifacts),
             previous_outcomes=tuple(materialized_outcomes),
+            capacity=self.capacity,
         )
 
     @staticmethod
@@ -1753,6 +1770,8 @@ class WorkspaceManager:
         target_logs: Sequence[tuple[str, str, bytes]],
         receipt_context: Mapping[str, Any],
         allow_empty_targets: bool = False,
+        source_metadata: Mapping[str, Mapping[str, Any]] | None = None,
+        source_receipts: Sequence[Mapping[str, Any]] = (),
     ) -> FrozenMethodsWorkspaceInputs:
         """Atomically publish the server-owned Methods V1 input surface.
 
@@ -1782,6 +1801,9 @@ class WorkspaceManager:
             ):
                 raise ValueError("Methods target-log identity is invalid")
             source_ids.add(source_id)
+        metadata = dict(source_metadata or {})
+        if set(metadata) - source_ids:
+            raise ValueError("Methods source metadata must refer to frozen target logs")
 
         inputs_root = workspace.root / "inputs"
         try:
@@ -1815,6 +1837,7 @@ class WorkspaceManager:
                         "log_path": relative_path,
                         "size": len(content),
                         "content_sha256": digest,
+                        **({"source_archive": dict(metadata[source_id])} if source_id in metadata else {}),
                     }
                 )
 
@@ -1826,6 +1849,7 @@ class WorkspaceManager:
                     "schema_version": 1,
                     **dict(receipt_context),
                     "target_logs": target_rows,
+                    **({"sources": [dict(item) for item in source_receipts]} if source_receipts else {}),
                 }
             )
             request_value = dict(request)

@@ -1,6 +1,6 @@
 # 网站接入示例：先看报告，再接 API
 
-诊断记录和附件默认保留 **30 天**，服务端可用 `HISTORY_RETENTION_DAYS` 调整，页面提示须与实际配置一致。接入页面须提示用户及时下载，并处理历史过期与 SSE 游标重置；详见[服务端文件保留与清理](../../docs/storage-retention.md)。
+会话正文、报告和历史问答永久保存；日志资源默认保留 **15 天**，磁盘紧张时可提前清理。服务端用 `WEB_RESOURCE_RETENTION_DAYS` 调整期限。页面根据所选轮次的 `resources_expired` 展示只读提示，保留报告阅读与下载，隐藏已清理 ZIP 的入口，并处理 SSE 游标重置；详见[服务端文件保留与清理](../../docs/storage-retention.md)。调用报告组件时传入 `renderReport(container, detail.result, { resourcesExpired: detail.resources_expired })`。
 
 已接入本示例的网站请核对 [2026-09-21～22 增量适配清单](../../docs/website-agent-changes-2026-09-22.md)，同步更新浏览器 SDK、BFF 和页面交互。
 
@@ -13,6 +13,8 @@
 通用报告赞踩接口及经验复用规则见[经验库接入说明](../../docs/generic-feedback-memory.md)。按钮由网站实现，本示例提供调用封装和后端转发。
 
 报告后连续解释、质疑和文字补充见[报告追问接入说明](../../docs/website-report-followup.md)。本示例提供真实请求 controller、独立问答视图和离线模拟；功能默认关闭，服务端启用后才可提交。追问使用独立接口，不改正式报告和赞踩；独立定位请新建对话。
+
+报告页还提供“继续诊断”：补充或替换日志、更正信息、指定目标，核对草稿后生成新版报告。`continuation-controller.js` 负责上传与草稿恢复，`continuation-view.js` 展示最终日志、版本列表和并排报告。部署时同时复制 `continuation-contract.js`、`file-sha256.js`、`file-sha256-worker.js`、`report-view.css`；BFF 需要 `continuation-bff.mjs`。继续诊断不依赖追问功能开关，使用现有正式诊断服务。完整接口和挂载示例见[继续诊断与报告版本](../../docs/website-report-followup.md#继续诊断与报告版本)。
 
 ## 1. 先打开离线报告预览
 
@@ -31,6 +33,10 @@ node examples/website-agent/preview.mjs
 | `report-view.css` | 报告区样式 | 与渲染模块一起复制，也可替换为网站自己的样式 |
 | `browser-client.js` | 封装浏览器对网站同源 API 的调用 | 复制后使用，或按相同接口接入现有请求库 |
 | `followup-contract.js` | SDK 和 BFF 共用的追问 DTO 校验 | 与 browser-client.js 一起复制 |
+| `continuation-contract.js` | SDK 和 BFF 共用的继续诊断 DTO 校验 | 即使只展示报告，也须与 browser-client.js 一起复制 |
+| `continuation-controller.js`、`continuation-view.js` | 继续诊断草稿、日志清单和版本对比 | 与现有报告和追问模块一起部署 |
+| `file-sha256.js`、`file-sha256-worker.js` | 分块校验文件、显示进度并支持取消 | 两个文件保持同一目录，网站 CSP 允许同源 Worker |
+| `continuation-bff.mjs` | 继续诊断路由与响应校验 | 与 server.mjs、continuation-contract.js 一起部署 |
 | `conversation-input.js` | 新网站共用输入框的诊断补充/报告追问分流 | 调用 sendConversationInput；诊断中固定 target_run_id，完成竞态先刷新再转追问 |
 | `followup-controller.js` | 草稿、请求 ID、快照和独立 SSE 恢复 | 每份报告创建实例，切换报告时销毁 |
 | `followup-view.js` | 可复用的连续问答界面 | 调用 mountFollowupView，或订阅 controller 接入自己的组件 |
@@ -40,7 +46,7 @@ node examples/website-agent/preview.mjs
 
 ## 2. 用最少代码显示已有报告
 
-把 `report-view.js`、`report-view.css`、`browser-client.js` 和它依赖的 `followup-contract.js` 放进网站的同一个静态资源目录，例如 `/xiaodao/`。后端接入同源 `/api/agent/` 接口后，在现有页面加入以下代码：
+把 `report-view.js`、`report-view.css`、`browser-client.js` 和它依赖的 `followup-contract.js`、`continuation-contract.js` 放进网站的同一个静态资源目录，例如 `/xiaodao/`。即使只展示报告，也必须保留两份合同模块。后端接入同源 `/api/agent/` 接口后，在现有页面加入以下代码：
 
 ```html
 <link rel="stylesheet" href="/xiaodao/report-view.css">
@@ -181,7 +187,7 @@ async function submitLogs() {
 }
 ```
 
-`websiteUpload.sha256(file)` 需接入网站现有的增量哈希组件或后端上传模块，返回该文件实际 SHA-256 的 64 位小写十六进制值。示例不提供哈希实现，也不使用占位哈希。计算哈希时，应避免一次读取数 GiB 文件。
+`websiteUpload.sha256(file)` 可以接入网站现有组件，也可以使用 `file-sha256.js` 导出的 `sha256File(file)`，返回文件实际 SHA-256 的 64 位小写十六进制值。继续诊断 controller 默认在 `file-sha256-worker.js` 中校验，按 1 MiB 读取，不会一次读取数 GiB 文件。网站 CSP 需允许 `worker-src 'self'`；Worker 不可用时，同一算法每处理 64 KiB 就让出主线程。`sha256File(file, {signal, onProgress})` 支持取消与字节进度；页面区分校验百分比和网络上传，取消后可用原文件、原预约重试。
 
 示例先检查后缀和大小，再计算哈希，全程保留文件原名。`file.type` 可能为空，因此根据支持的小写压缩后缀确定 MIME；服务端仍会核验实际上传内容。仅带附件的消息应省略 `text` 或传 null，不传空字符串。
 

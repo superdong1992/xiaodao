@@ -17,6 +17,7 @@ from problem_locator.runtime.generic_logs import _stream_verified
 from problem_locator.storage.atomic import is_reparse_point, require_real_directory
 from problem_locator.storage.paths import ensure_no_symlink_ancestors
 from problem_locator.storage.platform import PlatformFileSync
+from problem_locator.storage.capacity import StorageCapacityError
 
 _ID = TypeAdapter(OpaqueId)
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
@@ -155,7 +156,7 @@ def build_snapshot(service, task, cancellation):
         raise InputChanged("snapshot destination already exists")
     generated = {"inputs/problem.txt": source.problem_text.encode("utf-8"),
         "inputs/report.md": source.report_markdown.encode("utf-8")}
-    copies, logs = [], []
+    copies, logs, sources = [], [], []
     if hashlib.sha256(generated["inputs/report.md"]).hexdigest() != source.report_sha256:
         raise InputChanged("published report hash differs")
     if source.has_logs:
@@ -165,6 +166,9 @@ def build_snapshot(service, task, cancellation):
         if raw != read_small(job_root, audit_name):
             raise InputChanged("log receipt differs from the published execution record")
         payload = json.loads(raw)
+        sources = payload.get("sources", [])
+        if not isinstance(sources, list):
+            raise InputChanged("invalid log source manifest")
         entries = payload[key]
         if not isinstance(entries, list) or len(entries) > 10_000:
             raise InputChanged("invalid log manifest")
@@ -179,8 +183,12 @@ def build_snapshot(service, task, cancellation):
             target = f"inputs/logs/log-{ordinal:06d}.log"
             copies.append((file, {"path": target, "size": size, "sha256": digest}))
             logs.append({"log_path": target, "size": size, "sha256": digest,
-                "source_label": str(entry.get("label", entry.get("relative_path", path)))[:1024]})
-    generated["inputs/logs.json"] = _json_bytes({"schema_version": 1, "logs": logs})
+                "source_label": str(entry.get("label", entry.get("relative_path", path)))[:1024],
+                **{field: entry[field] for field in (
+                    "source_id", "source_archive", "source_attachment_id", "source_attachment_name",
+                ) if field in entry}})
+    generated["inputs/logs.json"] = _json_bytes({"schema_version": 1, "logs": logs,
+        **({"sources": sources} if sources else {})})
     rows = [_row(path, raw) for path, raw in generated.items()] + [row for _, row in copies]
     manifest = {"schema_version": 1, "case_id": source.case_id, "run_id": task["run_id"],
         "source_job_id": job_id, "report_sha256": source.report_sha256, "source_kind": source.source_kind,
@@ -198,7 +206,8 @@ def build_snapshot(service, task, cancellation):
     for relative, raw in generated.items():
         write_new(staging / relative, raw)
     for file, row in copies:
-        _stream_verified(file, row["size"], row["sha256"], destination=staging / row["path"], cancellation=cancellation)
+        _stream_verified(file, row["size"], row["sha256"], destination=staging / row["path"], cancellation=cancellation,
+            capacity=getattr(getattr(service.agent, "uploads", None), "capacity", None))
     verify_inputs(staging, rows, cancellation)
     write_new(staging / "manifest.json", raw_manifest)
     protect_inputs(staging / "inputs")
@@ -231,7 +240,8 @@ def copy_snapshot(service, snapshot, workspace, cancellation):
         target = workspace / row["path"]
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         ensure_no_symlink_ancestors(workspace, target)
-        _stream_verified(source, row["size"], row["sha256"], destination=target, cancellation=cancellation)
+        _stream_verified(source, row["size"], row["sha256"], destination=target, cancellation=cancellation,
+            capacity=getattr(getattr(service.agent, "uploads", None), "capacity", None))
     return list(rows)
 
 
@@ -265,7 +275,8 @@ class SnapshotWorker:
         except Exception as exc:
             if task is not None:
                 try:
-                    service.store.fail_snapshot(task["run_id"])
+                    service.store.fail_snapshot(task["run_id"],
+                        code=exc.code if isinstance(exc, StorageCapacityError) else "SNAPSHOT_UNAVAILABLE")
                 except Exception:
                     pass
             log_event("agent.followup.snapshot_failed", error_type=type(exc).__name__)

@@ -39,10 +39,16 @@ class _RunStopped(Exception):
 
 
 class AgentConversationService:
-    """One bounded intake worker; subscribing never starts or repeats model work."""
+    """Bounded intake and continuation workers; reads never repeat model work."""
 
-    def __init__(self, store, application, intake_engine, layout, *, memory_store=None, memory_enabled=False):
+    def __init__(self, store, application, intake_engine, layout, *, memory_store=None, memory_enabled=False,
+                 model_configuration_fingerprint=None):
+        if model_configuration_fingerprint is not None and (
+                not isinstance(model_configuration_fingerprint, str) or len(model_configuration_fingerprint) != 64
+                or any(char not in "0123456789abcdef" for char in model_configuration_fingerprint)):
+            raise ValueError("模型执行配置指纹必须是 64 位小写 SHA-256 摘要。")
         self.store, self.application, self.intake_engine = store, application, intake_engine
+        self.model_configuration_fingerprint = model_configuration_fingerprint
         from problem_locator.memory.service import FeedbackService
         self.memory_store = memory_store
         self.memory_enabled = memory_enabled
@@ -50,6 +56,10 @@ class AgentConversationService:
         self.feedback = None if memory_store is None else FeedbackService(self, memory_store, memory_enabled=memory_enabled)
         self.uploads = ConversationUploads(store, application, layout)
         self.usage_guard = ConversationUsageGuard()
+        from .report_archive import ReportArchive
+        self.report_archive = ReportArchive(self)
+        from problem_locator.continuation.service import ContinuationService
+        self.continuations = ContinuationService(self)
         self.cleanup = None
         self.followups = None
         self.dispatcher = None
@@ -62,10 +72,12 @@ class AgentConversationService:
         self._intake_accepts_cancellation = intake is not None and "cancellation" in inspect.signature(intake).parameters
         self._stop, self._wake = threading.Event(), threading.Event()
         self._control_wake = threading.Event()
+        self._continuation_wake = threading.Event()
         self._control_processing = threading.Lock()
         self._processing, self._lifecycle = threading.Lock(), threading.Lock()
         self._thread = None
         self._control_thread = None
+        self._continuation_thread = None
         self._failure = None
         self._phase = "AGENT"
         store.on_change = self._changed
@@ -73,6 +85,7 @@ class AgentConversationService:
     def _changed(self, _conversation_id):
         self._wake.set()
         self._control_wake.set()
+        self._continuation_wake.set()
         if self.followups is not None:
             try:
                 self.followups.schedule_observe(_conversation_id)
@@ -87,18 +100,23 @@ class AgentConversationService:
             if runtime_epoch is not None:
                 self.store.runtime_epoch = runtime_epoch
             self.store.recover()
+            self.continuations.recover()
             if self.followups is not None:
                 self.followups.start()
             self._thread = threading.Thread(target=self._run, name="agent-intake", daemon=True)
             self._control_thread = threading.Thread(target=self._run_control, name="agent-management", daemon=True)
+            self._continuation_thread = threading.Thread(target=self._run_continuations,
+                name="agent-continuation", daemon=True)
             self._thread.start()
             self._control_thread.start()
+            self._continuation_thread.start()
 
     def shutdown(self, timeout_seconds=30):
         deadline = time.monotonic() + timeout_seconds
         self._stop.set()
         self._wake.set()
         self._control_wake.set()
+        self._continuation_wake.set()
         if self.cleanup is not None:
             self.cleanup.shutdown(0)
         with self._run_lock:
@@ -106,10 +124,11 @@ class AgentConversationService:
                 signal.cancel(CancellationReason.SERVICE_SHUTDOWN)
         followups_stopped = self.followups is None or self.followups.shutdown(
             max(0.0, deadline - time.monotonic()))
-        for thread in (self._thread, self._control_thread):
+        threads = (self._thread, self._control_thread, self._continuation_thread)
+        for thread in threads:
             if thread is not None:
                 thread.join(max(0.0, deadline - time.monotonic()))
-        return followups_stopped and all(thread is None or not thread.is_alive() for thread in (self._thread, self._control_thread))
+        return followups_stopped and all(thread is None or not thread.is_alive() for thread in threads)
 
     def _available(self):
         if self._stop.is_set() or self._failure is not None:
@@ -124,9 +143,16 @@ class AgentConversationService:
 
     @contextmanager
     def operation_lease(self, conversation_id, *, owner_key=None):
-        with self.usage_guard.acquire(conversation_id):
-            self.store.require_owner(conversation_id, owner_key)
-            yield
+        try:
+            with self.usage_guard.acquire(conversation_id):
+                self.store.require_owner(conversation_id, owner_key)
+                yield
+        except AgentStoreError as error:
+            if error.code == "AGENT_RESOURCES_CLEANING":
+                # Temporary cleanup must not reveal another owner's chat or
+                # turn an already committed explicit deletion into a 503.
+                self.store.require_owner(conversation_id, owner_key)
+            raise
 
     @contextmanager
     def read_lease(self, conversation_id, *, owner_key=None, share=False):
@@ -160,19 +186,17 @@ class AgentConversationService:
                     raise AgentStoreError("AGENT_RUN_CHANGED", "本次定位已结束。", 409)
                 job = None if aggregate is None else aggregate.jobs.get(aggregate.case.active_job_id)
                 if self._is_generic_job(job) or (job is not None and job.job_type.value == "ROUTE"):
-                    # Validate the selected archive before accepting or cancelling
-                    # anything. Multiple selections must never pick the first.
+                    # Validate the complete selection before accepting or cancelling.
                     records = [self.store.get_attachment(item) for item in request.attachment_ids]
                     if any(item.conversation_id != conversation_id or item.status not in {"READY", "IMPORTED"} for item in records):
                         raise AgentStoreError("AGENT_ATTACHMENT_NOT_READY", "附件不存在、未上传完成或不属于本会话。", 409)
-                    if len(records) != 1 and self._is_generic_job(job):
-                        raise AgentStoreError("AGENT_LOG_SELECTION_INVALID", "当前仅支持一份日志归档，请合并后上传，或重新选择一个附件。", 409)
                     for record in records:
                         derive_attachment_filename_suffix(record.name, record.content_type)
                     record = records[0] if len(records) == 1 else None
-                    if self._is_generic_job(job) and record is not None and any(aggregate.attachments[item].sha256 == record.sha256 for item in job.attachment_refs
-                            if item in aggregate.attachments):
-                        raise AgentStoreError("AGENT_LOG_ALREADY_SELECTED", "这份日志已用于当前定位，无需重复提交。", 409)
+                    current_hashes = {aggregate.attachments[item].sha256 for item in job.attachment_refs
+                        if item in aggregate.attachments}
+                    if self._is_generic_job(job) and {item.sha256 for item in records} == current_hashes:
+                        raise AgentStoreError("AGENT_LOG_ALREADY_SELECTED", "这些日志已用于当前定位，无需重复提交。", 409)
                     identity = str(uuid.uuid5(uuid.UUID(view.run_id), request_id))
                     fields = dict(case_id=view.case_id, expected_case_revision=aggregate.case.case_revision,
                         source_job_id=job.job_id)
@@ -227,7 +251,7 @@ class AgentConversationService:
                     snapshot = self.store.repository.read_snapshot(command.case_id)
                     aggregate = snapshot.cases.get(command.case_id)
                     job = None if aggregate is None else aggregate.jobs.get(aggregate.case.active_job_id)
-                    if self._is_generic_job(job) and len(pending["message"]["attachment_ids"]) == 1:
+                    if self._is_generic_job(job) and pending["message"]["attachment_ids"]:
                         replacement = RestartGenericDiagnosis(idempotency_key=command.idempotency_key + "-generic",
                             case_id=command.case_id, expected_case_revision=aggregate.case.case_revision,
                             source_job_id=job.job_id, supplement_text=pending["message"]["text"])
@@ -309,6 +333,15 @@ class AgentConversationService:
         self._control_wake.set()
         return receipt
 
+    def expire_waiting_run(self, conversation_id, run_id, cutoff):
+        """Durably fence an idle round, then use the ordinary safe stop path."""
+        with self._message_lock(conversation_id):
+            if not self.store.request_idle_stop(conversation_id, run_id, cutoff):
+                return False
+            self._signal_run(conversation_id, run_id)
+        self._control_wake.set()
+        return self._settle_stop(conversation_id, run_id)
+
     def delete_conversation(self, conversation_id, *, owner_key=None):
         # Store performs authorization even for the minimal deletion receipt.
         receipt = self.store.request_delete(conversation_id, owner_key=owner_key)
@@ -358,13 +391,17 @@ class AgentConversationService:
             raise
         view = captured.view
         case = published = artifacts = None
-        if needs_case and view.case_id is not None:
+        archived = self.report_archive.read(conversation_id, captured.selected_run_id) if (
+            needs_case and view.resources_expired) else None
+        if needs_case and view.case_id is not None and archived is None:
             try:
                 case, published, artifacts = self.application.read_conversation_delivery(
                     view.case_id, captured.snapshot, report="report" in included, artifacts="artifacts" in included)
             except ApplicationPortError as error:
+                if error.error.code.value == "CASE_NOT_FOUND" and view.status in _CLOSED:
+                    archived = self.report_archive.read(conversation_id, captured.selected_run_id)
                 if not (error.error.code.value == "CASE_NOT_FOUND" and view.status in _CLOSED
-                        and view.report_state == "UNAVAILABLE"):
+                        and (view.report_state == "UNAVAILABLE" or archived is not None)):
                     raise
         view = self._read_failure(view, case=case)
         values = view.model_dump(mode="python")
@@ -379,8 +416,15 @@ class AgentConversationService:
                 archive_status=case.archive_status, source_job_id=source,
                 report_state="READY" if source is not None else "UNAVAILABLE" if (
                     view.status in _CLOSED or case.status.value in _CASE_DONE) else "PENDING")
+        if archived is not None:
+            result = archived.result
+            values.update(case_revision=result.case_revision, case_status=result.case_status,
+                archive_status=result.archive_status, source_job_id=result.source_job_id,
+                report_state=result.report_state, failure=result.failure)
+            artifacts = [item for item in archived.artifacts if result.artifact is not None
+                and item.artifact_id == result.artifact.artifact_id]
         if "report" in included:
-            result = self._report_view(view, published)
+            result = archived.result if archived is not None else self._report_view(view, published)
             values.update(result=result, case_revision=result.case_revision, case_status=result.case_status,
                 archive_status=result.archive_status, source_job_id=result.source_job_id,
                 report_state=result.report_state, failure=result.failure)
@@ -388,6 +432,21 @@ class AgentConversationService:
             values["artifacts"] = [ConversationArtifact.model_validate(item.model_dump(mode="json"))
                 for item in artifacts or []]
         return ConversationDetail(**values)
+
+    def open_conversation_artifact(self, conversation_id, artifact_id, *, run_id=None):
+        """Caller holds the authenticated read lease through the full transfer."""
+        body = self.store.get_run(conversation_id, run_id)
+        opened = self.report_archive.open(conversation_id, body["run_id"], artifact_id,
+            resources_expired=body.get("resources_expired", False))
+        if opened is not None:
+            return opened
+        if body.get("resources_expired"):
+            raise AgentStoreError("ARTIFACT_NOT_FOUND", "产物不存在。", 404)
+        detail = self._conversation_detail(conversation_id, ("artifacts",), run_id=body["run_id"],
+            history_before=None, history_limit=50)
+        if detail.case_id is None or not any(item.artifact_id == artifact_id for item in detail.artifacts or []):
+            raise AgentStoreError("ARTIFACT_NOT_FOUND", "产物不存在。", 404)
+        return self.application.open_artifact(detail.case_id, artifact_id)
 
     def get_status(self, conversation_id):
         return self._read_failure(self.store.get_status(conversation_id))
@@ -564,6 +623,18 @@ class AgentConversationService:
                 return
             if not progressed:
                 self._wake.wait(0.5)
+
+    def _run_continuations(self):
+        while not self._stop.is_set():
+            self._continuation_wake.clear()
+            try:
+                progressed = self.continuations.run_once()
+            except Exception as error:
+                # Preserve the ordinary worker's fail-closed storage behavior.
+                self._failure = type(error).__name__
+                return
+            if not progressed:
+                self._continuation_wake.wait(0.5)
 
     def run_once(self, conversation_id=None):
         operational = getattr(self.application, "operational_state", None)
@@ -760,11 +831,17 @@ class AgentConversationService:
             self.store.update_intake(conversation_id, draft, [], "RUNNING")
             create_key = "agent-create-" + run_id
             self.store.expect_case(conversation_id, create_key)
+            with self.store.repository.database_transaction() as db:
+                body = self.store._load(db, conversation_id, run_id=run_id)
+                if "model_configuration_fingerprint" not in body:
+                    body["model_configuration_fingerprint"] = self.model_configuration_fingerprint
+                    self.store._save(db, body)
             self._execute_command(conversation_id, "create", CreateCase(
                 idempotency_key=create_key,
                 raw_problem_text=message.text, problem_spec=spec,
                 initial_log_archive_expected=bool(selected_attachment_ids),
                 initial_user_facts=[], wait_seconds=0,
+                continuation_context=self.store.get_run(conversation_id).get("continuation_context"),
             ), message_id=message.message_id)
             return True
         self._phase = "INTAKE"
@@ -829,8 +906,11 @@ class AgentConversationService:
         self.store.set_draft(conversation_id, draft)
         inputs = {item.name: item.value for item in decision.user_facts}
         if inputs or attachment_ids:
-            self._supplement(conversation_id, case_view, inputs, attachment_ids, "message-" + message.message_id,
-                message_id=message.message_id)
+            submitted = self._supplement(conversation_id, case_view, inputs, attachment_ids,
+                "message-" + message.message_id, message_id=message.message_id,
+                selected_attachment_ids=selected_attachment_ids)
+            if not submitted and message.status != "APPLIED":
+                self.store.set_message_status(conversation_id, message.message_id, "APPLIED")
         elif decision.action == "SUBMIT_SUPPLEMENT" and attachment_notice is None:
             raise AgentStoreError("AGENT_NO_MATCHING_INPUT", "本次内容不符合当前补充要求。", 409)
         elif message.status != "APPLIED":
@@ -948,21 +1028,39 @@ class AgentConversationService:
         return attachments, [item.attachment_id for item in records], None
 
     def _supplement(self, conversation_id, case_view, inputs, attachment_ids, label, *, message_id=None,
-                    generic_supplement_text=""):
+                    generic_supplement_text="", selected_attachment_ids=None):
         self._check_run()
         run_id = self.store.get_run(conversation_id)["run_id"]
+        def selection_changed():
+            if not attachment_ids or selected_attachment_ids is None:
+                return False
+            return self.store.latest_attachment_selection(conversation_id) != selected_attachment_ids
+
+        # A selection accepted while INTAKE was running supersedes the frozen
+        # attachment choice. Keep its message pending for the next advance.
+        with self._message_lock(conversation_id):
+            deferred = selection_changed()
         self._phase = "IMPORT_ATTACHMENT"
         targets = [self.uploads.import_into_case(conversation_id, case_view.case_id, item, self._execute_command,
             run_id=run_id, check_cancelled=self._check_run)
-            for item in attachment_ids]
-        if not inputs and not targets and not generic_supplement_text:
-            self._phase = "SUBMIT_SUPPLEMENT"
-            raise AgentStoreError("AGENT_NO_MATCHING_INPUT", "本次内容不符合当前补充要求。", 409)
-        self._phase = "CASE_QUERY"
-        latest = self.application.get_case(case_view.case_id).case_view
-        self._execute_command(conversation_id, label, SubmitSupplement(
-            idempotency_key="agent-supplement-" + run_id + "-" + label,
-            case_id=latest.case_id, expected_case_revision=latest.case_revision,
-            inputs=inputs, attachment_ids=targets, wait_seconds=0,
-            generic_supplement_text=generic_supplement_text,
-        ), message_id=message_id)
+            for item in ([] if deferred else attachment_ids)]
+        # Imports can be slow. Accept messages throughout them, then serialize
+        # only the final selection check and command commit against acceptance.
+        with self._message_lock(conversation_id):
+            deferred = deferred or selection_changed()
+            if deferred:
+                targets = []
+            if not inputs and not targets and not generic_supplement_text:
+                if deferred:
+                    return False
+                self._phase = "SUBMIT_SUPPLEMENT"
+                raise AgentStoreError("AGENT_NO_MATCHING_INPUT", "本次内容不符合当前补充要求。", 409)
+            self._phase = "CASE_QUERY"
+            latest = self.application.get_case(case_view.case_id).case_view
+            self._execute_command(conversation_id, label, SubmitSupplement(
+                idempotency_key="agent-supplement-" + run_id + "-" + label,
+                case_id=latest.case_id, expected_case_revision=latest.case_revision,
+                inputs=inputs, attachment_ids=targets, wait_seconds=0,
+                generic_supplement_text=generic_supplement_text,
+            ), message_id=message_id)
+            return True

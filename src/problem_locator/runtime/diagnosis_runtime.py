@@ -117,12 +117,13 @@ from .agent_backend import (
 )
 from .context_builder import ContextBuilder, ContextLimitExceeded, ContextMaterials
 from .context_policy import ResolvedJobAssets, RuntimeAssetResolver
+from .continuation_context import build_report_continuation_context
 from .failures import RuntimeExecutionError, runtime_failure
 from .final_response import parse_route_response, parse_specialist_response, specialist_prompt
 from .generic_locator import GenericLocatorExecutor
 from .skill_direct import parse_skill_direct_response
 from .input_profile import expand_profile_requirements, load_builtin_input_profile
-from .generic_logs import freeze_generic_logs
+from .generic_logs import freeze_generic_logs, freeze_generic_log_batch
 from problem_locator.integrations.logparse.outputs import validate_generic_parse_result
 from problem_locator.integrations.logparse.paths import resolve_workspace_path
 from .outcome_finalizer import (
@@ -177,6 +178,7 @@ from .proposal_stager import discard_staged, stage_validated_output
 from .resolved_logparse import (
     ResolvedLogparsePlanNotReady,
     compile_resolved_logparse_plan,
+    compile_resolved_logparse_plans,
 )
 from .methods_grounding import (
     MethodGroundingAuditV1,
@@ -437,6 +439,7 @@ class _DirectPreprocessingCancellation:
         source: CancellationSignal,
         workspace: PreparedWorkspace,
         limits: BackendExecutionLimits,
+        deadline: float | None = None,
     ) -> None:
         self._source = source
         self._workspace_root = workspace.root
@@ -449,7 +452,7 @@ class _DirectPreprocessingCancellation:
             ),
         )
         self._limits = limits
-        self._deadline = time.monotonic() + limits.wall_time_seconds
+        self._deadline = deadline if deadline is not None else time.monotonic() + limits.wall_time_seconds
         self._next_workspace_scan = 0.0
         self._failure: ExecutionFailure | None = None
         self._lock = threading.Lock()
@@ -610,6 +613,16 @@ class _BorrowedLogSink:
 
 
 @dataclass(frozen=True, slots=True)
+class MethodsPreprocessingSource:
+    """One independently validated archive and its closed broker session."""
+
+    plan: ResolvedLogparsePlanInput
+    validated: ValidatedMethodsPreprocessing
+    claim: LogparseParseClaim | None
+    receipt_context: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
 class MethodsPreprocessingExecution:
     """All Pass-A values needed by verification, staging, and mapping."""
 
@@ -617,6 +630,7 @@ class MethodsPreprocessingExecution:
     frozen: FrozenMethodsWorkspaceInputs
     claim: LogparseParseClaim | None
     secrets: tuple[str, ...]
+    sources: tuple[MethodsPreprocessingSource, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1292,7 +1306,11 @@ class DiagnosisRuntime:
                         preflight=preflight,
                     )
             try:
-                broker_plan = compile_resolved_logparse_plan(job, aggregate, assets)
+                if is_specialized_direct(job) and len(job.attachment_refs) > 1:
+                    broker_plans = compile_resolved_logparse_plans(job, aggregate, assets)
+                    broker_plan = broker_plans[0] if broker_plans else None
+                else:
+                    broker_plan = compile_resolved_logparse_plan(job, aggregate, assets)
             except ResolvedLogparsePlanNotReady as exc:
                 raise ValueError(
                     "complete Methods preflight inputs did not resolve a Logparse plan"
@@ -1440,7 +1458,7 @@ class DiagnosisRuntime:
                     workspace,
                     materials,
                 )
-                specialist_context = context.body
+                specialist_context = context.body + build_report_continuation_context(job.continuation_context)
                 if not is_specialized_direct(job) and self._methods_evidence_validation == "advisory":
                     specialist_context += (
                         "\nServer evidence policy: advisory. Return your best supported diagnosis in the "
@@ -1472,9 +1490,10 @@ class DiagnosisRuntime:
                 )
             final_response = backend_result.final_result
             secrets = methods_preprocessing.secrets
-            parse_request_bytes = methods_preprocessing.validated.request_bytes
-            claim = methods_preprocessing.claim
-            broker_audit_bytes = methods_preprocessing.validated.broker_audit_bytes
+            multi_source = len(methods_preprocessing.sources) > 1
+            parse_request_bytes = None if multi_source else methods_preprocessing.validated.request_bytes
+            claim = None if multi_source else methods_preprocessing.claim
+            broker_audit_bytes = None if multi_source else methods_preprocessing.validated.broker_audit_bytes
         else:
             context = self._materialize_context(
                 job,
@@ -3661,12 +3680,47 @@ class DiagnosisRuntime:
             raise runtime_failure(stage=ExecutionStage.ASSET_RESOLUTION,
                 code=ErrorCode.ASSET_VERSION_UNAVAILABLE, message="通用定位的日志解析配置不可用。")
         self._announce(job, "LOGPARSE")
+        limits = self._backend_test_limits or BackendExecutionLimits.from_resource_limits(job.resource_limits)
+        deadline = time.monotonic() + limits.wall_time_seconds
+        sources = [self._prepare_generic_log_source(job, aggregate, attachment_id,
+            cancellation=cancellation, deadline=deadline) for attachment_id in job.attachment_refs]
+        plan = sources[0][0]
+        limited = sources[-1][-1]
+        workspace = self._workspace_manager.prepare_generic_main_metadata_only(
+            job, aggregate, resolved_logparse_plan=plan,
+        )
+        try:
+            if len(sources) == 1:
+                _, tree_root, parsed, _, _ = sources[0]
+                receipt_bytes = freeze_generic_logs(workspace, controlled_root=tree_root,
+                    parsed=parsed, cancellation=limited)
+            else:
+                receipt_bytes = freeze_generic_log_batch(workspace,
+                    sources=[(root, parsed, name) for _, root, parsed, name, _ in sources],
+                    cancellation=limited)
+            limit_failure = limited.failure(force_workspace_scan=True)
+            if limit_failure is not None:
+                raise RuntimeExecutionError(limit_failure)
+        except RuntimeExecutionError:
+            raise
+        except (OSError, TypeError, ValueError):
+            raise runtime_failure(stage=ExecutionStage.TOOL_EXECUTE,
+                code=ErrorCode.LOGPARSE_OUTPUT_INVALID, message="日志解析结果或文件校验失败。") from None
+        self._publish_audit_bytes(job, "generic_logs.json", receipt_bytes)
+        return workspace, receipt_bytes
+
+    def _prepare_generic_log_source(
+        self, job: Job, aggregate: CaseAggregate, attachment_id: str, *,
+        cancellation: CancellationSignal, deadline: float,
+    ) -> tuple[ResolvedLogparseParseOnlyPlanInput, Path, dict[str, Any], str, _DirectPreprocessingCancellation]:
+        batch = len(job.attachment_refs) > 1
         plan = ResolvedLogparseParseOnlyPlanInput(
-            schema_version=1, operation="parse-only", attachment_id=job.attachment_refs[0],
+            schema_version=1, operation="parse-only", attachment_id=attachment_id,
         )
         preprocessing = self._workspace_manager.prepare(
             job, aggregate, self._resource_store, resolved_logparse_plan=plan,
             workspace_phase="logparse-preprocess",
+            **({"preprocessing_attachment_id": attachment_id} if batch else {}),
         )
         request_bytes = canonical_json_bytes(ParseOnlyRequest(
             schema_version=1, attachment_id=plan.attachment_id,
@@ -3676,7 +3730,8 @@ class DiagnosisRuntime:
             preprocessing, request_bytes=request_bytes, operation="parse-only",
         )
         limited = _DirectPreprocessingCancellation(source=cancellation, workspace=preprocessing,
-            limits=self._backend_test_limits or BackendExecutionLimits.from_resource_limits(job.resource_limits))
+            limits=self._backend_test_limits or BackendExecutionLimits.from_resource_limits(job.resource_limits),
+            deadline=deadline)
         initial = limited.failure(force_workspace_scan=True)
         if initial is not None:
             raise RuntimeExecutionError(initial)
@@ -3695,9 +3750,10 @@ class DiagnosisRuntime:
         finally:
             primary = limited.failure(force_workspace_scan=True) or primary
             primary, accepted, audit_bytes = self._close_and_audit_broker(session, primary)
+        suffix = "." + attachment_id if batch else ""
         if audit_bytes is not None:
-            self._publish_audit_bytes(job, "logparse_broker_audit.json", audit_bytes)
-        self._publish_audit_bytes(job, "generic_logparse_request.json", request_bytes)
+            self._publish_audit_bytes(job, f"logparse_broker_audit{suffix}.json", audit_bytes)
+        self._publish_audit_bytes(job, f"generic_logparse_request{suffix}.json", request_bytes)
         if primary is not None:
             raise RuntimeExecutionError(primary)
         try:
@@ -3720,7 +3776,7 @@ class DiagnosisRuntime:
                 raise ValueError("generic preprocessing audit differs from its exact result")
             tree_root = resolve_workspace_path(preprocessing.root,
                 "output/proposals/generic-preprocess/tree", must_exist=True)
-            attachment = preprocessing.attachments[0]
+            attachment = next(item for item in preprocessing.attachments if item.attachment_id == attachment_id)
             def check_parse_validation_abort() -> None:
                 failure = limited.failure()
                 if failure is not None:
@@ -3729,11 +3785,6 @@ class DiagnosisRuntime:
             parsed = validate_generic_parse_result(result_bytes, controlled_root=tree_root,
                 product=job.logparse_product, source_attachment_id=attachment.attachment_id,
                 source_attachment_sha256=attachment.sha256, check_abort=check_parse_validation_abort)
-            workspace = self._workspace_manager.prepare_generic_main_metadata_only(
-                job, aggregate, resolved_logparse_plan=plan,
-            )
-            receipt_bytes = freeze_generic_logs(workspace, controlled_root=tree_root,
-                parsed=parsed, cancellation=limited)
             limit_failure = limited.failure(force_workspace_scan=True)
             if limit_failure is not None:
                 raise RuntimeExecutionError(limit_failure)
@@ -3745,10 +3796,10 @@ class DiagnosisRuntime:
         except (OSError, TypeError, ValueError):
             raise runtime_failure(stage=ExecutionStage.TOOL_EXECUTE,
                 code=ErrorCode.LOGPARSE_OUTPUT_INVALID, message="日志解析结果或文件校验失败。") from None
-        self._publish_audit_bytes(job, "generic_logs.json", receipt_bytes)
         record_stage_completed(ExecutionStage.TOOL_EXECUTE, started,
-            data={"tool": "logparse", "operation": "parse-only", "log_count": len(parsed["logs"])})
-        return workspace, receipt_bytes
+            data={"tool": "logparse", "operation": "parse-only", "log_count": len(parsed["logs"]),
+                "attachment_id": attachment_id})
+        return plan, tree_root, parsed, attachment.name, limited
 
     def _publish_methods_preflight(
         self,
@@ -3828,7 +3879,9 @@ class DiagnosisRuntime:
                     prompt=template["prompt"],
                     required=True,
                     constraints=AttachmentRequirementConstraints.model_validate(
-                        template["constraints"]
+                        {**template["constraints"], "max_count": (
+                            template["constraints"]["max_count"] if is_specialized_direct(job) else 1
+                        )}
                     ),
                     status=RequirementStatus.OPEN,
                     requested_by_job_id=job.job_id,
@@ -4565,6 +4618,72 @@ class DiagnosisRuntime:
         assets: ResolvedJobAssets,
         cancellation: CancellationSignal,
     ) -> MethodsPreprocessingExecution:
+        skill = self._resolved_methods_skill(assets)
+        base_plan = main_workspace.manifest.resolved_logparse_plan
+        if not isinstance(base_plan, ResolvedLogparsePlanInput):
+            raise ValueError("Methods preprocessing requires its fixed plan")
+        batch = is_specialized_direct(job) and len(job.attachment_refs) > 1
+        plans = (base_plan,)
+        if batch:
+            plans = tuple(ResolvedLogparsePlanInput.model_validate({
+                **plan.model_dump(mode="json"), "schema_version": 2,
+            }) for plan in compile_resolved_logparse_plans(job, aggregate, assets))
+        limits = self._backend_test_limits or BackendExecutionLimits.from_resource_limits(job.resource_limits)
+        deadline = time.monotonic() + limits.wall_time_seconds
+        sources = tuple(self._read_methods_preprocessing_source(
+            job=job, aggregate=aggregate, plan=plan, assets=assets,
+            cancellation=cancellation, batch=batch, deadline=deadline,
+        ) for plan in plans)
+        first = sources[0]
+        request = self._methods_request_value(job, main_workspace, skill)
+        target_logs, metadata, source_receipts = [], {}, []
+        for ordinal, source in enumerate(sources, start=1):
+            attachment = aggregate.attachments.get(source.plan.attachment_id)
+            archive = ({} if attachment is None else {
+                "attachment_id": attachment.attachment_id, "name": attachment.name,
+                "sha256": attachment.sha256, "size": attachment.size,
+            })
+            for item in source.validated.target_logs:
+                label = item.target.label
+                source_id = f"archive-{ordinal:03d}-{label}" if batch else label
+                target_logs.append((source_id, label, item.content))
+                if attachment is not None:
+                    metadata[source_id] = archive
+            if batch:
+                source_receipts.append({**source.receipt_context, **archive,
+                    "target_log_count": len(source.validated.target_logs),
+                    "unresolved_targets": [{"label": item.label, "match_status": item.match_status,
+                        "caveats": list(item.caveats)}
+                        for item in source.validated.authoritative_targets.unresolved]})
+        receipt_context = first.receipt_context
+        if batch:
+            request["consumed_artifacts"] = [{
+                "name": "log_archive", "resource_type": "ATTACHMENT",
+                "resource_id": source.plan.attachment_id,
+                "size": aggregate.attachments[source.plan.attachment_id].size,
+                "sha256": aggregate.attachments[source.plan.attachment_id].sha256,
+            } for source in sources]
+            receipt_context = {**receipt_context, "operation": "parse-targets-batch",
+                "broker_request_sha256": bytes_sha256(canonical_json_bytes([
+                    parse_canonical_json_bytes(source.validated.request_bytes) for source in sources])),
+                "broker_audit_sha256": bytes_sha256(canonical_json_bytes([
+                    parse_canonical_json_bytes(source.validated.broker_audit_bytes) for source in sources]))}
+        frozen = self._workspace_manager.freeze_methods_inputs(
+            main_workspace, request=request, target_logs=target_logs,
+            receipt_context=receipt_context, allow_empty_targets=is_specialized_direct(job),
+            source_metadata=metadata, source_receipts=source_receipts,
+        )
+        self._publish_audit_bytes(job, "methods_request.json", frozen.request_bytes)
+        self._publish_audit_bytes(job, "methods_target_logs.json", frozen.target_logs_bytes)
+        self._publish_audit_bytes(job, "methods_logparse_receipt.json", frozen.receipt_bytes)
+        return MethodsPreprocessingExecution(validated=first.validated, frozen=frozen,
+            claim=first.claim if not batch else None, secrets=(), sources=sources)
+
+    def _read_methods_preprocessing_source(
+        self, *, job: Job, aggregate: CaseAggregate, plan: ResolvedLogparsePlanInput,
+        assets: ResolvedJobAssets, cancellation: CancellationSignal,
+        batch: bool, deadline: float,
+    ) -> MethodsPreprocessingSource:
         if self._logparse_broker_factory is None:
             raise runtime_failure(
                 stage=ExecutionStage.ASSET_RESOLUTION,
@@ -4578,9 +4697,10 @@ class DiagnosisRuntime:
                 job,
                 aggregate,
                 self._resource_store,
-                resolved_logparse_plan=main_workspace.manifest.resolved_logparse_plan,
+                resolved_logparse_plan=plan,
                 review_subject=None,
                 workspace_phase="logparse-preprocess",
+                **({"preprocessing_attachment_id": plan.attachment_id} if batch else {}),
             )
         except BaseException:
             try:
@@ -4634,6 +4754,7 @@ class DiagnosisRuntime:
             source=cancellation,
             workspace=preprocessing_workspace,
             limits=limits,
+            deadline=deadline,
         )
         initial_limit_failure = preprocessing_cancellation.failure(
             force_workspace_scan=True
@@ -4720,7 +4841,6 @@ class DiagnosisRuntime:
                 ),
                 secrets=secrets,
             )
-            request = self._methods_request_value(job, main_workspace, skill)
             record = parse_canonical_json_bytes(broker_audit_bytes)
             operations = record["operations"]
             if (
@@ -4740,16 +4860,6 @@ class DiagnosisRuntime:
                 "broker_request_sha256": bytes_sha256(validated.request_bytes),
                 "broker_audit_sha256": bytes_sha256(broker_audit_bytes),
             }
-            frozen = self._workspace_manager.freeze_methods_inputs(
-                main_workspace,
-                request=request,
-                target_logs=[
-                    (item.target.label, item.target.label, item.content)
-                    for item in validated.target_logs
-                ],
-                receipt_context=receipt_context,
-                allow_empty_targets=is_specialized_direct(job),
-            )
         except RuntimeExecutionError:
             raise
         except (OSError, TypeError, ValueError):
@@ -4758,18 +4868,8 @@ class DiagnosisRuntime:
                 code=ErrorCode.LOGPARSE_OUTPUT_INVALID,
                 message="Frozen Logparse preprocessing evidence is invalid.",
             ) from None
-        self._publish_audit_bytes(job, "logparse_broker_audit.json", broker_audit_bytes)
-        self._publish_audit_bytes(job, "methods_request.json", frozen.request_bytes)
-        self._publish_audit_bytes(
-            job,
-            "methods_target_logs.json",
-            frozen.target_logs_bytes,
-        )
-        self._publish_audit_bytes(
-            job,
-            "methods_logparse_receipt.json",
-            frozen.receipt_bytes,
-        )
+        suffix = "." + plan.attachment_id if batch else ""
+        self._publish_audit_bytes(job, f"logparse_broker_audit{suffix}.json", broker_audit_bytes)
         record_stage_completed(
             ExecutionStage.TOOL_EXECUTE,
             tool_started,
@@ -4777,16 +4877,12 @@ class DiagnosisRuntime:
                 "tool": "logparse",
                 "pass": "PREPROCESS",
                 "operation": operation,
-                "target_log_count": len(frozen.target_logs),
-                "receipt_sha256": frozen.receipt_sha256,
+                "target_log_count": len(validated.target_logs),
+                "attachment_id": plan.attachment_id,
             },
         )
-        return MethodsPreprocessingExecution(
-            validated=validated,
-            frozen=frozen,
-            claim=claim,
-            secrets=secrets,
-        )
+        return MethodsPreprocessingSource(plan=plan, validated=validated,
+            claim=claim, receipt_context=receipt_context)
 
     def _execute_backend(
         self,

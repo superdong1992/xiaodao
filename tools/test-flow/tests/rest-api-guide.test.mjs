@@ -20,6 +20,11 @@ const BUSINESS_OPERATIONS = [
 ];
 const SERVICE_OPERATIONS = ["GET /live", "GET /ready"];
 const AGENT_OPERATIONS = [
+  "POST /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/continuation-drafts",
+  "GET /api/v1/agent/conversations/{conversation_id}/continuation-drafts/{draft_id}",
+  "PATCH /api/v1/agent/conversations/{conversation_id}/continuation-drafts/{draft_id}",
+  "POST /api/v1/agent/conversations/{conversation_id}/continuation-drafts/{draft_id}/confirm",
+  "GET /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/report-versions",
   "GET /api/v1/agent/conversations",
   "PATCH /api/v1/agent/conversations/{conversation_id}",
   "DELETE /api/v1/agent/conversations/{conversation_id}",

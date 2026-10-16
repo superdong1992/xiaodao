@@ -168,13 +168,22 @@ def _assert_unaccepted(store, cid, count):
     assert store.pending_generic_restarts()[0]["status"] == "PENDING"
 
 
-@pytest.mark.parametrize("selection", ["multiple", "not-ready", "foreign"])
+def test_multiple_packages_preserve_entire_selection_on_restart(generic_web):
+    store, service, app, cid, run_id = generic_web
+    selected = [_ready(store, cid), _ready(store, cid, "second", "b" * 64)]
+    receipt = service.send_message(cid, "multi-selection", "补充两份日志", selected)
+    assert receipt.run_id == run_id
+    assert store.get_conversation(cid).messages[-1].attachment_ids == selected
+    assert len(app.calls) == 1
+    assert service.send_message(cid, "multi-selection", "补充两份日志", selected) == receipt
+    assert len(app.calls) == 1
+
+
+@pytest.mark.parametrize("selection", ["not-ready", "foreign"])
 def test_invalid_selection_does_not_cancel_or_accept(generic_web, selection):
     store, service, app, cid, _ = generic_web
     selected = [_ready(store, cid)]
-    if selection == "multiple":
-        selected.append(_ready(store, cid, "second", "b" * 64))
-    elif selection == "not-ready":
+    if selection == "not-ready":
         selected = [store.reserve_attachment(cid, "reserved", "logs.zip", "application/zip", 10, "b" * 64).attachment_id]
     else:
         other = store.create_conversation("other").conversation_id
@@ -305,22 +314,33 @@ def test_runtime_epoch_recovery_never_restarts_pending_model_work(generic_web):
 
 @pytest.mark.parametrize("cleanup", ["delete", "retention"])
 def test_restart_payloads_follow_run_cleanup(generic_web, cleanup):
+    from problem_locator.storage.coordination import StorageCoordinationLock
     from problem_locator.storage.history_retention import HistoryRetentionService
+    from problem_locator.storage.quarantine import QuarantineMover
+    from tests.deterministic.unit.storage.fakes import FakeFileSync, FaultInjectingReplace
     store, service, app, cid, run_id = generic_web
     attachment = _ready(store, cid)
-    service.send_message(cid, "logs", "需随历史清理的描述", [attachment])
+    service.send_message(cid, "logs", "需永久保留的补充说明", [attachment])
     if cleanup == "delete":
         store.request_delete(cid)
         store.finish_cleanup(cid)
     else:
         store.request_stop(cid, "stop", run_id)
         store.finish_stop(cid, run_id)
-        store.submit_message(cid, "another-run", "下一轮问题")
+        newer = store.submit_message(cid, "another-run", "下一轮问题")
+        history = store.read_conversation(cid, history=True, run_id=run_id).history
+        coordination = StorageCoordinationLock()
+        clock = SimpleNamespace(now=lambda: "2999-01-01T00:00:00Z")
         retention = HistoryRetentionService(
-            store.repository, store, quarantine=None, usage_guard=None, clock=None,
+            store.repository, store,
+            QuarantineMover(store.repository.layout, coordination, FakeFileSync(), FaultInjectingReplace()),
+            service.usage_guard, clock, coordination_lock=coordination,
         )
-        with store.repository.database_transaction() as db:
-            assert retention._prune_run(db, cid, run_id, "2999-01-01T00:00:00Z")
+        assert retention._expire_run(cid, run_id, CASE_ID, clock.now())
+        assert store.read_conversation(cid, history=True, run_id=run_id).history == history
+        assert store.get_run(cid, run_id)["resources_expired"]
+        assert not store.get_run(cid, newer.run_id).get("resources_expired", False)
+        assert store.get_attachment(attachment).status == "EXPIRED"
     with store.repository.database_read() as db:
         assert db.execute("SELECT count(*) FROM agent_generic_restarts WHERE run_id=?", (run_id,)).fetchone()[0] == 0
 

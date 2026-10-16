@@ -114,6 +114,7 @@ class ArchiveService:
                 paths.append(path)
             staged = self._resources.stage_archive(payload["source_job_id"], lambda path:
                 write_result_archive_file(path, plan=plan, source_paths=paths,
+                    capacity=getattr(self._resources, "capacity", None),
                     cancelled=lambda: self._stop.is_set() or self._deleted(case_id)))
             artifact_id = str(uuid.uuid5(uuid.UUID(payload["report_artifact_id"]), "result-archive-v10"))
             # Deletion and final publication share this short barrier. Long

@@ -1303,6 +1303,7 @@ def build_job(
         generic_problem_text=spec.generic_problem_text,
         generic_log_archive_expected=spec.generic_log_archive_expected,
         generic_supplement_texts=list(spec.generic_supplement_texts),
+        continuation_context=spec.continuation_context,
         status=JobStatus.PENDING,
         goal=spec.goal,
         base_state_revision=spec.target_state_revision,

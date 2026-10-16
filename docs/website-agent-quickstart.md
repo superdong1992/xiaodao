@@ -20,7 +20,7 @@ node examples/website-agent/preview.mjs
 
 打开 [http://127.0.0.1:8788/](http://127.0.0.1:8788/)。本地预览使用固定示例数据，不连接服务端、不创建任务，也不调用模型。先查看完整结果、部分结果、尚无定论、等待和失败等状态，确定网站的展示方式。
 
-将 `examples/website-agent/` 中的 `report-view.js`、`report-view.css` 和 `browser-client.js` 复制到网站的静态资源目录，例如 `/xiaodao/`。这些模块没有额外依赖，可以嵌入现有页面。后端接入同源 `/api/agent/` 接口后，用已有会话 ID 读取报告：
+将 `examples/website-agent/` 中的 `report-view.js`、`report-view.css`、`browser-client.js`、`followup-contract.js` 和 `continuation-contract.js` 复制到网站的同一静态资源目录，例如 `/xiaodao/`。这些模块不需要第三方库，但必须保留全部本地依赖。后端接入同源 `/api/agent/` 接口后，用已有会话 ID 读取报告：
 
 ```javascript
 import { createAgentClient } from "/xiaodao/browser-client.js";

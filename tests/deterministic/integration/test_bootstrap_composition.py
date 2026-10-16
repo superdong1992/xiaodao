@@ -210,7 +210,8 @@ def test_unique_object_graph_recovery_export_and_shutdown_lock_order(
     tmp_path: Path,
     history_days: int,
 ) -> None:
-    graph = build_service(replace(_settings(tmp_path / "data"), history_retention_days=history_days))
+    graph = build_service(replace(_settings(tmp_path / "data"), history_retention_days=history_days,
+        web_resource_retention_days=history_days // 2))
     try:
         assert str(tmp_path) not in repr(graph)
         assert graph.instance_lock.is_acquired()
@@ -235,6 +236,15 @@ def test_unique_object_graph_recovery_export_and_shutdown_lock_order(
         )
         assert graph.retention.history is not None
         assert graph.retention.history.retention_days == history_days
+        assert graph.retention.history.web_retention_days == history_days // 2
+        assert graph.agent.followups.store.retention_days == history_days // 2
+        assert graph.retention.capacity is graph.resource_store.capacity
+        assert graph.retention.capacity is graph.agent.uploads.capacity
+        assert graph.retention.deletion_cleanup is graph.agent.cleanup
+        assert graph.retention.capacity.low_free_bytes == 10 * 1024 ** 3
+        assert graph.retention.capacity.target_free_ratio == 0.15
+        assert graph.retention.history.archive_run == graph.agent.report_archive.archive_run
+        assert graph.retention.history.expire_waiting_run == graph.agent.expire_waiting_run
         assert graph.retention._interval_seconds == 3_600
         assert graph.asset_catalog._logparse_broker_factory is (
             graph.logparse_broker_factory
@@ -567,6 +577,8 @@ def test_production_composition_routes_each_job_role_to_its_agent_backend(
 
         assert graph.runtime._route_backend._command == "route-agent --fast"
         assert graph.runtime._diagnose_backend._command == "diagnose-agent --deep"
+        assert graph.agent.model_configuration_fingerprint == graph.runtime._diagnose_backend.model_configuration_fingerprint
+        assert graph.agent.model_configuration_fingerprint != graph.runtime._route_backend.model_configuration_fingerprint
         assert graph.runtime._backend_for_job(route_job) is graph.runtime._route_backend
         assert (
             graph.runtime._backend_for_job(diagnose_job)

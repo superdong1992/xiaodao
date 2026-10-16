@@ -55,7 +55,7 @@ def test_snapshot_copy_enospc_preserves_report_and_allows_report_only_answer(sys
     report = system.source.report_markdown
     copies = []
 
-    def disk_full(source, size, digest, *, destination, cancellation):
+    def disk_full(source, size, digest, *, destination, cancellation, capacity=None):
         copies.append((source, destination))
         assert destination is not None
         raise OSError(errno.ENOSPC, "no space /private/log-copy")

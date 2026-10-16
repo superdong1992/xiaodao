@@ -1366,6 +1366,27 @@ def finalize_generic_result_v2(
 ArchiveStatus = Literal["NOT_REQUIRED", "PENDING", "READY", "FAILED"]
 
 
+class ReportContinuationContext(ContractModel):
+    """Read-only prior report used to explain changes in a new diagnosis."""
+
+    parent_run_id: OpaqueId
+    parent_case_id: OpaqueId
+    parent_report_artifact_id: OpaqueId
+    parent_report_sha256: Sha256
+    parent_report_markdown: NonEmptyText
+    parent_report_version: PositiveInt = 1
+    change_note: NonEmptyText
+    goal: NonEmptyText
+
+    @model_validator(mode="after")
+    def validate_parent_report(self) -> ReportContinuationContext:
+        report_bytes = self.parent_report_markdown.encode("utf-8")
+        _validate_generic_report_content(
+            self.parent_report_markdown, len(report_bytes), self.parent_report_sha256,
+        )
+        return self
+
+
 class Case(ContractModel):
     case_id: OpaqueId
     status: CaseStatus
@@ -1373,6 +1394,9 @@ class Case(ContractModel):
     archive_status: ArchiveStatus = "NOT_REQUIRED"
     raw_problem_text: NonEmptyText
     initial_log_archive_expected: bool = Field(default=False, exclude_if=lambda value: not value)
+    continuation_context: ReportContinuationContext | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     diagnosis_state: DiagnosisState
     active_job_id: OpaqueId | None
     selected_skill_ref: VersionedRef | None
@@ -1517,6 +1541,9 @@ class Job(ContractModel):
     generic_problem_text: NonEmptyText | None
     generic_log_archive_expected: bool = Field(default=False, exclude_if=lambda value: not value)
     generic_supplement_texts: list[NonEmptyText] = Field(default_factory=list, exclude_if=lambda value: not value)
+    continuation_context: ReportContinuationContext | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     status: JobStatus
     goal: NonEmptyText
     base_state_revision: PositiveInt
@@ -1547,6 +1574,12 @@ class Job(ContractModel):
 
     @model_validator(mode="after")
     def validate_job(self) -> Job:
+        if self.continuation_context is not None and self.job_type is not JobType.DIAGNOSE:
+            raise ValueError("only DIAGNOSE jobs may carry report continuation context")
+        if self.continuation_context is not None and (
+            self.diagnosis_mode is not DiagnosisMode.GENERIC and not is_specialized_direct(self)
+        ):
+            raise ValueError("report continuation requires GENERIC or skill-direct diagnosis")
         if self.diagnosis_mode is not DiagnosisMode.GENERIC and (
             self.generic_log_archive_expected or self.generic_supplement_texts
         ):
@@ -1598,8 +1631,6 @@ class Job(ContractModel):
                     raise ValueError(
                         "GENERIC DIAGNOSE forbids Evidence, Artifacts, and history"
                     )
-                if len(self.attachment_refs) > 1:
-                    raise ValueError("GENERIC DIAGNOSE accepts at most one log archive")
             else:
                 if self.generic_problem_text is not None:
                     raise ValueError("SPECIALIZED DIAGNOSE forbids generic problem text")
@@ -4467,6 +4498,9 @@ class JobSpec(ContractModel):
     generic_problem_text: NonEmptyText | None
     generic_log_archive_expected: bool = Field(default=False, exclude_if=lambda value: not value)
     generic_supplement_texts: list[NonEmptyText] = Field(default_factory=list, exclude_if=lambda value: not value)
+    continuation_context: ReportContinuationContext | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     goal: NonEmptyText
     target_state_revision: PositiveInt
     evidence_bindings: list[PlannedResourceBinding]
@@ -4491,6 +4525,12 @@ class JobSpec(ContractModel):
 
     @model_validator(mode="after")
     def validate_spec(self) -> JobSpec:
+        if self.continuation_context is not None and self.job_type is not JobType.DIAGNOSE:
+            raise ValueError("only DIAGNOSE JobSpec may carry report continuation context")
+        if self.continuation_context is not None and (
+            self.diagnosis_mode is not DiagnosisMode.GENERIC and not is_specialized_direct(self)
+        ):
+            raise ValueError("report continuation requires GENERIC or skill-direct diagnosis")
         if self.diagnosis_mode is not DiagnosisMode.GENERIC and (
             self.generic_log_archive_expected or self.generic_supplement_texts
         ):
@@ -4538,8 +4578,6 @@ class JobSpec(ContractModel):
                     raise ValueError(
                         "GENERIC JobSpec forbids Evidence, Artifacts, and history"
                     )
-                if len(self.attachment_refs) > 1:
-                    raise ValueError("GENERIC JobSpec accepts at most one log archive")
             else:
                 if self.generic_problem_text is not None:
                     raise ValueError("SPECIALIZED JobSpec forbids generic problem text")
@@ -4612,6 +4650,9 @@ class JobSpec(ContractModel):
 class CreateCaseTriggerPayload(ContractModel):
     raw_problem_text: NonEmptyText
     initial_log_archive_expected: bool = Field(default=False, exclude_if=lambda value: not value)
+    continuation_context: ReportContinuationContext | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     problem_spec: ProblemSpec
     initial_user_facts: Annotated[
         list[DiagnosisItem], Field(max_length=MAX_INITIAL_USER_FACTS)
@@ -5353,6 +5394,11 @@ class CaseAggregate(ContractModel):
 
         replacement_sources: list[str] = []
         for job in self.jobs.values():
+            if (
+                job.job_type is JobType.DIAGNOSE
+                and job.continuation_context != self.case.continuation_context
+            ):
+                raise ValueError("DIAGNOSE continuation context must equal the Case context")
             if job.methods_review_target is not None:
                 target = job.methods_review_target
                 source_job = self.jobs.get(target.source_job_id)
@@ -6319,6 +6365,9 @@ class CreateCase(ContractModel):
     idempotency_key: NonEmptyText
     raw_problem_text: NonEmptyText
     initial_log_archive_expected: bool = Field(default=False, exclude_if=lambda value: not value)
+    continuation_context: ReportContinuationContext | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     problem_spec: ProblemSpecInput
     initial_user_facts: Annotated[
         list[UserFactInput], Field(max_length=MAX_INITIAL_USER_FACTS)

@@ -136,7 +136,8 @@ def _failure(code: str, message: str, status: int, *, retryable: bool = False, d
     value = AgentErrorEnvelope(error=AgentHttpError(
         code=code, message=message, retryable=retryable, details=details or [],
     ))
-    return JSONResponse(value.model_dump(mode="json"), status_code=status)
+    headers = {"Retry-After": "5"} if code in {"AGENT_STORAGE_PRESSURE", "AGENT_RESOURCES_CLEANING"} and retryable else None
+    return JSONResponse(value.model_dump(mode="json"), status_code=status, headers=headers)
 
 
 def _invalid() -> JSONResponse:
@@ -273,6 +274,8 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
     from .http_app import _port_call, parse_upload_headers
     from .followup_http import register_followup_routes
     register_followup_routes(app, service)
+    from .continuation_http import register_continuation_routes
+    register_continuation_routes(app, service)
 
     errors = {
         status: {"model": AgentErrorEnvelope}
@@ -523,6 +526,8 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
             return result
         import json
         attachment = AgentAttachment.model_validate(json.loads(result.body)["data"])
+        if attachment.status == "EXPIRED":
+            return _failure("AGENT_RESOURCE_EXPIRED", "这份附件已清理，请重新上传。", 410)
         upload = WebUploadDescriptor(
             attachment_id=attachment.attachment_id, method="PUT",
             url=append_public_path(
@@ -619,12 +624,7 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
             lease = service.read_lease(conversation_id, owner_key=owner_key, share=share)
             lease.__enter__()
             try:
-                detail = service.get_conversation(conversation_id, include=("artifacts",),
-                                                  run_id=run_id, owner_key=owner_key, share=share)
-                artifact = next((item for item in detail.artifacts or [] if item.artifact_id == artifact_id), None)
-                if artifact is None or detail.case_id is None:
-                    raise AgentStoreError("ARTIFACT_NOT_FOUND", "产物不存在。", 404)
-                opened = query_port.open_artifact(detail.case_id, artifact_id)
+                opened = service.open_conversation_artifact(conversation_id, artifact_id, run_id=run_id)
             except BaseException:
                 lease.__exit__(None, None, None)
                 raise

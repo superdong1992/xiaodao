@@ -1,4 +1,5 @@
 import { createPreviewFollowups } from "./followup-preview.js";
+import { createPreviewContinuations } from "./continuation-preview.js";
 /** 只用于离线交互预览的内存数据源；不连接服务，不执行诊断。 */
 export function createPreviewApi(samples, { schedule, followupDelay = 1200 } = {}) {
   let serial = 100;
@@ -39,8 +40,11 @@ export function createPreviewApi(samples, { schedule, followupDelay = 1200 } = {
       current: runId, runs: new Map([[runId, view]]), history, created: view.created_at, updated: view.updated_at,
       snapshotStatus: sample.followup_snapshot_status ?? "READY" });
   }
+  const continuations = createPreviewContinuations({ conversations, id, now, finish });
   return async (path, init = {}) => {
     const url = new URL(path, "http://preview.local"), method = init.method ?? "GET";
+    const continuationResponse = await continuations(url, init);
+    if (continuationResponse) return continuationResponse;
     const followupResponse = await followups(url, init);
     if (followupResponse) return followupResponse;
     if (url.pathname === "/api/agent/conversations" && method === "POST") {

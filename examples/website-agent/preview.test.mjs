@@ -56,7 +56,8 @@ test("offline preview serves only explicit local assets and never exposes API or
   await once(server, "listening");
   const url = `http://127.0.0.1:${server.address().port}`;
   try {
-    for (const route of ["/", "/preview.js", "/preview.css", "/report-view.js", "/report-view.css", "/sample-data.json"]) {
+    for (const route of ["/", "/preview.js", "/preview.css", "/report-view.js", "/report-view.css", "/sample-data.json",
+      "/continuation-contract.js", "/continuation-controller.js", "/continuation-view.js", "/continuation-preview.js", "/file-sha256.js", "/file-sha256-worker.js"]) {
       const response = await fetch(url + route);
       assert.equal(response.status, 200);
       assert.match(response.headers.get("content-security-policy"), /connect-src 'self'/);

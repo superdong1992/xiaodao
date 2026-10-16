@@ -20,7 +20,8 @@ from problem_locator.contracts.limits import DEFAULT_HISTORY_RETENTION_DAYS
 from problem_locator.diagnostics import log_event
 from problem_locator.timestamps import format_timestamp, parse_timestamp
 from .database import dialect_for, lock_conversation, lock_key
-from .paths import job_workspace_names
+from .paths import job_workspace_names, workspace_owner_id
+from .web_resource_retention import WebResourceRetention
 
 HISTORY_RETENTION_SECONDS = DEFAULT_HISTORY_RETENTION_DAYS * 24 * 60 * 60
 _ID = TypeAdapter(OpaqueId)
@@ -35,10 +36,15 @@ class HistoryRetentionService:
 
     def __init__(self, repository, store, quarantine, usage_guard, clock, *,
                  dispatcher=None, archive=None, attachment_registry=None,
-                 coordination_lock=None, retention_days=DEFAULT_HISTORY_RETENTION_DAYS):
+                 coordination_lock=None, retention_days=DEFAULT_HISTORY_RETENTION_DAYS,
+                 web_retention_days=15, archive_run=None, expire_waiting_run=None):
         if type(retention_days) is not int or not 1 <= retention_days <= 3650:
             raise ValueError("retention_days 必须是 1–3650 之间的整数")
         self.retention_days = retention_days
+        if type(web_retention_days) is not int or not 1 <= web_retention_days <= 3650:
+            raise ValueError("web_retention_days 必须是 1–3650 之间的整数")
+        self.web_retention_days = web_retention_days
+        self.archive_run, self.expire_waiting_run = archive_run, expire_waiting_run
         self.repository, self.store, self.quarantine = repository, store, quarantine
         self.usage_guard, self.clock = usage_guard, clock
         self.dispatcher, self.archive = dispatcher, archive
@@ -47,6 +53,7 @@ class HistoryRetentionService:
         self._processing = threading.Lock()
         self._last_compaction = None
         self._database_dirty = False
+        self.web = WebResourceRetention(self)
 
     def _barrier(self):
         # Match formal publication: coordination barrier -> Case mutex -> DB.
@@ -72,7 +79,7 @@ class HistoryRetentionService:
     def _workspace_paths(self, job_ids, workspace_ids=()):
         paths = {f"tmp/workspaces/{value}" for value in workspace_ids}
         for job_id in job_ids:
-            paths.update(f"tmp/workspaces/{name}" for name in job_workspace_names(job_id))
+            paths.update(f"tmp/workspaces/{name}" for name in job_workspace_names(job_id, self.repository.layout.workspaces))
         return paths
 
     @staticmethod
@@ -81,6 +88,8 @@ class HistoryRetentionService:
                for name in ("case_ids", "job_ids", "attachment_ids", "workspace_ids", "upload_ids")}
         if manifest.get("conversation_id") is not None:
             _ID.validate_python(manifest["conversation_id"])
+        if manifest.get("run_id") is not None:
+            _ID.validate_python(manifest["run_id"])
         for relative in manifest["paths"]:
             parts = PurePosixPath(relative).parts
             if "\\" in relative or relative != "/".join(parts) or any(p in {".", ".."} for p in parts):
@@ -98,8 +107,7 @@ class HistoryRetentionService:
                 if prefix == ("tmp", "proposals") and key in ids["job_ids"]:
                     continue
                 if prefix == ("tmp", "workspaces"):
-                    names = {name for job_id in ids["job_ids"] for name in job_workspace_names(job_id)}
-                    if key in ids["workspace_ids"] or key in names:
+                    if key in ids["workspace_ids"] or workspace_owner_id(key) in ids["job_ids"]:
                         continue
             raise ValueError("history cleanup path is outside its recorded owner")
 
@@ -115,6 +123,7 @@ class HistoryRetentionService:
                 raise RuntimeError("history cleanup candidate was not isolated")
             self.quarantine.delete(moved)
         with self.repository.database_transaction() as db:
+            self.web.finish_receipt(db, manifest)
             db.execute("DELETE FROM history_cleanup_jobs WHERE cleanup_id=?", (cleanup_id,))
         self._database_dirty = True
 
@@ -136,7 +145,8 @@ class HistoryRetentionService:
         with ExitStack() as leases:
             cid = manifest.get("conversation_id")
             if cid is not None:
-                lease = self.usage_guard.acquire_cleanup_if_idle(cid)
+                lease = self.usage_guard.acquire_cleanup_if_idle(cid,
+                    temporary=manifest.get("kind") in {"WEB_RESOURCES", "WEB_UNUSED_UPLOAD"})
                 if lease is None:
                     return False
                 leases.enter_context(lease)
@@ -196,113 +206,17 @@ class HistoryRetentionService:
         self._database_dirty |= changed
         return changed
 
-    def _prune_run(self, db, cid, run_id, cutoff):
-        lock_conversation(db, cid)
-        row = db.execute("SELECT r.body,c.current_run_id,c.body FROM agent_conversation_runs r "
-            "JOIN agent_conversations c USING(conversation_id) WHERE r.conversation_id=? AND r.run_id=? "
-            "AND c.deleted_at IS NULL", (cid, run_id)).fetchone()
-        if row is None or row[1] == run_id or not HistoryRetentionService._expired(json.loads(row[0]), cutoff):
-            return False
-        followup_store = getattr(self.store, "followup_store", None)
-        if followup_store is not None:
-            if followup_store.busy(db, cid, run_id=run_id):
-                return False
-            followup_store.purge(db, cid, run_id=run_id)
-        memory_store = getattr(self.store, "memory_store", None)
-        if memory_store is not None:
-            memory_store.expire_sources(db, cid, run_id=run_id)
-        maximum = db.execute("SELECT max(sequence) FROM agent_events WHERE conversation_id=? AND run_id=?",
-                             (cid, run_id)).fetchone()[0]
-        head = json.loads(row[2])
-        head["events_pruned_through"] = max(head.get("events_pruned_through", 0), maximum or 0)
-        db.execute("UPDATE agent_conversations SET body=? WHERE conversation_id=?", (_json(head), cid))
-        db.execute("DELETE FROM agent_message_adoptions WHERE message_id IN "
-            "(SELECT message_id FROM agent_messages WHERE conversation_id=? AND run_id=?)", (cid, run_id))
-        for table in ("agent_attachment_imports", "agent_stop_requests", "agent_messages", "agent_events", "agent_dispatches", "agent_generic_restarts"):
-            db.execute(f"DELETE FROM {table} WHERE run_id=?", (run_id,))
-        db.execute("DELETE FROM agent_conversation_runs WHERE run_id=? AND conversation_id=?", (run_id, cid))
-        return True
-
     def _expire_run(self, cid, run_id, case_id, cutoff):
-        with ExitStack() as leases:
-            lease = self.usage_guard.acquire_cleanup_if_idle(cid)
-            if lease is None:
-                return False
-            leases.enter_context(lease)
-            followup_store = getattr(self.store, "followup_store", None)
-            with self.repository.database_read() as db:
-                if followup_store is not None and followup_store.busy(db, cid, run_id=run_id):
-                    return False
-            if case_id is not None:
-                lease = self.repository.case_cleanup_if_idle(case_id)
-                if lease is None or not self._idle([case_id]):
-                    if lease is not None:
-                        with lease:
-                            pass
-                    return False
-                leases.enter_context(lease)
-            with self._barrier():
-                manifest = self.repository.prepare_history_case_cleanup(case_id, cutoff) if case_id else {
-                    "case_ids": [], "job_ids": [], "attachment_ids": [], "paths": []}
-                if manifest is None or not self._uploads_idle(manifest["attachment_ids"]):
-                    return False
-                with self.repository.database_read() as db:
-                    workspace = dialect_for(db).json_text("payload", "$.workspace_id")
-                    workspaces = [row[0] for row in db.execute(f"SELECT {workspace} "
-                        f"FROM agent_dispatches WHERE run_id=? AND {workspace} IS NOT NULL", (run_id,))]
-                    body = db.execute("SELECT body FROM agent_conversation_runs WHERE run_id=?", (run_id,)).fetchone()
-                    if followup_store is not None:
-                        workspaces.extend(followup_store.workspace_ids(db, cid, run_id=run_id))
-                if body is None:
-                    return False
-                workspaces.extend(json.loads(body[0]).get("legacy_workspace_ids", []))
-                workspaces = sorted({_ID.validate_python(value) for value in workspaces})
-                manifest.update(conversation_id=cid, workspace_ids=workspaces, upload_ids=[])
-                manifest["paths"] = sorted(set(manifest["paths"]) | self._workspace_paths(manifest["job_ids"], workspaces))
-                self._validate_manifest(manifest)
-                cleanup_id = str(uuid.uuid5(uuid.UUID(run_id), "history-retention-v1"))
-                committed = self.repository.commit_history_cleanup(cleanup_id, manifest,
-                    case_id=case_id, cutoff=cutoff,
-                    mutate=lambda db: self._prune_run(db, cid, run_id, cutoff))
-            if not committed:
-                return False
-            self._database_dirty = True
-            self._finish_paths(cleanup_id, manifest)
-            return True
+        return self.web.expire_run(cid, run_id, case_id, cutoff)
 
     def _expire_conversation(self, cid, cutoff):
-        lease = self.usage_guard.acquire_cleanup_if_idle(cid)
-        if lease is None:
-            return False
-        with lease, ExitStack() as case_leases:
-            with self.repository.database_read() as db:
-                row = db.execute("SELECT deleted_at FROM agent_conversations WHERE conversation_id=?", (cid,)).fetchone()
-                if row is None or row[0] is not None:
-                    return False
-                followup_store = getattr(self.store, "followup_store", None)
-                if followup_store is not None and followup_store.busy(db, cid):
-                    return False
-                runs = [(case_id, json.loads(raw)) for case_id, raw in db.execute(
-                    "SELECT case_id,body FROM agent_conversation_runs WHERE conversation_id=?", (cid,))]
-            if not runs or any(not self._expired(body, cutoff) for _, body in runs):
-                return False
-            case_ids = [case_id for case_id, _ in runs if case_id is not None]
-            if not self._idle(case_ids):
-                return False
-            with self._barrier():
-                for case_id in case_ids:
-                    case_lease = self.repository.case_cleanup_if_idle(case_id)
-                    if case_lease is None:
-                        return False
-                    case_leases.enter_context(case_lease)
-                    manifest = self.repository.prepare_history_case_cleanup(case_id, cutoff)
-                    if manifest is None or not self._uploads_idle(manifest["attachment_ids"]):
-                        return False
-            # Reuse durable resource cleanup, but preserve completed experience
-            # cards and discard any source still awaiting extraction.
-            self.store.request_expiry(cid)
-            self._database_dirty = True
-            return True
+        # A natural deadline only releases resources; explicit deletion remains
+        # the sole operation which removes user-visible conversation content.
+        changed = False
+        for owner, rid, case_id in self.web.candidates(cutoff):
+            if owner == cid:
+                changed = self.web.expire_run(cid, rid, case_id, cutoff) or changed
+        return changed
 
     def _expire_uploads(self, cutoff):
         with self.repository.database_read() as db:
@@ -310,6 +224,7 @@ class HistoryRetentionService:
             created = dialect.timestamp(dialect.json_text("a.body", "$.created_at"))
             rows = db.execute("SELECT a.attachment_id,a.conversation_id FROM agent_attachments a "
                 "JOIN agent_conversations c USING(conversation_id) WHERE c.deleted_at IS NULL "
+                f"AND {dialect.json_text('a.body', '$.status')}<>'EXPIRED' "
                 f"AND {created}<={dialect.timestamp('?')}", (cutoff,)).fetchall()
         changed, failures = False, []
         for aid, cid in rows:
@@ -322,11 +237,11 @@ class HistoryRetentionService:
         return changed
 
     def _expire_upload(self, aid, cid, cutoff):
-        lease = self.usage_guard.acquire_cleanup_if_idle(cid)
+        lease = self.usage_guard.acquire_cleanup_if_idle(cid, temporary=True)
         if lease is None:
             return False
         with lease:
-            manifest = dict(conversation_id=cid, case_ids=[], job_ids=[], attachment_ids=[],
+            manifest = dict(conversation_id=cid, kind="WEB_UNUSED_UPLOAD", case_ids=[], job_ids=[], attachment_ids=[],
                 workspace_ids=[], upload_ids=[aid], paths=[f"resources/conversations/{aid}"])
             self._validate_manifest(manifest)
             def remove(db):
@@ -335,28 +250,11 @@ class HistoryRetentionService:
                 row = db.execute("SELECT body FROM agent_attachments WHERE attachment_id=? AND conversation_id=?", (aid, cid)).fetchone()
                 if row is None or self._time(json.loads(row[0])["created_at"]) > self._time(cutoff):
                     return False
-                # A retained run may still display or use its selected
-                # attachment, even after the original upload is seven days old.
-                attachments = dialect.json_array("m.body", "$.attachment_ids", "x")
-                referenced = db.execute(f"SELECT 1 FROM agent_messages m,{attachments} "
-                    "WHERE m.conversation_id=? AND x.value=? LIMIT 1", (cid, aid)).fetchone()
-                attachments = dialect.json_array("r.payload", "$.message.attachment_ids", "x")
-                pending_restart = db.execute(f"SELECT 1 FROM agent_generic_restarts r,{attachments} "
-                    "WHERE r.status IN ('PENDING','COMMITTED') "
-                    "AND x.value=? LIMIT 1", (aid,)).fetchone()
-                if referenced or pending_restart or db.execute("SELECT 1 FROM agent_attachment_imports WHERE attachment_id=?", (aid,)).fetchone():
+                if json.loads(row[0])["status"] == "EXPIRED":
                     return False
-                attachment = dialect.json_text("body", "$.data.attachment_id")
-                maximum = db.execute("SELECT max(sequence) FROM agent_events WHERE conversation_id=? "
-                    f"AND {attachment}=?", (cid, aid)).fetchone()[0]
-                row = db.execute("SELECT body FROM agent_conversations WHERE conversation_id=?", (cid,)).fetchone()
-                if row is None:
+                if self.web.upload_in_use(db, cid, aid):
                     return False
-                head = json.loads(row[0])
-                head["events_pruned_through"] = max(head.get("events_pruned_through", 0), maximum or 0)
-                db.execute("UPDATE agent_conversations SET body=? WHERE conversation_id=?", (_json(head), cid))
-                db.execute(f"DELETE FROM agent_events WHERE conversation_id=? AND {attachment}=?", (cid, aid))
-                db.execute("DELETE FROM agent_attachments WHERE attachment_id=?", (aid,))
+                self.web.mark_upload_expired(db, cid, aid)
                 return True
             cleanup_id = str(uuid.uuid5(uuid.UUID(aid), "history-upload-retention-v1"))
             if not self.repository.commit_history_cleanup(cleanup_id, manifest, mutate=remove):
@@ -391,12 +289,86 @@ class HistoryRetentionService:
             self._finish_paths(cleanup_id, manifest)
             return True
 
+    def reclaim_web_resources(self, *, limit=1) -> bool:
+        """Release oldest completed Web runs; admission measures physical space."""
+        if type(limit) is not int or limit < 1:
+            raise ValueError("limit 必须是正整数")
+        if not self._processing.acquire(blocking=False):
+            return False
+        try:
+            changed, failures = self._retry_paths()
+            if changed:
+                for error in failures:
+                    log_event("history.retention.pressure_failed", level=logging.ERROR, error=error)
+                return True
+            completed = 0
+            for cid, rid, case_id in self.web.candidates():
+                try:
+                    released = self.web.expire_run(cid, rid, case_id, reason="DISK_PRESSURE")
+                    changed = released or changed
+                    completed += int(released)
+                except Exception as error:
+                    failures.append(error)
+                if completed >= limit:
+                    break
+            for error in failures:
+                log_event("history.retention.pressure_failed", level=logging.ERROR, error=error)
+            return changed
+        finally:
+            self._processing.release()
+
+    def _expire_waiting(self, cutoff):
+        if self.expire_waiting_run is None:
+            return False
+        with self.repository.database_read() as db:
+            d = dialect_for(db)
+            activity = d.timestamp(f"coalesce({d.json_text('r.body', '$.last_business_activity_at')},{d.json_text('r.body', '$.updated_at')})")
+            rows = db.execute("SELECT r.conversation_id,r.run_id FROM agent_conversation_runs r "
+                "JOIN agent_conversations c USING(conversation_id) WHERE c.deleted_at IS NULL "
+                f"AND r.status='WAITING_INPUT' AND {activity}<={d.timestamp('?')}", (cutoff,)).fetchall()
+        changed = False
+        for cid, rid in rows:
+            lease = self.usage_guard.acquire_cleanup_if_idle(cid, temporary=True)
+            if lease is not None:
+                with lease:
+                    changed = bool(self.expire_waiting_run(cid, rid, cutoff)) or changed
+        return changed
+
+    def _prune_internal_events(self, cutoff):
+        # Public history and user-facing failure/notice text are permanent.
+        # Only operational deltas of completed runs have a replay deadline.
+        kinds = "('agent.progress','case.updated','archive.updated','attachment.updated','run.started','run.stopping')"
+        with self.repository.database_read() as db:
+            d = dialect_for(db)
+            eligible = (f"{d.json_text('body', '$.type')} IN {kinds} AND "
+                f"{d.timestamp(d.json_text('body', '$.created_at'))}<={d.timestamp('?')} "
+                "AND run_id IN (SELECT run_id FROM agent_conversation_runs WHERE status IN ('COMPLETED','FAILED','INTERRUPTED','CANCELLED'))")
+            owners = db.execute(f"SELECT DISTINCT conversation_id FROM agent_events WHERE {eligible}", (cutoff,)).fetchall()
+        changed = False
+        for (cid,) in owners:
+            with self.repository.database_transaction() as db:
+                lock_conversation(db, cid)
+                head = db.execute("SELECT body FROM agent_conversations WHERE conversation_id=? AND deleted_at IS NULL", (cid,)).fetchone()
+                if head is None:
+                    continue
+                maximum = db.execute(f"SELECT max(sequence) FROM agent_events WHERE conversation_id=? AND {eligible}", (cid, cutoff)).fetchone()[0]
+                if maximum is None:
+                    continue
+                body = json.loads(head[0])
+                body["events_pruned_through"] = max(body.get("events_pruned_through", 0), maximum)
+                db.execute("UPDATE agent_conversations SET body=? WHERE conversation_id=?", (_json(body), cid))
+                db.execute(f"DELETE FROM agent_events WHERE conversation_id=? AND {eligible}", (cid, cutoff))
+                changed = True
+        self._database_dirty |= changed
+        return changed
+
     def run_once(self) -> bool:
         if not self._processing.acquire(blocking=False):
             return False
         try:
             now = self._time(self.clock.now())
             cutoff = format_timestamp(now - timedelta(days=self.retention_days))
+            web_cutoff = format_timestamp(now - timedelta(days=self.web_retention_days))
             changed, failures = self._retry_paths()
             def attempt(action):
                 try:
@@ -405,21 +377,11 @@ class HistoryRetentionService:
                     failures.append(error)
                     return False
             changed = self._prune_keys_and_tombstones(cutoff) or changed
-            with self.repository.database_read() as db:
-                dialect = dialect_for(db)
-                completed = dialect.json_text("r.body", "$.completed_at")
-                updated = dialect.json_text("r.body", "$.updated_at")
-                finished = dialect.timestamp(f"coalesce({completed},{updated})")
-                rows = db.execute("SELECT r.conversation_id,r.run_id,r.case_id,c.current_run_id "
-                    "FROM agent_conversation_runs r JOIN agent_conversations c USING(conversation_id) "
-                    f"WHERE c.deleted_at IS NULL AND {finished}<={dialect.timestamp('?')} "
-                    f"ORDER BY {dialect.order_column('r')}", (cutoff,)).fetchall()
-            for cid, run_id, case_id, current in rows:
-                if run_id == current:
-                    changed = attempt(lambda: self._expire_conversation(cid, cutoff)) or changed
-                else:
-                    changed = attempt(lambda: self._expire_run(cid, run_id, case_id, cutoff)) or changed
-            changed = attempt(lambda: self._expire_uploads(cutoff)) or changed
+            changed = attempt(lambda: self._prune_internal_events(cutoff)) or changed
+            changed = attempt(lambda: self._expire_waiting(web_cutoff)) or changed
+            for cid, run_id, case_id in self.web.candidates(web_cutoff):
+                changed = attempt(lambda: self._expire_run(cid, run_id, case_id, web_cutoff)) or changed
+            changed = attempt(lambda: self._expire_uploads(web_cutoff)) or changed
             for case_id in self.repository.history_case_candidates(cutoff):
                 changed = attempt(lambda: self._expire_core_case(case_id, cutoff)) or changed
             # Explicit/asynchronous conversation cleanup can free pages after

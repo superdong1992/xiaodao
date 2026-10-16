@@ -1439,6 +1439,7 @@ class ExternalCommandHandler:
             case_revision=1,
             raw_problem_text=payload.raw_problem_text,
             initial_log_archive_expected=payload.initial_log_archive_expected,
+            continuation_context=payload.continuation_context,
             diagnosis_state=diagnosis_state,
             active_job_id=None,
             selected_skill_ref=None,

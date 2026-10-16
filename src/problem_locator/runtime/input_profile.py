@@ -88,7 +88,7 @@ def _base_requirement(value: Any, name: str, *, attachment: bool = False) -> dic
         if (
             constraints["allowed_content_types"] != _LOG_ARCHIVE_CONTENT_TYPES
             or constraints["min_count"] != 1
-            or constraints["max_count"] != 1
+            or constraints["max_count"] != 20
         ):
             raise ValueError(f"{name}.constraints are invalid")
     else:

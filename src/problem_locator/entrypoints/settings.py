@@ -121,6 +121,11 @@ class Settings:
     database_url: str | None = field(default=None, repr=False)
     database_pool_size: int = 8
     history_retention_days: int = DEFAULT_HISTORY_RETENTION_DAYS
+    web_resource_retention_days: int = 15
+    resource_disk_low_free_bytes: int = 10 * 1024 ** 3
+    resource_disk_target_free_bytes: int = 20 * 1024 ** 3
+    resource_disk_low_free_percent: int = 10
+    resource_disk_target_free_percent: int = 15
     website_auth: WebsiteAuthConfig = field(default_factory=WebsiteAuthConfig, repr=False)
 
     @classmethod
@@ -139,7 +144,8 @@ class Settings:
             key
             for key in values
             if key == "JOB_CONCURRENCY" or (
-                _FORBIDDEN_LIMIT_KEY.fullmatch(key) and key != "HISTORY_RETENTION_DAYS"
+                _FORBIDDEN_LIMIT_KEY.fullmatch(key)
+                and key not in {"HISTORY_RETENTION_DAYS", "WEB_RESOURCE_RETENTION_DAYS"}
             )
         )
         if forbidden:
@@ -160,6 +166,25 @@ class Settings:
         if (re.fullmatch(r"[1-9][0-9]{0,3}", raw_history_days) is None
                 or int(raw_history_days) > 3650):
             raise SettingsError("HISTORY_RETENTION_DAYS 必须是 1–3650 之间的整数")
+
+        raw_web_days = values.get("WEB_RESOURCE_RETENTION_DAYS", "15")
+        if re.fullmatch(r"[1-9][0-9]{0,3}", raw_web_days) is None or int(raw_web_days) > 3650:
+            raise SettingsError("WEB_RESOURCE_RETENTION_DAYS 必须是 1–3650 之间的整数")
+        disk_settings = {}
+        for key, default in (
+            ("RESOURCE_DISK_LOW_FREE_BYTES", 10 * 1024 ** 3),
+            ("RESOURCE_DISK_TARGET_FREE_BYTES", 20 * 1024 ** 3),
+            ("RESOURCE_DISK_LOW_FREE_PERCENT", 10),
+            ("RESOURCE_DISK_TARGET_FREE_PERCENT", 15),
+        ):
+            raw = values.get(key, str(default))
+            upper = 99 if key.endswith("PERCENT") else 2 ** 63 - 1
+            if re.fullmatch(r"0|[1-9][0-9]{0,18}", raw) is None or not 0 <= int(raw) <= upper:
+                raise SettingsError(f"{key} 必须是 0–{upper} 之间的整数")
+            disk_settings[key.lower()] = int(raw)
+        if (disk_settings["resource_disk_target_free_bytes"] <= disk_settings["resource_disk_low_free_bytes"]
+                or disk_settings["resource_disk_target_free_percent"] <= disk_settings["resource_disk_low_free_percent"]):
+            raise SettingsError("RESOURCE_DISK_TARGET_FREE_BYTES 和 RESOURCE_DISK_TARGET_FREE_PERCENT 必须分别大于触发阈值")
 
         paths: dict[str, Path] = {}
         for key in _PATH_KEYS:
@@ -286,10 +311,12 @@ class Settings:
         return cls(
             **workers,
             **followup_sizes,
+            **disk_settings,
             data_root=paths["DATA_ROOT"],
             database_url=database_url,
             database_pool_size=database_pool_size,
             history_retention_days=int(raw_history_days),
+            web_resource_retention_days=int(raw_web_days),
             website_auth=website_auth,
             public_base_url=base_url.rstrip("/"),
             bind_host=bind_host,
@@ -319,6 +346,7 @@ class Settings:
             "database_url=<redacted>, "
             f"database_pool_size={self.database_pool_size}, "
             f"history_retention_days={self.history_retention_days}, "
+            f"web_resource_retention_days={self.web_resource_retention_days}, "
             "claude_command=<configured>, "
             "route_claude_command=<configured>, "
             "diagnose_claude_command=<configured>, "

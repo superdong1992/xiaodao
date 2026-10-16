@@ -30,7 +30,7 @@
 | --- | --- |
 | Problem Locator 软件包 | `8.2.0` |
 | State / Job / Outcome 数据格式 | `11` |
-| S00 合同修订版 | `v11-contract-r2` |
+| S00 合同修订版 | `v11-contract-r3` |
 | Agent 会话详情 / 存储 / 事件 | `3` / `2` / `2` |
 | Methods 包 | `SKILL.md` + `methods.json@1` + `references/*.md` |
 | 产品注册格式 | `registration-template.json@2`；V1 仅兼容加载，不参与自动专用路由 |
@@ -92,7 +92,7 @@ Problem Locator 8.2 将活动 Case、Job 和核心命令的幂等记录保存在
 
 ## 环境要求与安装
 
-历史诊断、报告和附件默认保留 **30 天**，可用服务端 `HISTORY_RETENTION_DAYS` 调整，重启后生效。服务启动时及每小时清理到期数据，临时工作区按 24 小时清理，DFX/Journey 日志按大小轮转。完整范围、并发保护和部署要求见[服务端文件保留与清理](docs/storage-retention.md)。
+Web 会话正文、报告和历史问答永久保存，用户主动删除时再清除。日志资源默认保留 **15 天**，可用 `WEB_RESOURCE_RETENTION_DAYS` 调整；空间不足时提前回收已完成轮次的日志。成功工作区在依赖结束后尽快释放，失败临时数据保留 24 小时，DFX/Journey 按大小轮转。非 Web 历史仍由 `HISTORY_RETENTION_DAYS` 控制，默认 30 天。配置、容量保护和升级说明见[服务端文件保留与清理](docs/storage-retention.md)。
 
 - CPython 3.12（项目要求 `>=3.12,<3.13`）
 - `uv`，并使用仓库中已提交的 `uv.lock`
@@ -417,7 +417,7 @@ INTERRUPTED 不生成用户报告。`methods_result` 不属于当前客户端的
 
 ## 隔离重放指定 Job
 
-`replay-job` 是普通本地 CLI，不增加管理员角色、管理 API、认证或权限模型。它只接受当前 State V11 / `v11-contract-r2` 中已保存的完整 State/Job/Outcome 记录及其引用，并在新的隔离安装环境中，使用当前固定版本的运行文件执行指定阶段。数据目录升级不会转换以前导出的 replay 文件。活动任务在停服后不会保留，不能用这个命令恢复：
+`replay-job` 是普通本地 CLI，不增加管理员角色、管理 API、认证或权限模型。它只接受当前 State V11 / `v11-contract-r3` 中已保存的完整 State/Job/Outcome 记录及其引用，并在新的隔离安装环境中，使用当前固定版本的运行文件执行指定阶段。数据目录升级不会转换以前导出的 replay 文件。活动任务在停服后不会保留，不能用这个命令恢复：
 
 - `diagnose-only`：源 Job 必须是 DIAGNOSE；完成服务端的结果处理，但不向隔离 State 提交诊断 Outcome。
 - `review-only`：源 Job 必须是 REVIEW；完成服务端的结果处理，但不向隔离 State 提交 Review Outcome。

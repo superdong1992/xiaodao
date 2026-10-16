@@ -671,6 +671,24 @@ def test_followup_lease_protects_expired_workspace_until_released(tmp_path: Path
     assert not workspace.exists()
 
 
+def test_completed_workspace_reclaims_early_and_rechecks_dependencies(tmp_path):
+    harness = _harness(tmp_path, state=_state())
+    identifier = "70000000-0000-0000-0000-000000000008"
+    workspace = harness.layout.workspaces / identifier
+    workspace.mkdir()
+    (workspace / "input.log").write_bytes(b"temporary copy")
+    _set_age(workspace, 1)
+    harness.cleaner.run_once(workspaces_only=True)
+    assert workspace.exists()
+    observations = iter((True, False))
+    harness.scanner.workspace_completed = lambda _: next(observations)
+    harness.cleaner.run_once(workspaces_only=True)
+    assert workspace.exists()
+    harness.scanner.workspace_completed = lambda _: True
+    harness.cleaner.run_once(workspaces_only=True)
+    assert not workspace.exists()
+
+
 def test_running_job_protects_both_workspaces_until_it_finishes(tmp_path: Path) -> None:
     state = _state()
     aggregate = state.cases[CASE_ID]

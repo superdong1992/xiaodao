@@ -18,7 +18,7 @@ export async function sendConversationInput({ client, conversationId, runId, req
     return value;
   }
   async function ask() {
-    if (attachmentIds.length) throw new AgentApiError("报告后的追问只接收文字；如需提交新日志，请新建对话。", {
+    if (attachmentIds.length) throw new AgentApiError("报告追问只接收文字；补充新日志请打开“继续诊断”，核对后再提交。", {
       status: 409, code: "WEBSITE_FOLLOWUP_TEXT_ONLY",
     });
     return { kind: "followup", receipt: await client.followups.send(conversationId, runId, {

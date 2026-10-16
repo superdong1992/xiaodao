@@ -115,6 +115,7 @@ def build_create_case_trigger(
         payload=CreateCaseTriggerPayload(
             raw_problem_text=command.raw_problem_text,
             initial_log_archive_expected=command.initial_log_archive_expected,
+            continuation_context=command.continuation_context,
             problem_spec=problem_spec_at_revision_one(command),
             initial_user_facts=facts,
         ),

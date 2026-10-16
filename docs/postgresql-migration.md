@@ -1,6 +1,6 @@
 # 从 SQLite 迁移到 PostgreSQL
 
-`problem-locator-postgres-import` 将当前 V11 r2、会话存储 v2 的 SQLite 历史复制到新的 PostgreSQL 数据库和新的 `DATA_ROOT`。它保留会话、报告、事件、反馈、追问以及资源文件。原目录不作修改。
+`problem-locator-postgres-import` 将 V11 r2 或 r3、会话存储 v2 的 SQLite 历史复制到新的 PostgreSQL 数据库和新的 `DATA_ROOT`。它保留会话、报告、事件、反馈、追问以及资源文件。原目录不作修改。
 
 此命令只支持 Linux Server。Windows 和 macOS 客户端仍直接连接 Linux Server，不需要安装数据库、代理或 Hook。
 
@@ -37,11 +37,13 @@ problem-locator-postgres-import \
 
 执行时，工具先复制完整目录，将 SQLite 主文件、WAL 和 SHM 放入独立暂存目录。SQLite 只打开这个副本，源数据库始终不打开。随后检查数据库完整性、任务状态、Case 快照、资源校验值、附件和追问快照。
 
-工具使用当前程序创建 PostgreSQL 表结构，再在单个事务中导入历史记录。存在插入顺序要求的表将 SQLite `rowid` 保存为 `storage_order`。JSON 正文、消息、事件和回执不作改写；SQLite 中保存为文本的二进制字段按原 UTF-8 字节写入 `BYTEA`。会话附件的 `storage_path` 只将已验证的源目录前缀替换为目标目录，资源文件本身不变。
+工具使用当前程序创建 PostgreSQL 表结构，再在单个事务中导入历史记录。存在插入顺序要求的表将 SQLite `rowid` 保存为 `storage_order`。r2 来源仅在副本中将 StateFile 顶层合同头升为 r3；内部 Job、Outcome、报告内容、消息、事件和回执不作改写。SQLite 中保存为文本的二进制字段按原 UTF-8 字节写入 `BYTEA`。会话附件的 `storage_path` 只将已验证的源目录前缀替换为目标目录，资源文件本身不变。
 
 每张表都核对记录数和完整记录的 SHA-256。数据库保留原 `installation_id`，新增 PostgreSQL 后端标记，并绑定目标目录。文件清单、每表校验结果和允许的路径映射记录在目标目录的 `postgresql-import.receipt.json` 中。收据中的校验结果只证明本次导入，不代替仓库 Test Flow 的 `verdict.json`。
 
 ## 切换与回滚
+
+已经部署的 r2 PostgreSQL 无须再次导入。r3 服务接受规范的 r2 PostgreSQL 目录标记，在读取旧 StateFile 时只将合同头映射为 r3；数据库里的历史快照、目录标记和报告文件不会因此改写。新增快照使用 r3。此兼容只覆盖 r2→r3，不接受更早版本，也不接受伪装成 r2 的持续诊断字段。上线后若已写入 r3 数据，不能仅切回旧程序继续使用同一数据库，应使用升级前的备份回退。
 
 命令返回 `status: IMPORTED` 且退出码为 `0` 后，同时更新 Server 的 `DATA_ROOT` 和 `DATABASE_URL`，再启动新版本。新目录没有 `completed.sqlite3`，只包含 PostgreSQL 格式标记和资源文件。正常启动还会核对数据库与目录的安装标识及路径绑定。
 

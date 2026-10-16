@@ -13,9 +13,12 @@ from problem_locator.agent.store import AgentStore
 from problem_locator.agent.usage import ConversationUsageGuard
 from problem_locator.followup.models import FollowupRequest, FollowupSource
 from problem_locator.followup.store import FollowupStore
+from problem_locator.storage.coordination import StorageCoordinationLock
 from problem_locator.storage.database import lock_conversation
 from problem_locator.storage.history_retention import HistoryRetentionService
+from problem_locator.storage.quarantine import QuarantineMover
 from tests.postgres_helpers import postgres_database_url, postgres_repository
+from tests.deterministic.unit.storage.fakes import FakeFileSync, FaultInjectingReplace
 
 OWNER = "a" * 64
 NOW = "2026-09-24T01:00:00.000Z"
@@ -154,28 +157,41 @@ def test_postgres_retention_preserves_referenced_upload_then_prunes_its_events(f
     state = followup_database
     conversation = _conversation(state, "retention")
     cid = conversation.conversation_id
-    attachment = state.agent.reserve_attachment(cid, "upload", "trace.log", "text/plain", 1, "a" * 64)
-    state.agent.complete_attachment(attachment.attachment_id)
+    payload = b"original log bytes"
+    attachment = state.agent.reserve_attachment(cid, "upload", "trace.log", "text/plain",
+        len(payload), hashlib.sha256(payload).hexdigest())
+    path = state.repository.layout.data_root / "resources/conversations" / attachment.attachment_id / "payload"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(payload)
+    state.agent.complete_attachment(attachment.attachment_id, str(path))
     if reference == "message":
         state.agent.submit_message(cid, "message", "请分析日志。", [attachment.attachment_id])
-        table = "agent_messages"
     else:
+        state.agent.submit_message(cid, "message", "请重新分析日志。")
         with state.repository.database_transaction() as db:
             db.execute("INSERT INTO agent_generic_restarts(conversation_id,request_id,run_id,fingerprint,command_key,status,payload) "
                 "VALUES (?,?,?,?,?,'PENDING',?)", (cid, "restart", conversation.run_id, "fingerprint", "command",
                     json.dumps({"message": {"attachment_ids": [attachment.attachment_id]}})))
-        table = "agent_generic_restarts"
-    # No resource directory was created, so durable cleanup has no file to move.
-    history = HistoryRetentionService(state.repository, state.agent, None,
+    quarantine = QuarantineMover(state.repository.layout, StorageCoordinationLock(), FakeFileSync(), FaultInjectingReplace())
+    history = HistoryRetentionService(state.repository, state.agent, quarantine,
         ConversationUsageGuard(), SimpleNamespace(now=lambda: NOW))
     assert history._expire_upload(attachment.attachment_id, cid, NOW) is False
-    with state.repository.database_transaction() as db:
-        db.execute(f"DELETE FROM {table} WHERE conversation_id=?", (cid,))
-    assert history._expire_upload(attachment.attachment_id, cid, NOW) is True
+    assert path.read_bytes() == payload and state.agent.get_attachment(attachment.attachment_id).status == "READY"
+    state.agent.request_stop(cid, "stop", conversation.run_id)
+    state.agent.finish_stop(cid, conversation.run_id)
+    before = state.agent.read_conversation(cid, history=True).history
+    assert history.reclaim_web_resources()
+    assert not path.exists()
+    expired = state.agent.get_attachment(attachment.attachment_id)
+    assert expired.status == "EXPIRED" and expired.storage_path is None
+    assert (expired.name, expired.size, expired.sha256) == (attachment.name, len(payload), hashlib.sha256(payload).hexdigest())
+    assert state.agent.read_conversation(cid, history=True).history == before
+    assert history._prune_internal_events(NOW)
     with state.repository.database_read() as db:
-        assert db.execute("SELECT 1 FROM agent_attachments WHERE attachment_id=?", (attachment.attachment_id,)).fetchone() is None
+        assert db.execute("SELECT 1 FROM agent_attachments WHERE attachment_id=?", (attachment.attachment_id,)).fetchone() == (1,)
         head = json.loads(db.execute("SELECT body FROM agent_conversations WHERE conversation_id=?", (cid,)).fetchone()[0])
-        assert head["events_pruned_through"] >= 2
+        assert head["events_pruned_through"] >= 2 and head["resources_expired"] is True
+    assert state.agent.read_conversation(cid, history=True).history == before
     assert history._retry_paths() == (False, [])
     assert history._prune_keys_and_tombstones(NOW) is True
     assert history._prune_keys_and_tombstones(NOW) is False

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -180,6 +181,13 @@ class _OwnedSink:
                 raise
 
 
+_MODEL_CONFIGURATION_ENVIRONMENT = (
+    "ANTHROPIC_MODEL", "CLAUDE_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_EFFORT_LEVEL",
+)
+
+
 class AgentBackend:
     """Run one fresh external Agent process for one Job."""
 
@@ -197,6 +205,20 @@ class AgentBackend:
         )
         self._process_factory = process_factory
         self._monotonic = monotonic
+
+    @property
+    def model_configuration_fingerprint(self) -> str:
+        """Compare explicit launch configuration without exposing its values.
+
+        This does not identify the provider's resolved model or inspect private
+        settings files. Credentials and unrelated environment are not inputs.
+        """
+        environment = os.environ if self._parent_environment is None else self._parent_environment
+        payload = {"version": 1, "command": self._command,
+                   "model_environment": {key: environment[key] for key in _MODEL_CONFIGURATION_ENVIRONMENT
+                                         if key in environment}}
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                                         separators=(",", ":")).encode("utf-8")).hexdigest()
 
     def execute(
         self,

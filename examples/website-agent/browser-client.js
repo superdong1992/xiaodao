@@ -1,5 +1,7 @@
 import { validFollowupId, validFollowupRequestId, validFollowupText, validateFollowupView,
   validateFollowupReceipt, validateFollowupEvent } from "./followup-contract.js";
+import { validateContinuationInput, validateContinuationDraft, validateContinuationReceipt,
+  validateReportVersions } from "./continuation-contract.js";
 
 /**
  * 浏览器 → 网站同源后端。成功时直接返回 data，失败时抛 AgentApiError。
@@ -93,6 +95,14 @@ export function createAgentClient({ basePath = "/api/agent", fetchImpl = globalT
   const checked = (validate) => {
     try { return validate(); }
     catch { throw new AgentApiError("追问响应与所选报告不一致或格式无效，请刷新后重试。", { status: 502, code: "WEBSITE_INVALID_RESPONSE" }); }
+  };
+  const continuationPath = (id, key, kind = "continuation-drafts") => {
+    if (!validFollowupId(id) || !validFollowupId(key)) throw new TypeError("会话、轮次和草稿标识必须是小写规范 UUID。");
+    return kind === "run" ? `${conversationPath(id)}/runs/${key}` : `${conversationPath(id)}/continuation-drafts/${key}`;
+  };
+  const continuationChecked = (validate) => {
+    try { return validate(); }
+    catch { throw new AgentApiError("继续诊断响应与所选报告不一致或格式无效，请刷新后重试。", { status: 502, code: "WEBSITE_INVALID_RESPONSE" }); }
   };
 
   return {
@@ -217,12 +227,39 @@ export function createAgentClient({ basePath = "/api/agent", fetchImpl = globalT
         }
       },
     },
+    continuations: {
+      async create(id, runId, input) {
+        validateContinuationInput(input, "create");
+        const data = await post(`${continuationPath(id, runId, "run")}/continuation-drafts`, input);
+        return continuationChecked(() => validateContinuationDraft(data, id, { runId }));
+      },
+      async get(id, draftId, { signal } = {}) {
+        const data = await request(continuationPath(id, draftId), { signal });
+        return continuationChecked(() => validateContinuationDraft(data, id, { draftId }));
+      },
+      async update(id, draftId, input) {
+        validateContinuationInput(input, "update");
+        const data = await request(continuationPath(id, draftId), { method: "PATCH", body: JSON.stringify(input),
+          requestHeaders: { "Content-Type": "application/json" } });
+        return continuationChecked(() => validateContinuationDraft(data, id, { draftId }));
+      },
+      async confirm(id, draftId, input) {
+        validateContinuationInput(input, "confirm");
+        const data = await post(`${continuationPath(id, draftId)}/confirm`, input);
+        return continuationChecked(() => validateContinuationReceipt(data, id, input.request_id));
+      },
+      async versions(id, runId, { signal } = {}) {
+        const data = await request(`${continuationPath(id, runId, "run")}/report-versions`, { signal });
+        return continuationChecked(() => validateReportVersions(data, id, runId));
+      },
+    },
     attachments: {
       prepare: (id, metadata) => post(`${base}/attachments`, { ...metadata, conversation_id: id }),
 
       /** prepared 是 attachments.prepare 的返回值；上传不重新读取或计算文件哈希。 */
-      async upload(prepared, file) {
+      async upload(prepared, file, { signal } = {}) {
         const { attachment, upload } = prepared ?? {};
+        if (attachment?.status === "EXPIRED") throw new TypeError("该附件已清理，请用新的请求重新上传。");
         const uploadHeaders = new Headers(upload?.required_headers);
         if (!attachment || !upload || upload.method !== "PUT" ||
             !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(attachment.attachment_id) ||
@@ -236,7 +273,7 @@ export function createAgentClient({ basePath = "/api/agent", fetchImpl = globalT
         }
         // 固定走本站路径，描述符中的 URL 不用于跨域寻址。
         return request(`${base}/attachments/${encodeURIComponent(attachment.attachment_id)}/content`, {
-          method: "PUT", body: file, requestHeaders: uploadHeaders,
+          method: "PUT", body: file, requestHeaders: uploadHeaders, signal,
         });
       },
     },

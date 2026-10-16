@@ -45,7 +45,7 @@ function validate(data) {
  * The caller handles fetching and decides whether a failed refresh needs a notice.
  * Returns the mounted section. Import report-view.css separately in the page.
  */
-export function renderReport(container, data) {
+export function renderReport(container, data, { resourcesExpired = false } = {}) {
   if (!container?.ownerDocument || typeof container.replaceChildren !== "function") {
     throw new TypeError("请提供有效的报告容器。");
   }
@@ -121,6 +121,7 @@ export function renderReport(container, data) {
     data.case_status === "UNRESOLVED" ? "尚无定论" : "报告已就绪";
   header.append(node("span", "badge", label));
   root.append(header);
+  if (resourcesExpired) root.append(node("p", "notice", "相关日志已清理，本轮仅供查看。报告和历史问答仍可查看，也可以在同一会话新开一轮。"));
 
   const archiveUnknown = data.failure?.details?.some((item) => item.field === "phase" && item.actual === "ARCHIVE_STATUS_COMMIT");
   if (ready && archiveUnknown) root.append(node("p", "notice", "报告已生成，但归档状态暂时无法确认。"));

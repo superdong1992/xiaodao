@@ -58,6 +58,7 @@ from problem_locator.contracts import (
     PendingRequirement,
     PlannedResourceBinding,
     ProblemSpecPatch,
+    ReportContinuationContext,
     RequirementFulfillment,
     RequirementKind,
     RequirementStatus,
@@ -467,6 +468,7 @@ class DomainCoordinator:
             or case.failure is not None
             or case.raw_problem_text != payload.raw_problem_text
             or case.initial_log_archive_expected != payload.initial_log_archive_expected
+            or case.continuation_context != payload.continuation_context
         ):
             return _validation(
                 "The transient NEW snapshot does not match the normalized CreateCase payload."
@@ -536,15 +538,14 @@ class DomainCoordinator:
                 target_state_revision=snapshot.case.diagnosis_state.revision,
                 goal=_GENERIC_DIAGNOSE_GOAL,
                 evidence_bindings=[],
-                # Specialized history may contain several archives. Generic
-                # diagnosis waits for an explicit single selection in that case.
-                attachment_refs=attachments if len(attachments) == 1 else [],
+                attachment_refs=attachments,
                 previous_outcome_refs=[],
                 artifact_bindings=[],
                 selected_skill_ref=None,
                 generic_problem_text=snapshot.case.raw_problem_text,
                 generic_log_archive_expected=(snapshot.case.initial_log_archive_expected
                     or bool(attachments)),
+                continuation_context=snapshot.case.continuation_context,
             )
             if isinstance(next_job, ApplicationError):
                 return next_job
@@ -580,6 +581,7 @@ class DomainCoordinator:
             previous_outcome_refs=continuation.previous_outcome_refs,
             artifact_bindings=_existing_bindings(continuation.artifact_refs),
             selected_skill_ref=decision.skill_ref,
+            continuation_context=snapshot.case.continuation_context,
         )
         if isinstance(next_job, ApplicationError):
             return next_job
@@ -997,6 +999,7 @@ class DomainCoordinator:
             previous_outcome_refs=trigger.continuation_resources.previous_outcome_refs,
             artifact_bindings=resources[2],
             selected_skill_ref=snapshot.case.selected_skill_ref,
+            continuation_context=snapshot.case.continuation_context,
         )
         if isinstance(next_job, ApplicationError):
             return next_job
@@ -1554,6 +1557,7 @@ class DomainCoordinator:
                 generic_log_archive_expected=True,
                 generic_supplement_texts=[*generic_source.generic_supplement_texts,
                     *([payload.generic_supplement_text] if payload.generic_supplement_text.strip() else [])],
+                continuation_context=case.continuation_context,
             )
         else:
             if payload.generic_supplement_text:
@@ -1568,6 +1572,7 @@ class DomainCoordinator:
                 previous_outcome_refs=continuation.previous_outcome_refs,
                 artifact_bindings=_existing_bindings(continuation.artifact_refs),
                 selected_skill_ref=case.selected_skill_ref,
+                continuation_context=case.continuation_context,
             )
         if isinstance(next_job, ApplicationError):
             return next_job
@@ -1616,6 +1621,7 @@ class DomainCoordinator:
             generic_log_archive_expected=True,
             generic_supplement_texts=[*source.generic_supplement_texts,
                 *([payload.supplement_text] if payload.supplement_text.strip() else [])],
+            continuation_context=source.continuation_context,
         )
         if isinstance(next_job, ApplicationError):
             return next_job
@@ -1758,6 +1764,7 @@ class DomainCoordinator:
             generic_problem_text=source.generic_problem_text,
             generic_log_archive_expected=source.generic_log_archive_expected,
             generic_supplement_texts=source.generic_supplement_texts,
+            continuation_context=source.continuation_context,
         )
         if isinstance(next_job, ApplicationError):
             return next_job
@@ -2111,6 +2118,7 @@ class DomainCoordinator:
         generic_problem_text: str | None = None,
         generic_log_archive_expected: bool = False,
         generic_supplement_texts: Sequence[str] = (),
+        continuation_context: ReportContinuationContext | None = None,
     ) -> JobSpec | ApplicationError:
         bindings = trigger.runtime_bindings_by_job_type.get(job_type)
         if bindings is None:
@@ -2119,6 +2127,15 @@ class DomainCoordinator:
                 field="runtime_bindings_by_job_type",
                 expected=job_type.value,
                 actual=None,
+            )
+        if continuation_context is not None and (
+            job_type is not JobType.DIAGNOSE
+            or (bindings.diagnosis_mode is not DiagnosisMode.GENERIC
+                and not is_specialized_direct(bindings))
+        ):
+            return _validation(
+                "持续诊断目前只支持通用诊断和直接输出 Markdown 报告的专用诊断。",
+                field="continuation_context",
             )
         if job_type is JobType.ROUTE:
             if selected_skill_ref is not None:
@@ -2150,6 +2167,7 @@ class DomainCoordinator:
             generic_problem_text=generic_problem_text,
             generic_log_archive_expected=generic_log_archive_expected,
             generic_supplement_texts=list(generic_supplement_texts),
+            continuation_context=continuation_context,
             goal=goal,
             target_state_revision=target_state_revision,
             evidence_bindings=evidence_bindings,

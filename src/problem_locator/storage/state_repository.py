@@ -29,7 +29,7 @@ from .database import (PostgresDatabase, DatabaseOwnershipError, dialect_for, ta
                        lock_conversation, try_lock_conversation)
 from .layout import StorageLayout, UnsupportedDataFormatError
 from .platform import PlatformFileSync
-from .postgres_layout import preflight_postgres_root, initialize_postgres_root, root_identity
+from .postgres_layout import preflight_postgres_root, initialize_postgres_root, root_identity, load_postgres_state
 
 _TERMINAL = frozenset({CaseStatus.RESOLVED, CaseStatus.PARTIALLY_RESOLVED,
                       CaseStatus.UNRESOLVED, CaseStatus.FAILED, CaseStatus.CANCELLED})
@@ -270,10 +270,13 @@ class CaseStateRepository:
             with self._database_lock:
                 row = self._db.execute('SELECT snapshot FROM completed_cases WHERE case_id=?',
                                        (case_id,)).fetchone()
-            return None if row is None else StateFile.model_validate_json(row[0])
-        except self.database_errors + (ValidationError,) as exc:
+            return None if row is None else self._read_persisted_state(row[0])
+        except self.database_errors + (ValidationError, ValueError, TypeError, AttributeError) as exc:
             self._state_failure = _port_error(ErrorCode.STATE_CORRUPT, '已完成 Case 的快照无法读取。').error
             raise ApplicationPortError(_clone(self._state_failure)) from exc
+
+    def _read_persisted_state(self, raw) -> StateFile:
+        return load_postgres_state(raw) if self._database is not None else StateFile.model_validate_json(raw)
 
     def read_snapshot(self, case_id: str | None = None, *, job_id: str | None = None,
                       attachment_id: str | None = None, request_key: str | None = None) -> StateFile:
@@ -723,7 +726,7 @@ class CaseStateRepository:
                 if row is None:
                     continue
                 try:
-                    state = StateFile.model_validate_json(row[0])
+                    state = self._read_persisted_state(row[0])
                     if set(state.cases) != {case_id}:
                         continue
                     case = state.cases[case_id].case

@@ -73,7 +73,7 @@
         "application/x-tar"
       ],
       "min_count": 1,
-      "max_count": 1
+      "max_count": 20
     },
     "supplement_policy": "MISSING_ONLY",
     "requiredness": "REQUIRED"

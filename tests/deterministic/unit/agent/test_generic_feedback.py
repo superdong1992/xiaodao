@@ -212,10 +212,120 @@ def test_pending_source_expires_after_seven_days(system):
     put(system)
     system.clock.value = "2026-09-28T00:00:00.000Z"
     assert system.memory.prune()["expired_sources"] == 1
-    assert task_rows(system)[0][1:4] == ("FAILED", None, None)
+    assert task_rows(system) == []
     assert system.memory.claim_task() is None
     put(system, "up-again")
     assert system.memory.claim_task() is None
+
+
+def _new_report(system):
+    created = system.agent_store.create_conversation("new-report", owner_key=OWNER)
+    source = replace(system.source, case_id="00000000-0000-0000-0000-000000000099")
+    with system.repository.database_transaction() as db:
+        db.execute("UPDATE agent_conversation_runs SET case_id=? WHERE run_id=?", (source.case_id, created.run_id))
+    return created, source
+
+
+def _expire_resources(system):
+    with system.repository.database_transaction() as db:
+        body = json.loads(db.execute("SELECT body FROM agent_conversation_runs WHERE run_id=?",
+            (system.created.run_id,)).fetchone()[0])
+        body["resources_expired"] = True
+        db.execute("UPDATE agent_conversation_runs SET body=? WHERE run_id=?",
+            (json.dumps(body), system.created.run_id))
+        system.memory.expire_sources(db, system.created.conversation_id, run_id=system.created.run_id)
+
+
+@pytest.mark.parametrize("status,expired_at", [
+    ("FAILED", "2026-09-28T00:00:00.000Z"),
+    ("READY", "2026-12-20T00:00:00.000Z"),
+])
+def test_permanent_history_releases_task_quota_at_its_own_ttl(system, monkeypatch, status, expired_at):
+    monkeypatch.setattr(memory_module, "MAX_TASKS", 1)
+    put(system)
+    task = system.memory.claim_task()
+    if status == "READY":
+        assert system.memory.finish_task(task["task_id"], CARD)
+    else:
+        assert system.memory.fail_task(task["task_id"])
+    system.clock.value = expired_at
+    created, source = _new_report(system)
+    assert system.memory.put_feedback(created.conversation_id, created.run_id, owner_key=OWNER,
+        request_id="new-report-like", rating="LIKE", source=source).rating == "LIKE"
+    replacement = system.memory.claim_task()
+    assert replacement is not None and replacement["run_id"] == created.run_id
+    assert len(task_rows(system)) == 1
+    assert not system.memory.finish_task(task["task_id"], CARD)
+    # The old run, vote and replay receipt remain readable after its task goes.
+    assert system.agent_store.get_run(system.created.conversation_id, system.created.run_id)
+    assert put(system).rating == "LIKE"
+    monkeypatch.setattr(memory_module, "MAX_TASKS", 2)
+    put(system, "down-after-expiry", "DISLIKE")
+    put(system, "up-after-expiry")
+    assert system.memory.claim_task() is None
+    assert len(task_rows(system)) == 1
+
+
+def test_expired_resource_history_keeps_vote_but_releases_source_quota(system, monkeypatch):
+    monkeypatch.setattr(memory_module, "MAX_SOURCES", 1)
+    original = put(system)
+    task = system.memory.claim_task()
+    assert system.memory.finish_task(task["task_id"], CARD)
+    cards = system.memory.active_cards(system.source.skill_name)
+    created, source = _new_report(system)
+    with pytest.raises(AgentStoreError) as blocked:
+        system.memory.put_feedback(created.conversation_id, created.run_id, owner_key=OWNER,
+            request_id="new-report-like", rating="LIKE", source=source)
+    assert blocked.value.code == "AGENT_FEEDBACK_LIMIT_EXCEEDED"
+    _expire_resources(system)
+    assert system.memory.put_feedback(created.conversation_id, created.run_id, owner_key=OWNER,
+        request_id="new-report-like", rating="LIKE", source=source).rating == "LIKE"
+    feedback = system.memory.get_feedback(system.created.conversation_id, system.created.run_id,
+        owner_key=OWNER, can_rate=False)
+    assert feedback.rating == original.rating and feedback.updated_at == original.updated_at
+    assert feedback.can_rate is False
+    assert system.memory.active_cards(system.source.skill_name) == cards
+    with system.repository.database_read() as db:
+        assert db.execute("SELECT count(*) FROM memory_feedback").fetchone()[0] == 2
+        assert db.execute("SELECT count(*) FROM memory_feedback_requests").fetchone()[0] == 2
+
+
+def test_resource_expiry_reclaims_unfinished_task_before_source_ttl(system):
+    put(system)
+    task = system.memory.claim_task()
+    _expire_resources(system)
+    assert system.memory.prune()["tasks"] == 1
+    assert task_rows(system) == []
+    assert not system.memory.finish_task(task["task_id"], CARD)
+    assert system.memory.get_feedback(system.created.conversation_id, system.created.run_id,
+        owner_key=OWNER, can_rate=False).rating == "LIKE"
+
+
+def test_task_admission_not_attempted_when_temporarily_disabled_or_full(system, monkeypatch):
+    put(system, extract_memory=False)
+    monkeypatch.setattr(memory_module, "MAX_TASKS", 0)
+    put(system, "full")
+    monkeypatch.setattr(memory_module, "MAX_TASKS", 1)
+    put(system, "enabled")
+    assert system.memory.claim_task() is not None
+
+
+@pytest.mark.parametrize("had_task", [False, True])
+def test_old_feedback_schema_backfills_extraction_receipt_without_changing_vote(system, had_task):
+    original = put(system, extract_memory=had_task)
+    # Simulate the previous schema with a retained run and its original bytes.
+    with system.repository.database_transaction() as db:
+        db.execute("ALTER TABLE memory_feedback DROP COLUMN extraction_attempted")
+    reopened = MemoryStore(system.repository, system.clock)
+    with system.repository.database_read() as db:
+        assert db.execute("SELECT extraction_attempted FROM memory_feedback").fetchone()[0] == int(had_task)
+    system.clock.value = "2026-09-28T00:00:00.000Z"
+    reopened.prune()
+    assert task_rows(system) == []
+    assert reopened.get_feedback(system.created.conversation_id, system.created.run_id,
+        owner_key=OWNER, can_rate=True) == original
+    put(system, "up-after-upgrade")
+    assert (system.memory.claim_task() is not None) is not had_task
 
 
 def test_feedback_and_extraction_timestamps_use_local_offset_without_rewriting_history(system):

@@ -5,15 +5,81 @@
 本文件记录已经在当前工作区验证、修复并由专项回归测试保护的问题。活跃待办仍只写入
 [`TODO.md`](TODO.md)；同一问题再次回归时更新原条目，不另建一个缺少历史关联的条目。
 
+本轮统一交付以 `a84bc45` 为基线，包含报告正文永久保存、日志资源回收与容量管理，以及持续诊断、意图分流和相关性能修复。最终状态以 PL-FIX-070 的本轮元数据和 PL-FIX-083 至 PL-FIX-088 的元数据为准；此前失败、独立提交和专项结果保留，不预先宣称完整验证通过。
+
+本轮最终验收环境：Ubuntu 22.04、Python 3.12.13、锁定依赖及真实 PostgreSQL 15.19。已确认 WSL 持久盘存在同步等待及同机测试竞争，旧源码也有明显耗时波动；前轮 ext4 完整验证及专项证据保留。本轮使用正式 `--evidence-root` 指向本任务独立的 32 GiB tmpfs，承载测试临时数据、字节码缓存及现场证据；执行源码、运行时和 PostgreSQL 仍在原持久盘。32 GiB 是按需分配的挂载上限，不是物理内存；运行时记录实际占用。测试范围、fsync、重开与崩溃恢复、默认容量阈值、真实数据库及 300 秒门槛均不调整。结束后立即将完整 attempt 复制到持久盘，逐文件校验并复核证据封印。该环境只用于确定性开发验收与反馈预算，不证明生产磁盘性能、真实模型效果或 Release 通过；结果仍以最终 verdict 为准。
+
+## PL-FIX-083：继续诊断入口把纯报告追问整理成可确认的新诊断草稿
+
+- **状态**：实现和专项回归已完成；专项通过，待本次统一推送前完整验证。
+- **症状、受影响版本与确认**：8.2.0 / `a84bc45` 上尚未提交的持续诊断实现中，在继续诊断入口输入“为什么这样判断”等纯追问，也会整理成 DRAFT。修改前专项复现此行为；普通输入框原本就走独立 Followup，不会创建 Case，本次不是 PL-FIX-062 普通追问入口的回归。
+- **根因与修复历史（2026-10-16）**：草稿整理仅返回完整问题和变化说明，没有意图结果。复用既有一次、有预算限制且禁工具的 INTAKE，结合父报告、原问题和实际日志变化返回 FOLLOWUP 或 CONTINUE；自然文字、目标和变化说明均参与判断。FOLLOWUP 保留原问题及用户追问，页面经用户点击后调用原追问接口；CONTINUE 保留预览确认，只有确认后创建独立 run/Case。直接编辑完整问题或仅选日志仍使用确定性草稿，不增加模型；本轮诊断说明新旧判断的变化，不另加比较模型。
+- **不可回归行为**：FOLLOWUP 不得 confirm，也不能用 PATCH 升为 DRAFT；真实日志增删不得被误判后静默丢弃。普通追问不增加分类调用；失败、刷新和重试保留原请求 ID，不自动回退新诊断。旧报告、Case 与已发布版本保持可读，事实更正采用确认后的有效问题，父报告只能作为旧判断参考。
+- **同批接入修正**：Generic V2 与 skill-direct 多包逐包使用独立解析会话、工作区和审计文件；审计名称只接受既有固定名或严格 UUID 后缀。单包、多包及追问快照保留来源信息，同名文件和同 role 不互相覆盖。恢复时跳过已删除或不存在会话的草稿，普通 RUNNING 草稿仍标为 FAILED，不重放模型；清理由原会话生命周期处理。
+- **事实承接修正与回归（2026-10-16）**：同一未交付工作区的 `capture_report_inputs` 用子串判重，会将原文 `timeout_seconds=100` 误当成已包含 ACTIVE 事实 `timeout_seconds=10`，原 `.count()` 断言也把前缀算作完整事实。改为完整原文行相等及完整补充项去重，保留 ACTIVE 事实和 Generic 补充，确认草稿及新 Case 的 `raw_problem_text` 均包含完整信息。`test_report_inputs_retain_named_facts_when_only_their_value_occurs_in_source` 的五种输入覆盖独立数值、行内片段、100/10、已有完整行、多字段与 Generic 补充前缀，并核对实际新诊断命令；修复前 3 failed、2 passed，修复后整个 `test_report_continuation.py` 26 passed，证据分别为 WSL `/tmp/continuation-fact-line-red-02`、`/tmp/continuation-fact-line-green-01` 及本会话执行输出。
+- **专项回归测试**：`test_report_continuation.py::test_report_question_in_continuation_is_followup_and_never_opens_a_run` 覆盖三个自然输入字段及 confirm/PATCH 拒绝；`test_new_logs_cannot_be_discarded_by_a_followup_classification` 保留真实材料变化；`test_continuation_intent.py` 校验单次调用、上下文和输出合同。`test_website_report_continuation.py::test_confirmed_report_continuation_corrects_facts_selects_logs_and_preserves_versions` 的 APPEND/REPLACE 两例走真实 HTTP、ROUTE、解析和报告发布，模型使用替身。`test_multi_log_runtime.py`、`test_execution_records.py` 的逐包审计读写与非法名用例、`test_multi_archive_snapshot_preserves_sources_for_same_named_logs`、`test_preparation_recovery_skips_deleted_or_missing_conversations_without_blocking_start` 直接覆盖上述接入问题。意图首轮 70 passed、2 项旧同步假设失败，修正后两项集成通过；页面专项 42 passed，最后意图与草稿联合专项 48 passed。各组重叠，不能累加；命令及证据见 TODO。
+- **完整验证发现的附件接入回归（2026-10-16）**：同一 8.2.0 / `a84bc45` 未交付工作区的正式 `dev.default` [run-20261016T051049Z-835e4391](.tmp/continuation-push-evidence-20261016/run-20261016T051049Z-835e4391/verdict.json) 总体与 functional 为 FAIL，operation、verification 为 PASS，performance 为 NOT_CALIBRATED；源码快照 `git-visible-worktree-v1:488df22cec39068beb6ec5d09b0b94913785c6e3375909bab676e0772a10195c`（1002 files），verdict SHA-256 `203c16510e3e3b53067ecbb5febfbc842ade9015781989042ca905b2b240279c`，101 份证据保留。三项附件集成失败并非应删除的旧断言：全局多包模板误将 strict/advisory 的要求放宽到 20，而其解析仍限单包；INTAKE 期间接受的新选择也可能被旧选择抢先提交，Case 进入 RUNNING 后新消息无法继续采用。
+- **附件修正与不可回归行为**：专用预检查按 Job 的实际模式发布附件要求，skill-direct 保持最多 20 包，strict/advisory 保持单包，Generic 多包能力不变。Agent 在导入前和提交补充前核对最新附件选择，只在最终核对及命令提交时持消息锁；文件导入期间仍接受消息。旧选择被替换后不启动诊断，已提取事实照常保存，新选择消息继续等待下一次推进；已经导入的旧附件保留审计，但不得出现在新诊断的 `attachment_refs` 中。原两项单包集成断言保留，并覆盖整理期间初选一包／两包、导入期间替换，以及事实已采用后只更换附件；最终报告必须使用新选择，消息均被正常采用，不增加 INTAKE 调用。
+- **附件专项回归**：`test_specialized_preflight_accepts_only_the_archive_count_its_runtime_supports` 的 strict/advisory 两例先复现 `max_count=20` 与实际单包能力不一致，direct 的 20 包要求保持通过；证据 `/tmp/continuation-selection-limit-red-02`。`test_selection_arriving_during_intake_is_not_covered_or_overwritten` 扩充时机和已采用事实参数，三种新选择到达时机先复现旧选择抢先使 Case RUNNING，保留 `/tmp/continuation-selection-red-01`。修复后联合附件选择、多包运行时、已完成 INTAKE 重放、APPEND/REPLACE 持续诊断及长历史重查专项共 22 passed，73.69 秒，证据 `/tmp/continuation-selection-green-02`；使用确定性替身，没有真实模型调用，不代表完整 Test Flow 通过。
+- **附件重查性能修正与最终专项**：最初的提交保护两次调用 `get_conversation`，会重新加载全部消息。128 条各 64 KiB 的历史专项先复现该问题，证据 `/tmp/continuation-selection-history-red-01`。最终 `latest_attachment_selection` 在数据库按非 UNUSED、非空附件筛选，使用当前 run 的 `event_sequence` 倒序及 `LIMIT 1`，只返回附件 IDs；不构建完整会话，也不让 PostgreSQL 普通游标缓冲整段消息正文。`test_attachment_commit_rechecks_only_the_latest_selection_without_loading_history` 核对两次重查不解析任何消息正文、只解析两份选中 IDs，SQLite 的真实 EXPLAIN 使用既有 `agent_messages_run` 索引且无需排序；PostgreSQL 核对真实有界查询及零正文解码，不把优化器选择的具体计划写成产品合同。SQLite 长历史与导入期间只换附件的必要集成共 2 passed，证据 `/tmp/continuation-selection-bounded-01`；同一长历史用例在 PostgreSQL 新建隔离测试库运行，1 passed，证据 `/tmp/continuation-selection-postgres-02`，数据库及凭据之外的测试回执保留。首次 PostgreSQL 命令未导出连接变量而在 setup 中止，`/tmp/continuation-selection-postgres-01` 一并保留；最后两库联合复验 2 passed，2.08 秒，证据 `/tmp/continuation-selection-databases-final-01`；没有更改业务库、表结构、planner 配置或模型调用次数。
+- **最新 Test Flow verdict（PL-FIX-083）**：Linux `dev.default` [run-20261016T055354Z-e70e54e3](.tmp/continuation-push-evidence-20261016/run-20261016T055354Z-e70e54e3/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。完整确定性阶段 268.340 秒，低于 300 秒门槛，全部必需 Gate 通过；模型调用、token 和费用均为 0。源码快照 `git-visible-worktree-v1:c1d23b543825d46f1453e78a2ec01cc3ed0efa4240527f15008e7bee45492911`（1004 文件），verdict SHA-256 `4e6e0657de7e69e76c0cd42309d2c410ad240c2f3b5291ea5123bc9eabd3deef`。测试临时数据使用本轮说明的独立 tmpfs，真实 PostgreSQL 仍在持久盘；完整证据已复制到持久盘并逐文件核对，不代表生产磁盘性能、真实模型效果或 Release 已验收。本行是验证后回填的引用元数据，不属于所引用源码快照。
+
+## PL-FIX-084：草稿整理占用全局 Agent worker，阻塞其他会话
+
+- **状态**：实现和专项回归已完成；专项通过，待本次统一推送前完整验证。
+- **症状、受影响版本与确认**：8.2.0 / `a84bc45` 上尚未提交的持续诊断实现中，一个草稿等待模型时，普通会话不能推进。使用当前 `AgentConversationService.run_once` 和 Event 替身复现：整理挂起 163 ms 期间，普通会话推进次数为 0，第二次 `run_once` 返回 False；释放整理后才继续。此复现没有调用真实模型。
+- **根因与修复历史（2026-10-16）**：普通 `run_once` 持有全局 `_processing` 锁，同步执行最长 180 秒的整理调用。新增独立单 worker 和唤醒事件，整理使用独立非阻塞互斥锁；普通 `agent.run_once` 不再执行整理，`continuations.run_once` 保留同步手动推进。取消仍登记在原活动执行表，关闭服务时取消并等待新增线程，恢复沿用原流程。
+- **不可回归行为**：慢草稿不得阻塞普通会话，普通 INTAKE 等待也不得阻塞草稿；同时最多执行一个整理任务，手动入口不能绕过互斥。删除、关闭和启动恢复不得遗留线程、重放模型或写回已删除会话；普通 Followup 不增加调用。
+- **专项回归测试**：`test_continuation_scheduling.py` 覆盖双向不阻塞、并发只执行一次、手动推进、删除和关闭取消；与 `test_report_continuation.py` 联合运行 28 passed，证据 `.tmp/continuation-scheduling-c9`。后续版本列表专项联合复验 33 passed，证据 `.tmp/continuation-version-after-c11`。这些计数证明确定性行为，不代表生产并发吞吐已验收。
+- **最新 Test Flow verdict（PL-FIX-084）**：Linux `dev.default` [run-20261016T055354Z-e70e54e3](.tmp/continuation-push-evidence-20261016/run-20261016T055354Z-e70e54e3/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。完整确定性阶段 268.340 秒，低于 300 秒门槛，全部必需 Gate 通过；模型调用、token 和费用均为 0。源码快照 `git-visible-worktree-v1:c1d23b543825d46f1453e78a2ec01cc3ed0efa4240527f15008e7bee45492911`（1004 文件），verdict SHA-256 `4e6e0657de7e69e76c0cd42309d2c410ad240c2f3b5291ea5123bc9eabd3deef`。测试临时数据使用本轮说明的独立 tmpfs，真实 PostgreSQL 仍在持久盘；完整证据已复制到持久盘并逐文件核对，不代表生产磁盘性能、真实模型效果或 Release 已验收。本行是验证后回填的引用元数据，不属于所引用源码快照。
+
+## PL-FIX-085：报告版本列表重复读取并解析全部历史轮次
+
+- **状态**：实现和专项回归已完成；专项通过，待本次统一推送前完整验证。
+- **症状、受影响版本与确认**：8.2.0 / `a84bc45` 上尚未提交的持续诊断实现中，一次版本查询会全量读取两次 run body，每轮又包含父报告。32 版、每版父报告 64 KiB 的专项先复现两条全量 SELECT，预期一次，失败为 `2 != 1`；证据 `.tmp/continuation-version-before-c10`。
+- **根因与修复历史（2026-10-16）**：`versions` 已读取列表，随后 `_head` 为检查资格再次扫描。让 `_head` 接收同一次读取的 parent 和 rows，`versions` 复用已有列表，只额外读取一次当前轮次；其他创建和确认入口保留原完整检查，不加表或缓存。
+- **不可回归行为**：版本查询只全量读取一次，历史父报告只解析一次，不把父报告正文放进版本列表响应。最新报告可继续、旧版不可继续、当前诊断执行中拒绝、失败后可从已发布报告继续等规则保持一致。
+- **专项回归测试**：`test_continuation_performance.py::test_versions_scan_and_decode_large_historical_bodies_once` 检查真实 SQL 和逐轮 JSON 解析次数；`test_reusing_version_rows_preserves_continue_eligibility` 覆盖四种资格状态。与调度、草稿用例联合运行 33 passed，证据 `.tmp/continuation-version-after-c11`；不以测试总耗时外推线上响应时间。
+- **最新 Test Flow verdict（PL-FIX-085）**：Linux `dev.default` [run-20261016T055354Z-e70e54e3](.tmp/continuation-push-evidence-20261016/run-20261016T055354Z-e70e54e3/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。完整确定性阶段 268.340 秒，低于 300 秒门槛，全部必需 Gate 通过；模型调用、token 和费用均为 0。源码快照 `git-visible-worktree-v1:c1d23b543825d46f1453e78a2ec01cc3ed0efa4240527f15008e7bee45492911`（1004 文件），verdict SHA-256 `4e6e0657de7e69e76c0cd42309d2c410ad240c2f3b5291ea5123bc9eabd3deef`。测试临时数据使用本轮说明的独立 tmpfs，真实 PostgreSQL 仍在持久盘；完整证据已复制到持久盘并逐文件核对，不代表生产磁盘性能、真实模型效果或 Release 已验收。本行是验证后回填的引用元数据，不属于所引用源码快照。
+
+## PL-FIX-086：纯追问分类强制回显完整问题，增加输出并可能超限
+
+- **状态**：实现和专项回归已完成；专项通过，待本次统一推送前完整验证。
+- **症状、受影响版本与确认**：8.2.0 / `a84bc45` 上尚未提交的意图分流实现要求 FOLLOWUP 逐字返回原问题。合法的 65536 字节输入加上必需 JSON 字段后超过同为 65536 字节的模型输出上限；不足 128 字节的 null 结果又被旧解析器拒绝。新增最大输入专项先复现 `INTAKE_OUTPUT_INVALID`，证据 `.tmp/continuation-compact-before-c12`。
+- **根因与修复历史（2026-10-16）**：纯意图结果沿用继续诊断的完整文本输出要求。模型仍返回原三个字段，但 FOLLOWUP 的 `effective_problem_text` 要求为 null，代码补回原 source；兼容旧模型逐字回传，不接受改写。CONTINUE 仍返回完整非空有效问题，服务、草稿和输入上下文不变，不增加摘要或第二次调用。
+- **不可回归行为**：最大合法原问题可用短 FOLLOWUP 结果保留完整原文；旧式完全一致的原文仍可接受，追加、改写、空串和错误类型必须拒绝；CONTINUE 的 null 或空文本仍拒绝。普通报告追问不经过该分类步骤。
+- **专项回归测试**：`test_continuation_intent.py::test_compact_followup_restores_maximum_source_with_one_small_model_result` 验证 64 KiB 原问题、短模型结果、原文恢复及恰好一次调用；既有与新增反例覆盖兼容和 CONTINUE 合同。与 `test_report_continuation.py` 联合运行 48 passed，证据 `.tmp/continuation-compact-after-c13`；未调用真实模型，不宣称实际模型延迟或识别准确率已验收。
+- **最新 Test Flow verdict（PL-FIX-086）**：Linux `dev.default` [run-20261016T055354Z-e70e54e3](.tmp/continuation-push-evidence-20261016/run-20261016T055354Z-e70e54e3/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。完整确定性阶段 268.340 秒，低于 300 秒门槛，全部必需 Gate 通过；模型调用、token 和费用均为 0。源码快照 `git-visible-worktree-v1:c1d23b543825d46f1453e78a2ec01cc3ed0efa4240527f15008e7bee45492911`（1004 文件），verdict SHA-256 `4e6e0657de7e69e76c0cd42309d2c410ad240c2f3b5291ea5123bc9eabd3deef`。测试临时数据使用本轮说明的独立 tmpfs，真实 PostgreSQL 仍在持久盘；完整证据已复制到持久盘并逐文件核对，不代表生产磁盘性能、真实模型效果或 Release 已验收。本行是验证后回填的引用元数据，不属于所引用源码快照。
+
+## PL-FIX-087：上传前文件哈希占用主线程，缺少可见进度与及时取消
+
+- **状态**：实现和专项回归已完成；专项通过，待本次统一推送前完整验证。
+- **症状、受影响版本与确认**：基于 8.2.0 / `a84bc45` 的本次未提交持续诊断前端中，新增文件哈希在主线程计算，每个 1 MiB CPU 段持续约 17–26 ms。相同 128 MiB 输入的修复前 Node 基准为 3956 ms；128 段全部超过 16 ms。该缺陷属于本次新增文件，不宣称已经存在于该提交或旧发布版本。
+- **根因与修复历史（2026-10-16）**：哈希循环每 64 字节重复创建数组和迭代器，又在主线程完成大块计算。移除重复分配，默认由同源 Worker 分块读取并计算；Worker 不可用时每 64 KiB 让出执行。页面显示校验进度，更新节流为 100 ms，支持取消和重试；取消信号传入上传，切换报告终止原请求。
+- **不可回归行为**：Worker 只接收原 File，主线程不预读整包；取消后释放 Worker，不采用迟到结果或静默重算。降级仍按小块让出主线程；重试复用原文件、已算摘要与上传预约，同内容不重复选择，结果须与标准 SHA-256 一致。
+- **专项回归测试与测量**：`file-sha256.test.mjs` 覆盖真实 Worker、进度、取消、四类降级和标准摘要；`continuation.test.mjs` 覆盖进度、取消、重试及切换报告；`browser-client.test.mjs` 检查原 Blob 与 AbortSignal。与部署和预览专项联合运行 90 passed。相同 128 MiB 输入修复后 Worker 为 532.65 ms，主线程文件读取为 0；降级小块计算中位数 0.21 ms、最大 2.46 ms。命令及基准保留于本会话执行输出，没有独立 verdict；这是 Node 算法与线程基准，不代表浏览器帧率、生产耗时或 Release 验收。
+- **最新 Test Flow verdict（PL-FIX-087）**：Linux `dev.default` [run-20261016T055354Z-e70e54e3](.tmp/continuation-push-evidence-20261016/run-20261016T055354Z-e70e54e3/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。完整确定性阶段 268.340 秒，低于 300 秒门槛，全部必需 Gate 通过；模型调用、token 和费用均为 0。源码快照 `git-visible-worktree-v1:c1d23b543825d46f1453e78a2ec01cc3ed0efa4240527f15008e7bee45492911`（1004 文件），verdict SHA-256 `4e6e0657de7e69e76c0cd42309d2c410ad240c2f3b5291ea5123bc9eabd3deef`。测试临时数据使用本轮说明的独立 tmpfs，真实 PostgreSQL 仍在持久盘；完整证据已复制到持久盘并逐文件核对，不代表生产磁盘性能、真实模型效果或 Release 已验收。本行是验证后回填的引用元数据，不属于所引用源码快照。
+
+## PL-FIX-088：继续诊断部署清单遗漏新增静态依赖
+
+- **状态**：文档和专项回归已完成；专项通过，待本次统一推送前完整验证。
+- **症状、受影响版本与确认**：基于 8.2.0 / `a84bc45` 的本次未提交持续诊断前端增加模块依赖后，部署说明仍列最小四文件。按该清单在内存 HTTP 服务器复现 `followup-contract.js` 为 200、`continuation-contract.js` 为 404；六项部署依赖完整性测试均先失败。此缺陷属于新增前端与旧清单的组合，不归因于旧发布版本。
+- **根因与修复历史（2026-10-16）**：入口增加 continuation、文件哈希和 Worker 依赖，但五份部署说明未同步。补齐 README、快速接入、报告追问、Redis 部署和累计升级说明的全部本地依赖及同源 Worker 配置；预览静态白名单包含 Worker，哈希专项接入正式网站 Node 测试入口。
+- **不可回归行为**：照部署清单复制即可解析浏览器和 BFF 入口的全部本地依赖；Worker 资源可访问，预览不得扩大到任意仓库文件或 API。新增模块不能只在完整仓库中可用，独立部署与旧入口均须有直接检查。
+- **专项回归测试**：`onboarding.test.mjs` 六项入口依赖检查及“继续诊断部署说明包含 Worker 与全部浏览器依赖”覆盖五份说明；`preview.test.mjs` 的显式静态资源用例检查 Worker 返回 200。联合 `file-sha256.test.mjs`、`continuation.test.mjs`、`browser-client.test.mjs` 共 90 passed；语法检查与 `git diff --check` 通过。原失败和最终结果保留于本会话执行输出，不虚构独立证据目录。
+- **最新 Test Flow verdict（PL-FIX-088）**：Linux `dev.default` [run-20261016T055354Z-e70e54e3](.tmp/continuation-push-evidence-20261016/run-20261016T055354Z-e70e54e3/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。完整确定性阶段 268.340 秒，低于 300 秒门槛，全部必需 Gate 通过；模型调用、token 和费用均为 0。源码快照 `git-visible-worktree-v1:c1d23b543825d46f1453e78a2ec01cc3ed0efa4240527f15008e7bee45492911`（1004 文件），verdict SHA-256 `4e6e0657de7e69e76c0cd42309d2c410ad240c2f3b5291ea5123bc9eabd3deef`。测试临时数据使用本轮说明的独立 tmpfs，真实 PostgreSQL 仍在持久盘；完整证据已复制到持久盘并逐文件核对，不代表生产磁盘性能、真实模型效果或 Release 已验收。本行是验证后回填的引用元数据，不属于所引用源码快照。
+
 ## PL-FIX-082：长期统计参考方案漏算报告追问，已有消息数不再更新
 
-- **状态**：参考代码和专项回归已完成；2026-10-16 按用户明确要求不再运行测试，跳过本次推送前完整验证。仅供内网适配替换，没有接入本项目服务或部署到生产。
+- **状态**：参考代码和专项回归已完成；2026-10-16 独立统计提交时按用户明确要求跳过该次推送前完整验证。此次合并交付保留该提交，最终统一验证另见 PL-FIX-070 本轮元数据；参考包仍仅供内网适配替换，没有接入本项目服务或部署到生产。
 - **症状、受影响版本与确认**：8.2.0 / `5bce783` 加现有工作区中的 `usage-stats-reference`；在真实 PostgreSQL 和当前 `AgentStore`、`FollowupStore` 上，初始输入计 1，追加报告追问并再次调用旧写入函数后仍为 1，预期为 2。首条新增回归先复现该失败；最初的临时库调查也确认 1 条诊断输入加 2 条已保存追问只计 1。
 - **根因**：统计只读取 `agent_messages`，而报告追问保存在 `agent_followup_tasks`；补录排除已有统计，冲突时不更新。仅在成功回答的回调补写还会漏掉排队取消等已入库输入。
 - **修复历史（2026-10-16）**：统一刷新函数合计同一会话、run 的两类输入，追问不按状态过滤。补录在批次截断前筛选缺失或计数偏低的项，冲突时只提高计数，防止重复累加及并发旧快照覆盖；保留统计表结构和旧 `record_closed_run` 包装。同步预检字段、权限、替换步骤以及最外层提交后的关闭/追问挂接示例，幂等返回路径也刷新。
 - **不可回归行为**：1 条诊断输入加 2 次追问计 3；重试不重复，失败、取消和未完成但已入库的追问仍计数，拒绝或回滚不计。刷新失败不回滚业务，补录能修复缺失及偏低记录；旧快照不能降低计数；刷新不改变会话归属、创建日期和原 run 元数据；只刷新指定 run，超过 1000 条仍能继续补录。run 未终态时暂不计入，关闭后刷新。源清理不能降低已保存统计，但部分清理后新增输入的完整性仍由生产清理保护保证，不能从残缺源数据恢复历史。
-- **专项回归测试**：`tests/deterministic/postgres/test_usage_stats_reference.py` 在修复阶段工作区中 21 项全部通过，使用真实 PostgreSQL 15.19 和独立测试库；已包含元数据不变、未关闭 run 的在线返回值及旧返回列名兼容断言。本次只提交统计修复，按用户要求未对隔离后的提交重跑测试。命令、范围和证据见 `TODO.md` 的会话长期统计条目；本地专项不代表生产适配验收或完整 Test Flow。
-- **最新 Test Flow verdict（PL-FIX-082）**：本次按用户明确要求跳过推送前完整 `dev.default`；无对应 run ID 或 source snapshot digest，状态为未执行完整验证。保留此前专项结果，不复用历史 PASS，不宣称完整 Test Flow 通过。
+- **专项回归测试**：`tests/deterministic/postgres/test_usage_stats_reference.py` 在修复阶段工作区中 21 项全部通过，使用真实 PostgreSQL 15.19 和独立测试库；已包含元数据不变、未关闭 run 的在线返回值及旧返回列名兼容断言。该次隔离提交只包含统计修复，按用户要求未重跑测试；此次统一验证不改变这一历史事实。命令、范围和证据见 `TODO.md` 的会话长期统计条目；本地专项不代表生产适配验收或完整 Test Flow。
+- **最新 Test Flow verdict（PL-FIX-082，独立统计提交）**：2026-10-16 独立统计提交按用户明确要求跳过该次推送前完整 `dev.default`；无对应 run ID 或 source snapshot digest，状态为未执行完整验证。保留此前专项结果，不复用历史 PASS；此次合并交付的最终统一验证另见 PL-FIX-070 本轮元数据。
+
+- **关联文档修复（2026-10-16，`a84bc45`）**：本次在干净隔离目录的正式 `docs.current` 中确认，TODO 的两项统计专项证据链接指向未入库的本机 `.tmp` XML，导致相对链接校验失败。保留原路径、测试结果和未生产接入边界，将链接改为路径文本；干净检出不再要求这些本机文件。直接回归 `node --test tools/test-flow/tests/docs-drift.test.mjs`：4 passed，包含相对链接检查；本轮正式验证统一见 PL-FIX-070 的 2026-10-16 最新 verdict 元数据；该条不改变此前按用户要求跳过验证的历史事实。
 
 ## PL-FIX-081：网站会话缺少跨用户只读分享入口
 
@@ -68,6 +134,7 @@
 ## PL-FIX-076：SQLite 单连接与全局锁使不同会话的数据库操作串行化
 
 - **状态**：实现及专项回归完成；正式验证结论以本条最终 Test Flow 元数据为准。Linux 是唯一 Server 平台，当前仍只支持一个服务进程独占同一数据库和资源目录。
+- **关联修复（2026-10-16，8.2.0 / `5bce783`）**：PL-FIX-070 本轮新增独立报告归档表，并为经验提炼补充一次性尝试标记。旧 SQLite 导入须在读取列值和计算行摘要时使用同一份派生列结果，保留既有投票、请求回执及原始源数据；不能把新增列当作任意 schema 差异的豁免。`test_postgres_import_memory.py` 直接覆盖旧/新源库、有无匹配任务、完整导入循环和源/目标摘要。适配器专项不等同于真实 PostgreSQL 验证；本轮统一结论见 PL-FIX-070 的 2026-10-16 最新 verdict 元数据，以下历史 PASS 不覆盖本轮。
 - **症状、受影响版本与确认**：8.2.0 当前工作区的 `CaseStateRepository` 使用一条 SQLite 连接和全局 `RLock`，所有数据库读写都经过该锁，写事务使用 `BEGIN IMMEDIATE`。SQLite WAL 可以支持读写并行，但同时只能有一个写事务；本项目的全局锁进一步让不同会话的数据库操作互相等待。修改前已核对当前生产装配入口、连接配置和事务路径。
 - **根因**：原存储层依赖共享连接和全局串行访问，Agent、记忆与报告追问中的 JSON 更新、序列号和任务领取也默认依赖这一串行保证，无法只替换连接驱动。
 - **修复历史（2026-09-28）**：生产配置改用 PostgreSQL 17 或更新版本，固定 psycopg 与连接池依赖，要求 `DATABASE_URL`，缺少配置时拒绝启动。按线程借用连接，使用 PostgreSQL 原生 SQL、会话级事务锁和 `FOR UPDATE SKIP LOCKED`；同一业务事务保留原子提交和回滚。数据库与 `DATA_ROOT` 绑定，独立实例锁及失效检查防止多个进程接管内存状态。初始化失败日志不再携带原始驱动异常中的凭据。新增显式离线导入命令，复制源 SQLite/WAL 和资源后校验，再导入专用空库及新目录；源目录不作修改。正式 Linux 测试入口新增独立 PostgreSQL 实例身份和重启接线，停止复用不含数据库的目录检查点。
@@ -119,6 +186,7 @@
 ## PL-FIX-062：报告交付后继续提问会误开新诊断，缺少独立问答与恢复能力
 
 - **状态**：实现完成；是否通过正式验证，以本条最终 Test Flow 元数据为准。功能默认关闭，实际网站与部署环境须单独验收。
+- **保留策略调整（2026-10-16，8.2.0 / `5bce783`）**：关联 PL-FIX-070，本轮按用户确认的新需求替换初版“问答和快照一起保留 7 天”的规则：追问及回答永久保存，日志快照随该轮资源默认在完成后 15 天回收，磁盘紧张时可提前回收。截止后拒绝新追问，已受理任务先完成，幂等重试仍返回原回执；资源清理只撤销日志使用资格，不删问答和事件。`test_report_followup.py`、`test_followup_retention.py`、`test_web_resource_retention.py` 覆盖完成时间锚点、跨截止任务、历史分页和原回执；本轮正式结论统一见 PL-FIX-070 的 2026-10-16 最新 verdict 元数据。
 - **症状与受影响版本**：`c37c4f5` / 8.2.0 的消息入口在报告完成后创建新诊断轮次，没有报告追问接口。当前版本代码路径与改动前中央 Dev 基线均已核对；原有诊断 SSE 已支持回放，但没有独立追问记录、游标和停止目标。
 - **根因**：原消息接口同时承担补充与开启新诊断，报告解释不能复用其状态机；原日志临时工作区与报告保留期限也不相同。
 - **再次修复（2026-09-29，codeagent 启动兼容）**：8.2.0 / `51e11e5` 的 `REPORT_FOLLOWUP` 命令强制追加 `--no-chrome`；已核对代码路径，用户确认生产 `codeagent` 不支持该参数。本次只停止为 codeagent 追加此参数，官方 Claude 和既有权限策略保持原样。初版额外加入的 bare 识别及无日志降级已按用户要求撤回。固定 Claude Code 2.1.89 的 bare 模式会跳过目录 Hook，因此不将该参数直接替换成 `--bare`。
@@ -3025,6 +3093,25 @@
 
 ## PL-FIX-070：服务运行文件缺少完整的保留与空间回收策略
 
+### 2026-10-16：Web 正文永久保存，日志资源独立回收
+
+- **状态与历史关联**：实现及专项回归完成；本轮完整验证状态以本节唯一的最新 verdict 元数据为准。沿用本条 7 天固定期限、30 天可配置期限的修复历史，按用户新确认的产品规则分开保存正文和资源；同时关联 PL-FIX-068 的多轮与主动删除、PL-FIX-062 的报告追问、PL-FIX-071 的经验期限、PL-FIX-076 的数据库迁移，以及 PL-FIX-079 的混合时区边界。以下旧 verdict 只证明各自的历史快照。
+- **症状、受影响版本与确认**：8.2.0 / `5bce783` 已支持默认 30 天，但 Web 消息、用户可见事件、报告和附件仍一起自然删除；追问仍有独立的 7 天限制。当前清理入口、报告读取路径和专项均已核对。只延长原参数不能满足正文永久保存，也不能在日志达到 MB 至 GB 时及时释放中间副本和已完成轮次的文件。
+- **根因**：Web 可见内容依赖即将删除的 Case、文件及整轮清理流程；附件、追问快照和经验任务的配额依赖历史行删除。运行状态更新时间混合了改名、只读投影和业务活动，无法准确判断等待补充材料的闲置时长。文件隔离、物理删除、资源额度和主动删除完成状态也必须按同一份持久清单协调。
+- **修复历史（2026-10-15 至 2026-10-16）**：Web 消息、助手提问、失败说明、报告和历史追问永久保存，正式报告正文与原始下载字节按 run 独立归档到数据库。新增 `WEB_RESOURCE_RETENTION_DAYS`，默认 15 天，按轮次完成时间回收附件、日志、ZIP、执行记录和追问快照；`HISTORY_RETENTION_DAYS` 继续管理非 Web 历史、内部事件、创建幂等与删除凭据，默认 30 天。成功工作区在 ZIP、快照等依赖完成后提前释放，失败或中断工作区沿用 24 小时清理。原单文件 2.5 GiB、会话 20 个在用附件及每轮 200 条消息等限制保留。
+- **磁盘压力与不可回归行为**：主要大文件写入统一预约可用空间，拒绝时不提前读取或复制 GiB 文件，并唤醒回收。先处理未完成删除、无用副本和到期资源，再按完成时间从旧到新回收已完成的 Web 轮次；每轮和每批重试后重新测量真实空闲空间，达到目标即停。不能抢删运行、等待补充、上传、下载、归档或追问正在使用的资源；多轮共享附件只由最后一个有效使用者释放，包含尚未写入消息的日志重启请求。报告归档失败时保留原资源；物理删除失败时保留清单和额度，重启继续处理。
+- **正文、接口与不可回归行为**：资源清理后，原报告 URL、原始字节、大小和哈希保持一致；历史问答、用户归属和分享只读规则继续有效。该轮标记 `resources_expired`、`resources_expired_at` 和 `resource_cleanup_reason`，禁止新追问；附件标记 `EXPIRED`，ZIP 旧地址返回 410。历史元数据不占已释放的附件或快照额度，分页只返回本页引用及仍占额度的附件；过期上传不得靠旧请求复活。内部事件可按期限清理，旧 SSE 游标须明确返回过期，不能假装完整回放。同步中文接口说明、网站提示和 OpenAPI 快照；`test_web_api.py` 先复现新增字段缺描述，再验证描述与实际 schema 一致。
+- **等待与升级不可回归行为**：用户消息、助手提问、上传完成以及真正进入等待补充状态才推进业务活动时间；重复投影、读取和改名不续期。连续 15 天无业务活动的等待轮先安全停止并保留正文，同会话可新开轮；磁盘压力不得提前结束等待轮。旧记录从可信事件补齐活动时间，无可靠事件则采用首次升级时间并持久保存，重启不重复续期。已删除内容及旧清理任务不恢复，升级只保护尚未进入删除流程的内容。
+- **本轮发现并修正的竞态与配额回归**：临时资源清理持有租约时返回可重试 503，不能伪装成会话已删除；错误归属及主动删除仍返回 404。先前资源清理隔离文件后失败，随后用户主动删除时，必须等同会话历史清单完成后才能返回 `DELETED`，防止隔离目录残留被遗漏；无关会话清单不阻塞删除。永久 run 不得让经验任务和来源配额永久耗尽，反馈与幂等回执保留，提炼尝试标记防止任务回收后再次调用模型；经验卡仍按原 90 天期限保存，详见 PL-FIX-071。
+- **专项回归测试**：`test_web_resource_retention.py` 覆盖超过 30 天和数据库重开后的正文、共享附件、PENDING/COMMITTED 重启引用、20 个附件额度、21 轮历史分页、归档失败、物理删除重试、停止条件及迁移时间；三个等待入口均先复现失败，再验证只在真实状态转换时续期。`test_report_archive.py` 与 `test_agent_reports.py` 覆盖各报告格式、原字节、哈希、原 URL、权限、清理后重开及删除竞争。`test_cleanup_history_receipts.py` 直接覆盖新/旧清单隔离失败后主动删除及无关清单；`test_capacity.py`、`test_capacity_reclamation.py`、`test_completed_workspaces.py` 覆盖并发预约、真实 GiB 稀疏文件拒绝、目标余量、提前清理顺序和依赖保护。`test_history_retention.py`、`test_followup_retention.py`、`test_report_followup.py`、`test_generic_feedback.py`、`test_postgres_import_memory.py` 覆盖旧期限兼容、追问、经验额度与迁移；配置、bootstrap、租约、HTTP、网站视图、REST/OpenAPI 和接入文档专项覆盖公开合同及接线。开发期命令、范围和结果列于 `TODO.md`，各组有重叠，不能累加为完整测试总数。
+- **真实 PostgreSQL 专项（2026-10-16）**：新增 `tests/deterministic/postgres/test_postgres_web_retention.py` 与 `test_postgres_web_import.py`，在 PostgreSQL 15.19 上 11 项通过。覆盖 Markdown/JSON 报告 BYTEA 原字节、实际文件清理、365 天后关闭连接重开、历史问答、共享附件、当前及旧清单的主动删除竞态、归档删除与迟到写入拒绝；旧反馈按匹配任务、不同报告及无任务三种情况导入，核对逐表摘要、源目录不变和归档下载。每例使用新的独立测试库，证据保留；本轮完整结论仍以下方元数据为准。
+- **完整验证发现的测试适配（2026-10-16）**：首轮 `run-20261016T021933Z-e298f83c` 为 FAIL：单元 6 项、PostgreSQL 2 项、集成 1 项失败，均已核对实际入口和证据。旧测试仍调用已移除的整轮删除接口、ENOSPC 替身缺少容量参数、HTTP 替身缺少报告读取入口、ZIP 静态清单使用旧函数名，或仍要求删除附件元数据；公开配置清单也遗漏本次新增的 5 项。已精确适配测试，保留权限、使用租约、磁盘写满和压缩包输入禁用断言，并加强物理文件删除、附件名称/大小/哈希永久保留、正文不变及其他轮次保护验证。对应专项依次为 Linux 清理/ENOSPC 39 项、HTTP 46 项、真实 PostgreSQL 并发与清理 10 项、ZIP 入口 4 项、公开配置 3 项通过。未因此放宽产品合同；首轮 FAIL 证据保留，当前完整结论须由修正后的新源码重新生成。
+- **2026-10-16 性能复核与本轮推送准备**：上一轮 `run-20261016T022949Z-67777382` 功能通过，但完整确定性阶段 423.358 秒超过 300 秒门槛，整体 FAIL，证据保留。相同 Python、依赖及 194 项集成输入的旧版—新版—旧版顺序对照为 193.807 / 216.876 / 225.214 秒；未发现明显源码回退，存储同步等待与运行波动已确认，新增测试集合净增加约 15.431 秒。专项调查保留于 `.tmp/web-retention-perf-audit-20261016/diagnosis.md`，不替代正式验证。此前曾基于 `a84bc45` 隔离保留策略核查；按用户最新明确授权，本轮改为统一交付正文永久保存、日志回收与容量管理，以及持续诊断、意图分流和 PL-FIX-083 至 PL-FIX-088 的修复，保留已提交的长期统计修复。完成全部正文后重新查看计划并运行完整 `dev.default`，最终结论只回填元数据，不沿用历史 PASS。
+- **本轮文档 Gate 修正**：`run-20261016T044512Z-fe528410` 在框架阶段发现上述 `a84bc45` 本机证据链接问题，结果为 FAIL，确定性完整阶段尚未运行。失败证据保留；先修正并验证文档专项，再用新源码快照重跑全部阶段。
+- **本轮确定性夹具开销修正**：性能剖析确认 `tests/deterministic/journey/test_rpc_timeout.py` 的 `_Stack` 在构造时装配 HTTP app，访问 `http_app` 又重复装配；采样用例两次装配合计约 0.298 秒。新增 `test_stack_http_app_is_built_once_only_when_requested` 先复现失败，再将该测试夹具改为首次请求时创建并缓存，未使用 HTTP 的旅程不创建 app。该用例、`test_first_problem_creates_case_before_one_requirement_aware_intake` 两种参数及 `test_same_job_uses_initial_order_fact_and_survives_restart` 共 4 passed，证据 `.tmp/lazy-http-after-20261016`。不可回归行为是每个夹具最多按需装配一次，原 HTTP、首问题、参数提取和重启断言保留；不改生产装配、模型次数、全量范围或 300 秒门槛，也不将夹具加速外推为产品响应速度。
+- **测试替身导入开销修正与最终专项**：同批剖析确认 `tests/fixtures/rpc_timeout/fake_agent.py` 在 ROUTE、DIAGNOSE 和 REVIEW 启动时也导入仅预处理使用的 `logparse_cli`，还导入完全未使用的 `seal_agent_outcome_draft`。`test_fake_agent_import_does_not_load_unused_phase_helpers` 先复现失败，再将 Logparse 导入移入 `_preprocess` 并删除未使用导入；预处理继续使用原实现，不跳过业务校验。联合两项性能回归、跨模块旅程、SameJob 重启和网站首问题共 6 passed，证据 `.tmp/fixture-perf-final-20261016`。Linux 对实际 `fake.main` 的交错 A/B 中，导入加首次调用中位数分别为 DIAGNOSE 0.3167→0.2743 秒、REVIEW 0.3398→0.2907 秒、ROUTE 0.3260→0.3124 秒；测量文件 `/home/xiaodao/quick-validation/continuation-fixture-profile-20261016/results.json`。这些结果仅证明测试替身减少无关启动工作，不代表完整阶段已通过 300 秒门槛；最终仍以本节 verdict 元数据为准。
+- **最新 Test Flow verdict（PL-FIX-070，2026-10-16，正文永久与资源回收）**：Linux `dev.default` [run-20261016T055354Z-e70e54e3](.tmp/continuation-push-evidence-20261016/run-20261016T055354Z-e70e54e3/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。完整确定性阶段 268.340 秒，低于 300 秒门槛，全部必需 Gate 通过；模型调用、token 和费用均为 0。源码快照 `git-visible-worktree-v1:c1d23b543825d46f1453e78a2ec01cc3ed0efa4240527f15008e7bee45492911`（1004 文件），verdict SHA-256 `4e6e0657de7e69e76c0cd42309d2c410ad240c2f3b5291ea5123bc9eabd3deef`。测试临时数据使用本轮说明的独立 tmpfs，真实 PostgreSQL 仍在持久盘；完整证据已复制到持久盘并逐文件核对，不代表生产磁盘性能、真实模型效果或 Release 已验收。本行是验证后回填的引用元数据，不属于所引用源码快照。
+
 ### 2026-10-13：历史保留期改为默认 30 天，并支持部署配置
 
 - **最新 Test Flow verdict（2026-10-13，推送前统一验证）**：Linux `dev.default` [run-20261013T095455Z-a9580c72](.tmp/push-current-evidence-20261013/run-20261013T095455Z-a9580c72/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`（性能基线尚未校准）。源码快照 `git-visible-worktree-v1:7b6d27e5402c426bcf8e5d1ed04c32ef93c4fcf0ede0888d6eaed721bad52986`（961 文件），verdict SHA-256 `634a927b9070208e1d843df36eedba9d60aad1d69abd2183cf14879f21c2ee15`。最终源码的完整确定性轨通过，模型调用、token 和费用均为 0；10 个入口脚本保留 Git 中的执行权限。交付工作区与测试副本的文件内容逐项一致，提交索引同时核对文件权限。仅本行是验证后追加的引用元数据，不属于所引用源码快照；统计参考文件尚未完成独立 PostgreSQL 专项和生产验收，本次不是 Release。
@@ -3063,6 +3150,7 @@
 ## PL-FIX-071：合并经验库后，自然过期误删已提炼经验
 
 - **状态**：合并阶段修复完成，是否通过正式验证以本条最终 Test Flow 元数据为准。
+- **再次修复（2026-10-16，8.2.0 / `5bce783` 上的正文永久保存改动）**：PL-FIX-070 不再自然删除 run 后，原任务清理条件仍要求来源轮次消失，导致过期任务和来源永久占用配额。已复现并改为按任务自身期限及 `resources_expired` 回收；READY 经验卡保留原 90 天规则，历史投票与请求回执继续保存。新增 `extraction_attempted` 标记并从匹配的旧任务回填，防止任务被回收后重新点赞再次提炼；关闭或暂时满额而从未受理的任务不误记为已尝试。`test_generic_feedback.py` 的永久历史任务/来源额度、一次性提炼和旧 schema 回填专项，以及 `test_history_retention.py` 的自然回收与主动删除专项直接覆盖本次回归；导入兼容见 PL-FIX-076。本轮正式结论统一见 PL-FIX-070 的 2026-10-16 最新 verdict 元数据，以下历史 PASS 不覆盖本轮。
 - **症状与受影响版本**：将经验库分支 `aba3a5a` 合入主分支 `45d2d68` 的未发布工作区时，整段会话自然过期会清空已提炼经验，使原定独立保留 90 天的经验在来源满 7 天时提前失效。修改前已核对当前 `HistoryRetentionService._expire_conversation()` → `AgentStore.request_delete()` → `MemoryStore.revoke_conversation()` 的实际路径；原自然过期用例直接删除 run，未覆盖该入口。
 - **根因**：主分支复用主动删除入口清理过期会话，经验库将该入口统一视为用户主动删除，没有区分两种来源。
 - **不可回归行为**：自然过期保留已完成经验的内容和原可用状态，仍按经验自身期限清理；待处理或正在提炼的来源立即清空，迟到结果不能启用。主动删除在同一事务内撤销全部来源经验，包括已经被自然过期标为 DELETING 或 DELETED 的会话。旧轮次过期不能清除新轮次的任务或经验。

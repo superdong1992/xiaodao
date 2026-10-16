@@ -80,6 +80,13 @@ function data(overrides = {}) {
   };
 }
 
+test("日志清理后仍展示完整报告并说明本轮只读", () => {
+  const target = container();
+  renderReport(target, data({ format: "markdown", report: null, markdown: "完整报告永久保留" }), { resourcesExpired: true });
+  assert.match(target.textContent, /相关日志已清理，本轮仅供查看/);
+  assert.match(target.textContent, /完整报告永久保留/);
+});
+
 test("structured report renders the authoritative fields as readable cards, with technical records folded", () => {
   const target = container();
   const value = data();

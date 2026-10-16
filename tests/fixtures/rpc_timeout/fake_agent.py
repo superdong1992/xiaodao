@@ -42,10 +42,6 @@ from problem_locator.contracts import (  # noqa: E402
     canonical_json_bytes,
     parse_canonical_json_bytes,
 )
-from problem_locator.integrations.logparse import cli as logparse_cli  # noqa: E402
-from problem_locator.runtime.outcome_finalizer import (  # noqa: E402
-    seal_agent_outcome_draft,
-)
 
 
 _PREPROCESS_COMMAND = re.compile(
@@ -115,6 +111,8 @@ def _assert_safe_relative(value: object, *, prefix: str | None = None) -> str:
 
 
 def _preprocess(prompt: str) -> int:
+    from problem_locator.integrations.logparse import cli as logparse_cli
+
     helper_offsets = [
         match.start()
         for match in re.finditer(re.escape(_PREPROCESS_HELPER_CALL), prompt)

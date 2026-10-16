@@ -96,7 +96,7 @@ class AgentAttachment(AgentModel):
     content_type: str
     size: int = Field(ge=1)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    status: Literal["RESERVED", "UPLOADING", "READY", "IMPORTED", "FAILED"] = "RESERVED"
+    status: Literal["RESERVED", "UPLOADING", "READY", "IMPORTED", "FAILED", "EXPIRED"] = "RESERVED"
     created_at: str
     case_attachment_id: str | None = None
 
@@ -140,6 +140,9 @@ class ConversationStatusView(AgentModel):
     created_at: str
     updated_at: str
     run_id: OpaqueId | None = None
+    resources_expired: bool = False
+    resources_expired_at: str | None = None
+    resource_cleanup_reason: Literal["RETENTION_EXPIRED", "DISK_PRESSURE"] | None = None
 
 
 class ConversationRun(AgentModel):
@@ -153,6 +156,9 @@ class ConversationRun(AgentModel):
     report_state: Literal["PENDING", "READY", "UNAVAILABLE"]
     created_at: str
     updated_at: str
+    resources_expired: bool = False
+    resources_expired_at: str | None = None
+    resource_cleanup_reason: Literal["RETENTION_EXPIRED", "DISK_PRESSURE"] | None = None
 
 
 class ConversationCapabilities(AgentModel):

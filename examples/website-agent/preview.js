@@ -3,11 +3,13 @@ import { createAgentClient } from "./browser-client.js";
 import { createPreviewApi } from "./preview-model.js";
 import { createFollowupController } from "./followup-controller.js";
 import { mountFollowupView } from "./followup-view.js";
+import { createContinuationController } from "./continuation-controller.js";
+import { mountContinuationView } from "./continuation-view.js";
 
 const element = (selector) => document.querySelector(selector);
 const report = element("#report"), directory = element("#scenarios"), note = element("#scenario-note");
 const history = element("#history"), responseText = element("#response");
-let client, currentId, current, before = null, disposeFollowups, selection = 0, newRequest;
+let client, currentId, current, before = null, disposeFollowups, disposeContinuation, selection = 0, newRequest;
 const busy = async (work) => { try { await work(); } catch (error) { note.textContent = error.message; } };
 
 function showHistory(entries, prepend = false) {
@@ -38,7 +40,9 @@ async function refreshDirectory() {
 async function select(id, run_id) {
   const selected = ++selection;
   disposeFollowups?.(); disposeFollowups = null;
+  disposeContinuation?.(); disposeContinuation = null;
   element("#followups").replaceChildren();
+  element("#continuation").replaceChildren();
   const view = await client.conversations.get(id, { run_id, history_limit: 3 });
   if (selected !== selection) return;
   currentId = id; current = view;
@@ -47,11 +51,19 @@ async function select(id, run_id) {
   note.textContent = `第 ${current.current_run.ordinal} 轮 · ${current.current_run.status}。所有操作仅修改浏览器内的合成样例。`;
   element("#stop").disabled = !current.capabilities.can_stop;
   element("#older").disabled = before === null;
-  renderReport(report, current.result); showHistory(current.history);
+  renderReport(report, current.result, { resourcesExpired: current.resources_expired }); showHistory(current.history);
   const controller = createFollowupController({ client, conversationId: id, runId: current.selected_run_id,
     storageNamespace: "xiaodao-preview-followup" });
   disposeFollowups = mountFollowupView(element("#followups"), controller);
   void controller.start().catch(() => {});
+  if (current.result.report_state === "READY") {
+    const continuation = createContinuationController({ client, conversationId: id, runId: current.selected_run_id,
+      onConfirmed: (receipt) => select(id, receipt.run_id),
+      onFollowup: async (receipt) => { await select(id, receipt.run_id); element("#followups").scrollIntoView({ block: "start" }); } });
+    disposeContinuation = mountContinuationView(element("#continuation"), continuation, { client, conversationId: id,
+      runId: current.selected_run_id, onSelectRun: (selectedRun) => select(id, selectedRun) });
+    void continuation.start().catch(() => {});
+  }
   responseText.textContent = JSON.stringify({ ok: true, data: current, error: null }, null, 2);
   await refreshDirectory();
 }
@@ -68,6 +80,7 @@ element("#delete").onclick = () => busy(async () => {
   if (!confirm("删除这个预览会话及其历史？刷新页面即可恢复合成样例。")) return;
   await client.conversations.delete(currentId);
   disposeFollowups?.();
+  disposeContinuation?.(); element("#continuation").replaceChildren();
   const items = await refreshDirectory();
   if (items.length) await select(items[0].conversation_id);
   else { history.replaceChildren(); report.replaceChildren(); responseText.textContent = "";
