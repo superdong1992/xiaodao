@@ -34,6 +34,8 @@ const AGENT_OPERATIONS = [
   "GET /api/v1/agent/conversations/{conversation_id}/events",
   "GET /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/feedback",
   "PUT /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/feedback",
+  "POST /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/feedback/comments",
+  "POST /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups/{followup_id}/feedback/comments",
   "GET /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups",
   "POST /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups",
   "GET /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups/events",

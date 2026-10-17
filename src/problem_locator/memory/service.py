@@ -106,3 +106,13 @@ class FeedbackService:
             return self.store.put_feedback(conversation_id, run_id, owner_key=owner_key,
                 request_id=request.request_id, rating=request.rating, source=source,
                 extract_memory=self.memory_enabled, answer_key=followup_id)
+    def post_feedback_comment(self, conversation_id, run_id, request_id, text=None,
+                              analysis_text=None, analysis_reference=None, *, owner_key, followup_id=None):
+        self._require_owner(owner_key)
+        with self.agent.operation_lease(conversation_id, owner_key=owner_key):
+            source = (self._source(conversation_id, run_id) if followup_id is None else
+                self._followup_source(conversation_id, run_id, followup_id, owner_key))
+            return self.store.post_feedback_comment(conversation_id, run_id, owner_key=owner_key,
+                request_id=request_id, text=text, analysis_text=analysis_text,
+                analysis_reference=analysis_reference, source=source, answer_key=followup_id or "",
+                extract_memory=self.memory_enabled)

@@ -19,6 +19,7 @@ import "./browser-client.test.mjs";
 import "./preview.test.mjs";
 import "./onboarding.test.mjs";
 import "./followup.test.mjs";
+import "./feedback-comments.test.mjs";
 import "./continuation.test.mjs";
 import "./file-sha256.test.mjs";
 

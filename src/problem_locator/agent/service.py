@@ -317,6 +317,14 @@ class AgentConversationService:
             raise AgentStoreError("AGENT_FEEDBACK_UNSUPPORTED", "这份报告暂不支持反馈。", 409)
         return self.feedback.put_feedback(conversation_id, run_id, request_id, rating, owner_key=owner_key)
 
+    def post_feedback_comment(self, conversation_id, run_id, request_id, text=None,
+                              analysis_text=None, analysis_reference=None, *, owner_key=None, followup_id=None):
+        if self.feedback is None:
+            self.get_feedback(conversation_id, run_id, owner_key=owner_key)
+            raise AgentStoreError("AGENT_FEEDBACK_UNSUPPORTED", "这条内容暂不支持反馈。", 409)
+        return self.feedback.post_feedback_comment(conversation_id, run_id, request_id, text,
+            analysis_text, analysis_reference, owner_key=owner_key, followup_id=followup_id)
+
     def list_conversations(self, owner_key, *, cursor=None, limit=20):
         return self.store.list_conversations(owner_key, cursor=cursor, limit=limit)
 

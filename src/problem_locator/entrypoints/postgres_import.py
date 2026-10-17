@@ -21,6 +21,7 @@ from problem_locator.contracts import canonical_json_bytes
 from problem_locator.followup.models import FollowupEvent, FollowupItem, FollowupSource
 from problem_locator.followup.store import FollowupStore
 from problem_locator.memory.store import LEGACY_DEFAULTS, MemoryStore
+from problem_locator.memory.comments import COMMENT_TABLE, COMMENT_VERSION, COMMENT_VERSION_KEY
 from problem_locator.storage.atomic import read_stable_file_bytes, write_synced_file
 from problem_locator.storage.coordination import StorageCoordinationLock
 from problem_locator.storage.database import table_columns, table_names
@@ -56,7 +57,7 @@ def _source_schema(db):
     _require(not any(kind in {"view", "trigger"} for kind, _ in objects), "源数据库包含不受支持的视图或触发器。")
     tables = {name for kind, name in objects if kind == "table"}
     allowed = safety._CORE_TABLES | safety._AGENT_TABLES | safety._AGENT_V2_TABLES | _MEMORY | _FOLLOWUP | _CONTINUATION | {
-        "completed_case_retention", "history_cleanup_jobs", "agent_report_archives"}
+        "completed_case_retention", "history_cleanup_jobs", "agent_report_archives", COMMENT_TABLE}
     _require(safety._CORE_TABLES <= tables and tables <= allowed, "源数据库的表结构不属于受支持的 V11 格式。", "VERSION_UNSUPPORTED")
     for group in (safety._AGENT_TABLES | safety._AGENT_V2_TABLES, _MEMORY, _FOLLOWUP, _CONTINUATION):
         _require(not tables.intersection(group) or group <= tables, "源数据库的业务表不完整。")
@@ -74,6 +75,11 @@ def _source_schema(db):
         _require(memory_version in {None, "2"}, "源反馈存储版本不受支持。", "VERSION_UNSUPPORTED")
         _require(("answer_key" in table_columns(db, "memory_feedback")) == (memory_version == "2"),
             "源反馈版本与表结构不一致。", "VERSION_UNSUPPORTED")
+    _require((COMMENT_TABLE in tables) == (COMMENT_VERSION_KEY in metadata),
+        "源文字反馈数据表与版本标记不一致。", "VERSION_UNSUPPORTED")
+    if COMMENT_TABLE in tables:
+        _require(metadata[COMMENT_VERSION_KEY] == COMMENT_VERSION and _MEMORY <= tables,
+            "源文字反馈存储版本不受支持。", "VERSION_UNSUPPORTED")
     if _FOLLOWUP <= tables:
         followup_version = dict(db.execute("SELECT key,value FROM agent_followup_metadata")).get("storage_version")
         _require(followup_version in {"1", "2"},
@@ -300,6 +306,8 @@ def _import_rows(sqlite, repository, tables, source, target, mappings):
                     additions.append(("agent_storage_version", "2"))
                 if "memory_storage_version" not in metadata:
                     additions.append(("memory_storage_version", "2"))
+                if COMMENT_VERSION_KEY not in metadata:
+                    additions.append((COMMENT_VERSION_KEY, COMMENT_VERSION))
                 db.executemany(insert, additions)
                 expected_hashes.extend(_row_hash(row) for row in additions)
             if "storage_order" in target_columns:

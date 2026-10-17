@@ -47,6 +47,15 @@ def test_postgres_import_derives_legacy_feedback_without_changing_source_and_kee
             resources.content.decode(), aggregate.case.generic_result_v2.report_sha256)
         memory.put_feedback(cid, rid, owner_key=OWNER, request_id="like", rating="LIKE",
             source=report_source, extract_memory=legacy_task != "none")
+        memory.put_feedback(cid, rid, owner_key=OWNER, request_id="comment-down", rating="DISLIKE",
+            source=report_source, extract_memory=False)
+        comment_receipt = memory.post_feedback_comment(cid, rid, owner_key=OWNER, request_id="comment-import",
+            source=report_source, text="请核对连接池排队。", analysis_text="管理员检查发现等待连接。",
+            analysis_reference="analysis-import-1", extract_memory=False)
+        memory.put_feedback(cid, rid, owner_key=OWNER, request_id="comment-up", rating="LIKE",
+            source=report_source, extract_memory=False)
+        with repository.database_read() as db:
+            comment_before = db.execute("SELECT * FROM memory_feedback_comments").fetchall()
         assert service.report_archive.archive_run(cid, rid)
         expire(context)
         original = service.get_conversation(cid)
@@ -89,5 +98,11 @@ def test_postgres_import_derives_legacy_feedback_without_changing_source_and_kee
         downloaded.stream.close()
         imported_memory = MemoryStore(reopened, clock)
         assert imported_memory.get_feedback(cid, rid, owner_key=OWNER, can_rate=True).rating == "LIKE"
+        with reopened.database_read() as db:
+            assert db.execute("SELECT * FROM memory_feedback_comments").fetchall() == comment_before
+        assert result["tables"]["memory_feedback_comments"]["source"] == migration._digest(comment_before)
+        assert imported_memory.post_feedback_comment(cid, rid, owner_key=OWNER, request_id="comment-import",
+            source=None, text="请核对连接池排队。", analysis_text="管理员检查发现等待连接。",
+            analysis_reference="analysis-import-1", extract_memory=False) == comment_receipt
     finally:
         reopened.close()

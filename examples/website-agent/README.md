@@ -10,7 +10,7 @@
 
 部署和联调步骤见[快速接入清单](../../docs/website-agent-quickstart.md)，请求、响应和 SSE 的详细说明见 [Agent API 参考](../../docs/website-agent-api.md)。
 
-每条追问回答的赞踩和文字纠正见[本次增量适配说明](../../docs/website-answer-feedback-upgrade.md)。原报告反馈接口保持不变；新能力只更新调用封装和转发，按钮及输入框由网站实现。
+每条追问回答的赞踩、独立文字反馈和管理员资料附带方式见[本次增量适配说明](../../docs/website-answer-feedback-upgrade.md)。原报告反馈接口保持不变；新能力只更新调用封装和转发，按钮及输入框由网站实现。
 
 通用报告赞踩接口及经验复用规则见[经验库接入说明](../../docs/generic-feedback-memory.md)。按钮由网站实现，本示例提供调用封装和后端转发。
 
@@ -34,6 +34,8 @@ node examples/website-agent/preview.mjs
 | `report-view.js` | 按固定字段生成报告界面 | 复制到网站静态资源目录，调用 `renderReport` |
 | `report-view.css` | 报告区样式 | 与渲染模块一起复制，也可替换为网站自己的样式 |
 | `browser-client.js` | 封装浏览器对网站同源 API 的调用 | 复制后使用，或按相同接口接入现有请求库 |
+| `feedback-comment-contract.js` | 文字反馈请求与回执校验 | 与 browser-client.js 一起复制 |
+| `feedback-comments-bff.mjs` | 独立文字反馈转发，服务端可配置 loadFeedbackAnalysis | 与 server.mjs 一起部署；资料快照持久化由网站实现 |
 | `followup-contract.js` | SDK 和 BFF 共用的追问 DTO 校验 | 与 browser-client.js 一起复制 |
 | `continuation-contract.js` | SDK 和 BFF 共用的继续诊断 DTO 校验 | 即使只展示报告，也须与 browser-client.js 一起复制 |
 | `continuation-controller.js`、`continuation-view.js` | 继续诊断草稿、日志清单和版本对比 | 与现有报告和追问模块一起部署 |
@@ -48,7 +50,7 @@ node examples/website-agent/preview.mjs
 
 ## 2. 用最少代码显示已有报告
 
-把 `report-view.js`、`report-view.css`、`browser-client.js` 和它依赖的 `followup-contract.js`、`continuation-contract.js` 放进网站的同一个静态资源目录，例如 `/xiaodao/`。即使只展示报告，也必须保留两份合同模块。后端接入同源 `/api/agent/` 接口后，在现有页面加入以下代码：
+把 `report-view.js`、`report-view.css`、`browser-client.js` 和它依赖的 `followup-contract.js`、`continuation-contract.js`、`feedback-comment-contract.js` 放进网站的同一个静态资源目录，例如 `/xiaodao/`。即使只展示报告，也必须保留三份合同模块。后端接入同源 `/api/agent/` 接口后，在现有页面加入以下代码：
 
 ```html
 <link rel="stylesheet" href="/xiaodao/report-view.css">

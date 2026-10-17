@@ -15,6 +15,7 @@ import { pipeline } from "node:stream/promises";
 import { clearInterval, clearTimeout, setInterval, setTimeout } from "node:timers";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { handleFollowups } from "./followup-bff.mjs";
+import { handleFeedbackComments } from "./feedback-comments-bff.mjs";
 import { handleContinuations } from "./continuation-bff.mjs";
 import { CONTINUATION_FAILURE_MESSAGES } from "./continuation-contract.js";
 export const denyAccess = {
@@ -199,6 +200,7 @@ const PUBLIC_CODES = new Set([
     "AGENT_CONVERSATION_DELETED",
     "AGENT_CANCELLING",
     "AGENT_FEEDBACK_UNSUPPORTED",
+    "AGENT_FEEDBACK_REQUIRES_DISLIKE",
     "AGENT_FEEDBACK_LIMIT_EXCEEDED",
     "AGENT_FOLLOWUP_DISABLED", "AGENT_FOLLOWUP_UNSUPPORTED", "AGENT_FOLLOWUP_EXPIRED",
     "AGENT_FOLLOWUP_BUSY", "AGENT_FOLLOWUP_SOURCE_CHANGED", "AGENT_FOLLOWUP_LIMIT_EXCEEDED",
@@ -299,6 +301,7 @@ function safeError(value, terminal = false) {
         AGENT_CONVERSATION_NOT_FOUND: "会话不存在或已删除。",
         AGENT_RUN_NOT_FOUND: "诊断轮次不存在。",
         AGENT_FEEDBACK_UNSUPPORTED: "这条内容暂不支持评价。",
+        AGENT_FEEDBACK_REQUIRES_DISLIKE: "请先对这条回答点踩，再提交文字反馈。",
         AGENT_FEEDBACK_LIMIT_EXCEEDED: "评价请求已达上限，请联系管理员。",
         AGENT_FOLLOWUP_DISABLED: "报告追问功能尚未启用。",
         AGENT_FOLLOWUP_UNSUPPORTED: "这份报告暂不支持追问。",
@@ -456,6 +459,8 @@ function validateFeedback(result, conversationId, runId) {
 /** @param {{upstream: string, access?: Access, ownerNamespace?: string, fetchImpl?: typeof fetch}} options */
 export function createAgentBackend(options) {
     const access = options.access;
+    if (options.loadFeedbackAnalysis != null && typeof options.loadFeedbackAnalysis !== "function")
+        throw new TypeError("loadFeedbackAnalysis 必须是网站后端的资料读取函数。");
     const fetchImpl = options.fetchImpl ?? fetch;
     const base = new URL(options.upstream.endsWith("/") ? options.upstream : `${options.upstream}/`);
     if (![
@@ -668,6 +673,8 @@ export function createAgentBackend(options) {
                 ])).digest("hex");
             }
             const url = new URL(request.url ?? "/", "http://website.local");
+            if (await handleFeedbackComments({ request, response, url, authContext, api, json,
+                jsonBody, HttpError, loadFeedbackAnalysis: options.loadFeedbackAnalysis })) return;
             if (await handleContinuations({ request, response, url, authContext, api, json, jsonBody, HttpError })) return;
             if (await handleFollowups({ request, response, url, authContext, api, upstreamFetch, json,
                 jsonBody, HttpError, safeError, boundedResponseJson, validateQuery, checkLimit })) return;

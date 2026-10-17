@@ -6,7 +6,7 @@
 
 功能默认关闭，服务端配置 `REPORT_FOLLOWUP_ENABLED=true` 后启用。`REPORT_FOLLOWUP_SNAPSHOT_BYTES` 默认 1073741824，控制单份原日志副本的大小；可调低，最大 1 GiB。`REPORT_FOLLOWUP_STORAGE_BYTES` 默认 5368709120，控制副本总量，不能小于单份上限。副本异步准备失败或超限不会撤销已交付报告，页面仍可提供仅依据报告的问答。模型命令沿用 `DIAGNOSE_CLAUDE_COMMAND`，未设置时回退到 `CLAUDE_COMMAND`。提交追问会调用真实模型；读取、分页、订阅和恢复状态不会调用模型。
 
-每条回答支持独立赞踩，也可复用追问入口提交明确的文字纠正。原报告评价和所有追问响应字段保持不变；接入方需要更新的文件、请求示例和经验采纳边界见[回答反馈增量适配说明](website-answer-feedback-upgrade.md)。按钮和输入框由网站实现。
+每条回答支持独立赞踩；点踩后的文字负反馈使用独立 feedback/comments 接口，不经过追问入口。既有 intent=CORRECTION 仍用于用户主动继续对话。原报告评价和所有追问响应字段保持不变；接入方需要更新的文件、请求示例和经验采纳边界见[回答反馈增量适配说明](website-answer-feedback-upgrade.md)。按钮和输入框由网站实现。
 
 ## 继续诊断与报告版本
 
@@ -85,9 +85,9 @@ await controller.start();
 
 ## 直接复用浏览器模块
 
-复制 [示例目录](../examples/website-agent/README.md) 中的 `browser-client.js`、`followup-contract.js`、`continuation-contract.js`、`followup-controller.js`、`followup-view.js`、`report-view.js` 和 `report-view.css` 到网站静态资源目录；复用共用输入框时，一并部署 `conversation-input.js`。这些模块应来自同一次发布，保留相对导入路径，不要只替换入口文件。controller 发真实的同源请求；离线预览仅替换它的 `fetchImpl`，没有另一套页面逻辑。
+复制 [示例目录](../examples/website-agent/README.md) 中的 `browser-client.js`、`followup-contract.js`、`continuation-contract.js`、`feedback-comment-contract.js`、`followup-controller.js`、`followup-view.js`、`report-view.js` 和 `report-view.css` 到网站静态资源目录；复用共用输入框时，一并部署 `conversation-input.js`。这些模块应来自同一次发布，保留相对导入路径，不要只替换入口文件。controller 发真实的同源请求；离线预览仅替换它的 `fetchImpl`，没有另一套页面逻辑。
 
-BFF 同步部署 `server.ts`、`server.mjs`、`followup-bff.mjs`、`followup-contract.js`、`continuation-bff.mjs` 和 `continuation-contract.js`。即使 `REPORT_FOLLOWUP_ENABLED=false`，也必须保留这些静态导入的模块，否则 BFF 无法启动。后端、BFF 和浏览器模块的累计升级顺序见[生产升级清单](production-upgrade-2026-09-23.md)。
+BFF 同步部署 `server.ts`、`server.mjs`、`followup-bff.mjs`、`followup-contract.js`、`continuation-bff.mjs`、`continuation-contract.js`、`feedback-comments-bff.mjs` 和 `feedback-comment-contract.js`。即使 `REPORT_FOLLOWUP_ENABLED=false`，也必须保留这些静态导入的模块，否则 BFF 无法启动。后端、BFF 和浏览器模块的累计升级顺序见[生产升级清单](production-upgrade-2026-09-23.md)。
 
 ```javascript
 import { createAgentClient } from "/xiaodao/browser-client.js";

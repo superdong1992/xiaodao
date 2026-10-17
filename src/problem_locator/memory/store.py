@@ -11,6 +11,7 @@ from problem_locator.storage.database import (dialect_for, lock_conversation, lo
     table_columns, table_names, try_lock_conversation)
 from problem_locator.timestamps import format_timestamp, now_timestamp, parse_timestamp
 
+from .comments import FeedbackCommentStoreMixin, initialize_comments
 from .models import FeedbackRequest, FeedbackSource, FeedbackView, FollowupFeedbackView
 
 MAX_CARD_BYTES = 4096
@@ -66,7 +67,7 @@ def _unsupported():
     return AgentStoreError("AGENT_FEEDBACK_UNSUPPORTED", "回答来源已变化，请刷新后重试。", 409)
 
 
-class MemoryStore:
+class MemoryStore(FeedbackCommentStoreMixin):
     def __init__(self, repository, clock=None):
         self.repository, self.clock = repository, clock
         with repository.database_transaction() as db:
@@ -91,6 +92,7 @@ class MemoryStore:
             elif any(not set(defaults) <= table_columns(db, table)
                      for table, defaults in LEGACY_DEFAULTS.items()):
                 raise AgentStoreError("STATE_SCHEMA_UNSUPPORTED", "反馈数据表结构不受支持，请保留原目录。", 503)
+            initialize_comments(db)
             for statement in _INDEXES:
                 db.execute(statement)
             if "extraction_attempted" not in table_columns(db, "memory_feedback"):
@@ -255,6 +257,9 @@ class MemoryStore:
             task = _one(db, "SELECT * FROM memory_tasks WHERE task_id=? AND status='RUNNING'", (task_id,))
             if task is None:
                 return False
+            if not self._comment_can_finish(db, task):
+                db.execute("UPDATE memory_tasks SET status='FAILED',active=0,problem_text=NULL,report_markdown=NULL,context_json=NULL,updated_at=? WHERE task_id=?", (now, task_id))
+                return False
             correction = task["source_kind"] == "CORRECTION"
             if correction:
                 if not isinstance(evidence_json, str) or len(evidence_json.encode()) > 65_536 or not isinstance(json.loads(evidence_json), dict) or not json.loads(evidence_json):
@@ -273,6 +278,7 @@ class MemoryStore:
             active = not superseded and (rating is None or rating[0] == "LIKE")
             db.execute("UPDATE memory_tasks SET status='READY',problem_text=NULL,report_markdown=NULL,context_json=NULL,card_json=?,card_sha256=?,evidence_json=?,active=?,superseded=?,completed_at=?,updated_at=? WHERE task_id=?", (content, hashlib.sha256(content.encode("utf-8")).hexdigest(), evidence_json, int(active), int(superseded), now, now, task_id))
             if correction:
+                self._supersede_prior_comments(db, task)
                 db.execute("UPDATE memory_tasks SET active=0,superseded=1,problem_text=CASE WHEN status='PENDING' THEN NULL ELSE problem_text END,report_markdown=CASE WHEN status='PENDING' THEN NULL ELSE report_markdown END,context_json=CASE WHEN status='PENDING' THEN NULL ELSE context_json END,status=CASE WHEN status='PENDING' THEN 'FAILED' ELSE status END WHERE run_id=? AND answer_key=?", (task["run_id"], task["replaces_answer_key"]))
             return True
 
@@ -303,6 +309,7 @@ class MemoryStore:
             return [dict(zip(("card_id", "card_json", "card_sha256", "updated_at", "skill_name", "run_id", "answer_key", "source_kind"), (*row[:3], _timestamp(row[3]), *row[4:]))) for row in rows]
 
     def revoke_conversation(self, db, conversation_id):
+        db.execute("UPDATE memory_feedback_comments SET text=NULL,analysis_text=NULL,analysis_reference=NULL WHERE conversation_id=?", (conversation_id,))
         db.execute("UPDATE memory_tasks SET status='DELETED',active=0,problem_text=NULL,report_markdown=NULL,context_json=NULL,evidence_json=NULL,card_json=NULL,card_sha256=NULL,updated_at=? WHERE conversation_id=?", (self._now(), conversation_id))
 
     def expire_sources(self, db, conversation_id, *, run_id=None):
@@ -316,6 +323,7 @@ class MemoryStore:
             f"AND coalesce({dialect.json_int('r.body', '$.resources_expired')},0)=0)")
 
     def _prune(self, db, now):
+        self._prune_comments(db, now)
         dialect = dialect_for(db)
         raw = db.execute("UPDATE memory_tasks SET status='FAILED',active=0,problem_text=NULL,report_markdown=NULL,context_json=NULL,updated_at=? "
             f"WHERE status IN ('PENDING','RUNNING') AND {dialect.timestamp('created_at')}<={dialect.timestamp('?')}", (now, _before(now, SOURCE_RETENTION_DAYS))).rowcount

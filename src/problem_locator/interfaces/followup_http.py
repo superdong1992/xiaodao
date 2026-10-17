@@ -9,7 +9,7 @@ from fastapi import Path, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from problem_locator.agent.models import AgentStoreError
-from problem_locator.memory.models import FeedbackRequest, FollowupFeedbackView
+from problem_locator.memory.models import FeedbackRequest, FollowupFeedbackView, FeedbackCommentRequest, FeedbackCommentReceipt
 from problem_locator.contracts.models import OpaqueId
 from problem_locator.contracts.serialization import canonical_json_bytes
 from problem_locator.followup.models import (
@@ -191,6 +191,34 @@ def register_followup_routes(app, agent):
     async def put_feedback(conversation_id: Annotated[OpaqueId, Path()], run_id: Annotated[OpaqueId, Path()],
                            followup_id: Annotated[OpaqueId, Path()], body: FeedbackRequest, request: Request):
         return await feedback_response(request, conversation_id, run_id, followup_id, body)
+
+    @app.post(_ROOT + "/{followup_id}/feedback/comments", tags=["Agent"],
+              response_model=SuccessEnvelope[FeedbackCommentReceipt], responses=errors,
+              operation_id="post_agent_followup_feedback_comment", summary="提交追问回答的文字负反馈",
+              description="绑定已完成的具体回答，当前投票须为 DISLIKE；只保存反馈和返回回执，不新增追问、聊天消息或 SSE 事件。")
+    async def post_feedback_comment(conversation_id: Annotated[OpaqueId, Path()], run_id: Annotated[OpaqueId, Path()],
+                                    followup_id: Annotated[OpaqueId, Path()], body: FeedbackCommentRequest, request: Request):
+        try:
+            owner = _owner_key(request)
+            _no_query(request)
+        except ValueError:
+            return _invalid()
+        try:
+            target = getattr(agent, "feedback", None)
+            if target is None:
+                raise AgentStoreError("AGENT_UNAVAILABLE", "评价服务尚未配置。", 503)
+            raw = await _port_call(lambda: target.post_feedback_comment(conversation_id, run_id,
+                owner_key=owner, followup_id=followup_id, **body.model_dump()))
+            result = FeedbackCommentReceipt.model_validate(model_json(raw))
+            if (result.conversation_id, result.run_id, result.followup_id, result.request_id) != (
+                    conversation_id, run_id, followup_id, body.request_id):
+                raise ValueError("feedback comment receipt identity mismatch")
+            return JSONResponse(success_envelope(result))
+        except AgentStoreError as exc:
+            return _failure(exc.code, exc.message, exc.status_code, details=exc.details, retryable=exc.retryable)
+        except Exception:
+            _LOGGER.exception("Feedback comment HTTP operation failed")
+            return _failure("STATE_WRITE_FAILED", "暂时无法提交反馈，请稍后重试。", 500, retryable=True)
 
     @app.get(_ROOT + "/events", tags=["Agent"], response_class=_SseResponse, response_model=None,
              operation_id="subscribe_agent_followup_events", summary="订阅报告追问事件",

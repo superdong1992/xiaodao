@@ -25,7 +25,7 @@ from problem_locator.agent.models import (
     MessageReceipt,
     PublicArtifactData,
 )
-from problem_locator.memory.models import FeedbackRequest, FeedbackView
+from problem_locator.memory.models import FeedbackRequest, FeedbackView, FeedbackCommentRequest, FeedbackCommentReceipt
 from problem_locator.contracts.errors import ApplicationPortError
 from problem_locator.contracts.limits import MAX_ATTACHMENT_BYTES
 from problem_locator.contracts.models import NonEmptyText, OpaqueId, Sha256
@@ -318,6 +318,7 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
                 "delete_conversation": DeleteReceipt,
                 "get_feedback": FeedbackView,
                 "put_feedback": FeedbackView,
+                "post_feedback_comment": FeedbackCommentReceipt,
             }[function]
             if function == "get_conversation":
                 # The shared service already validated nested report content.
@@ -342,9 +343,12 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
                 result = ConversationDetailResponse.model_construct(**{**values, "artifacts": artifacts})
             else:
                 result = result_model.model_validate(model_json(result))
-            if function in {"get_feedback", "put_feedback"} and (
+            if function in {"get_feedback", "put_feedback", "post_feedback_comment"} and (
                     result.conversation_id != kwargs["conversation_id"] or result.run_id != kwargs["run_id"]):
                 raise RuntimeError("Feedback response identity does not match the request")
+            if function == "post_feedback_comment" and (
+                    result.followup_id is not None or result.request_id != kwargs["request_id"]):
+                raise RuntimeError("Feedback comment receipt identity does not match the request")
             return JSONResponse(success_envelope(result),
                                 headers={"Cache-Control": "no-store"} if kwargs.get("share") else None)
         except AgentStoreError as exc:
@@ -414,6 +418,15 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
     async def put_feedback(conversation_id: Annotated[OpaqueId, Path()], run_id: Annotated[OpaqueId, Path()],
                            body: FeedbackRequest, request: Request) -> JSONResponse:
         return await respond("put_feedback", request, conversation_id=conversation_id, run_id=run_id,
+                             **body.model_dump())
+
+    @app.post(f"{_PREFIX}/conversations/{{conversation_id}}/runs/{{run_id}}/feedback/comments", tags=["Agent"],
+              response_model=SuccessEnvelope[FeedbackCommentReceipt], responses=errors,
+              summary="提交报告的文字负反馈", operation_id="post_agent_feedback_comment",
+              description="当前投票须为 DISLIKE；保存用户意见和网站后端附带的分析资料。相同 request_id 和参数返回原回执，不创建追问或同步调用模型。")
+    async def post_feedback_comment(conversation_id: Annotated[OpaqueId, Path()], run_id: Annotated[OpaqueId, Path()],
+                                    body: FeedbackCommentRequest, request: Request) -> JSONResponse:
+        return await respond("post_feedback_comment", request, conversation_id=conversation_id, run_id=run_id,
                              **body.model_dump())
 
     @app.post(

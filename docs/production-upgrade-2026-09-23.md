@@ -143,7 +143,7 @@ ROUTE 响应现在必须包含 `skill_id`、`reason`、`confidence` 和 `assessm
 
 先保持 `REPORT_FOLLOWUP_ENABLED=false`。支持 Generic V2 和默认 `skill-direct` 的 Markdown 报告；`strict` / `advisory` 结构化报告不支持。旧报告没有日志快照时可按 `REPORT_ONLY` 回答，页面须说明没有重新核对原日志，不重新解析旧日志。
 
-同步部署整个[网站示例模块](../examples/website-agent/README.md)：BFF 的 `server.mjs` 依赖 `followup-bff.mjs`、`followup-contract.js`、`continuation-bff.mjs` 和 `continuation-contract.js`；新版 `browser-client.js` 也依赖这两份合同模块。即使功能暂未开启，也不能只复制入口文件。启用界面时一并接入 `followup-controller.js`、`followup-view.js`、报告视图和 `conversation-input.js`。继续诊断还需要 `continuation-controller.js`、`continuation-view.js`、`file-sha256.js` 和 `file-sha256-worker.js`，哈希文件保持同一目录，网站 CSP 允许同源 Worker。
+同步部署整个[网站示例模块](../examples/website-agent/README.md)：BFF 的 `server.mjs` 依赖 `followup-bff.mjs`、`followup-contract.js`、`continuation-bff.mjs`、`continuation-contract.js`、`feedback-comments-bff.mjs` 和 `feedback-comment-contract.js`；新版 `browser-client.js` 也依赖这三份合同模块。即使功能暂未开启，也不能只复制入口文件。启用界面时一并接入 `followup-controller.js`、`followup-view.js`、报告视图和 `conversation-input.js`。继续诊断还需要 `continuation-controller.js`、`continuation-view.js`、`file-sha256.js` 和 `file-sha256-worker.js`，哈希文件保持同一目录，网站 CSP 允许同源 Worker。
 
 前端必须完成以下适配，细节见[追问接入说明](website-report-followup.md)：
 

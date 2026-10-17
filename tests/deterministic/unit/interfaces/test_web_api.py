@@ -22,7 +22,7 @@ from problem_locator.contracts.models import CaseFailure
 from problem_locator.contracts.serialization import canonical_json_bytes
 from problem_locator.interfaces.error_mapping import http_status_for
 from problem_locator.interfaces.agent_http import AgentErrorEnvelope
-from problem_locator.memory.models import FeedbackRequest, FeedbackView, FollowupFeedbackView
+from problem_locator.memory.models import FeedbackRequest, FeedbackView, FollowupFeedbackView, FeedbackCommentRequest, FeedbackCommentReceipt
 from problem_locator.followup.models import FollowupRequest
 from problem_locator.interfaces.http_app import create_http_app
 from problem_locator.interfaces.mcp_server import McpAdapter
@@ -425,6 +425,8 @@ def test_openapi_and_swagger_publish_the_browser_contract() -> None:
         ("/api/v1/agent/conversations/{conversation_id}/stop", "post"): "stop_agent_conversation",
         ("/api/v1/agent/conversations/{conversation_id}/runs/{run_id}/feedback", "get"): "get_agent_feedback",
         ("/api/v1/agent/conversations/{conversation_id}/runs/{run_id}/feedback", "put"): "put_agent_feedback",
+        ("/api/v1/agent/conversations/{conversation_id}/runs/{run_id}/feedback/comments", "post"): "post_agent_feedback_comment",
+        ("/api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups/{followup_id}/feedback/comments", "post"): "post_agent_followup_feedback_comment",
         ("/api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups", "post"): "submit_agent_followup",
         ("/api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups", "get"): "list_agent_followups",
         ("/api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups/events", "get"): "subscribe_agent_followup_events",
@@ -692,6 +694,7 @@ def test_openapi_examples_validate_against_the_real_rest_dtos() -> None:
     for model, schema_name in (
         (CreateCaseBody, "CreateCaseBody"),
         (FeedbackRequest, "FeedbackRequest"),
+        (FeedbackCommentRequest, "FeedbackCommentRequest"),
         (FollowupRequest, "FollowupRequest"),
         (PrepareAttachmentBody, "PrepareAttachmentBody"),
         (SubmitSupplementBody, "SubmitSupplementBody"),
@@ -702,6 +705,8 @@ def test_openapi_examples_validate_against_the_real_rest_dtos() -> None:
             model.model_validate(example)
 
     success_models = {
+        "post_agent_feedback_comment": SuccessEnvelope[FeedbackCommentReceipt],
+        "post_agent_followup_feedback_comment": SuccessEnvelope[FeedbackCommentReceipt],
         "get_agent_feedback": SuccessEnvelope[FeedbackView],
         "put_agent_feedback": SuccessEnvelope[FeedbackView],
         "get_agent_followup_feedback": SuccessEnvelope[FollowupFeedbackView],
@@ -733,7 +738,7 @@ def test_openapi_examples_validate_against_the_real_rest_dtos() -> None:
                             continue
                         if media["schema"].get("$ref") == "#/components/schemas/AgentErrorEnvelope":
                             parsed = AgentErrorEnvelope.model_validate(value)
-                            assert {"AGENT_CONVERSATION_NOT_FOUND": 404, "AGENT_FEEDBACK_UNSUPPORTED": 409,
+                            assert {"AGENT_CONVERSATION_NOT_FOUND": 404, "AGENT_FEEDBACK_UNSUPPORTED": 409, "AGENT_FEEDBACK_REQUIRES_DISLIKE": 409,
                                     "AGENT_FEEDBACK_LIMIT_EXCEEDED": 429, "AGENT_FOLLOWUP_NOT_FOUND": 404}[parsed.error.code] == int(status)
                         else:
                             parsed = ErrorEnvelope.model_validate(value)
@@ -741,6 +746,8 @@ def test_openapi_examples_validate_against_the_real_rest_dtos() -> None:
                         operations_with_error_examples.add(operation_id)
 
     assert operations_with_error_examples == {
+        "post_agent_feedback_comment",
+        "post_agent_followup_feedback_comment",
         "get_agent_feedback",
         "put_agent_feedback",
         "get_agent_followup_feedback",

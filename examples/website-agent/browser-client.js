@@ -1,6 +1,7 @@
 import { validFollowupId, validFollowupRequestId, validateFollowupView,
   validateFollowupReceipt, validateFollowupEvent, validFollowupInput, validFeedbackInput,
   validateFollowupFeedback } from "./followup-contract.js";
+import { validBrowserFeedbackComment, validateFeedbackCommentReceipt } from "./feedback-comment-contract.js";
 import { validateContinuationInput, validateContinuationDraft, validateContinuationReceipt,
   validateReportVersions } from "./continuation-contract.js";
 
@@ -97,6 +98,10 @@ export function createAgentClient({ basePath = "/api/agent", fetchImpl = globalT
     try { return validate(); }
     catch { throw new AgentApiError("追问响应与所选报告不一致或格式无效，请刷新后重试。", { status: 502, code: "WEBSITE_INVALID_RESPONSE" }); }
   };
+  const feedbackCommentChecked = (validate) => {
+    try { return validate(); }
+    catch { throw new AgentApiError("反馈回执与提交对象不一致或格式无效，请刷新后重试。", { status: 502, code: "WEBSITE_INVALID_RESPONSE" }); }
+  };
   const continuationPath = (id, key, kind = "continuation-drafts") => {
     if (!validFollowupId(id) || !validFollowupId(key)) throw new TypeError("会话、轮次和草稿标识必须是小写规范 UUID。");
     return kind === "run" ? `${conversationPath(id)}/runs/${key}` : `${conversationPath(id)}/continuation-drafts/${key}`;
@@ -153,6 +158,19 @@ export function createAgentClient({ basePath = "/api/agent", fetchImpl = globalT
           body: JSON.stringify({ request_id: feedback.request_id, rating: feedback.rating }),
           requestHeaders: { "Content-Type": "application/json" } });
         return feedbackResult(data, id, runId);
+      },
+      async submitFeedbackComment(id, runId, input) {
+        const path = feedbackPath(id, runId);
+        if (!validBrowserFeedbackComment(input)) throw new TypeError("文字反馈只接受 request_id 和可选 text，最多 16 KiB。");
+        const data = await post(path + "/comments", input);
+        return feedbackCommentChecked(() => validateFeedbackCommentReceipt(data, id, runId, null, input.request_id));
+      },
+      async submitFollowupFeedbackComment(id, runId, followupId, input) {
+        const path = followupPath(id, runId);
+        if (!validFollowupId(followupId) || !validBrowserFeedbackComment(input))
+          throw new TypeError("文字反馈需要有效 followup_id，以及 request_id 和可选 text，最多 16 KiB。");
+        const data = await post(path + "/" + followupId + "/feedback/comments", input);
+        return feedbackCommentChecked(() => validateFeedbackCommentReceipt(data, id, runId, followupId, input.request_id));
       },
       async getFollowupFeedback(id, runId, followupId, { signal } = {}) {
         const path = followupPath(id, runId);

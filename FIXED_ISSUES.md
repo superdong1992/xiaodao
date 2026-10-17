@@ -1,6 +1,6 @@
 # 已修复问题台账
 
-更新时间：2026-10-16
+更新时间：2026-10-17
 
 本文件记录已经在当前工作区验证、修复并由专项回归测试保护的问题。活跃待办仍只写入
 [`TODO.md`](TODO.md)；同一问题再次回归时更新原条目，不另建一个缺少历史关联的条目。
@@ -8,6 +8,18 @@
 本轮在已合并主线 `2245a1c` 上优化附件并发、可见历史分页与磁盘压力回收，保留逐条回答反馈、持续诊断及正文永久保存。三处问题先在 `603e5b9` 复现，修复后衔接最新主线并复验；本轮最终状态以 PL-FIX-090 至 PL-FIX-092 的最新 verdict 元数据为准。此前各条记录的 PASS 只证明其对应快照，不替代本轮完整验证。
 
 本轮最终验收环境：Ubuntu 22.04、Python 3.12.13、锁定依赖及真实 PostgreSQL 15.19。已确认 WSL 持久盘存在同步等待及同机测试竞争，旧源码也有明显耗时波动；前轮 ext4 完整验证及专项证据保留。本轮使用正式 `--evidence-root` 指向本任务独立的 32 GiB tmpfs，承载测试临时数据、字节码缓存及现场证据；执行源码、运行时和 PostgreSQL 仍在原持久盘。32 GiB 是按需分配的挂载上限，不是物理内存；运行时记录实际占用。测试范围、fsync、重开与崩溃恢复、默认容量阈值、真实数据库及 300 秒门槛均不调整。结束后立即将完整 attempt 复制到持久盘，逐文件校验并复核证据封印。该环境只用于确定性开发验收与反馈预算，不证明生产磁盘性能、真实模型效果或 Release 通过；结果仍以最终 verdict 为准。
+
+## PL-FIX-093：文字负反馈依赖追问入口，无法独立附带网站分析资料
+
+- **状态与历史关联**：实现和专项回归已完成，待本次推送前完整验证；以本节最新 verdict 元数据为准。承接 `09f1481` 的逐条回答反馈及证据纠正，保留 PL-FIX-089 的纠正回执、资源保留与旧经验停用规则。
+- **症状、受影响版本与确认**：8.2.0 / `2fef563` 中，报告和追问回答的 `FeedbackRequest` 只接受 `request_id`、`rating`，文字纠正只能进入 `POST …/followups` 并生成新回答。当前代码路径和严格输入模型已确认这一缺口；网站已有点踩意见框，但无法独立提交意见及其后台持有的管理员分析资料。
+- **根因与修复历史（2026-10-17）**：投票、对话纠正与经验审核尚未分离。新增报告及逐条回答的 `POST …/feedback/comments`，只保存不可变反馈并返回回执；在独立数据表中保存请求指纹、目标、原回答哈希、用户意见和网站分析资料。可选经验任务与反馈写入同一事务，任务入队故障使用保存点隔离；复用纠正审核队列，原日志与网站分析分别校验来源、哈希及精确引用，不创建追问或聊天事件。
+- **不可回归行为**：旧赞踩请求与响应字段保持不变；首次提交要求目标当前为 DISLIKE，重复请求返回原回执，换票不被旧请求覆盖，同一请求改目标或材料返回冲突。跨用户和错误轮次拒绝；只传管理员资料也可提交，浏览器不能冒充网站后台附带资料。无可靠证据不采纳；较早反馈的晚到结果不能覆盖更新的反馈，新的已采纳经验停用同一目标的旧经验。关闭追问功能仍可核验网站资料；经验开关关闭时仅保存反馈，专用定位不写通用经验；恢复、删除和任务失败不得重复调用模型或启用已删除经验。
+- **数据与外部适配**：新增 `memory_feedback_comments` 和独立版本标记，旧投票表和公开 schema_version 不变；覆盖 SQLite 自动建表与离线 PostgreSQL 导入。数据库意见和分析正文最长七天，核验工作区随原诊断资源保留期清理，来源引用/哈希及幂等回执按纠正记录保留。网站后端负责按认证主体、目标和 request_id 保存管理员资料首次快照，再转发独立接口；不得把提交成功显示为已采纳。详见 [文字反馈接入说明](docs/website-answer-feedback-upgrade.md)。
+- **专项回归测试**：`test_feedback_comments.py` 覆盖持久化、并发、重放、换票、入队故障、保留、删除与乱序；`test_feedback_comment_review.py` 覆盖无日志的网站资料、混合证据、拒绝无依据结论、引用伪造、来源变化及真实存储到审核 worker 的衔接；`test_feedback_comments_http.py` 和 `feedback-comments.test.mjs` 覆盖新入口、请求限制、旧赞踩兼容与 Web 后端附带资料。Linux 与既有反馈、纠正和保留用例联合专项 145 passed；HTTP 联合 218 passed；网站与文档联合 114 passed，均不调用真实模型。真实 PostgreSQL 并发、保存点与导入联合专项 16 passed；完整网站入口 `node --test examples/website-agent/server.test.mjs` 为 276 passed、1 项 Linux 专属用例在 Windows 跳过，包含全部 6 项新增文字反馈测试。Windows 文件快照专项受既有链接计数行为影响，已使用受支持的 Linux 原样复验，未放宽生产校验。
+- **推送前验收方式**：最终源码先查看正式 `dev.default --plan-only`，再运行 affected 与 full deterministic，真实模型调用为零。Linux 源码逐文件与本分支当前字节校验一致；本次独立 tmpfs 只承载测试临时数据和现场证据，源码、运行时及真实 PostgreSQL 在持久盘。完整证据持久化并逐文件校验，正式结论不外推为生产性能或真实模型效果验收。
+- **首次完整验证与修正**：`run-20261017T093900Z-89220ede` 为 FAIL，唯一失败 Gate 为网站示例的七项部署依赖检查；合同、单元、真实 PostgreSQL 及其他集成 Gate 均通过。新模块遗漏在既有 PL-FIX-088 追加回归记录，补齐全部部署清单，并将文字反馈测试显式接入网站总入口。失败 run 的 101 份证据已完整复制到持久盘并逐文件校验；专项通过后仍须对最终源码重新完整验证。
+- **最新 Test Flow verdict（PL-FIX-093）**：Linux `dev.default` [run-20261017T094944Z-fcd30f5a](.tmp/feedback-comments-evidence/run-20261017T094944Z-fcd30f5a/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。完整确定性阶段 254.904 秒，低于 300 秒门槛，全部必需 Gate 通过；affected 按编排规则交由 full 覆盖，状态为 `NOT_REQUIRED`。模型调用、token 和费用均为 0。源码快照 `git-visible-worktree-v1:50e5d21f50caa4d34d0ced6ea44c204ed96755b9171ed7eeae35af6b6b534ff0`（1027 文件），verdict SHA-256 `0a4f8c88ea709013b92b3dec204057023d9458014612e3435dcfc70a941331da`。101 份完整证据已复制到持久盘并逐文件校验；本次不代表生产性能、真实模型效果或 Release 已验收。本行是验证后回填的引用元数据，不属于所引用源码快照。
 
 ## PL-FIX-090：大附件导入占用全局 Agent 推进锁，阻塞其他会话
 
@@ -104,6 +116,13 @@
 - **专项回归测试**：`onboarding.test.mjs` 六项入口依赖检查及“继续诊断部署说明包含 Worker 与全部浏览器依赖”覆盖五份说明；`preview.test.mjs` 的显式静态资源用例检查 Worker 返回 200。联合 `file-sha256.test.mjs`、`continuation.test.mjs`、`browser-client.test.mjs` 共 90 passed；语法检查与 `git diff --check` 通过。原失败和最终结果保留于本会话执行输出，不虚构独立证据目录。
 - **合并前 Test Flow verdict（PL-FIX-088）**：Linux `dev.default` [run-20261016T055354Z-e70e54e3](.tmp/continuation-push-evidence-20261016/run-20261016T055354Z-e70e54e3/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。完整确定性阶段 268.340 秒，低于 300 秒门槛，全部必需 Gate 通过；模型调用、token 和费用均为 0。源码快照 `git-visible-worktree-v1:c1d23b543825d46f1453e78a2ec01cc3ed0efa4240527f15008e7bee45492911`（1004 文件），verdict SHA-256 `4e6e0657de7e69e76c0cd42309d2c410ad240c2f3b5291ea5123bc9eabd3deef`。测试临时数据使用本轮说明的独立 tmpfs，真实 PostgreSQL 仍在持久盘；完整证据已复制到持久盘并逐文件核对，不代表生产磁盘性能、真实模型效果或 Release 已验收。本行是验证后回填的引用元数据，不属于所引用源码快照。
 - **最新 Test Flow verdict（PL-FIX-088）**：Linux `dev.default` [run-20261016T062945Z-d6d1919f](.tmp/continuation-push-evidence-20261016/run-20261016T062945Z-d6d1919f/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。完整确定性阶段 273.693 秒，低于 300 秒门槛，全部必需 Gate 通过；模型调用、token 和费用均为 0。源码快照 `git-visible-worktree-v1:1304858e54ec52899ce177940889aaf1c858ff1f5b5a30655f50ad5b709be989`（1011 文件），verdict SHA-256 `1a04a0ef5193cbd6d9ecdc355153e8904ef55dc34d88e971f54c8435275ff399`。测试临时数据使用本轮说明的独立 tmpfs，真实 PostgreSQL 仍在持久盘；完整证据已复制到持久盘并逐文件核对，不代表生产磁盘性能、真实模型效果或 Release 已验收。本行是验证后回填的引用元数据，不属于所引用源码快照。
+### 2026-10-17：新增文字反馈模块后，独立部署清单再次漏列依赖
+
+- **受影响版本与回归原因**：基于 8.2.0 / `2fef563` 的本次未发布增量新增 `feedback-comment-contract.js` 和 `feedback-comments-bff.mjs`，六处既有部署清单未同步补全。正式 `run-20261017T093900Z-89220ede` 的原有递归依赖用例直接复现七项失败，网站示例 Gate 为 `NODE_TEST_FAILED`；其余 Gate 通过。该结论不能登记为整体通过。
+- **再次修复与不可回归行为**：补齐 README、快速接入、报告追问、Redis 部署、累计升级和文字反馈增量说明中的浏览器及 BFF 依赖，通用经验文档同步提示复制全部合同模块；不删原有断言。`server.test.mjs` 显式导入新增文字反馈测试，使六项新用例随正式网站 Gate 执行。按部署清单复制后，两个入口的全部递归依赖必须可解析。
+- **专项回归**：`node --test examples/website-agent/server.test.mjs`：276 passed、1 项 Linux 专属用例在 Windows 跳过，0 failed；七项部署依赖检查和六项新增反馈测试全部纳入。首次失败的 101 份证据保存在 `.tmp/feedback-comments-evidence/run-20261017T093900Z-89220ede`，verdict SHA-256 为 `881ceace74e49485e69b0b071bc1d2b3312f7059876cbe47f17e17b0e5fd2565`，源码快照为 `git-visible-worktree-v1:62fccf15d9fadf4a67654e37ead35f4fee4f96f62e0803b9a13de561994e3962`。专项通过，待最终源码完整验证。
+- **最新 Test Flow verdict（PL-FIX-088，2026-10-17）**：Linux `dev.default` [run-20261017T094944Z-fcd30f5a](.tmp/feedback-comments-evidence/run-20261017T094944Z-fcd30f5a/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。完整确定性阶段 254.904 秒，低于 300 秒门槛，全部必需 Gate 通过；affected 按编排规则交由 full 覆盖，状态为 `NOT_REQUIRED`。模型调用、token 和费用均为 0。源码快照 `git-visible-worktree-v1:50e5d21f50caa4d34d0ced6ea44c204ed96755b9171ed7eeae35af6b6b534ff0`（1027 文件），verdict SHA-256 `0a4f8c88ea709013b92b3dec204057023d9458014612e3435dcfc70a941331da`。101 份完整证据已复制到持久盘并逐文件校验；本次不代表生产性能、真实模型效果或 Release 已验收。本行是验证后回填的引用元数据，不属于所引用源码快照。
+
 ## PL-FIX-089：报告追问无法独立评价，文字纠正缺少经验更新路径
 
 - **合并后完整验证与测试适配（2026-10-16）**：`run-20261016T062028Z-07331a81` 的总体与 functional 为 FAIL，operation、verification 为 PASS，performance 为 NOT_CALIBRATED；源码快照 `git-visible-worktree-v1:b36f4c90bc2bdf9ba88f7fdeea1dd430262fc35eb1ac80b60f31c6454f9e3cf6`（1011 文件），verdict SHA-256 `6c63d09b24e4786412a5b0b871b1d803e9b9d8362c159e322da96f5597e2b1dc`，101 份完整证据已保存到 `.tmp/continuation-push-evidence-20261016/run-20261016T062028Z-07331a81`。实际 PostgreSQL 100 项、集成和其余 Gate 通过，单元 4 项失败均来自 `test_postgres_import_memory.py` 仍按旧的二元返回值解包；合并后的内部函数返回派生列、默认列及行游标三项。已改为三元解包并新增默认列为空的精确断言，保留原有同报告匹配、任务清理后回执、源只读与摘要一致性检查，没有改变产品或放宽测试。该文件与 `test_answer_memory_retention.py` 联合专项 13 passed，3.23 秒，证据 `/tmp/continuation-merged-import-final-01`；完整阶段本轮耗时 283.399 秒，但功能失败不能登记通过，最终源码仍待下一份完整 verdict。

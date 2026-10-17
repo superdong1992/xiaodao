@@ -292,6 +292,10 @@ _INSTANCE_LOCKED_EXAMPLE = {
     },
 }
 _ERROR_EXAMPLES_BY_OPERATION = {
+    **{operation: {"409": {"ok": False, "data": None, "error": {
+        "code": "AGENT_FEEDBACK_REQUIRES_DISLIKE", "message": "请先对这条回答点踩，再提交文字反馈。",
+        "details": [], "retryable": False,
+    }}} for operation in ("post_agent_feedback_comment", "post_agent_followup_feedback_comment")},
     "get_agent_feedback": {
         "404": {"ok": False, "data": None, "error": {
             "code": "AGENT_CONVERSATION_NOT_FOUND", "message": "会话不存在。",
@@ -356,6 +360,12 @@ _ERROR_EXAMPLES_BY_OPERATION = {
 }
 
 _SUCCESS_EXAMPLES: dict[str, dict[str, Any]] = {
+    **{operation: {"ok": True, "data": {
+        "schema_version": 1, "conversation_id": _CASE_ID_EXAMPLE, "run_id": _JOB_ID_EXAMPLE,
+        "followup_id": followup_id, "comment_id": "70000000-0000-0000-0000-000000000001",
+        "request_id": "feedback-comment-1", "created_at": _TIME_EXAMPLE,
+    }, "error": None} for operation, followup_id in (
+        ("post_agent_feedback_comment", None), ("post_agent_followup_feedback_comment", _ARTIFACT_ID_EXAMPLE))},
     "get_agent_feedback": {"ok": True, "data": {
         "schema_version": 1, "conversation_id": _CASE_ID_EXAMPLE, "run_id": _JOB_ID_EXAMPLE,
         "can_rate": True, "rating": None, "updated_at": None,
@@ -489,6 +499,9 @@ _SUCCESS_EXAMPLES: dict[str, dict[str, Any]] = {
 # enrich only the REST OpenAPI projection and therefore cannot change the
 # persisted or command/query schemas.
 _REST_FIELD_DESCRIPTIONS = {
+    "analysis_text": "网站后端附带的管理员分析资料，可省略；不作为已验证事实直接采纳。",
+    "analysis_reference": "管理员资料来源标识，仅用于追溯，不自动访问对应地址。",
+    "comment_id": "已保存文字反馈的 UUID；相同请求重放返回同一标识。",
     "included": "实际加载的会话内容，按 history、report、artifacts 的固定顺序返回；空数组表示仅有轻量状态。",
     "progress": "最近一条公开阶段及固定进度文案；尚无阶段事件时为 null。",
     "stage": "公开诊断阶段；进度文案按该阶段固定映射，不包含模型内部推理。",
@@ -721,6 +734,8 @@ _REST_FIELD_DESCRIPTIONS = {
 }
 
 _SUCCESS_RESPONSE_DESCRIPTIONS = {
+    "post_agent_feedback_comment": "文字反馈已保存；重复请求返回原回执，不代表经验已采纳。",
+    "post_agent_followup_feedback_comment": "指定回答的文字反馈已保存；不产生追问或新聊天回答，不代表经验已采纳。",
     "create_agent_conversation": "会话已持久创建；相同 request_id 返回同一回执。",
     "send_agent_message": "消息及接收事件已原子持久化；后续整理与定位异步执行。",
     "get_agent_conversation": "返回会话状态、进度、追问、受控失败原因和游标，并按 include 加载历史、正式报告及下载入口；未加载字段为 null。",
@@ -774,6 +789,15 @@ _REST_MODEL_FIELD_DESCRIPTIONS = {
         "sequence": "该报告追问流内从 1 开始连续递增的事件序号，与诊断 SSE 独立。",
         "type": "followup.accepted 表示已接收，followup.updated 表示状态或回答更新。",
         "data": "对应追问的完整状态和回答；按 followup_id 更新页面，按 sequence 去重。",
+    },
+    "FeedbackCommentReceipt": {
+        "schema_version": "文字反馈回执合同版本，固定为 1。",
+        "followup_id": "具体追问回答 UUID；评价原报告时固定为 null。",
+        "request_id": "本次文字提交的幂等标识，与请求一致。",
+        "created_at": "首次保存反馈的服务时间；重放保持不变。",
+    },
+    "FeedbackCommentRequest": {
+        "request_id": "1 到 128 个 Unicode 字符；重试须保留原目标及全部文字资料，新提交使用新 ID。",
     },
     "FeedbackRequest": {
         "request_id": "本次评价的幂等标识，1 到 128 个 Unicode 字符，不能全为空白；重试保留原 ID 和内容，换票使用新 ID。",
@@ -897,12 +921,14 @@ _SUCCESS_RESPONSE_DESCRIPTIONS.update({
 })
 
 _REQUEST_BODY_DESCRIPTIONS = {
+    "post_agent_feedback_comment": "独立负反馈：request_id 必填，text 和 analysis_text 至少一项非空；analysis_reference 必须与分析资料一起提交。首次提交须已点踩。",
+    "post_agent_followup_feedback_comment": "独立负反馈：绑定路径指定的回答，字段和幂等约定同报告文字反馈。首次提交须已点踩；不调用追问接口。",
     "create_agent_continuation_draft": "request_id 和本次更正、完整问题、目标及附件选择；APPEND 默认沿用父报告日志。",
     "update_agent_continuation_draft": "request_id、expected_revision 和待修改字段；attachment_ids 为最终完整日志集合。",
     "confirm_agent_continuation_draft": "稳定的 request_id 和用户已核对的 expected_revision。",
     "submit_agent_followup": "接收 request_id 和 text；纠正可加 intent=CORRECTION 和 target_followup_id。重试保留 ID、原文和目标，不接受附件；只追加回答，不改正式报告。",
     "stop_agent_followup": "稳定的 request_id；同一次停止重试保持不变，停止目标由路径指定。",
-    "put_agent_followup_feedback": "只接受 request_id 和 LIKE/DISLIKE 的 rating；不接受评论。重试保留 ID 和内容，换票使用新 ID。纠正文字使用已有追问 POST。",
+    "put_agent_followup_feedback": "只接受 request_id 和 LIKE/DISLIKE 的 rating；不接受评论。重试保留 ID 和内容，换票使用新 ID。文字负反馈使用独立 POST feedback/comments。",
     "put_agent_feedback": "只接受 request_id 和 rating。request_id 为 1 到 128 个 Unicode 字符；rating 为 LIKE 或 DISLIKE。重试保留 ID 与内容，换票使用新 ID。",
     "rename_agent_conversation": "新的会话标题，1 到 80 个字符；赋值操作可安全重复。",
     "stop_agent_conversation": "稳定 request_id 和目标 run_id；重试不能改为停止另一轮。",
@@ -999,6 +1025,10 @@ def _apply_rest_openapi_overlay(schema: dict[str, Any]) -> None:
         {"request_id": "feedback-like-1", "rating": "LIKE"},
         {"request_id": "feedback-dislike-2", "rating": "DISLIKE"},
     ]
+    component_schemas["FeedbackCommentRequest"]["examples"] = [
+        {"request_id": "feedback-comment-1", "text": "报告遗漏了连接池耗尽的线索。"},
+        {"request_id": "feedback-comment-2", "analysis_text": "管理员排查发现连接未释放，修复后恢复。", "analysis_reference": "web-analysis-123"},
+    ]
     component_schemas["FollowupRequest"]["examples"] = [
         {"request_id": "followup-1", "text": "请解释判断依据。"},
         {"request_id": "correction-report-1", "text": "请核对错误发生的阶段。", "intent": "CORRECTION"},
@@ -1029,6 +1059,11 @@ def _apply_rest_openapi_overlay(schema: dict[str, Any]) -> None:
             if method not in {"get", "post", "put", "patch", "delete"}:
                 continue
             operation_id = operation["operationId"]
+            if operation_id in {"post_agent_feedback_comment", "post_agent_followup_feedback_comment"}:
+                operation["description"] += " 不接受查询参数。沿用已认证的网站身份和会话归属，不提供管理员代评权限。"
+                operation["responses"]["404"]["description"] = "目标不存在、已删除或不属于当前用户。"
+                operation["responses"]["409"]["description"] = "首次提交时未点踩、不支持反馈，或同一 request_id 的目标、资料发生变化。"
+                operation["responses"]["429"]["description"] = "反馈存储配额已满；保留原请求，不自动重试。"
             if operation_id in {"get_agent_feedback", "put_agent_feedback", "get_agent_followup_feedback", "put_agent_followup_feedback"}:
                 operation["description"] += " 不接受查询参数；GET 不接受请求体。归属由可信网站后端的 X-Agent-Owner-Key 确定。"
                 operation["responses"]["404"]["description"] = "会话或轮次不存在、已删除，或不属于当前用户。"

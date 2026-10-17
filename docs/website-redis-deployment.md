@@ -42,7 +42,7 @@ Redis 身份接入本身不改变业务数据格式。但当前累计版本已�
 
 ## 2. 同步更新 BFF
 
-同步部署 `examples/website-agent/server.ts`、`server.mjs` 及其依赖 `followup-bff.mjs`、`followup-contract.js`、`continuation-bff.mjs`、`continuation-contract.js`，保留相对路径。业务实现位于 `server.mjs`，即使关闭报告追问，也不能遗漏它静态导入的模块。切换到默认 Redis 模式时，从部署环境删除 `WEBSITE_AUTH_MODULE`；自定义 `createAgentBackend({ access })` 还需移除 `access` 参数。
+同步部署 `examples/website-agent/server.ts`、`server.mjs` 及其依赖 `followup-bff.mjs`、`followup-contract.js`、`continuation-bff.mjs`、`continuation-contract.js`、`feedback-comments-bff.mjs`、`feedback-comment-contract.js`，保留相对路径。业务实现位于 `server.mjs`，即使关闭报告追问，也不能遗漏它静态导入的模块。切换到默认 Redis 模式时，从部署环境删除 `WEBSITE_AUTH_MODULE`；自定义 `createAgentBackend({ access })` 还需移除 `access` 参数。
 
 使用 Node.js 24+，从网站源码根目录启动，无需 npm 依赖：
 
