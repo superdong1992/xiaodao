@@ -492,7 +492,7 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `FollowupEventBatch` | `events` | 服务内部一次读取的追问事件数组；HTTP 按 SSE 逐条发送。 |
 | `FollowupEventBatch` | `stream_closed` | 当前轮的追问是否全部终止且没有后续事件。 |
 
-普通回答只调用一次追问模型，不创建 Case。内部 `CONTINUE_DIAGNOSIS` 决策仅在材料足够且需要诊断工具时触发新轮次；缺少必须由用户补充的材料时直接在问答中索要。原追问完成与关联 run 创建在同一事务提交，历史记录与 SSE 使用同一 `diagnosis_run_id`。新报告发布前继续展示旧报告；新轮失败不会撤销旧报告或推进已发布版本。带 `diagnosis_run_id` 的交接项返回 `can_rate=false`，不能提交赞踩或文字负反馈，也不会进入经验提炼。新报告和其他普通回答的评价仍各自独立。
+普通回答只调用一次追问模型，不创建 Case。内部结果包使用 `protocol=xiaodao.followup.v1` 和绑定当前 `followup_id` 的 `request_key`，区分 `ANSWER`、`REQUEST_INPUT` 与 `CONTINUE_DIAGNOSIS`；浏览器只显示公开 `answer_markdown`，不解析控制包。材料足够且需要诊断工具，或用户明确要求完整重查时，使用包含完整问题、目标、理由与最终 `attachment_ids` 的继续诊断结果；缺少必须由用户补充的材料时先在问答中索要。原追问完成与关联 run 创建在同一事务提交，历史记录与 SSE 使用同一 `diagnosis_run_id`。新报告发布前继续展示旧报告；新轮失败不会撤销旧报告或推进已发布版本。带 `diagnosis_run_id` 的交接项返回 `can_rate=false`，不能提交赞踩或文字负反馈，也不会进入经验提炼。新报告和其他普通回答的评价仍各自独立。判断优先级、材料选择和失败恢复见[统一追问详细说明](website-report-followup.md#如何决定回答补材料或继续诊断)。
 
 关联轮次进入 `WAITING_INPUT` 时，同一输入区展示后端 `current_questions`，补充通过既有诊断消息接口发送，`target_run_id` 固定为该 `diagnosis_run_id`。原追问仍绑定旧报告；不能把补充继续发往旧报告 followups，也不能读取尚未生成的新报告追问。该场景遇到 `409 / AGENT_RUN_CHANGED` 时刷新原目标，不自动转发追问。新报告就绪后再切换版本。页面只依据后端状态选择提交目标，不另做意图判断。
 
@@ -906,7 +906,7 @@ node --test examples/website-agent/server.test.mjs
 
 手动设置 `advisory` 可恢复原建议模式及 `PARTIAL` / `INCONCLUSIVE` 结构化交付，设置 `strict` 可恢复原核验方式；这两种策略下，`SPECIALIZED_REVIEWER_ENABLED` 继续控制独立审核。单项输入无效只影响该项；非法输入、模型执行协议错误、共享输入变化，以及权限、路径和文件完整性异常仍会使任务失败。不增加模型重试或任务续接。详见[诊断交付策略](diagnosis-advisory.md)。
 
-要求输出 JSON 的模型阶段，如果在最终 `result` 中先写 Markdown 说明、再给出唯一完整 JSON，服务端会按[受限提取规则](model-output-compatibility.md#说明文字与最终-json)处理，前端无需自行截取或修复。出现多个候选、内容截断或无法识别的结果时，仍会返回具体失败信息。默认 Skill 直接输出首行 `SKILL_DIAGNOSIS_RESULT_V1` 终态标记和 Markdown 正文，不做 JSON 提取。`stream-json` 只规定 CLI 事件的外层格式，不改变各阶段的业务输出要求；兼容处理不增加模型调用。
+除报告追问外，要求输出 JSON 的模型阶段如果在最终 `result` 中先写 Markdown 说明、再给出唯一完整 JSON，服务端会按[受限提取规则](model-output-compatibility.md#说明文字与最终-json)处理，前端无需自行截取或修复。报告追问只接受绑定当前任务的完整 `xiaodao.followup.v1` 结果包，不接受 BOM、代码围栏或前后说明，也不提取、修补或自动重试。出现多个候选、内容截断或无法识别的结果时，仍会返回具体失败信息。默认 Skill 直接输出首行 `SKILL_DIAGNOSIS_RESULT_V1` 终态标记和 Markdown 正文，不做 JSON 提取。`stream-json` 只规定 CLI 事件的外层格式，不改变各阶段的业务输出要求；兼容处理不增加模型调用。
 
 新部署使用全新空 `DATA_ROOT`；升级 `8.0.0` 时，需手动生成并核验 r2 副本，原目录保持原样。其他旧数据按升级说明支持的范围处理，不自动迁移，也不从旧 `methods_result` 反推报告。MCP 仍为原来的七个工具，输入参数继续平铺在根层；网站直接使用 REST Agent 接口。
 

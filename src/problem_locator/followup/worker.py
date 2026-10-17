@@ -88,9 +88,11 @@ class FollowupWorker:
                 mode = item["context_mode"]
                 if mode == "REPORT_AND_LOGS" and snapshot["status"] != "READY":
                     raise InputChanged("snapshot was revoked")
+                diagnosis_context = service.decision_context(task, history, snapshot)
                 prompt, context = build_prompt(source, history, item["text"], mode,
                     read_search=service.read_search_supported, correction=json.loads(task["correction_json"]),
-                    attachments=service.task_attachments(task, history=history), snapshot_status=snapshot["status"])
+                    snapshot_status=snapshot["status"], request_key=task["followup_id"],
+                    diagnosis_context=diagnosis_context)
                 root = service.layout.workspaces
                 require_real_directory(root)
                 workspace = root / task["workspace_id"]
@@ -103,6 +105,10 @@ class FollowupWorker:
                     "inputs/context.json": json.dumps(context, ensure_ascii=False, sort_keys=True).encode("utf-8"),
                     "inputs/history.md": history_markdown(history).encode("utf-8"),
                 }
+                attempt = context["diagnosis_context"]["latest_attempt"]
+                if attempt and attempt.get("user_messages_file"):
+                    generated[attempt["user_messages_file"]] = json.dumps(
+                        diagnosis_context["latest_attempt"]["user_messages"], ensure_ascii=False).encode("utf-8")
                 if mode == "REPORT_ONLY":
                     generated.update({"inputs/problem.txt": source.problem_text.encode("utf-8"),
                         "inputs/report.md": source.report_markdown.encode("utf-8")})
@@ -123,12 +129,12 @@ class FollowupWorker:
                 if cancellation.is_cancelled():
                     raise InterruptedError()
                 verify_inputs(workspace, rows, cancellation)
-                decision = parse_result(result.final_result)
-                if decision is None:
-                    answer = validate_answer(result.final_result, mode)
+                decision = parse_result(result.final_result, request_key=task["followup_id"])
+                if decision.action in {"ANSWER", "REQUEST_INPUT"}:
+                    answer = validate_answer(decision.answer_markdown, mode)
                     service.store.finish_task(task["followup_id"], answer=answer)
                 else:
-                    service.continue_diagnosis(task, decision.model_dump(mode="json"))
+                    service.continue_diagnosis(task, decision.model_dump(mode="json", exclude={"protocol", "request_key"}))
             return True
         except Exception as exc:
             if task is not None:

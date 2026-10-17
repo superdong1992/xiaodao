@@ -148,6 +148,40 @@ test("原追问框提供多日志和后端补充问题，版本区域只有查�
   await tick(); assert.equal(all(versionsRoot).some((node) => ["form", "textarea"].includes(node.tagName)), false); close();
 });
 
+for (const [status, failure, expected] of [
+  ["FAILED", { message: "日志解析失败，请补充完整日志。", details: [{ actual: "/private/source" }] }, "日志解析失败，请补充完整日志。"],
+  ["INTERRUPTED", { message: "服务已重启，本次任务已中断，请重新发起。" }, "服务已重启，本次任务已中断，请重新发起。"],
+  ["FAILED", null, "本轮诊断失败。"],
+  ["CANCELLED", null, "本轮诊断已停止。"],
+  ["COMPLETED", null, "本轮诊断已结束，但未生成新版报告。"],
+]) test(`关联诊断终态优先显示公开原因和同入口补充提示：${status}/${failure ? "有原因" : "无原因"}`, async () => {
+  const container = root();
+  const controller = { subscribe(listener) { listener({ ...view([item({ diagnosis_run_id: next })]), draft: "", uploads: [],
+    diagnoses: { [next]: { detail: { status, report_state: "UNAVAILABLE", failure,
+      progress: { message: "旧进度：正在解析日志。" }, capabilities: { can_stop: true } } } } }); return () => {}; },
+    submit: () => assert.fail("终态展示不能自动重新提交"), refreshDiagnosis: () => assert.fail("终态展示不能自动重跑"), destroy() {} };
+  const dispose = mountFollowupView(container, controller);
+  try {
+    await tick(); assert.ok(container.textContent.includes(expected));
+    assert.match(container.textContent, /在下方补充信息或日志后重新询问/);
+    assert.doesNotMatch(container.textContent, /旧进度|\/private\/source/);
+    assert.equal(all(container).filter((node) => node.tagName === "form").length, 1);
+    assert.equal(all(container).some((node) => node.tagName === "button" && node.textContent === "停止诊断"), false);
+  } finally { dispose(); }
+});
+
+test("关联诊断已有新版报告时优先展示报告入口，不显示旧失败和重问提示", () => {
+  const container = root(), controller = { subscribe(listener) { listener({ ...view([item({ diagnosis_run_id: next })]),
+    draft: "", uploads: [], diagnoses: { [next]: { detail: { status: "FAILED", report_state: "READY",
+      failure: { message: "旧失败原因。" }, progress: { message: "旧进度。" } } } } }); return () => {}; }, destroy() {} };
+  const dispose = mountFollowupView(container, controller);
+  try {
+    assert.match(container.textContent, /新版报告已生成/);
+    assert.doesNotMatch(container.textContent, /旧失败|旧进度|补充信息或日志后重新询问/);
+    assert.equal(all(container).find((node) => node.tagName === "button" && node.textContent === "查看新版报告").hidden, false);
+  } finally { dispose(); }
+});
+
 test("离线原追问升级后保留旧报告，补充固定轮次后生成新版及版本链", async () => {
   const tasks = [], client = createAgentClient({ fetchImpl: createPreviewApi(previewSamples(), { schedule: (work) => tasks.push(work) }) });
   const original = (await client.conversations.list()).items.find((entry) => entry.title === "通用 Markdown");

@@ -4,6 +4,8 @@ import threading
 
 import pytest
 
+from tests.deterministic.unit.agent import test_followup_material_selection as material_tests
+
 from tests.postgres_helpers import postgres_database_url, postgres_repository
 from tests.deterministic.unit.agent import test_report_continuation as continuation_tests
 from tests.deterministic.unit.agent import test_followup_handoff as handoff_tests
@@ -55,3 +57,23 @@ def test_postgres_duplicate_handoff_creates_only_one_run(state):
 
 def test_postgres_existing_snapshot_context_uses_confirmed_facts(state):
     handoff_tests.test_existing_snapshot_does_not_hide_confirmed_facts_from_the_followup_model(state)
+
+
+def test_postgres_explicit_selection_can_keep_only_one_original_archive(state):
+    material_tests.test_explicit_selection_can_remove_one_original_archive_without_new_upload(state)
+
+
+def test_postgres_latest_failed_attempt_context_and_selection(state):
+    material_tests.test_latest_failed_attempt_preserves_user_corrections_and_materials_only(state)
+
+
+def test_postgres_explicit_selection_rechecks_material_before_commit(state, monkeypatch):
+    material_tests.test_explicit_selection_revalidates_availability_before_atomic_handoff(state, monkeypatch)
+
+
+def test_postgres_repeated_failure_retains_last_effective_problem(state):
+    material_tests.test_repeated_failure_keeps_correction_in_last_adopted_problem_text(state)
+
+
+def test_postgres_none_launcher_rejects_large_attempt_before_accepting(state):
+    material_tests.test_none_launcher_rejects_full_attempt_context_limit_before_acceptance(state)

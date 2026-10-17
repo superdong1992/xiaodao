@@ -6,7 +6,8 @@
 | --- | --- |
 | 生产链路 | `tests/deterministic/integration/test_report_followups.py`：已发布报告资格、HTTP 提交、连续追问、原报告不变；`test_unified_followup.py`：HTTP 普通答复后交接新 run / Case、Generic 解析两个日志包、发布 V2 新报告和版本，保留旧 Case 与报告 |
 | 存储与执行 | `tests/deterministic/unit/agent/test_report_followup.py`：重复请求、会话互斥、日志读取、文本补充、旧报告降级、输入漂移、失败与重启恢复；`test_report_followup_faults.py`：模型超时、磁盘不足、总量配额、开关往返和提交事务回滚 |
-| 同次决策与交接 | `tests/deterministic/unit/agent/test_followup_decision.py`：直接回答、索要用户材料、有效内部决策、完整问题的字节边界；`test_followup_handoff.py` 与 `tests/deterministic/postgres/test_postgres_followup_handoff.py`：run 与完成记录同事务、并发幂等、回滚、停止、删除，以及旧日志快照不遮蔽当前有效用户补充 |
+| 同次决策与交接 | `tests/deterministic/unit/agent/test_followup_result_protocol.py` 与 `test_followup_decision.py`：三种严格结果包、当前任务身份、正文中的 JSON 不是控制动作、无效输出不泄露或自动重试；`test_followup_handoff.py` 与 `tests/deterministic/postgres/test_postgres_followup_handoff.py`：run 与完成记录同事务、并发幂等、回滚、停止、删除，以及旧日志快照不遮蔽当前有效用户补充 |
+| 最终材料与失败后承接 | `tests/deterministic/unit/agent/test_followup_material_selection.py` 与 `test_followup_context_recovery.py`：最终附件集合、排除旧包、未选过期包不阻断、最新未发布尝试的用户消息与采纳状态、连续失败后的整理输入、长补充只读检索与准入预算、选中材料的事务前重验；无材料且没有关联尝试时不增加数据库查询 |
 | 消息兼容 | `tests/deterministic/unit/agent/test_target_run_guard.py`：旧行为、定向补充、完成竞争、幂等及通用日志重启 |
 | HTTP 与恢复 | `tests/deterministic/unit/interfaces/test_followup_http.py`：归属、严格输入、独立游标回放、查询不执行模型；补日志 `attachment_ids` 和交接 `diagnosis_run_id` 必须随快照与事件一致恢复，旧记录缺省仍可读 |
 | 反馈与经验兼容 | `tests/deterministic/unit/agent/test_followup_handoff_feedback.py`：交接说明不可评价、不可提交文字意见、不进入经验；普通回答仍接受独立负反馈与网站分析资料。既有 `test_feedback_comments.py`、`test_feedback_comment_review.py`、`test_followup_corrections.py` 保留管理员资料来源、引用核验及纠正回执约束 |
@@ -17,6 +18,8 @@
 真实验证使用独立 `dev.real --stage real.report-followup`。执行前必须审阅同一组参数的 `--plan-only`，核对模型与启动器身份、Proof、Stage、Gate、复用决定、两次调用和预算。计划单次最多 8 个模型回合、120000 token、1 美元、300 秒；两次合计上限为 240000 token 和 2 美元。此次 Gate 不代表 Release，也不能替代实际网站与 Linux 服务部署验收。
 
 单入口交接的专项还须断言：一次追问不额外调用 INTAKE 分类；只有有效 `CONTINUE_DIAGNOSIS` 决策可以交接；同一事务保存完成记录与关联 run；并发重放、提交回滚、停止、删除及重启不会重复开案；新轮未发布或失败时不推进报告版本。页面刷新与 SSE 重放只读取 `diagnosis_run_id`，不能重新提交。确定性模型替身验证这些执行边界，不代表真实模型已准确判断所有材料是否充分；不得为适配新行为删减真实测试断言或放宽预算。
+
+判断复核还要求直接覆盖以下旅程：A 被 B 替换后再补 C，最终清单为 B、C，且可以排除单个旧包，不被未选中的过期包阻断；交接后在新轮补充文字和日志，再失败，下一次追问能看到最新尝试的有效用户信息与状态，连续两次失败也保留上次采用的整理输入；失败、中断和停止时优先展示终态或安全失败说明，不能被旧进度覆盖。长补充按只读文件检索，不调用摘要模型；没有检索能力时须在准入阶段拒绝超限。已采纳事实、未采纳用户陈述与旧模型判断分别处理，不把所有失败轮次拼进上下文。
 
 新轮进入 `WAITING_INPUT` 时，必须继续展示后端 `current_questions`，同一输入区以 `target_run_id=diagnosis_run_id` 提交诊断补充。直接复现过的错误是补充仍发到旧报告，查看进度又为未生成报告的新轮挂载追问而得到 `UNSUPPORTED`；此旅程必须覆盖刷新、补充成功和新报告就绪后的版本切换，不能只验证交接通知出现。
 

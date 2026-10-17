@@ -75,8 +75,14 @@ export function mountFollowupView(container, controller) {
       if (item.diagnosis_run_id) {
         const diagnosis = state.diagnoses?.[item.diagnosis_run_id], detail = diagnosis?.detail;
         const terminal = ["COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED"].includes(detail?.status);
-        row.append(node("p", detail?.report_state === "READY" ? "新版报告已生成。" : diagnosis?.error ?? detail?.progress?.message ??
-          (terminal ? "本轮诊断已结束，原报告仍可查看。" : "后台正在继续诊断，原报告仍可查看。")));
+        if (detail?.report_state === "READY") row.append(node("p", "新版报告已生成。"));
+        else if (terminal) {
+          const statusText = { FAILED: "本轮诊断失败。", INTERRUPTED: "本轮诊断已中断。", CANCELLED: "本轮诊断已停止。",
+            COMPLETED: "本轮诊断已结束，但未生成新版报告。" }[detail.status];
+          const failure = ["FAILED", "INTERRUPTED"].includes(detail.status) && typeof detail.failure?.message === "string"
+            ? detail.failure.message.trim() : "";
+          row.append(node("p", failure || statusText), node("p", "可在下方补充信息或日志后重新询问，系统会根据材料决定下一步。原报告仍可查看。"));
+        } else row.append(node("p", diagnosis?.error ?? detail?.progress?.message ?? "后台正在继续诊断，原报告仍可查看。"));
         const open = node("button", "查看新版报告"); open.type = "button"; open.hidden = detail?.report_state !== "READY";
         open.onclick = () => run(() => controller.openDiagnosis(item.followup_id)); row.append(open);
         if (diagnosis?.error) {

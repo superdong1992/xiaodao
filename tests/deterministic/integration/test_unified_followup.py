@@ -6,6 +6,7 @@ from problem_locator.followup.service import ReportFollowupService
 from problem_locator.runtime.agent_backend import BackendExecution
 from tests.deterministic.integration.test_website_agent import OWNER_KEY, _post, _preupload, website
 from tests.deterministic.integration.test_website_report_continuation import _get, _upload_second_archive
+from tests.deterministic.unit.agent.test_report_followup import model_reply
 
 
 def test_unified_followup_answers_then_diagnoses_new_logs_and_publishes_another_version(website, monkeypatch):
@@ -28,7 +29,8 @@ def test_unified_followup_answers_then_diagnoses_new_logs_and_publishes_another_
     decision = {}
     def respond(**kwargs):
         followup_calls.append(json.loads((kwargs["workspace_root"] / "inputs/context.json").read_bytes()))
-        return SimpleNamespace(final_result=json.dumps(decision, ensure_ascii=False) if decision else "原报告暂未确定根因。")
+        return SimpleNamespace(final_result=model_reply(kwargs, decision=decision) if decision else
+            model_reply(kwargs, answer="原报告暂未确定根因。"))
     followups = ReportFollowupService(agent, "claude", enabled=True, backend=SimpleNamespace(execute=respond))
     agent.followups, store.followup_store = followups, followups.store
     monkeypatch.setattr(engine, "prepare_continuation", lambda **kw: (_ for _ in ()).throw(
@@ -54,7 +56,8 @@ def test_unified_followup_answers_then_diagnoses_new_logs_and_publishes_another_
     extra, _ = _upload_second_archive(client, cid)
     decision.update(action="CONTINUE_DIAGNOSIS",
         effective_problem_text=store.get_run(cid)["report_inputs"]["effective_problem_text"],
-        diagnosis_goal="核对新增服务端日志能否确认根因。", reason="需解析新增日志并核对连接池等待。", log_mode="APPEND")
+        diagnosis_goal="核对新增服务端日志能否确认根因。", reason="需解析新增日志并核对连接池等待。",
+        attachment_ids=[attachment, extra])
     request = {"request_id": "new-evidence", "text": "结合这些日志，现在能确定原因吗？", "attachment_ids": [extra]}
     receipt = _post(client, path, request)
     assert followups.worker.run_once()
@@ -70,7 +73,8 @@ def test_unified_followup_answers_then_diagnoses_new_logs_and_publishes_another_
     assert current["run_id"] == handoff["diagnosis_run_id"] and current["case_id"] != first["case_id"]
     assert current["result"]["report_state"] == "READY" and "本轮变化" in current["result"]["markdown"]
     assert len(followup_calls) == len(diagnoses) == 2
-    assert followup_calls[1]["supplementary_log_attachments"][0]["attachment_id"] == extra
+    materials = followup_calls[1]["diagnosis_context"]["materials"]
+    assert any(entry["attachment_id"] == extra and entry["available"] for entry in materials)
     assert len(diagnoses[1][1]["sources"]) == 2
     assert "连接池等待仍待核实" in diagnoses[1][0]
     assert stack.repository.read_case(first["case_id"]).model_dump_json() == original

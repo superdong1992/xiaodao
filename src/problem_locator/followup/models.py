@@ -81,14 +81,29 @@ class FollowupItem(FollowupModel):
         return self
 
 
-class DiagnosisDecision(FollowupModel):
+RESULT_PROTOCOL = "xiaodao.followup.v1"
+
+
+class FollowupResult(FollowupModel):
+    """Internal model output; never exposed as a public MCP input."""
+
+    protocol: Literal["xiaodao.followup.v1"]
+    request_key: OpaqueId
+
+
+class AnswerResult(FollowupResult):
+    action: Literal["ANSWER", "REQUEST_INPUT"]
+    answer_markdown: str = Field(min_length=1, max_length=MAX_TEXT_BYTES, pattern=r"\S")
+
+
+class DiagnosisDecision(FollowupResult):
     """Internal handoff, produced by the same invocation that answers a question."""
 
     action: Literal["CONTINUE_DIAGNOSIS"]
     effective_problem_text: str = Field(min_length=1, max_length=MAX_TEXT_BYTES, pattern=r"\S")
     diagnosis_goal: str = Field(min_length=1, max_length=8192, pattern=r"\S")
     reason: str = Field(min_length=1, max_length=4096, pattern=r"\S")
-    log_mode: Literal["APPEND", "REPLACE"] = "APPEND"
+    attachment_ids: list[OpaqueId] = Field(max_length=20)
 
     @field_validator("effective_problem_text", "diagnosis_goal", "reason")
     @classmethod

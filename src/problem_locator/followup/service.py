@@ -165,6 +165,15 @@ class ReportFollowupService:
                     "sha256": item.sha256, "size": item.size})
         return result
 
+    def decision_context(self, task, history, snapshot):
+        """One bounded read of candidate descriptors; no parsing or model call."""
+        report_ids = snapshot.get("report_attachment_ids", [])
+        if (not self.store.material_origins(task, history, report_ids)
+                and self.store.latest_attempt_link(history) is None):
+            return {"materials": [], "latest_attempt": None}
+        with self.store.repository.database_read() as db:
+            return self.store.decision_context(db, task, history, report_ids)
+
     def continue_diagnosis(self, task, decision):
         """Commit the new run and its answer link together, without reclassifying."""
         try:

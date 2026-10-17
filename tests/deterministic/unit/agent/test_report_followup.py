@@ -26,15 +26,32 @@ CASE = "00000000-0000-0000-0000-000000000001"
 JOB = "00000000-0000-0000-0000-000000000011"
 
 
+def model_reply(kwargs, *, answer=None, decision=None, action="ANSWER"):
+    context = json.loads((kwargs["workspace_root"] / "inputs/context.json").read_bytes())
+    contract = context["response_contract"]
+    result = {"protocol": contract["protocol"], "request_key": contract["request_key"],
+        "action": "CONTINUE_DIAGNOSIS" if decision is not None else action}
+    if decision is not None:
+        result.update(decision)
+    elif action in {"ANSWER", "REQUEST_INPUT"}:
+        result["answer_markdown"] = answer
+    return json.dumps(result, ensure_ascii=False)
+
+
 class Backend:
-    def __init__(self, answer="根据报告，连接池排队是需要继续核实的方向。", action=None):
+    def __init__(self, answer="根据报告，连接池排队是需要继续核实的方向。", action=None, *, decision=None, raw_result=None):
         self.answer, self.action, self.calls = answer, action, []
+        self.decision, self.raw_result = decision, raw_result
 
     def execute(self, **kwargs):
         self.calls.append(kwargs)
         if self.action is not None:
             self.action(kwargs)
-        return SimpleNamespace(final_result=self.answer)
+        result = self.raw_result
+        if result is None:
+            result = (model_reply(kwargs, answer=self.answer, decision=self.decision)
+                if kwargs["backend_phase"] == "REPORT_FOLLOWUP" else self.answer)
+        return SimpleNamespace(final_result=result)
 
 
 @pytest.fixture

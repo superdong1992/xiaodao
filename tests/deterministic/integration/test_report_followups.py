@@ -15,6 +15,7 @@ from problem_locator.runtime.agent_backend import BackendExecution
 from tests.deterministic.integration.test_agent_reports import _finish_diagnosis, _get
 from tests.deterministic.integration.test_direct_skill_delivery import direct_website, _finish
 from tests.deterministic.integration.test_website_agent import OWNER_KEY, _post, _preupload, website
+from tests.deterministic.unit.agent.test_report_followup import model_reply
 
 
 class GenericV2Backend:
@@ -51,7 +52,7 @@ class FollowupBackend:
             assert context["prior_turns"][0]["answer"].endswith("memory-42。")
             assert context["question"] == "补充：另一实例 queue_depth=0，这如何影响此前判断？"
             answer = "queue_depth=0 提示应区分实例，不能据此排除原实例排队。memory-42。"
-        return SimpleNamespace(final_result=answer)
+        return SimpleNamespace(final_result=model_reply(kwargs, answer=answer))
 
 
 def _install(website):

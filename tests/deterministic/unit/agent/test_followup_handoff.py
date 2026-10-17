@@ -15,6 +15,7 @@ from problem_locator.followup.service import ReportFollowupService
 from tests.deterministic.unit.agent.test_report_continuation import (
     ARTIFACT, CASE, OWNER, confirm, create, system, upload,
 )
+from tests.deterministic.unit.agent.test_report_followup import model_reply
 
 JOB = "00000000-0000-0000-0000-000000000011"
 DECISION = dict(action="CONTINUE_DIAGNOSIS", effective_problem_text="故障时间是 10:05，客户端和服务端均超时。",
@@ -24,10 +25,10 @@ DECISION = dict(action="CONTINUE_DIAGNOSIS", effective_problem_text="故障时�
 @pytest.fixture
 def state(system):
     s = system
-    backend = SimpleNamespace(answer="原报告只是待验证的假设。", calls=[])
+    backend = SimpleNamespace(answer="原报告只是待验证的假设。", decision=None, calls=[])
     def execute(**kwargs):
         backend.calls.append(kwargs)
-        return SimpleNamespace(final_result=backend.answer)
+        return SimpleNamespace(final_result=model_reply(kwargs, answer=backend.answer, decision=backend.decision))
     backend.execute = execute
     followups = ReportFollowupService(s.agent, "claude", enabled=True, backend=backend)
     source = FollowupSource(CASE, JOB, "故障时间是 10:00，仅客户端超时。", s.report.markdown,
@@ -75,11 +76,12 @@ def test_same_followup_call_hands_off_exact_inputs_and_link_without_intent_model
         body["report_inputs"]["attachment_ids"] = [old]
         s.store._save(db, body)
     receipt = ask(s, attachments=[new, duplicate])
-    s.backend.answer = json.dumps({**DECISION, "log_mode": mode}, ensure_ascii=False)
+    expected = [old, new] if mode == "APPEND" else [new]
+    s.backend.decision = {**{key: value for key, value in DECISION.items() if key != "log_mode"},
+        "attachment_ids": expected}
     assert s.followups.worker.run_once()
     answer = item(s)
     run = s.store.get_run(s.cid)
-    expected = [old, new] if mode == "APPEND" else [new]
     assert answer.diagnosis_run_id == run["run_id"] != s.rid
     assert answer.status == "COMPLETED" and "已开始继续诊断" in answer.answer_markdown
     assert answer.attachment_ids == [new]
@@ -123,7 +125,8 @@ def test_material_uploaded_before_clarification_remains_available_to_the_next_qu
     latest_task = s.followups.store.claim_task()
     assert s.followups.store.finish_task(latest_task["followup_id"], answer="还需要服务端首次超时的时间。")
     receipt = ask(s, request_id="clarification")
-    s.backend.answer = json.dumps({**DECISION, "log_mode": mode}, ensure_ascii=False)
+    s.backend.decision = {**{key: value for key, value in DECISION.items() if key != "log_mode"},
+        "attachment_ids": [first, latest] if mode == "APPEND" else [latest]}
     assert s.followups.worker.run_once()
     assert first in s.backend.calls[0]["prompt"] and latest in s.backend.calls[0]["prompt"]
     message = s.store.get_conversation(s.cid).messages[0]

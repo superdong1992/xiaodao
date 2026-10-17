@@ -24,10 +24,13 @@
 | ROUTE 最终响应 | 一个开头 BOM、包住完整 JSON 的一个代码围栏，以及下述说明文字加唯一最终 JSON | 严格拒绝，包括根 `reason`；新审核协议不再修复语法 |
 | Intake 最终响应 | 同上 | 严格拒绝；不改用户事实和来源原文 |
 | Specialist 最终响应、Reviewer 草稿文件 | 同上 | 严格拒绝；不改证据、引用、身份或审核判断 |
+| 报告追问最终响应 | 完整 `xiaodao.followup.v1` JSON 对象，`request_key` 与当前追问任务一致 | 严格拒绝；不接受 BOM、代码围栏或前后说明，不提取、修补或自动重试 |
 | Generic 报告文件 | 协议头接受 BOM、LF、CRLF | 正文是 Markdown，保留原始字节；不解析或修复正文里的 JSON 示例 |
 | 公开 HTTP/MCP 输入、Agent 工具 JSON | 遵循各自规定的输入格式 | 不应用模型输出的修复规则；七个公开 MCP 工具的输入继续保持扁平 |
 
 ## 说明文字与最终 JSON
+
+本节适用于上表的 ROUTE、Intake、Specialist 和 Reviewer，不适用于报告追问的严格结果包。追问的三类结果和页面展示规则见[追问决策说明](website-report-followup.md#内部决策与网页展示分开)。
 
 提示词仍要求模型只输出本阶段的 JSON 对象。`stream-json` 只规定 CLI 事件的外层格式，不能保证 `result` 字符串也符合业务 JSON 的格式要求。最终响应之前的 assistant 文本块仅用于遥测；框架不会拼接这些片段，只使用唯一一条成功结束事件中的 `result`。
 

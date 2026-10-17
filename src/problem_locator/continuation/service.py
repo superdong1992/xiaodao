@@ -366,6 +366,34 @@ class ContinuationService:
             raise AgentStoreError("AGENT_ATTACHMENT_NOT_READY", "本轮日志已经清理，请重新上传后继续。", 409)
         return row, False
 
+    @staticmethod
+    def _selected_handoff_materials(db, cid, attachment_ids, context):
+        candidates = {item["attachment_id"]: item for item in context["materials"]}
+        if len(attachment_ids) > 20:
+            raise AgentStoreError("RESOURCE_LIMIT_EXCEEDED", "一次最多使用 20 个日志包。", 413)
+        for aid in attachment_ids:
+            if aid not in candidates:
+                raise AgentStoreError("AGENT_ATTACHMENT_NOT_READY", "所选日志不在本次问题的材料中，请明确补充需要使用的日志。", 409)
+            if not candidates[aid]["available"]:
+                raise AgentStoreError("AGENT_ATTACHMENT_NOT_READY", "所选日志已不可用，请重新上传，或明确排除这份日志。", 409)
+        if not attachment_ids:
+            return []
+        placeholders = ",".join("?" for _ in attachment_ids)
+        records = {value.attachment_id: value for (raw,) in db.execute(
+            "SELECT body FROM agent_attachments WHERE conversation_id=? AND attachment_id IN (" + placeholders + ")",
+            (cid, *attachment_ids)) for value in (AgentAttachment.model_validate_json(raw),)}
+        selected, seen = [], set()
+        for aid in attachment_ids:
+            item = records.get(aid)
+            if item is None or item.conversation_id != cid or item.status not in {"READY", "IMPORTED"}:
+                raise AgentStoreError("AGENT_ATTACHMENT_NOT_READY", "所选日志已变化，请重新选择后继续。", 409)
+            if item.sha256 not in seen:
+                seen.add(item.sha256)
+                selected.append(item.model_dump(mode="json"))
+        if sum(item["size"] for item in selected) > MAX_CASE_RESOURCE_BYTES:
+            raise AgentStoreError("RESOURCE_LIMIT_EXCEEDED", "所选日志总大小不能超过 5 GiB。", 413)
+        return selected
+
     def handoff_followup(self, followups, task, decision):
         """Reuse diagnosis execution without creating or classifying a draft."""
         cid, rid, fid = task["conversation_id"], task["run_id"], task["followup_id"]
@@ -374,18 +402,27 @@ class ContinuationService:
                 row, replayed = self._handoff_state(db, followups, task)
                 if row is None:
                     return replayed
-                self._head(db, cid, rid)
+                _, parent = self._head(db, cid, rid)
                 history = followups.store._history(db, rid, row["ordinal"])
-                attachment_ids = followups.attachment_ids(row, history, log_mode=decision["log_mode"])
+                report_ids = (parent.get("report_inputs") or {}).get("attachment_ids", [])
+                material_context = followups.store.decision_context(db, row, history, report_ids)
+                if "attachment_ids" in decision:
+                    attachment_ids = list(dict.fromkeys(decision["attachment_ids"]))
+                else:
+                    # Compatibility for internal callers predating the explicit
+                    # model selection contract. New model replies cannot use it.
+                    mode = decision["log_mode"]
+                    attachment_ids = followups.attachment_ids(row, history, log_mode=mode)
+                    if mode == "REPLACE" and not attachment_ids:
+                        raise AgentStoreError("AGENT_ATTACHMENT_NOT_READY", "请先上传用于替换的日志，现有日志尚未更改。", 409)
+                    if mode == "APPEND":
+                        attachment_ids = list(dict.fromkeys([*report_ids, *attachment_ids]))
+                new = self._selected_handoff_materials(db, cid, attachment_ids, material_context)
             run, report, inputs = self._baseline(cid, rid)
             request = CreateDraftRequest(request_id="followup-diagnosis-" + fid,
                 effective_problem_text=decision["effective_problem_text"], diagnosis_goal=decision["diagnosis_goal"],
-                change_note=decision["reason"], log_mode=decision["log_mode"])
-            if request.log_mode == "REPLACE" and not attachment_ids:
-                raise AgentStoreError("AGENT_ATTACHMENT_NOT_READY", "请先上传用于替换的日志，现有日志尚未更改。", 409)
+                change_note=decision["reason"])
             old = [value.model_dump(mode="json") for value in self._attachments(cid, inputs["attachment_ids"], require_available=False)]
-            ids = inputs["attachment_ids"] if request.log_mode == "APPEND" else []
-            new = [value.model_dump(mode="json") for value in self._attachments(cid, [*ids, *attachment_ids])]
             value = dict(parent_run_id=rid, source_problem_text=inputs["effective_problem_text"],
                 effective_problem_text=request.effective_problem_text, diagnosis_goal=request.diagnosis_goal,
                 change_note=request.change_note, attachment_ids=[entry["attachment_id"] for entry in new],
@@ -405,12 +442,13 @@ class ContinuationService:
                 # The usage lease protects files during preparation. Reload
                 # descriptors on this connection so deletion/status changes
                 # cannot pass between the final check and the atomic handoff.
+                history = followups.store._history(db, rid, row["ordinal"])
+                refreshed = followups.store.decision_context(db, row, history,
+                    (parent.get("report_inputs") or {}).get("attachment_ids", []))
+                current_materials = {entry["attachment_id"]: entry for entry in refreshed["materials"]}
                 for expected in new:
-                    saved = db.execute("SELECT body FROM agent_attachments WHERE attachment_id=?",
-                        (expected["attachment_id"],)).fetchone()
-                    actual = None if saved is None else json.loads(saved[0])
-                    if (actual is None or actual["conversation_id"] != cid
-                            or actual["status"] not in {"READY", "IMPORTED"}
+                    actual = current_materials.get(expected["attachment_id"])
+                    if (actual is None or not actual["available"]
                             or (actual["sha256"], actual["size"]) != (expected["sha256"], expected["size"])):
                         raise AgentStoreError("AGENT_ATTACHMENT_NOT_READY", "日志已经变化或被清理，请重新上传后继续。", 409)
                 body = self._open_run(db, current, parent, value, request_key=request.request_id,

@@ -4,6 +4,16 @@
 
 本文件是仓库活跃待办的唯一清单。已完成事项由代码、当前设计与 Git 历史证明，不在这里保留关闭项。
 
+## 统一追问判断复核（2026-10-17）
+
+- 当前 `13cff60` 再次确认四项缺口：普通 JSON 与控制动作识别混淆；APPEND/REPLACE 无法表达替换后追加或排除单包；最新失败诊断中的用户补充未带入下一次追问；页面旧进度遮住终态失败。关联 PL-FIX-083 新增“判断复核”记录，上一轮统一入口的 PASS 不覆盖这次修改。
+- 统一使用绑定当前任务的严格内部结果包，区分回答、索取材料与诊断交接；继续诊断明确给出完整问题、目标、理由和最终附件 IDs。仅承接最新关联且未发布报告尝试的有效用户信息与材料，旧报告作为独立参考；前端展示终态优先，不自行判断意图，也不自动重跑。详细规则、优先级和示例已补入 `docs/website-report-followup.md`。
+- **协议与页面专项通过，待推送前完整验证**：协议 Linux 先复现 6 failed、1 passed（`194f5c`）；`test_followup_result_protocol.py` 与 `test_followup_decision.py` 联合修正后 19 passed、4.42 秒（`35f211`），后续与统一入口集成联合 20 passed、8.05 秒（`7b22d1`）。DOM 修复前 5 failed、1 passed（`8316e3`）；`node --test examples/website-agent/unified-followup.test.mjs examples/website-agent/followup.test.mjs` 修复后 38 passed、0 failed，164.4008 毫秒（`29794d`），6 个新增用例进入现有 server Gate。各轮范围重叠，不累计计数。
+- 材料专项先复现 10 failed（`eee8f9`），第一轮绿 10 passed、4.45 秒（`467ab2`），与交接/旧草稿联合曾为 53 passed、10.14 秒（`fdb156`）。最终命令 `python -m pytest tests/deterministic/unit/agent/test_followup_material_selection.py tests/deterministic/unit/agent/test_followup_handoff.py tests/deterministic/unit/agent/test_report_continuation.py tests/deterministic/unit/agent/test_followup_context_recovery.py -q -p no:cacheprovider --basetemp=/tmp/followup-material-recovery-final-20261017 --tb=short` 为 57 passed、11.26 秒（`7a873d`），材料选择已扩至 14 项。真实 PostgreSQL 的 `tests/deterministic/postgres/test_postgres_followup_handoff.py` 最终为 9 passed、6.69 秒（`4d9932`），临时目录 `/tmp/followup-material-pg-final-20261017`。最终两组均使用现有 Linux 运行时，无真实模型，各有 1 条既有 Starlette 警告。
+- 连续失败与长上下文复核的新增红测分别为长消息恢复 2 failed（`df44af`）、材料承接/准入 2 failed（`6d5d7d`）；后者单独修正后 2 passed（`bf9286`），最终均纳入上述 57 项。最新尝试单独承接已采用的整理输入；合法长补充按只读文件检索，无检索能力时在准入事务中返回 HTTP 413 / `AGENT_FOLLOWUP_CONTEXT_LIMIT`。文档已说明来源区别与预算规则，专项通过，待推送前完整验证。
+- 原追问兼容：`tests/deterministic/unit/agent/test_report_followup.py`、`tests/deterministic/integration/test_report_followups.py`、`tests/deterministic/integration/test_unified_followup.py` 联合 34 passed、23.85 秒（`230874`）。反馈兼容：`tests/deterministic/unit/agent/test_followup_corrections.py`、`tests/deterministic/unit/agent/test_feedback_comment_review.py`、`tests/deterministic/integration/test_answer_learning.py` 联合 48 passed、7.56 秒（`fc3343`）。不累计重叠测试数，不调用真实模型。
+- 最终源码须先查看正式计划，再运行 `dev.default`，零真实模型调用，保留 300 秒门槛。最终结果只回填 PL-FIX-083 的“2026-10-17，判断复核”唯一 verdict 元数据行。测试证据保留在本机路径，TODO 不添加指向忽略目录的 Markdown 链接；链接检查须在 Git 可见源码副本执行。
+
 ## 统一追问入口与自动诊断交接（2026-10-17）
 
 - 当前 `ec37d84` 已确认普通追问只会返回 Markdown，另一个草稿入口才做意图分类。按用户确认的规则，统一入口在同次追问中核对上下文：能回答则直接回答；材料足够但需要 Skill、解析或验证时交接关联诊断；缺少用户材料时先索要。新版页面去掉第二入口，保留补日志、报告版本与对比；旧草稿 API 保留兼容。

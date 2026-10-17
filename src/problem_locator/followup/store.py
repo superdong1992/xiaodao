@@ -290,17 +290,24 @@ class FollowupStore:
             if len(history) >= MAX_TURNS:
                 raise fail("LIMIT_EXCEEDED", "本报告的追问次数已达到上限，请新建对话。", 429)
             self._register_source(db, cid, rid, source)
-            snapshot = _one(db, "SELECT * FROM agent_followup_snapshots WHERE run_id=?", (rid,))
+            report_ids = dialect_for(db).json_document("r.body", "$.report_inputs.attachment_ids")
+            snapshot = _one(db, "SELECT s.*," + report_ids + " AS report_attachment_ids FROM agent_followup_snapshots s "
+                "JOIN agent_conversation_runs r ON r.run_id=s.run_id AND r.conversation_id=s.conversation_id "
+                "WHERE s.run_id=?", (rid,))
             mode = "REPORT_AND_LOGS" if logs_supported and snapshot["status"] == "READY" and source.has_logs else "REPORT_ONLY"
-            try:
-                build_prompt(source, history, request.text, mode, read_search=logs_supported, correction=correction)
-            except ValueError:
-                raise fail("CONTEXT_LIMIT", "追问上下文已达到上限，请新建对话。", 413) from None
             fid, now = str(uuid.uuid4()), self.now()
             item = FollowupItem(followup_id=fid, run_id=rid, request_id=request.request_id,
                 ordinal=len(history) + 1, status="QUEUED", context_mode=mode, text=request.text,
                 attachment_ids=request.attachment_ids if attachment_ids is None else attachment_ids,
                 created_at=now, updated_at=now)
+            task = {"followup_id": fid, "conversation_id": cid, "run_id": rid, "ordinal": item.ordinal,
+                "status": "RUNNING", "body": _json(item)}
+            decision_context = self.decision_context(db, task, history, json.loads(snapshot["report_attachment_ids"] or "[]"))
+            try:
+                build_prompt(source, history, request.text, mode, read_search=logs_supported, correction=correction,
+                    request_key=fid, snapshot_status=snapshot["status"], diagnosis_context=decision_context)
+            except ValueError:
+                raise fail("CONTEXT_LIMIT", "追问上下文已达到上限，请新建对话。", 413) from None
             sequence = self._append(db, cid, item, "followup.accepted")
             receipt = FollowupReceipt(conversation_id=cid, run_id=rid, followup_id=fid,
                 request_id=request.request_id, event_id=sequence)
@@ -446,8 +453,11 @@ class FollowupStore:
 
     def task_context(self, task):
         with self.repository.database_read() as db:
-            effective_text = dialect_for(db).json_text("r.body", "$.report_inputs.effective_problem_text")
-            source = _one(db, "SELECT s.*," + effective_text + " AS effective_problem_text "
+            dialect = dialect_for(db)
+            effective_text = dialect.json_text("r.body", "$.report_inputs.effective_problem_text")
+            report_ids = dialect.json_document("r.body", "$.report_inputs.attachment_ids")
+            source = _one(db, "SELECT s.*," + effective_text + " AS effective_problem_text," +
+                report_ids + " AS report_attachment_ids "
                 "FROM agent_followup_snapshots s LEFT JOIN agent_conversation_runs r "
                 "ON r.run_id=s.run_id AND r.conversation_id=s.conversation_id WHERE s.run_id=?", (task["run_id"],))
             if source is None:
@@ -460,7 +470,86 @@ class FollowupStore:
                 # Old snapshots may predate capture of named facts. Keep their
                 # log bytes immutable and use the run's adopted text in context.
                 current = replace(current, problem_text=effective)
+            source["report_attachment_ids"] = json.loads(source["report_attachment_ids"] or "[]")
             return current, self._history(db, task["run_id"], task["ordinal"]), source
+
+    @staticmethod
+    def material_origins(task, history, report_ids):
+        """A candidate is an uploaded input, never an inferred file name."""
+        origins = {}
+        def add(ids, origin):
+            for aid in dict.fromkeys(ids):
+                origins.setdefault(aid, []).append(origin)
+        add(report_ids, {"source": "REPORT", "run_id": task["run_id"]})
+        for entry in history:
+            if entry["status"] in {"CANCELLED", "CANCELLING"}:
+                continue
+            add(entry.get("attachment_ids", []), {"source": "FOLLOWUP", "run_id": task["run_id"],
+                "followup_id": entry["followup_id"], "turn": entry["ordinal"], "status": entry["status"]})
+        current = json.loads(task["body"])
+        add(current.get("attachment_ids", []), {"source": "CURRENT", "run_id": task["run_id"],
+            "followup_id": task["followup_id"], "turn": task["ordinal"], "status": task["status"]})
+        return origins
+
+    @staticmethod
+    def latest_attempt_link(history):
+        return next((entry for entry in reversed(history) if entry.get("diagnosis_run_id")), None)
+
+    @staticmethod
+    def _latest_attempt(db, task, history):
+        link = FollowupStore.latest_attempt_link(history)
+        if link is None:
+            return None
+        d = dialect_for(db)
+        row = db.execute("SELECT run_id,status," + d.json_text("body", "$.parent_run_id") + "," +
+            d.json_int("body", "$.report_available") + "," + d.json_document("body", "$.failure") + "," +
+            d.json_document("body", "$.current_questions") + " FROM agent_conversation_runs "
+            "WHERE conversation_id=? AND run_id=?", (task["conversation_id"], link["diagnosis_run_id"])).fetchone()
+        if row is None or row[2] != task["run_id"] or row[3]:
+            # Do not revive an older failed attempt after its successor published.
+            return None
+        failure = json.loads(row[4] or "null")
+        result = {"run_id": row[0], "status": row[1], "current_questions": json.loads(row[5] or "[]"),
+            "failure": None if failure is None else {key: failure[key] for key in ("code", "message")},
+            "effective_problem_text": None, "initial_attachment_ids": [], "user_messages": []}
+        for (raw,) in db.execute("SELECT body FROM agent_messages WHERE conversation_id=? AND run_id=? ORDER BY event_sequence",
+                (task["conversation_id"], row[0])):
+            message = json.loads(raw)
+            if message["request_id"] == "followup-diagnosis-" + link["followup_id"]:
+                result["initial_attachment_ids"] = message["attachment_ids"]
+                result["effective_problem_text"] = message["text"]
+                continue
+            result["user_messages"].append({key: message[key] for key in ("message_id", "text", "status", "attachment_ids")})
+        return result
+
+    def decision_context(self, db, task, history, report_ids):
+        origins = self.material_origins(task, history, report_ids)
+        attempt = self._latest_attempt(db, task, history)
+        if attempt is not None:
+            for aid in dict.fromkeys(attempt["initial_attachment_ids"]):
+                origins.setdefault(aid, []).append({"source": "LATEST_ATTEMPT", "run_id": attempt["run_id"],
+                    "kind": "INITIAL_INPUT"})
+            for message in attempt["user_messages"]:
+                if message["status"] == "UNUSED":
+                    continue
+                origin = {"source": "LATEST_ATTEMPT", "run_id": attempt["run_id"],
+                    "message_id": message["message_id"], "status": message["status"]}
+                for aid in dict.fromkeys(message["attachment_ids"]):
+                    origins.setdefault(aid, []).append(origin)
+        materials = []
+        if origins:
+            placeholders = ",".join("?" for _ in origins)
+            rows = {entry["attachment_id"]: entry for (raw,) in db.execute(
+                "SELECT body FROM agent_attachments WHERE conversation_id=? AND attachment_id IN (" + placeholders + ")",
+                (task["conversation_id"], *origins)) for entry in (json.loads(raw),)}
+            for aid, sources in origins.items():
+                record = rows.get(aid, {})
+                if record.get("conversation_id") != task["conversation_id"]:
+                    record = {}
+                materials.append({"attachment_id": aid, "name": record.get("name"), "size": record.get("size"),
+                    "sha256": record.get("sha256"), "available": record.get("status") in {"READY", "IMPORTED"},
+                    "origins": sources})
+        return {"materials": materials, "latest_attempt": attempt}
 
     def execution_allowed(self, fid):
         with self.repository.database_read() as db:
