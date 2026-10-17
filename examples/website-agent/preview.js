@@ -3,8 +3,7 @@ import { createAgentClient } from "./browser-client.js";
 import { createPreviewApi } from "./preview-model.js";
 import { createFollowupController } from "./followup-controller.js";
 import { mountFollowupView } from "./followup-view.js";
-import { createContinuationController } from "./continuation-controller.js";
-import { mountContinuationView } from "./continuation-view.js";
+import { mountReportVersionsView } from "./continuation-view.js";
 
 const element = (selector) => document.querySelector(selector);
 const report = element("#report"), directory = element("#scenarios"), note = element("#scenario-note");
@@ -53,16 +52,14 @@ async function select(id, run_id) {
   element("#older").disabled = before === null;
   renderReport(report, current.result, { resourcesExpired: current.resources_expired }); showHistory(current.history);
   const controller = createFollowupController({ client, conversationId: id, runId: current.selected_run_id,
-    storageNamespace: "xiaodao-preview-followup" });
+    storageNamespace: "xiaodao-preview-followup",
+    onDiagnosisReady: (handoff) => select(id, handoff.run_id),
+    onOpenDiagnosis: (handoff) => select(id, handoff.run_id) });
   disposeFollowups = mountFollowupView(element("#followups"), controller);
   void controller.start().catch(() => {});
   if (current.result.report_state === "READY") {
-    const continuation = createContinuationController({ client, conversationId: id, runId: current.selected_run_id,
-      onConfirmed: (receipt) => select(id, receipt.run_id),
-      onFollowup: async (receipt) => { await select(id, receipt.run_id); element("#followups").scrollIntoView({ block: "start" }); } });
-    disposeContinuation = mountContinuationView(element("#continuation"), continuation, { client, conversationId: id,
+    disposeContinuation = mountReportVersionsView(element("#continuation"), { client, conversationId: id,
       runId: current.selected_run_id, onSelectRun: (selectedRun) => select(id, selectedRun) });
-    void continuation.start().catch(() => {});
   }
   responseText.textContent = JSON.stringify({ ok: true, data: current, error: null }, null, 2);
   await refreshDirectory();

@@ -1,9 +1,8 @@
 import { validFollowupId, validFollowupRequestId, validFollowupText, validateFollowupReceipt } from "./followup-contract.js";
 import { validateContinuationInput } from "./continuation-contract.js";
 import { sha256File } from "./file-sha256.js";
+import { createLogUploadController } from "./log-upload-controller.js";
 
-const MIME = [[".tar.gz", "application/gzip"], [".tgz", "application/gzip"], [".zip", "application/zip"], [".tar", "application/x-tar"], [".gz", "application/gzip"]];
-const fileType = (file) => MIME.find(([suffix]) => file.name.toLowerCase().endsWith(suffix));
 const storageDefault = () => { try { return globalThis.sessionStorage; } catch { return null; } };
 function validatePendingInput(input, action) {
   if (action !== "followup") return validateContinuationInput(input, action);
@@ -17,10 +16,10 @@ export function createContinuationController({ client, conversationId, runId, on
   onFollowup = () => {},
   storage = storageDefault(), makeRequestId = () => globalThis.crypto.randomUUID(), sha256 = sha256File,
   schedule = setTimeout, cancelSchedule = clearTimeout } = {}) {
-  const key = `xiaodao-continuation:${conversationId}:${runId}`, listeners = new Set(), files = new Map();
+  const key = `xiaodao-continuation:${conversationId}:${runId}`, listeners = new Set();
   const state = { draft: null, versions: null, uploads: [], pending: null, busy: false, uploading: false,
     loading: false, error: null, storage_warning: null, followup_receipt: null };
-  let saved = { draft_id: null, pending: null }, disposed = false, timer, refreshing, uploadAbort = new AbortController();
+  let saved = { draft_id: null, pending: null }, disposed = false, timer, refreshing;
   try {
     const restored = JSON.parse(storage?.getItem(key) ?? "null");
     if (restored && (restored.draft_id === null || validFollowupId(restored.draft_id))) {
@@ -52,6 +51,9 @@ export function createContinuationController({ client, conversationId, runId, on
     try { if (storage) storage.setItem(key, JSON.stringify(saved)); }
     catch { state.storage_warning = "浏览器无法保存草稿状态，刷新页面前请保留当前草稿和请求 ID。"; }
   }
+  const uploader = createLogUploadController({ client, conversationId, makeRequestId, sha256,
+    canChange: () => !disposed && !state.busy && !saved.pending,
+    onChange: (upload) => { Object.assign(state, upload); emit(); } });
   const later = () => {
     if (disposed || timer !== undefined || state.draft?.status !== "PREPARING") return;
     timer = schedule(() => { timer = undefined; void refreshDraft().catch(() => {}); }, 1200);
@@ -133,86 +135,22 @@ export function createContinuationController({ client, conversationId, runId, on
       }
     } finally { state.busy = false; emit(); }
   }
-  async function uploadFiles(selected) {
-    if (disposed || state.busy || saved.pending || state.uploading) return;
-    const additions = [...new Set(selected)].filter((file) => !files.has(file));
-    if (state.uploads.length + additions.length > 20) throw new Error("一次最多选择 20 个日志包。");
-    if ([...files.keys(), ...additions].reduce((sum, file) => sum + file.size, 0) > 5_368_709_120)
-      throw new Error("所选日志包的总大小不能超过 5 GiB。");
-    for (const file of additions) {
-      const type = fileType(file);
-      if (!type || !file.name.endsWith(type[0]) || file.size < 1 || file.size > 2_684_354_560)
-        throw new Error("请选择后缀为小写 zip、tar、tar.gz、tgz 或 gz 的日志包，单包大小为 1 字节到 2.5 GiB。");
-    }
-    for (const file of additions) {
-      const item = { local_id: makeRequestId(), name: file.name, size: file.size, status: "WAITING", attachment_id: null };
-      files.set(file, { file, item, request_id: makeRequestId(), sha: null, prepared: null }); state.uploads.push(item);
-    }
-    if (uploadAbort.signal.aborted) uploadAbort = new AbortController();
-    const signal = uploadAbort.signal;
-    const checkUpload = () => { if (signal.aborted) throw new DOMException("已取消日志校验和上传，可重试。", "AbortError"); };
-    state.uploading = true; state.error = null; emit();
-    try {
-      for (const entry of files.values()) {
-        if (entry.item.status === "READY") continue;
-        if (disposed) return;
-        checkUpload();
-        if (!entry.sha) {
-          entry.item.status = "CHECKING"; entry.item.checked_bytes = 0; emit();
-          let lastProgress = -Infinity;
-          entry.sha = await sha256(entry.file, { signal, onProgress: (loaded, total) => {
-            if (disposed || signal.aborted) return;
-            entry.item.checked_bytes = Math.max(entry.item.checked_bytes, loaded);
-            if (Date.now() - lastProgress >= 100 || loaded === total) { lastProgress = Date.now(); emit(); }
-          } });
-        }
-        if (disposed) return;
-        checkUpload();
-        // 同一内容重复选择不会重复加入诊断。上传重试仍复用原预约与文件。
-        const duplicate = state.uploads.find((item) => item !== entry.item && item.sha256 === entry.sha && item.size === entry.file.size && item.status === "READY");
-        if (duplicate) {
-          Object.assign(entry.item, { status: "READY", attachment_id: duplicate.attachment_id, sha256: entry.sha }); emit(); continue;
-        }
-        entry.item.status = "UPLOADING"; emit();
-        entry.prepared ??= await client.attachments.prepare(conversationId, { request_id: entry.request_id,
-          name: entry.file.name, content_type: fileType(entry.file)[1],
-          declared_size: entry.file.size, declared_sha256: entry.sha });
-        if (disposed) return;
-        checkUpload();
-        await client.attachments.upload(entry.prepared, entry.file, { signal });
-        if (disposed) return;
-        checkUpload();
-        Object.assign(entry.item, { status: "READY", attachment_id: entry.prepared.attachment.attachment_id, sha256: entry.sha }); emit();
-      }
-    } catch (error) {
-      if (!disposed) {
-        for (const item of state.uploads) if (["CHECKING", "UPLOADING"].includes(item.status))
-          item.status = error.name === "AbortError" ? "CANCELLED" : "FAILED";
-        state.error = error.message; throw error;
-      }
-    } finally { state.uploading = false; emit(); }
-  }
   return {
     subscribe(listener) { listeners.add(listener); listener(structuredClone({ ...state, pending: saved.pending,
       followup_receipt: saved.followup?.receipt ?? null })); return () => listeners.delete(listener); },
     start: refresh, refresh,
     create: (input) => perform("create", input), update: (input) => perform("update", input), confirm: () => perform("confirm", {}),
     sendFollowup: () => perform("followup", {}),
-    retry: () => saved.pending ? perform(saved.pending.action, saved.pending.input) : uploadFiles([]),
-    uploadFiles,
-    cancelUploads() { if (state.uploading) uploadAbort.abort(); },
+    retry: () => saved.pending ? perform(saved.pending.action, saved.pending.input) : uploader.uploadFiles([]),
+    uploadFiles: uploader.uploadFiles,
+    cancelUploads: uploader.cancel,
     newDraft() {
       if (disposed || state.busy || state.loading || state.uploading || saved.pending ||
         !["CONFIRMED", "FOLLOWUP"].includes(state.draft?.status) || !state.versions?.can_continue) return false;
       saved = { draft_id: null, pending: null }; state.draft = null; state.uploads = []; state.error = null;
-      files.clear(); persist(); emit(); return true;
+      uploader.clear(); persist(); emit(); return true;
     },
-    removeUpload(localId) {
-      if (state.busy || state.uploading || saved.pending) return;
-      state.uploads = state.uploads.filter((item) => item.local_id !== localId);
-      for (const [file, entry] of files) if (entry.item.local_id === localId) files.delete(file);
-      emit();
-    },
-    destroy() { disposed = true; uploadAbort.abort(); if (timer !== undefined) cancelSchedule(timer); listeners.clear(); },
+    removeUpload: uploader.remove,
+    destroy() { disposed = true; uploader.destroy(); if (timer !== undefined) cancelSchedule(timer); listeners.clear(); },
   };
 }

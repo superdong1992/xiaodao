@@ -758,8 +758,9 @@ _REST_MODEL_FIELD_DESCRIPTIONS = {
         "status": "RESERVED 待上传，UPLOADING 上传中，READY 已校验，IMPORTED 已导入，FAILED 上传失败，EXPIRED 资源已清理。EXPIRED 仍保留附件元数据，不能再次采用；旧请求重试返回 410，重新上传须使用新的请求 ID。",
     },
     "FollowupRequest": {
-        "request_id": "本次追问的幂等标识，1 到 128 个字符；重试保留原 ID 和原文。",
-        "text": "本次追问或文字补充，不能为空，最多 65536 UTF-8 字节；不接受附件。",
+        "request_id": "本次追问的幂等标识，1 到 128 个字符；重试保留原 ID、原文和附件列表。",
+        "text": "本次追问、事实更正或文字补充，不能为空，最多 65536 UTF-8 字节。框架根据上下文决定直接回答或继续诊断。",
+        "attachment_ids": "本次补充的日志附件 ID，最多 20 个；须已完成上传且属于本会话。省略时为空列表。",
     },
     "FollowupStopRequest": {
         "request_id": "本次停止操作的幂等标识，1 到 128 个字符；重试保留原 ID 和停止目标。",
@@ -768,6 +769,8 @@ _REST_MODEL_FIELD_DESCRIPTIONS = {
         "ordinal": "该报告内从 1 开始递增的追问序号。",
         "status": "追问排队、执行、停止或结束状态；仅 COMPLETED 带有回答正文。",
         "text": "这次追问的用户原文，包含本次文字补充。",
+        "attachment_ids": "这次追问提交的日志附件 ID，历史记录省略时按空列表处理。",
+        "diagnosis_run_id": "框架已交接的新诊断轮次；为 null 时没有创建诊断。非空时使用原诊断接口读取进度、补充信息、停止和读取新报告；run_id 仍指原报告。",
         "failure": "追问失败或中断的受控说明；其余状态为 null。",
     },
     "FollowupView": {
@@ -841,6 +844,7 @@ _REST_MODEL_FIELD_DESCRIPTIONS = {
 }
 
 _REST_FIELD_DESCRIPTIONS.update({
+    "diagnosis_run_id": "追问交接的新诊断轮次 UUID；未交接时为 null，原报告仍由 run_id 标识。",
     "expected_revision": "用户核对的草稿版本；与当前版本不一致时拒绝修改或确认。",
     "draft_id": "继续诊断草稿标识。",
     "parent_run_id": "本轮所依据的上一版报告轮次；首版为 null。",
@@ -926,7 +930,7 @@ _REQUEST_BODY_DESCRIPTIONS = {
     "create_agent_continuation_draft": "request_id 和本次更正、完整问题、目标及附件选择；APPEND 默认沿用父报告日志。",
     "update_agent_continuation_draft": "request_id、expected_revision 和待修改字段；attachment_ids 为最终完整日志集合。",
     "confirm_agent_continuation_draft": "稳定的 request_id 和用户已核对的 expected_revision。",
-    "submit_agent_followup": "接收 request_id 和 text；纠正可加 intent=CORRECTION 和 target_followup_id。重试保留 ID、原文和目标，不接受附件；只追加回答，不改正式报告。",
+    "submit_agent_followup": "接收 request_id、text 和可选的 attachment_ids。框架判断现有上下文是否足够，直接回答或继续诊断；交接记录包含 diagnosis_run_id。纠正可加 intent=CORRECTION 和 target_followup_id。重试保留 ID、原文、附件和目标；原报告保留。",
     "stop_agent_followup": "稳定的 request_id；同一次停止重试保持不变，停止目标由路径指定。",
     "put_agent_followup_feedback": "只接受 request_id 和 LIKE/DISLIKE 的 rating；不接受评论。重试保留 ID 和内容，换票使用新 ID。文字负反馈使用独立 POST feedback/comments。",
     "put_agent_feedback": "只接受 request_id 和 rating。request_id 为 1 到 128 个 Unicode 字符；rating 为 LIKE 或 DISLIKE。重试保留 ID 与内容，换票使用新 ID。",

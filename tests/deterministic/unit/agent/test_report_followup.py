@@ -479,11 +479,12 @@ def test_long_history_stays_complete_in_readable_file_instead_of_being_discarded
     assert caught.value.code == "AGENT_FOLLOWUP_CONTEXT_LIMIT"
 
 
-def test_requests_enforce_utf8_budget_and_reject_attachments():
+def test_requests_enforce_utf8_budget_and_validate_attachment_ids():
     FollowupRequest(request_id="中文", text="问" * 21_845)
     with pytest.raises(ValueError):
         FollowupRequest(request_id="x", text="问" * 21_846)
     with pytest.raises(ValueError):
         FollowupRequest(request_id="x", text=" ")
+    assert FollowupRequest(request_id="x", text="问题", attachment_ids=[]).attachment_ids == []
     with pytest.raises(ValueError):
-        FollowupRequest.model_validate({"request_id": "x", "text": "问题", "attachment_ids": []})
+        FollowupRequest(request_id="x", text="问题", attachment_ids=["invalid"])

@@ -143,7 +143,7 @@ ROUTE 响应现在必须包含 `skill_id`、`reason`、`confidence` 和 `assessm
 
 先保持 `REPORT_FOLLOWUP_ENABLED=false`。支持 Generic V2 和默认 `skill-direct` 的 Markdown 报告；`strict` / `advisory` 结构化报告不支持。旧报告没有日志快照时可按 `REPORT_ONLY` 回答，页面须说明没有重新核对原日志，不重新解析旧日志。
 
-同步部署整个[网站示例模块](../examples/website-agent/README.md)：BFF 的 `server.mjs` 依赖 `followup-bff.mjs`、`followup-contract.js`、`continuation-bff.mjs`、`continuation-contract.js`、`feedback-comments-bff.mjs` 和 `feedback-comment-contract.js`；新版 `browser-client.js` 也依赖这三份合同模块。即使功能暂未开启，也不能只复制入口文件。启用界面时一并接入 `followup-controller.js`、`followup-view.js`、报告视图和 `conversation-input.js`。继续诊断还需要 `continuation-controller.js`、`continuation-view.js`、`file-sha256.js` 和 `file-sha256-worker.js`，哈希文件保持同一目录，网站 CSP 允许同源 Worker。
+同步部署整个[网站示例模块](../examples/website-agent/README.md)：BFF 的 `server.mjs` 依赖 `followup-bff.mjs`、`followup-contract.js`、`continuation-bff.mjs`、`continuation-contract.js`、`feedback-comments-bff.mjs` 和 `feedback-comment-contract.js`；新版 `browser-client.js` 也依赖这三份合同模块。即使功能暂未开启，也不能只复制入口文件。启用界面时一并接入 `followup-controller.js`、`followup-view.js`、报告视图和 `conversation-input.js`。统一追问的日志上传还直接依赖 `log-upload-controller.js`、`file-sha256.js` 和 `file-sha256-worker.js`；报告版本对比和旧草稿兼容仍需 `continuation-controller.js`、`continuation-view.js`。哈希文件保持同一目录，网站 CSP 允许同源 Worker。
 
 前端必须完成以下适配，细节见[追问接入说明](website-report-followup.md)：
 
@@ -187,9 +187,9 @@ RESOURCE_DISK_TARGET_FREE_PERCENT=15
 
 ### 持续诊断与新版报告
 
-继续诊断不依赖 `REPORT_FOLLOWUP_ENABLED`，仍使用正式诊断服务。网站按版本接口的 `can_continue` 展示入口，从最新已发布报告创建草稿，核对完整问题、目标和最终日志清单后确认。确认产生新的 run 和 Case，旧报告保持原样；旧日志已清理时选择 `REPLACE` 并重新上传。多包日志按 SHA-256 去重、逐包解析，不能继续假设每轮只支持一份日志。
+新版网站将报告追问、更正和补日志放在同一入口，启用 `REPORT_FOLLOWUP_ENABLED` 后由同次追问模型核对材料：能回答则直接回答，需要诊断工具则交接关联 run 和 Case，缺少用户材料则在原入口索要。页面按 `diagnosis_run_id` 读取进度；新轮等待补充时展示后端问题，并向该轮提交诊断补充。旧报告保持原样，新报告发布后再更新版本。多包日志按 SHA-256 去重、逐包解析，不能继续假设每轮只支持一份日志。
 
-完整路径、草稿字段、`expected_revision`、APPEND/REPLACE 和幂等规则见[持续诊断与追问接入](website-report-followup.md)。自然语言草稿可能返回 `FOLLOWUP`，此时让用户确认后发送原报告追问，不能调用草稿 confirm。直接编辑完整问题不增加草稿整理模型调用。前后端文件及 Worker 要求见第 4 节；自定义模型包装器须同步当前 INTAKE 输出和多日志输入，不能继续按旧单包格式自行拼装。
+旧草稿 API 保留兼容，独立于 `REPORT_FOLLOWUP_ENABLED`。旧客户端可按 `can_continue` 从最新报告创建草稿，核对完整问题和日志清单后确认；旧日志已清理时选择 `REPLACE` 并重新上传。自然语言草稿可能返回 `FOLLOWUP`，此时发送原报告追问，不能调用草稿 confirm；直接编辑完整问题不增加草稿整理模型调用。完整路径、字段和幂等规则见[持续诊断与追问接入](website-report-followup.md)，前后端文件及 Worker 要求见第 4 节。自定义模型包装器须同步当前追问决策、INTAKE 输出和多日志输入，不能继续按旧单包格式自行拼装。
 
 ### 独立回答评价与文字纠正
 

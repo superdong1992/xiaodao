@@ -78,8 +78,7 @@ def _exercise(website, followups, backend, cid, prefix, kind):
     source = followups._source(cid, run_id)
     assert source is not None and source.source_kind == kind and source.has_logs
     aggregate = stack.repository.read_case(source.case_id)
-    assert source.problem_text == (aggregate.jobs[source.source_job_id].generic_problem_text
-        if kind == "GENERIC" else aggregate.case.raw_problem_text)
+    assert source.problem_text == store.get_run(cid, run_id)["report_inputs"]["effective_problem_text"]
     assert source.report_markdown == result["markdown"]
     memory = MemoryStore(stack.repository, stack.clock)
     memory.put_feedback(cid, run_id, owner_key=OWNER_KEY, request_id="like-source", rating="LIKE",

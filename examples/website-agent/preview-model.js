@@ -6,7 +6,6 @@ export function createPreviewApi(samples, { schedule, followupDelay = 1200 } = {
   const id = () => `00000000-0000-0000-0000-${String(++serial).padStart(12, "0")}`;
   const now = () => new Date().toISOString();
   const conversations = new Map();
-  const followups = createPreviewFollowups({ conversations, id, now, schedule, delay: followupDelay });
   const creations = new Map();
   const finish = (data, status = 200) => new Response(JSON.stringify({ ok: status === 200,
     data: status === 200 ? data : null, error: status === 200 ? null : {
@@ -40,7 +39,8 @@ export function createPreviewApi(samples, { schedule, followupDelay = 1200 } = {
       current: runId, runs: new Map([[runId, view]]), history, created: view.created_at, updated: view.updated_at,
       snapshotStatus: sample.followup_snapshot_status ?? "READY" });
   }
-  const continuations = createPreviewContinuations({ conversations, id, now, finish });
+  const continuations = createPreviewContinuations({ conversations, id, now, finish, schedule, delay: followupDelay });
+  const followups = createPreviewFollowups({ conversations, id, now, schedule, delay: followupDelay, diagnose: continuations.startFromFollowup });
   return async (path, init = {}) => {
     const url = new URL(path, "http://preview.local"), method = init.method ?? "GET";
     const continuationResponse = await continuations(url, init);
@@ -91,6 +91,9 @@ export function createPreviewApi(samples, { schedule, followupDelay = 1200 } = {
         status: active ? "CANCELLED" : "ALREADY_FINISHED" });
     }
     if (method === "POST" && match[2] === "messages") {
+      const resumed = continuations.resumeDiagnosis(record, body);
+      if (resumed) return finish(resumed);
+      if (body.target_run_id) return finish("所选诊断不再等待补充，请刷新状态。", 409);
       const previous = record.runs.get(record.current), runId = id(), timestamp = now();
       const view = structuredClone(previous);
       // 演示一轮全新的等待状态；不会沿用上一轮报告。

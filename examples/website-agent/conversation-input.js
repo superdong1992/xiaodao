@@ -1,7 +1,7 @@
 import { AgentApiError } from "./browser-client.js";
 import { validFollowupId, validFollowupRequestId } from "./followup-contract.js";
 
-/** 新网站共用输入框的分流入口。调用者先保存全部参数，重试不能改写 reportReady。 */
+/** 按后端报告状态投递消息，不判断用户意图。调用者保存全部参数，重试不能改写 reportReady。 */
 export async function sendConversationInput({ client, conversationId, runId, requestId, text = null,
   attachmentIds = [], reportReady }) {
   if (!validFollowupId(conversationId) || !validFollowupId(runId) || !validFollowupRequestId(requestId) ||
@@ -18,11 +18,8 @@ export async function sendConversationInput({ client, conversationId, runId, req
     return value;
   }
   async function ask() {
-    if (attachmentIds.length) throw new AgentApiError("报告追问只接收文字；补充新日志请打开“继续诊断”，核对后再提交。", {
-      status: 409, code: "WEBSITE_FOLLOWUP_TEXT_ONLY",
-    });
     return { kind: "followup", receipt: await client.followups.send(conversationId, runId, {
-      request_id: requestId, text,
+      request_id: requestId, text, ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}),
     }) };
   }
   // 响应丢失后仍重放原入口，让服务端先命中旧收据。不能因报告后来完成就改发第二个模型请求。

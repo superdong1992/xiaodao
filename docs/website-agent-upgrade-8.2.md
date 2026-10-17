@@ -142,7 +142,7 @@ SDK 抛出的 `AgentApiError` 保留 `status`、`code`、`message`、`details`�
 1. 只使用会话、附件两个 API 抽象。移除旧 /status、/report、网站 /artifacts 及会话下预约附件调用，改用统一详情的 include 和独立附件接口。
 2. 会话详情按 schema_version=3 接入。history 替代 messages，恢复用户消息、追问和结果卡片并支持向前分页；实现目录分页、重命名、停止、删除。按钮统一使用 capabilities。
 3. 区分 current_run 和 selected_run_id。看旧报告不影响当前轮状态；停止用稳定 request_id + current_run.run_id，区分 CANCELLING、CANCELLED、ALREADY_FINISHED。删除受理后立即移除并关闭订阅，迟到响应不得恢复会话。
-4. 同一问题生成新版报告使用继续诊断草稿，按 can_continue 判断资格；追问报告使用 followups。原诊断期间的消息补充携带保存的 target_run_id，遇到 AGENT_RUN_CHANGED 先刷新，不能把同一请求换入口盲重试。独立的新问题由用户明确发起新轮，使用新 request_id；只复用仍可用的 READY/IMPORTED 附件。
+4. 同一问题的报告追问、更正和补日志统一使用 followups，由 xiaodao 在同次调用中判断能否直接回答、是否需要诊断工具，或是否缺少用户材料。带 diagnosis_run_id 的交接项指向新诊断轮次，刷新和重放只恢复关联；旧草稿 API 继续兼容，但新版页面不提供第二个入口。原诊断期间的消息补充携带保存的 target_run_id，遇到 AGENT_RUN_CHANGED 先刷新，不能把同一请求换入口盲重试。独立的新问题仍由用户明确发起，只复用仍可用的 READY/IMPORTED 附件。
 5. SSE 按 schema_version=2、全会话 sequence 去重、事件 run_id 分流。SSE URL 不加 run_id；旧轮事件不得覆盖新轮或关闭其订阅。新轮重新订阅，断流不等于停止诊断。
 6. 默认只展示当前轮报告，历史报告点击后按 run_id 查询。报告缓存按 conversation_id + run_id，轻量查询的 null 不清空已有内容；JSON 先展示，ZIP 不阻塞。保留结构化错误，不自动重跑模型。
 7. 浏览器只调用网站同源 API，不设置 owner_key。默认 Redis 模式透传 Cookie；仅 trusted_header 兼容模式派生归属头并保留原创建请求哈希算法。与运维确认数据升级路径、历史归属和 CSRF 校验。

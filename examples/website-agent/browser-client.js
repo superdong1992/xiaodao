@@ -201,7 +201,7 @@ export function createAgentClient({ basePath = "/api/agent", fetchImpl = globalT
       async send(id, runId, input) {
         const path = followupPath(id, runId);
         if (!validFollowupInput(input))
-          throw new TypeError("追问需要 request_id 和非空 text；纠正可加 intent=CORRECTION 和 target_followup_id，其他字段不受支持。");
+          throw new TypeError("追问需要 request_id 和非空 text，可用 attachment_ids 附带日志；纠正可保留 intent 和 target_followup_id。");
         const data = await post(path, input);
         return checked(() => validateFollowupReceipt(data, id, runId, input.request_id));
       },

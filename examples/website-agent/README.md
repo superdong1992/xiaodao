@@ -16,7 +16,9 @@
 
 报告后连续解释、质疑和文字补充见[报告追问接入说明](../../docs/website-report-followup.md)。本示例提供真实请求 controller、独立问答视图和离线模拟；功能默认关闭，服务端启用后才可提交。追问使用独立接口，不改正式报告和赞踩；独立定位请新建对话。
 
-报告页还提供“继续诊断”：补充或替换日志、更正信息、指定目标，核对草稿后生成新版报告。`continuation-controller.js` 负责上传与草稿恢复，`continuation-view.js` 展示最终日志、版本列表和并排报告。部署时同时复制 `continuation-contract.js`、`file-sha256.js`、`file-sha256-worker.js`、`report-view.css`；BFF 需要 `continuation-bff.mjs`。继续诊断不依赖追问功能开关，使用现有正式诊断服务。完整接口和挂载示例见[继续诊断与报告版本](../../docs/website-report-followup.md#继续诊断与报告版本)。
+报告页只保留原追问入口。用户直接提问、更正信息或上传补充日志；后台根据现有信息是否足够，决定回答或继续诊断，页面不判断意图、不要求再选模式或确认草稿。`followup-controller.js` 保存同一请求及附件集合，`log-upload-controller.js` 复用分块上传；后台返回 `diagnosis_run_id` 后，在原问题下显示进度和停止操作。需要补充时展示 `current_questions`，同一输入框把回答固定发到该诊断轮次；新报告 READY 后调用 `onDiagnosisReady`，原报告一直保留。
+
+部署统一追问页面时，一并复制 `followup-controller.js`、`followup-view.js`、`followup-contract.js`、`log-upload-controller.js`、`file-sha256.js`、`file-sha256-worker.js`、`continuation-view.js`、`report-view.js` 和 `report-view.css`，SDK 与 BFF 的依赖仍按下表部署。版本切换与并排查看使用 `continuation-view.js` 的 `mountReportVersionsView`。旧 `createContinuationController` / `mountContinuationView` 及草稿接口只用于兼容既有客户端，新页面不挂载独立草稿面板。完整协议见[报告追问接入](../../docs/website-report-followup.md)。
 
 ## 1. 先打开离线报告预览
 
@@ -38,10 +40,12 @@ node examples/website-agent/preview.mjs
 | `feedback-comments-bff.mjs` | 独立文字反馈转发，服务端可配置 loadFeedbackAnalysis | 与 server.mjs 一起部署；资料快照持久化由网站实现 |
 | `followup-contract.js` | SDK 和 BFF 共用的追问 DTO 校验 | 与 browser-client.js 一起复制 |
 | `continuation-contract.js` | SDK 和 BFF 共用的继续诊断 DTO 校验 | 即使只展示报告，也须与 browser-client.js 一起复制 |
-| `continuation-controller.js`、`continuation-view.js` | 继续诊断草稿、日志清单和版本对比 | 与现有报告和追问模块一起部署 |
+| `continuation-view.js` | 报告版本与并排对比 | 新页面调用 mountReportVersionsView，只提供查看功能 |
+| `continuation-controller.js` | 旧草稿流程兼容 | 仅旧接入使用；新页面不挂载独立继续诊断输入框 |
+| `log-upload-controller.js` | 追问与旧草稿共用的多日志上传队列 | 与 followup-controller.js、file-sha256.js 和 Worker 一起复制 |
 | `file-sha256.js`、`file-sha256-worker.js` | 分块校验文件、显示进度并支持取消 | 两个文件保持同一目录，网站 CSP 允许同源 Worker |
 | `continuation-bff.mjs` | 继续诊断路由与响应校验 | 与 server.mjs、continuation-contract.js 一起部署 |
-| `conversation-input.js` | 新网站共用输入框的诊断补充/报告追问分流 | 调用 sendConversationInput；诊断中固定 target_run_id，完成竞态先刷新再转追问 |
+| `conversation-input.js` | 按后端报告状态投递消息 | 不判断意图；诊断中固定 target_run_id，报告后发送原追问接口 |
 | `followup-controller.js` | 草稿、请求 ID、快照和独立 SSE 恢复 | 每份报告创建实例，切换报告时销毁 |
 | `followup-view.js` | 可复用的连续问答界面 | 调用 mountFollowupView，或订阅 controller 接入自己的组件 |
 | `followup-bff.mjs` | 四个追问路由及响应校验 | 与 server.mjs 一起部署，透传 Cookie，交由 xiaodao 读取工号 |
@@ -191,13 +195,13 @@ async function submitLogs() {
 }
 ```
 
-`websiteUpload.sha256(file)` 可以接入网站现有组件，也可以使用 `file-sha256.js` 导出的 `sha256File(file)`，返回文件实际 SHA-256 的 64 位小写十六进制值。继续诊断 controller 默认在 `file-sha256-worker.js` 中校验，按 1 MiB 读取，不会一次读取数 GiB 文件。网站 CSP 需允许 `worker-src 'self'`；Worker 不可用时，同一算法每处理 64 KiB 就让出主线程。`sha256File(file, {signal, onProgress})` 支持取消与字节进度；页面区分校验百分比和网络上传，取消后可用原文件、原预约重试。
+`websiteUpload.sha256(file)` 可以接入网站现有组件，也可以使用 `file-sha256.js` 导出的 `sha256File(file)`，返回文件实际 SHA-256 的 64 位小写十六进制值。追问上传队列默认在 `file-sha256-worker.js` 中校验，按 1 MiB 读取，不会一次读取数 GiB 文件。网站 CSP 需允许 `worker-src 'self'`；Worker 不可用时，同一算法每处理 64 KiB 就让出主线程。`sha256File(file, {signal, onProgress})` 支持取消与字节进度；页面区分校验百分比和网络上传，取消后可用原文件、原预约重试。
 
 示例先检查后缀和大小，再计算哈希，全程保留文件原名。`file.type` 可能为空，因此根据支持的小写压缩后缀确定 MIME；服务端仍会核验实际上传内容。仅带附件的消息应省略 `text` 或传 null，不传空字符串。
 
 上传预约的元数据、原文件、消息 ID 和已收到的回执，也应保存在按钮回调及重试函数之外。同一次上传失败后，沿用这些数据调用 `submitLogs()`，不能更换文件或重新生成 ID。
 
-新网站的诊断补充必须携带保存的 `target_run_id`。收到 `409 / AGENT_RUN_CHANGED` 后先刷新原轮次；如果报告已生成，文字补充改走追问接口，附件不能自动带入报告追问。`conversation-input.js` 的 `sendConversationInput` 已实现这套分流，调用方式见[报告追问指南](../../docs/website-report-followup.md)。追问失败不能退回 `conversations.send`。
+新网站始终使用原追问输入区，文字和补充日志一起发送给追问接口，由后端决定直接回答还是继续诊断。如果关联诊断返回 `WAITING_INPUT` 和 `current_questions`，同一输入区展示待补充问题，并将回答和附件发给 `conversations.send`，固定携带该轮的 `target_run_id`。这次补充重试必须保留原请求、附件和目标轮次；收到 `409 / AGENT_RUN_CHANGED` 后刷新该轮状态，不自动改发追问。`conversation-input.js` 仅按后端报告状态投递普通会话消息，不判断用户意图，调用方式见[报告追问指南](../../docs/website-report-followup.md)。
 
 ### 目录、历史与重新诊断
 

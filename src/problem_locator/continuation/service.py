@@ -298,13 +298,6 @@ class ContinuationService:
             # Only after validation do we open a run; imports are the existing
             # durable Agent work, never a side effect of preview or GET.
             self._attachments(cid, value["attachment_ids"])
-            from problem_locator.contracts.models import ReportContinuationContext
-            context = ReportContinuationContext(parent_run_id=value["parent_run_id"],
-                parent_case_id=value["_parent_case_id"], parent_report_artifact_id=value["_parent_artifact_id"],
-                parent_report_sha256=value["_parent_sha256"], parent_report_markdown=value["_parent_markdown"],
-                parent_report_version=value["_parent_version"],
-                change_note=value["change_note"].strip() or "本轮信息和日志清单已经用户确认，请结合当前材料重新核对。",
-                goal=value["diagnosis_goal"].strip() or "重新诊断并说明相较上一版的结论变化。")
             with self.repository.database_transaction() as db:
                 value = self._load(db, cid, draft_id)
                 previous = self._request(db, cid, request.request_id, fingerprint)
@@ -313,25 +306,8 @@ class ContinuationService:
                 if value["revision"] != request.expected_revision or value["status"] != "DRAFT":
                     raise AgentStoreError("AGENT_DRAFT_CHANGED", "草稿已更新，请刷新后再试。", 409)
                 current, parent = self._head(db, cid, value["parent_run_id"])
-                body = self.store._new_run(db, current)
-                body.update(parent_run_id=parent["run_id"], root_run_id=value["_root_run_id"],
-                    report_version=value["_parent_version"] + 1, effective_problem_text=value["effective_problem_text"],
-                    diagnosis_goal=value["diagnosis_goal"], change_note=value["change_note"],
-                    source_problem_text=value["source_problem_text"], source_attachments=value["_source_attachments"],
-                    input_changes=value["input_changes"], source_runtime=value["_source_runtime"],
-                    model_configuration_fingerprint=self.agent.model_configuration_fingerprint,
-                    continuation_context=context.model_dump(mode="json"), intake_pending=True)
-                mid = self.store._id("message")
-                message = AgentMessage(message_id=mid, request_id="continuation-" + draft_id,
-                    text=value["effective_problem_text"], attachment_ids=value["attachment_ids"],
-                    status="QUEUED", created_at=self.store._now(), run_id=body["run_id"],
-                    notice="已确认本轮信息，正在开始诊断。")
-                event = self.store._append(db, body, "message.accepted", message.model_dump(mode="json"), "message:" + mid)
-                receipt = MessageReceipt(conversation_id=cid, message_id=mid, request_id=message.request_id,
-                                         event_id=event.sequence, run_id=body["run_id"])
-                db.execute("INSERT INTO agent_messages(message_id,conversation_id,request_id,fingerprint,body,receipt,run_id,event_sequence) VALUES (?,?,?,?,?,?,?,?)",
-                    (mid, cid, message.request_id, _hash(["continuation", draft_id]), _json(message), _json(receipt), body["run_id"], event.sequence))
-                self.store._save(db, body)
+                body = self._open_run(db, current, parent, value, request_key="continuation-" + draft_id,
+                    fingerprint=_hash(["continuation", draft_id]), notice="已确认本轮信息，正在开始诊断。")
                 value.update(status="CONFIRMED", confirmed_run_id=body["run_id"])
                 self._save(db, value)
                 result = ContinuationReceipt(conversation_id=cid, parent_run_id=parent["run_id"],
@@ -339,6 +315,111 @@ class ContinuationService:
                 self._request(db, cid, request.request_id, fingerprint, result.model_dump(mode="json"))
             self.store._notify(cid)
             return result
+
+    def _open_run(self, db, current, parent, value, *, request_key, fingerprint, notice):
+        """The caller commits the triggering action and this run together."""
+        from problem_locator.contracts.models import ReportContinuationContext
+        context = ReportContinuationContext(parent_run_id=value["parent_run_id"],
+            parent_case_id=value["_parent_case_id"], parent_report_artifact_id=value["_parent_artifact_id"],
+            parent_report_sha256=value["_parent_sha256"], parent_report_markdown=value["_parent_markdown"],
+            parent_report_version=value["_parent_version"],
+            change_note=value["change_note"].strip() or "本轮信息和日志清单已经用户确认，请结合当前材料重新核对。",
+            goal=value["diagnosis_goal"].strip() or "重新诊断并说明相较上一版的结论变化。")
+        body = self.store._new_run(db, current)
+        body.update(parent_run_id=parent["run_id"], root_run_id=value["_root_run_id"],
+            report_version=value["_parent_version"] + 1, effective_problem_text=value["effective_problem_text"],
+            diagnosis_goal=value["diagnosis_goal"], change_note=value["change_note"],
+            source_problem_text=value["source_problem_text"], source_attachments=value["_source_attachments"],
+            input_changes=value["input_changes"], source_runtime=value["_source_runtime"],
+            model_configuration_fingerprint=self.agent.model_configuration_fingerprint,
+            continuation_context=context.model_dump(mode="json"), intake_pending=True)
+        cid, mid = current["conversation_id"], self.store._id("message")
+        message = AgentMessage(message_id=mid, request_id=request_key,
+            text=value["effective_problem_text"], attachment_ids=value["attachment_ids"],
+            status="QUEUED", created_at=self.store._now(), run_id=body["run_id"], notice=notice)
+        event = self.store._append(db, body, "message.accepted", message.model_dump(mode="json"), "message:" + mid)
+        receipt = MessageReceipt(conversation_id=cid, message_id=mid, request_id=message.request_id,
+            event_id=event.sequence, run_id=body["run_id"])
+        db.execute("INSERT INTO agent_messages(message_id,conversation_id,request_id,fingerprint,body,receipt,run_id,event_sequence) VALUES (?,?,?,?,?,?,?,?)",
+            (mid, cid, message.request_id, fingerprint, _json(message), _json(receipt), body["run_id"], event.sequence))
+        self.store._save(db, body)
+        return body
+
+    @staticmethod
+    def _handoff_state(db, followups, task):
+        """Reload under the same conversation lock used by stop and deletion."""
+        store = followups.store
+        row = store._locked_row(db, "agent_followup_tasks", "followup_id", task["followup_id"])
+        if row is None or (row["conversation_id"], row["run_id"]) != (task["conversation_id"], task["run_id"]):
+            return None, False
+        if row["status"] == "COMPLETED":
+            return None, bool(json.loads(row["body"]).get("diagnosis_run_id"))
+        if row["status"] not in {"RUNNING", "CANCELLING"} or row["epoch"] != store.epoch:
+            return None, False
+        if row["status"] == "CANCELLING" or not store.alive(db, row["conversation_id"], row["run_id"]):
+            store._transition(db, row, "CANCELLED")
+            return None, False
+        if followups._stop.is_set() or followups.agent._stop.is_set():
+            store._transition(db, row, "INTERRUPTED", code="AGENT_FOLLOWUP_INTERRUPTED")
+            return None, False
+        if store.resources_expired(db, row["conversation_id"], row["run_id"]):
+            raise AgentStoreError("AGENT_ATTACHMENT_NOT_READY", "本轮日志已经清理，请重新上传后继续。", 409)
+        return row, False
+
+    def handoff_followup(self, followups, task, decision):
+        """Reuse diagnosis execution without creating or classifying a draft."""
+        cid, rid, fid = task["conversation_id"], task["run_id"], task["followup_id"]
+        with self.agent.usage_guard.acquire(cid), self.agent._message_lock(cid):
+            with self.repository.database_transaction() as db:
+                row, replayed = self._handoff_state(db, followups, task)
+                if row is None:
+                    return replayed
+                self._head(db, cid, rid)
+                history = followups.store._history(db, rid, row["ordinal"])
+                attachment_ids = followups.attachment_ids(row, history, log_mode=decision["log_mode"])
+            run, report, inputs = self._baseline(cid, rid)
+            request = CreateDraftRequest(request_id="followup-diagnosis-" + fid,
+                effective_problem_text=decision["effective_problem_text"], diagnosis_goal=decision["diagnosis_goal"],
+                change_note=decision["reason"], log_mode=decision["log_mode"])
+            if request.log_mode == "REPLACE" and not attachment_ids:
+                raise AgentStoreError("AGENT_ATTACHMENT_NOT_READY", "请先上传用于替换的日志，现有日志尚未更改。", 409)
+            old = [value.model_dump(mode="json") for value in self._attachments(cid, inputs["attachment_ids"], require_available=False)]
+            ids = inputs["attachment_ids"] if request.log_mode == "APPEND" else []
+            new = [value.model_dump(mode="json") for value in self._attachments(cid, [*ids, *attachment_ids])]
+            value = dict(parent_run_id=rid, source_problem_text=inputs["effective_problem_text"],
+                effective_problem_text=request.effective_problem_text, diagnosis_goal=request.diagnosis_goal,
+                change_note=request.change_note, attachment_ids=[entry["attachment_id"] for entry in new],
+                input_changes=self._changes(inputs["effective_problem_text"], request.effective_problem_text, old, new),
+                _source_attachments=old, _source_runtime=inputs.get("runtime", {}),
+                _parent_case_id=report.case_id, _parent_artifact_id=report.artifact.artifact_id,
+                _parent_markdown=report.markdown, _parent_sha256=report.artifact.sha256,
+                _parent_version=run.get("report_version", 1), _root_run_id=run.get("root_run_id", rid))
+            with self.repository.database_transaction() as db:
+                row, replayed = self._handoff_state(db, followups, task)
+                if row is None:
+                    return replayed
+                current, parent = self._head(db, cid, rid)
+                snapshot = db.execute("SELECT report_sha256 FROM agent_followup_snapshots WHERE run_id=?", (rid,)).fetchone()
+                if snapshot is None or snapshot[0] != value["_parent_sha256"]:
+                    raise AgentStoreError("AGENT_REPORT_CHANGED", "报告来源发生变化，请刷新后从最新报告继续。", 409)
+                # The usage lease protects files during preparation. Reload
+                # descriptors on this connection so deletion/status changes
+                # cannot pass between the final check and the atomic handoff.
+                for expected in new:
+                    saved = db.execute("SELECT body FROM agent_attachments WHERE attachment_id=?",
+                        (expected["attachment_id"],)).fetchone()
+                    actual = None if saved is None else json.loads(saved[0])
+                    if (actual is None or actual["conversation_id"] != cid
+                            or actual["status"] not in {"READY", "IMPORTED"}
+                            or (actual["sha256"], actual["size"]) != (expected["sha256"], expected["size"])):
+                        raise AgentStoreError("AGENT_ATTACHMENT_NOT_READY", "日志已经变化或被清理，请重新上传后继续。", 409)
+                body = self._open_run(db, current, parent, value, request_key=request.request_id,
+                    fingerprint=_hash(["followup-diagnosis", fid]), notice="现有资料需要进一步核查，正在继续诊断。")
+                followups.store._transition(db, row, "COMPLETED", diagnosis_run_id=body["run_id"],
+                    answer="现有上下文还不足以可靠回答，已开始继续诊断。\n\n" + request.change_note)
+            self.store._notify(cid)
+            followups.store.notify()
+            return True
 
     def versions(self, cid, rid, *, owner_key=None):
         with self.agent.operation_lease(cid, owner_key=owner_key), self.repository.database_read() as db:

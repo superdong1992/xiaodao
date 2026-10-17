@@ -84,7 +84,7 @@ def register_followup_routes(app, agent):
     from .http_app import _port_call
 
     errors = {status: {"model": AgentErrorEnvelope}
-              for status in (400, 404, 409, 413, 422, 429, 500, 503)}
+              for status in (400, 404, 409, 410, 413, 422, 429, 500, 503)}
 
     def service():
         result = getattr(agent, "followups", None)
@@ -125,7 +125,7 @@ def register_followup_routes(app, agent):
 
     @app.post(_ROOT, tags=["Agent"], response_model=SuccessEnvelope[FollowupReceipt], responses=errors,
               operation_id="submit_agent_followup", summary="提交报告追问",
-              description="接收 request_id 和 text；纠正可加 intent=CORRECTION 和 target_followup_id。后台独立回答，不修改原报告。重试保持 ID 和全部参数，不得回退到普通消息接口。")
+              description="统一追问入口，接收 request_id、text 和可选的 attachment_ids。框架核对上下文，直接回答或继续诊断；交接后的记录包含 diagnosis_run_id。纠正可加 intent=CORRECTION 和 target_followup_id。原报告保留。重试保持 ID 和全部参数，不得回退到普通消息接口。")
     async def submit(conversation_id: Annotated[OpaqueId, Path()], run_id: Annotated[OpaqueId, Path()],
                      body: FollowupRequest, request: Request):
         return await respond("submit", FollowupReceipt, request, conversation_id, run_id, **body.model_dump(exclude_unset=True))

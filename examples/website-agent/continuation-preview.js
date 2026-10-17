@@ -1,6 +1,7 @@
 /** 离线预览专用：只修改浏览器内存，报告变化文字均为合成样例。 */
-export function createPreviewContinuations({ conversations, id, now, finish }) {
+export function createPreviewContinuations({ conversations, id, now, finish, schedule = setTimeout, delay = 1200 }) {
   const drafts = new Map(), receipts = new Map(), uploads = new Map();
+  const diagnoses = new Map();
   const problem = (view) => view.result.report?.problem_statement ?? "付款服务调用库存服务超时，请定位原因。";
   function rootRun(record, runId) { const parent = record.runs.get(runId).parent_run_id; return parent ? rootRun(record, parent) : runId; }
   function changes(source, text, attachments) {
@@ -14,7 +15,7 @@ export function createPreviewContinuations({ conversations, id, now, finish }) {
     return ids.map((value) => uploads.get(value) ?? candidates.find((item) => item.attachment_id === value))
       .filter((item) => item?.conversation_id === record.id && item.status === "READY");
   }
-  return async (url, init) => {
+  const handle = async (url, init) => {
     const method = init.method ?? "GET";
     if (url.pathname === "/api/agent/attachments" && method === "POST") {
       const input = JSON.parse(init.body), key = `upload:${input.conversation_id}:${input.request_id}`;
@@ -45,7 +46,7 @@ export function createPreviewContinuations({ conversations, id, now, finish }) {
     if (!source) return finish("诊断轮次或草稿不存在。", 404);
     if (runMatch && match[3] === "report-versions" && method === "GET") {
       const root = rootRun(record, match[2]);
-      const versions = [...record.runs.values()].filter((view) => rootRun(record, view.run_id) === root).map((view) => ({
+      const versions = [...record.runs.values()].filter((view) => rootRun(record, view.run_id) === root && view.report_state === "READY").map((view) => ({
         run_id: view.run_id, parent_run_id: view.parent_run_id ?? null, version: view.report_version ?? 1,
         created_at: view.current_run.created_at, input_changes: view.input_changes ?? null,
         diagnosis_goal: view.diagnosis_goal ?? "", runtime_changes: [],
@@ -104,4 +105,41 @@ export function createPreviewContinuations({ conversations, id, now, finish }) {
     }
     return finish("预览不支持此操作。", 404);
   };
+  handle.startFromFollowup = (cid, rid, input) => {
+    const record = conversations.get(cid), source = record.runs.get(rid), runId = id(), timestamp = now();
+    const attachments = metadata(record, [...new Set([...(source.attachments ?? []).map((item) => item.attachment_id), ...(input.attachment_ids ?? [])])]);
+    const waiting = input.text === "请继续核对超时根因。" && !input.attachment_ids?.length;
+    const current = structuredClone(source), text = `${problem(source)}\n\n用户补充：${input.text}`;
+    const status = waiting ? "WAITING_INPUT" : "RUNNING";
+    Object.assign(current, { run_id: runId, selected_run_id: runId, parent_run_id: rid, report_version: (source.report_version ?? 1) + 1,
+      status, report_state: "PENDING", current_questions: waiting ? ["请补充故障发生时间。"] : [],
+      progress: { stage: "DIAGNOSE", message: "正在核对补充信息和日志。" }, attachments, input_changes: changes(source, text, attachments) });
+    current.current_run = { ...source.current_run, run_id: runId, ordinal: source.current_run.ordinal + 1, status,
+      report_state: "PENDING", created_at: timestamp, updated_at: timestamp };
+    current.result = { ...source.result, report_state: "PENDING", report: null, markdown: null, artifact: null, format: null };
+    record.runs.set(runId, current); record.current = runId; record.updated = timestamp;
+    const publish = () => {
+      if (!conversations.has(cid) || current.status !== "RUNNING") return;
+      Object.assign(current, { status: "COMPLETED", report_state: "READY", current_questions: [], progress: null });
+      Object.assign(current.current_run, { status: "COMPLETED", report_state: "READY", updated_at: now() });
+      current.result = { ...source.result, format: "markdown", report: null, artifact: null, archive_status: "NOT_REQUIRED",
+        markdown: `# 继续诊断报告（合成样例）\n\n## 本轮变化\n已结合用户补充重新核对。此内容仅演示后台升级后的报告交付，不代表真实日志分析。\n\n## 本轮输入\n${text}\n` };
+      record.history.push({ id: id(), run_id: runId, type: "diagnosis.result", created_at: now(), message: null, questions: null,
+        result: { status: "COMPLETED", report_state: "READY", case_id: current.case_id, case_status: current.case_status, source_job_id: current.source_job_id, failure: null } });
+    };
+    diagnoses.set(runId, publish);
+    if (!waiting) schedule(publish, delay);
+    return runId;
+  };
+  handle.resumeDiagnosis = (record, input) => {
+    const key = `supplement:${record.id}:${input.request_id}`;
+    if (receipts.has(key)) return receipts.get(key);
+    const current = record.runs.get(input.target_run_id);
+    if (!current || current.status !== "WAITING_INPUT" || !diagnoses.has(input.target_run_id)) return null;
+    current.status = current.current_run.status = "RUNNING"; current.current_questions = [];
+    const result = { conversation_id: record.id, run_id: input.target_run_id, request_id: input.request_id,
+      message_id: id(), event_id: record.history.length + 1, status: "ACCEPTED" };
+    receipts.set(key, result); schedule(diagnoses.get(input.target_run_id), delay); return result;
+  };
+  return handle;
 }

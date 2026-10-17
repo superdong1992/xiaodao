@@ -67,7 +67,8 @@ class FeedbackService:
             raise AgentStoreError("AGENT_FOLLOWUP_NOT_FOUND", "这条追问不存在。", 404)
         source, item, correction, history = followups.store.learning_source(
             conversation_id, run_id, followup_id, owner_key)
-        if source is None or item.status != "COMPLETED" or not item.answer_markdown:
+        if (source is None or item.status != "COMPLETED" or not item.answer_markdown
+                or item.diagnosis_run_id is not None):
             return None
         if not source.skill_name and source.source_kind == "GENERIC":
             original = self._source(conversation_id, run_id)

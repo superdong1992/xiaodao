@@ -4,6 +4,67 @@ const node = (doc, tag, text) => { const value = doc.createElement(tag); if (tex
 const unique = (values) => [...new Set(values)];
 const size = (bytes) => Number.isFinite(bytes) ? `${(bytes / 1024 / 1024).toFixed(1)} MiB` : "";
 
+/** 统一追问页面只挂载版本浏览，不提供另一套输入、草稿或确认入口。 */
+export function mountReportVersionsView(container, { client, conversationId, runId, onSelectRun = () => {} }) {
+  const doc = container.ownerDocument, make = (tag, text) => node(doc, tag, text);
+  const root = make("section"), error = make("p"), comparison = make("div"), delta = make("div");
+  root.className = "xiaodao-continuation"; root.setAttribute("aria-label", "报告版本");
+  error.setAttribute("role", "alert"); comparison.className = "xiaodao-continuation__comparison";
+  const version = make("select"), left = make("select"), right = make("select");
+  const open = make("button", "查看所选版本"), compare = make("button", "并排查看"), refresh = make("button", "刷新版本");
+  for (const button of [open, compare, refresh]) button.type = "button";
+  root.append(make("h2", "报告版本"), error);
+  for (const [title, select] of [["查看版本", version], ["左侧报告", left], ["右侧报告", right]]) {
+    const label = make("label", title); label.append(select); root.append(label);
+  }
+  root.append(open, compare, refresh, make("p", "新报告开头的“本轮变化”说明判断的变化。输入变化对照右侧报告的直接上一版。"), delta, comparison);
+  container.replaceChildren(root);
+  let disposed = false, versions, sequence = 0;
+  const abort = new AbortController();
+  const run = (work) => { void Promise.resolve().then(work).catch((failure) => { if (!disposed) error.textContent = failure.message; }); };
+  async function load() {
+    open.disabled = compare.disabled = refresh.disabled = true;
+    try {
+      const value = await client.continuations.versions(conversationId, runId, { signal: abort.signal });
+      if (disposed) return;
+      versions = value; error.textContent = "";
+      for (const select of [version, left, right]) {
+        select.replaceChildren();
+        for (const entry of value.versions) {
+          const option = make("option", `第 ${entry.version} 版${entry.run_id === runId ? "（当前查看）" : ""}`);
+          option.value = entry.run_id; select.append(option);
+        }
+      }
+      version.value = right.value = runId;
+      left.value = value.versions.find((entry) => entry.run_id === runId)?.parent_run_id ?? value.root_run_id;
+    } finally { if (!disposed) { open.disabled = !versions; compare.disabled = !versions || versions.versions.length < 2; refresh.disabled = false; } }
+  }
+  refresh.onclick = () => run(load);
+  open.onclick = () => run(() => onSelectRun(version.value));
+  compare.onclick = () => run(async () => {
+    const current = ++sequence, ids = [left.value, right.value];
+    if (ids[0] === ids[1]) throw new Error("请选择两个不同的报告版本。");
+    compare.disabled = true;
+    try {
+      const views = await Promise.all(ids.map((id) => client.conversations.get(conversationId, { run_id: id, include: ["report"], signal: abort.signal })));
+      if (disposed || current !== sequence) return;
+      if (views.some((value, index) => value.conversation_id !== conversationId || value.selected_run_id !== ids[index]))
+        throw new Error("报告归属与所选版本不一致，请刷新后重试。");
+      const fragment = doc.createDocumentFragment();
+      views.forEach((value, index) => {
+        const column = make("section"), target = make("div"), entry = versions.versions.find((entry) => entry.run_id === ids[index]);
+        column.append(make("h3", `第 ${entry.version} 版`), target);
+        renderReport(target, value.result, { resourcesExpired: value.resources_expired }); fragment.append(column);
+      });
+      comparison.replaceChildren(fragment);
+      const selected = versions.versions.find((entry) => entry.run_id === ids[1]);
+      renderInputChanges(delta, selected.input_changes, selected.runtime_changes ?? []);
+    } finally { if (!disposed && current === sequence) compare.disabled = false; }
+  });
+  run(load);
+  return () => { disposed = true; sequence++; abort.abort(); };
+}
+
 /** 输入差异来自服务端记录，语义变化以新报告的“本轮变化”为准。 */
 export function renderInputChanges(container, changes, runtimeChanges = []) {
   const doc = container.ownerDocument, fragment = doc.createDocumentFragment();

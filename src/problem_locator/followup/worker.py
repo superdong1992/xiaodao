@@ -12,7 +12,7 @@ from problem_locator.runtime.agent_backend import AgentBackend
 from problem_locator.storage.atomic import require_real_directory
 from problem_locator.storage.paths import ensure_no_symlink_ancestors
 
-from .context import build_prompt, history_markdown, validate_answer
+from .context import build_prompt, history_markdown, parse_result, validate_answer
 from .models import MAX_CONTEXT_BYTES
 from .snapshots import InputChanged, _row, copy_snapshot, protect_inputs, verify_inputs, write_new
 
@@ -89,7 +89,8 @@ class FollowupWorker:
                 if mode == "REPORT_AND_LOGS" and snapshot["status"] != "READY":
                     raise InputChanged("snapshot was revoked")
                 prompt, context = build_prompt(source, history, item["text"], mode,
-                    read_search=service.read_search_supported, correction=json.loads(task["correction_json"]))
+                    read_search=service.read_search_supported, correction=json.loads(task["correction_json"]),
+                    attachments=service.task_attachments(task, history=history), snapshot_status=snapshot["status"])
                 root = service.layout.workspaces
                 require_real_directory(root)
                 workspace = root / task["workspace_id"]
@@ -122,8 +123,12 @@ class FollowupWorker:
                 if cancellation.is_cancelled():
                     raise InterruptedError()
                 verify_inputs(workspace, rows, cancellation)
-                answer = validate_answer(result.final_result, mode)
-                service.store.finish_task(task["followup_id"], answer=answer)
+                decision = parse_result(result.final_result)
+                if decision is None:
+                    answer = validate_answer(result.final_result, mode)
+                    service.store.finish_task(task["followup_id"], answer=answer)
+                else:
+                    service.continue_diagnosis(task, decision.model_dump(mode="json"))
             return True
         except Exception as exc:
             if task is not None:

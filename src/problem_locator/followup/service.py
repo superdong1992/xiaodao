@@ -1,7 +1,8 @@
-"""Report follow-ups with no changes to Case or the existing Agent projections."""
+"""Report answers and evidence-driven handoff to an independent diagnosis."""
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
 import time
 
@@ -40,7 +41,8 @@ class ReportFollowupService:
         self.snapshot_worker = SnapshotWorker(self)
 
     def _source(self, cid, rid):
-        if self.agent.store.get_run(cid, rid).get("resources_expired", False):
+        run = self.agent.store.get_run(cid, rid)
+        if run.get("resources_expired", False):
             return None
         captured = self.agent.store.read_conversation(cid, case_snapshot=True, run_id=rid)
         if captured.snapshot is None or captured.view.case_id is None:
@@ -58,7 +60,9 @@ class ReportFollowupService:
         direct = is_specialized_direct(job) and specialized_direct_skill_name(job) == result.skill_name
         if not generic and not direct:
             return None
-        problem = job.generic_problem_text if generic else aggregate.case.raw_problem_text
+        problem = (run.get("report_inputs") or {}).get("effective_problem_text")
+        if problem is None:
+            problem = job.generic_problem_text if generic else aggregate.case.raw_problem_text
         if (not isinstance(problem, str) or not problem.strip() or len(problem.encode("utf-8")) > MAX_TEXT_BYTES
                 or len(result.report_markdown.encode("utf-8")) > MAX_TEXT_BYTES
                 or hashlib.sha256(result.report_markdown.encode("utf-8")).hexdigest() != result.report_sha256):
@@ -69,7 +73,6 @@ class ReportFollowupService:
                 or published.artifact is None or published.artifact.artifact_id != result.report_artifact_id
                 or published.markdown != result.report_markdown):
             return None
-        run = self.agent.store.get_run(cid, rid)
         return FollowupSource(case_id=aggregate.case.case_id, source_job_id=job.job_id,
             problem_text=problem, report_markdown=result.report_markdown, report_sha256=result.report_sha256,
             source_kind="GENERIC" if generic else "SKILL_DIRECT", has_logs=bool(job.attachment_refs),
@@ -113,11 +116,14 @@ class ReportFollowupService:
                 reason=reason, snapshot_status=status, active_followup=page["active_followup"],
                 items=page["items"], next_cursor=page["next_cursor"], last_event_id=page["last_event_id"])
 
-    def submit(self, conversation_id, run_id, request_id, text, owner_key=None, *, intent=None, target_followup_id=None):
-        request = FollowupRequest(request_id=request_id, text=text, intent=intent, target_followup_id=target_followup_id)
+    def submit(self, conversation_id, run_id, request_id, text, owner_key=None, *, intent=None,
+               target_followup_id=None, attachment_ids=None):
+        request = FollowupRequest(request_id=request_id, text=text, intent=intent,
+            target_followup_id=target_followup_id, attachment_ids=attachment_ids or [])
         with self.agent.operation_lease(conversation_id, owner_key=owner_key):
             previous = self.store.request(conversation_id, run_id, request_id, text, owner_key,
-                intent=request.intent, target_followup_id=request.target_followup_id)
+                intent=request.intent, target_followup_id=request.target_followup_id,
+                attachment_ids=request.attachment_ids)
             if previous is not None:
                 return previous
             if not self.enabled:
@@ -130,8 +136,46 @@ class ReportFollowupService:
             source = self._source(conversation_id, run_id)
             if source is None:
                 raise fail("UNSUPPORTED", "这份报告暂不支持追问，请新建对话。")
+            attachments = (self.agent.continuations._attachments(conversation_id, request.attachment_ids)
+                if request.attachment_ids else [])
             return self.store.submit(conversation_id, run_id, request, source, owner_key,
-                logs_supported=self.read_search_supported)
+                logs_supported=self.read_search_supported,
+                attachment_ids=[item.attachment_id for item in attachments])
+
+    @staticmethod
+    def attachment_ids(task, history=(), *, log_mode="APPEND"):
+        batches = [entry.get("attachment_ids", []) for entry in (*history, json.loads(task["body"]))]
+        if log_mode == "REPLACE":
+            return next((list(dict.fromkeys(ids)) for ids in reversed(batches) if ids), [])
+        return list(dict.fromkeys(aid for ids in batches for aid in ids))
+
+    def task_attachments(self, task, history=()):
+        """Only upload descriptors enter the model; parsing stays in diagnosis."""
+        ids = self.attachment_ids(task, history)
+        if not ids:
+            return []
+        result, seen = [], set()
+        for aid in ids:
+            item = self.agent.store.get_attachment(aid)
+            if item.conversation_id != task["conversation_id"]:
+                raise AgentStoreError("AGENT_ATTACHMENT_NOT_READY", "附件不属于本会话。", 409)
+            if item.sha256 not in seen:
+                seen.add(item.sha256)
+                result.append({"attachment_id": item.attachment_id, "name": item.name,
+                    "sha256": item.sha256, "size": item.size})
+        return result
+
+    def continue_diagnosis(self, task, decision):
+        """Commit the new run and its answer link together, without reclassifying."""
+        try:
+            return self.agent.continuations.handoff_followup(self, task, decision)
+        except AgentStoreError as error:
+            if error.status_code not in {400, 404, 409, 410, 413}:
+                raise
+            # The question remains readable and actionable when material or the
+            # latest report changes. Never claim a diagnosis was started.
+            return self.store.finish_task(task["followup_id"], answer=
+                "现有上下文还不足以回答，需要进一步诊断，但这次尚未开始。\n\n" + error.message)
 
     def stop(self, conversation_id, run_id, followup_id, request_id, owner_key=None):
         request = FollowupStopRequest(request_id=request_id)

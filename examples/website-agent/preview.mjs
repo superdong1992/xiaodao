@@ -104,7 +104,7 @@ export function createPreviewServer() {
     ["/browser-client.js", ["browser-client.js", "text/javascript"]],
     ["/preview-model.js", ["preview-model.js", "text/javascript"]],
     ...["feedback-comment-contract.js", "followup-contract.js", "followup-controller.js", "followup-view.js", "followup-preview.js", "conversation-input.js",
-      "continuation-contract.js", "continuation-controller.js", "continuation-view.js", "continuation-preview.js", "file-sha256.js", "file-sha256-worker.js"].map((name) => [`/${name}`, [name, "text/javascript"]]),
+      "continuation-contract.js", "continuation-controller.js", "continuation-view.js", "continuation-preview.js", "log-upload-controller.js", "file-sha256.js", "file-sha256-worker.js"].map((name) => [`/${name}`, [name, "text/javascript"]]),
   ]);
   const samples = Buffer.from(JSON.stringify(previewSamples()));
   return createServer((request, response) => {

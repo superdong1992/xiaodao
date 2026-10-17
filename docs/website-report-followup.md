@@ -6,15 +6,25 @@
 
 功能默认关闭，服务端配置 `REPORT_FOLLOWUP_ENABLED=true` 后启用。`REPORT_FOLLOWUP_SNAPSHOT_BYTES` 默认 1073741824，控制单份原日志副本的大小；可调低，最大 1 GiB。`REPORT_FOLLOWUP_STORAGE_BYTES` 默认 5368709120，控制副本总量，不能小于单份上限。副本异步准备失败或超限不会撤销已交付报告，页面仍可提供仅依据报告的问答。模型命令沿用 `DIAGNOSE_CLAUDE_COMMAND`，未设置时回退到 `CLAUDE_COMMAND`。提交追问会调用真实模型；读取、分页、订阅和恢复状态不会调用模型。
 
-每条回答支持独立赞踩；点踩后的文字负反馈使用独立 feedback/comments 接口，不经过追问入口。既有 intent=CORRECTION 仍用于用户主动继续对话。原报告评价和所有追问响应字段保持不变；接入方需要更新的文件、请求示例和经验采纳边界见[回答反馈增量适配说明](website-answer-feedback-upgrade.md)。按钮和输入框由网站实现。
+普通回答支持独立赞踩；点踩后的文字负反馈使用独立 feedback/comments 接口，不经过追问入口。既有 intent=CORRECTION 仍用于用户主动继续对话。带 `diagnosis_run_id` 的交接说明不是诊断结论，不接受赞踩或文字负反馈，也不提炼为经验。原报告评价不变；接入方需要更新的文件、请求示例和经验采纳边界见[回答反馈增量适配说明](website-answer-feedback-upgrade.md)。按钮和输入框由网站实现。
 
 ## 继续诊断与报告版本
 
-报告页区分两种操作：“追问报告”解释所选报告；“继续诊断”采用补充日志、更正后的信息和新目标，生成新版完整报告。继续诊断支持 Generic V2、skill-direct Markdown，从最新已发布报告开始。每轮创建独立 run 和 Case，重新路由；旧报告作为只读参考，不继承旧 Evidence、Outcome 或事实 ID。普通追问中的信息只有进入确认草稿后，才成为新一轮输入。
+报告页只提供一个追问入口，用户可提问、更正信息或补充日志。xiaodao 在同一次追问模型调用中核对原问题、报告、历史问答和可用日志，再决定下一步；不要求用户先判断应当“追问”还是“继续诊断”。
 
-用户先预览完整问题、变更说明、诊断目标和最终日志清单，再确认一次。直接编辑和只补日志不调用草稿整理模型；未直接填写完整问题时，补充说明、变更说明或诊断目标中的自然语言复用一次 INTAKE，同时判断是否只是询问当前报告。更正信息或变更日志生成待确认草稿；纯报告追问返回 `FOLLOWUP`，不创建 Case 或 run。原有“追问报告”和共用输入框仍直接调用 followups，不增加分类调用。读取和刷新不会调用模型，也没有独立的报告比较模型。
+- 已有材料足以直接回答时，返回 Markdown 答复，不创建 Case 或 run，只有一次追问调用。
+- 已有材料足以继续排查，但需要诊断 Skill、重新解析日志或执行验证时，模型返回内部 `CONTINUE_DIAGNOSIS` 决策。后端校验当前状态后，在同一事务中创建关联 run 并保存 `diagnosis_run_id`，之后由原诊断流程推进。不会再调用一个分类模型，也不经过第二个页面入口。
+- 仍缺少必须由用户提供的材料时，在当前问答中说明需要补充什么；用户继续在同一入口回复或上传日志，不先启动空跑的诊断。
 
-`FOLLOWUP` 页面显示“这是对当前报告的追问，无需新建诊断”和 `followup_text`，用户点击“发送报告追问”后，调用原报告的 followups 接口。回答仍保存在该报告的问答记录中。此类草稿不能 PATCH 或 confirm；确实要更正问题或补充日志时，点击“重新准备继续诊断”。分类失败保留 `FAILED`，不会自动创建新诊断；用户明确编辑完整问题并保存后，才可核对并确认。
+新诊断支持 Generic V2、skill-direct Markdown，从最新已发布报告建立关联轮次。旧报告仅作为旧判断的只读参考，不继承旧 Evidence、Outcome 或事实 ID。`FollowupItem.run_id` 始终指向原报告，`diagnosis_run_id` 指向新轮次；普通回答和旧记录该字段为 null，旧记录还可能没有此字段。交接项的 `answer_markdown` 只说明已经开始诊断，不能展示成新版报告。页面读取新轮进度，直到新报告发布才更新版本列表；失败、中断或尚未发布时保留旧报告、下载和历史问答。
+
+如果关联新轮返回 `WAITING_INPUT`，在同一追问记录中展示后端 `current_questions`，继续使用原输入区收集回答和日志。此次补充发送到现有诊断消息接口，并固定 `target_run_id=diagnosis_run_id`；不能再发往旧报告的 followups，也不能为尚未生成报告的新轮挂载报告追问。该场景遇到 `409 / AGENT_RUN_CHANGED` 时只刷新原目标状态，不自动改发追问。前端只使用后端状态和轮次标识，不自行判断意图。新报告就绪后，沿用 `onDiagnosisReady` 回调查看报告并更新版本选择器。
+
+补日志先使用原附件预约与上传接口，上传完成后将同会话的 `attachment_ids` 与文字一起提交到 followups，最多 20 个。原请求 ID、文字、纠正目标和附件 IDs 一并保存，网络重试不得更换。原日志与新增材料的最终采用范围由服务端核对；不能静默丢弃已提交日志。读取、刷新和事件回放不调用模型，也没有独立的报告比较模型。
+
+### 已有草稿接口兼容
+
+旧版显式草稿 API 继续保留，供已接入的网站兼容使用；新版报告页不再提供第二个“继续诊断”按钮。以下预览与确认规则仅适用于这些旧接口，不是单追问入口的前置步骤。
 
 以下为原生 API 路径；示例 BFF 将 `/api/v1/agent` 映射为 `/api/agent`。所有接口沿用会话 owner 鉴权，不接受 `share=true` 或其他查询参数。
 
@@ -42,26 +52,9 @@ PATCH 额外要求 `expected_revision`；只更新传入字段，`attachment_ids
 
 ### 页面接入
 
-与现有浏览器模块一起部署 `continuation-contract.js`、`continuation-controller.js`、`continuation-view.js`、`file-sha256.js` 和 `file-sha256-worker.js`；BFF 同步部署 `continuation-bff.mjs`。两个哈希文件放在同一目录，网站 CSP 允许 `worker-src 'self'`。默认在 Worker 中分块校验并显示进度，取消会终止 Worker 或中断网络上传；Worker 不可用时，每处理 64 KiB 就让出主线程。预览还使用 `continuation-preview.js`，线上无需部署它。示例：
+报告页保留一个追问输入框、补日志上传和版本对比。收到带 `diagnosis_run_id` 的问答项时，展示交接说明并读取该轮进度；重复事件、刷新或重连只能恢复这条关联，不能再提交新诊断。旧报告仍按原 `run_id` 展示和下载，待新报告发布后再提供版本切换。
 
-```javascript
-import { createContinuationController } from "/xiaodao/continuation-controller.js";
-import { mountContinuationView } from "/xiaodao/continuation-view.js";
-
-const controller = createContinuationController({
-  client, conversationId: detail.conversation_id, runId: detail.selected_run_id,
-  onConfirmed: (receipt) => selectRun(receipt.run_id),
-  onFollowup: (receipt) => selectRun(receipt.run_id), // 刷新同一报告并重建其追问区
-});
-const dispose = mountContinuationView(container, controller, {
-  client, conversationId: detail.conversation_id, runId: detail.selected_run_id,
-  onSelectRun: selectRun,
-});
-await controller.start();
-// 离开页面或切换报告时调用 dispose()；它会销毁 controller。
-```
-
-报告正文、下载和追问都绑定当前选中的 `selected_run_id`。`onFollowup` 在发送成功后调用，网站应刷新该报告的问答区并移到该区域；示例预览已接好这一操作。继续诊断按钮以版本接口的 `can_continue` 为准，不沿用旧轮已经只读的资源状态推断新轮资格。
+与现有浏览器模块一起部署 `continuation-contract.js`、`continuation-controller.js`、`continuation-view.js`、`log-upload-controller.js`、`file-sha256.js` 和 `file-sha256-worker.js`；BFF 同步部署 `continuation-bff.mjs`。统一追问的日志上传直接依赖上传控制器及两个哈希文件，版本对比和旧客户端也仍依赖继续诊断模块，不能因删除第二个按钮就漏发文件。两个哈希文件放在同一目录，网站 CSP 允许 `worker-src 'self'`。默认在 Worker 中分块校验并显示进度，取消会终止 Worker 或中断网络上传；Worker 不可用时，每处理 64 KiB 就让出主线程。预览还使用 `continuation-preview.js`，线上无需部署它。
 
 ## 接口与身份
 
@@ -70,7 +63,7 @@ await controller.start();
 | 方法 | 网站路径 | 输入 |
 | --- | --- | --- |
 | GET | `/api/agent/conversations/{conversation_id}/runs/{run_id}/followups` | 可选 `cursor`、`limit`，默认最新 50 条，最大 100 条 |
-| POST | 同上 | `{request_id,text}`，只接收文字；纠正可加 `intent=CORRECTION`、`target_followup_id` |
+| POST | 同上 | `{request_id,text}`，可加已上传的 `attachment_ids`；纠正可加 `intent=CORRECTION`、`target_followup_id` |
 | GET | 上一路径加 `/events` | `Last-Event-ID` 请求头 |
 | POST | 上一路径加 `/{followup_id}/stop`（不含 `/events`） | `{request_id}` |
 | GET / PUT | 追问路径加 `/{followup_id}/feedback` | GET 无请求体；PUT 为 `{request_id,rating}`，独立评价该回答 |
@@ -85,7 +78,7 @@ await controller.start();
 
 ## 直接复用浏览器模块
 
-复制 [示例目录](../examples/website-agent/README.md) 中的 `browser-client.js`、`followup-contract.js`、`continuation-contract.js`、`feedback-comment-contract.js`、`followup-controller.js`、`followup-view.js`、`report-view.js` 和 `report-view.css` 到网站静态资源目录；复用共用输入框时，一并部署 `conversation-input.js`。这些模块应来自同一次发布，保留相对导入路径，不要只替换入口文件。controller 发真实的同源请求；离线预览仅替换它的 `fetchImpl`，没有另一套页面逻辑。
+复制 [示例目录](../examples/website-agent/README.md) 中的 `browser-client.js`、`followup-contract.js`、`continuation-contract.js`、`feedback-comment-contract.js`、`followup-controller.js`、`followup-view.js`、`log-upload-controller.js`、`file-sha256.js`、`file-sha256-worker.js`、`report-view.js` 和 `report-view.css` 到网站静态资源目录；复用共用输入框时，一并部署 `conversation-input.js`。这些模块应来自同一次发布，保留相对导入路径，不要只替换入口文件。controller 发真实的同源请求；离线预览仅替换它的 `fetchImpl`，没有另一套页面逻辑。
 
 BFF 同步部署 `server.ts`、`server.mjs`、`followup-bff.mjs`、`followup-contract.js`、`continuation-bff.mjs`、`continuation-contract.js`、`feedback-comments-bff.mjs` 和 `feedback-comment-contract.js`。即使 `REPORT_FOLLOWUP_ENABLED=false`，也必须保留这些静态导入的模块，否则 BFF 无法启动。后端、BFF 和浏览器模块的累计升级顺序见[生产升级清单](production-upgrade-2026-09-23.md)。
 
@@ -141,19 +134,20 @@ controller 在提交前保存原文和稳定请求 ID，收到回执后保存回
 | `AGENT_FOLLOWUP_EXPIRED` | 提示本轮已结束追问，报告和历史问答仍可查看 |
 | `AGENT_FOLLOWUP_BUSY` | 等待活动回答结束，或显式停止后再问 |
 | `AGENT_FOLLOWUP_SOURCE_CHANGED` | 刷新报告状态后重新提问 |
+| `AGENT_RESOURCE_EXPIRED`、`AGENT_ATTACHMENT_EXPIRED` | BFF 保留 HTTP 410。提示日志已清理或附件已失效，清除已被明确拒绝的待重试请求，允许移除过期日志或重新上传；不得包装成 502 并锁定原请求 |
 | `AGENT_FOLLOWUP_LIMIT_EXCEEDED` | 每份报告最多 100 条问答；提示新建对话 |
 | `AGENT_FOLLOWUP_CONTEXT_LIMIT` | 单次提示最多 262144 字节；支持 Read/Grep 时，较长历史保存在完整历史文件中，提示放入索引和可容纳的最近问答。仍无法满足限额时拒绝提交 |
 | `AGENT_FOLLOWUP_INVALID_CURSOR` | 分页游标无效返回 400，重新读取最新页；事件游标超出范围返回 409，重新 GET 快照并续订独立事件流 |
 | `AGENT_FOLLOWUP_NOT_FOUND` | 提示追问不存在或已删除 |
 | `AGENT_IDEMPOTENCY_CONFLICT` | 核对原 ID 和文字，不将冲突请求换 ID 自动补发 |
 
-服务重启时，仍处于 `QUEUED`、尚未开始且资源仍可用的已受理追问，会在功能启用时继续执行，即使此时刚超过 15 天期限；资源清理须等任务结束。如果功能关闭，排队任务会取消。原先处于 `RUNNING` 的任务无法确认模型执行结果，会标为 `INTERRUPTED`，不会自动重跑；期限内可新发一条问题。取消、失败和中断也保留在问答记录中。报告追问不接收新日志、不重写正式报告；需要这些操作时使用“继续诊断”。专用 `strict` / `advisory` 报告追问不属于首版能力。
+服务重启时，仍处于 `QUEUED`、尚未开始且资源仍可用的已受理追问，会在功能启用时继续执行，即使此时刚超过 15 天期限；资源清理须等任务结束。如果功能关闭，排队任务会取消。原先处于 `RUNNING` 的任务无法确认模型执行结果，会标为 `INTERRUPTED`，不会自动重跑；期限内可新发一条问题。已完成的交接读取原 `diagnosis_run_id`，不能再次创建新轮次。取消、失败和中断也保留在问答记录中。追问可提交补充日志，但不会覆盖旧正式报告；需要诊断时另行发布关联新版。专用 `strict` / `advisory` 报告追问不属于首版能力。
 
 每条回答的 `context_mode` 为 `REPORT_ONLY` 或 `REPORT_AND_LOGS`。前者只依据报告和已有问答；后者可读取原日志副本。日志后来准备好，也不能把较早的 `REPORT_ONLY` 回答显示成已核对日志。
 
 长对话不会删除较早问答。支持只读 Read/Grep 的运行命令可从 `inputs/history.md` 查阅完整历史，单次提示同时提供历史索引和能容纳的最近问答。命令不支持此能力，或原问题、报告与当前追问仍超过单次提示限额时，返回 `AGENT_FOLLOWUP_CONTEXT_LIMIT`。网页继续按原分页接口展示完整问答，不需要读取服务端工作区文件。
 
-新网站在诊断中发送补充时必须携带保存的 `target_run_id`，把发送固定到仍未交付报告的当前轮。协议仅为兼容旧客户端允许省略此字段。报告刚好生成或轮次变化时会返回 `409 / AGENT_RUN_CHANGED`；先重新读取同一 `run_id`，确认报告已生成后将文字送到 followups，不能重发一条不带目标轮次的消息。附件不进入追问；需要新日志时使用“继续诊断”预览并确认，独立问题使用新建对话。追问失败也不能退回旧消息接口。
+新网站在诊断中发送补充时必须携带保存的 `target_run_id`，把发送固定到仍未交付报告的当前轮。协议仅为兼容旧客户端允许省略此字段。报告刚好生成或轮次变化时会返回 `409 / AGENT_RUN_CHANGED`；先重新读取同一 `run_id`，确认报告已生成后将文字及已上传附件 IDs 送到 followups，不能重发一条不带目标轮次的消息。独立问题使用新建对话。追问失败也不能退回旧消息接口。
 
 共用输入框可直接复用 `conversation-input.js`。它按页面已确认的报告状态选择入口，为诊断补充强制带上 `target_run_id`，只在上述 409 竞态后重新查询并转为报告追问。调用前由网站保存以下全部参数，重试保持原值，尤其不要因报告后来生成就修改 `reportReady`；响应丢失时必须先让原入口命中旧收据，避免同一补充又触发一次追问。
 
@@ -172,6 +166,6 @@ const result = await sendConversationInput({
 
 运行 `node examples/website-agent/preview.mjs` 后，选择“通用 Markdown”或“旧报告追问”，可体验连续提问、仅依据报告回答、停止、刷新记录及报告切换。“新建对话并开始定位”会调用 create 再 send，追问表单只调用 followups。预览是浏览器内的合成数据，刷新整个页面会重置模拟服务，不能用于证明服务端持久化。
 
-继续诊断预览中，输入固定样例“请解释报告中的结论。”，不另填目标、变更说明或新日志，可体验 `FOLLOWUP` 页面及发送后的问答区。这个固定样例仅用于离线演示；线上语义判断由服务端完成。`continuation.test.mjs` 覆盖草稿兼容、纯追问不能确认、跨刷新重试、成功后防重复发送和原报告版本不变。
+统一追问预览用于检查普通答复、补日志、诊断交接和版本对比的页面状态。离线合成结果只验证接入和展示，不能证明线上模型判断正确。`continuation.test.mjs` 保留旧草稿兼容、纯追问不能确认、跨刷新重试与原报告版本不变的覆盖；统一入口还应检查重复交接事件和刷新不重复开案。
 
 `examples/website-agent/followup.test.mjs` 由原有 `server.test.mjs` Gate 导入，覆盖 DTO/轮次校验、BFF 登录和 owner、SSE 分片回放、游标越界恢复、响应丢失重试、迟到回执、旧页覆盖竞态、跨报告停止、安全文本展示及离线预览。正式验收仍使用仓库 Test Flow 的 `verdict.json`；这些确定性测试不调用模型，也不替代真实 Agent 的只读日志验证。

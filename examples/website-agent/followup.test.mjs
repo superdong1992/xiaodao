@@ -58,7 +58,7 @@ test("followup SDK preserves identities, explicit cursor, CSRF and original send
     assert.equal(init.credentials, "same-origin"); assert.equal(init.redirect, "error");
   }
   for (const input of [{ request_id: "x", text: " " }, { request_id: "x", text: "中".repeat(21846) },
-    { request_id: "x", text: "正常", attachment_ids: [] }]) await assert.rejects(client.followups.send(cid, rid, input), TypeError);
+    { request_id: "x", text: "正常", attachment_ids: ["invalid"] }]) await assert.rejects(client.followups.send(cid, rid, input), TypeError);
 });
 
 test("new website supplements always target the selected active run", async () => {
@@ -83,16 +83,16 @@ test("a report completion race refreshes the same run and switches once to follo
   assert.equal(result.kind, "followup"); assert.deepEqual(trace, ["message", "get", "followup"]);
 });
 
-test("followup rejection never falls back to messages, and completed reports cannot accept new logs", async () => {
+test("followup rejection never falls back to messages, including requests with new logs", async () => {
   let asks = 0;
   const client = { conversations: { get: async () => ({ conversation_id: cid, selected_run_id: rid,
     current_run: { run_id: other }, report_state: "READY" }), send: () => assert.fail("追问失败不能退回旧消息") },
   followups: { send: async () => { asks++; throw new AgentApiError("功能关闭", { status: 409, code: "AGENT_FOLLOWUP_DISABLED" }); } } };
   await assert.rejects(sendConversationInput({ client, conversationId: cid, runId: rid, requestId: "one", text: "解释", reportReady: true }),
     (error) => error.code === "AGENT_FOLLOWUP_DISABLED");
-  await assert.rejects(sendConversationInput({ client, conversationId: cid, runId: rid, requestId: "logs", attachmentIds: [fid], reportReady: true }),
-    (error) => error.code === "WEBSITE_FOLLOWUP_TEXT_ONLY");
-  assert.equal(asks, 1);
+  await assert.rejects(sendConversationInput({ client, conversationId: cid, runId: rid, requestId: "logs", text: "核对日志", attachmentIds: [fid], reportReady: true }),
+    (error) => error.code === "AGENT_FOLLOWUP_DISABLED");
+  assert.equal(asks, 2);
 });
 
 test("a lost diagnostic message response retries its original entry even after report completion", async () => {

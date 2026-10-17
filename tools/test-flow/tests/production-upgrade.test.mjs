@@ -49,7 +49,10 @@ test("累计清单覆盖资源清理的前端兼容和各增量功能的部署�
     "website-answer-feedback-upgrade.md", "../usage-stats-reference/INTEGRATION.md"]) {
     assert.ok(guide.includes(`](${target})`), `缺少专项说明入口 ${target}`);
   }
-  assert.ok(hasParagraph(guide, /继续诊断/u, /不依赖/u, /REPORT_FOLLOWUP_ENABLED/));
+  assert.ok(hasParagraph(guide, /新版网站/u, /同一入口/u, /启用\s*REPORT_FOLLOWUP_ENABLED\s*后/u, /交接/u),
+    "统一追问及自动交接必须说明启用 REPORT_FOLLOWUP_ENABLED 的前提");
+  assert.ok(hasParagraph(guide, /旧草稿 API/u, /独立于|不依赖/u, /REPORT_FOLLOWUP_ENABLED/, /确认/u),
+    "旧草稿确认接口仍独立于追问开关，不能把统一入口的开关要求套用到旧接口");
   assert.ok(hasParagraph(guide, /参考实现/u, /尚未接入/u, /追问/u));
   assert.ok(hasParagraph(guide, /两个/u, /后台/u, /无新增/u));
   assert.doesNotMatch(read("README.md"), /本轮明确选择的一份产品日志归档/u);

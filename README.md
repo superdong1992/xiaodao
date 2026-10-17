@@ -16,7 +16,7 @@
 
 部署后先看[网站 Agent 快速接入与联调清单](docs/website-agent-quickstart.md)，再查[完整 API 参考](docs/website-agent-api.md)和[TypeScript 后端示例](examples/website-agent/README.md)。服务的 `/docs` 提供在线接口说明，`/openapi.json` 提供接口定义文件。
 
-报告完成后继续解释、质疑或补充分析，按[报告追问接入说明](docs/website-report-followup.md)适配网站。追问使用独立接口、数据表和可回放事件流，默认关闭；原有诊断、报告、下载和赞踩保持原有行为。
+报告完成后的提问、更正和补日志统一使用[报告追问入口](docs/website-report-followup.md)。xiaodao 核对上下文后直接回答，或在材料足够但需要诊断工具时建立关联轮次；缺少用户材料时先在同一问答中索要。功能默认关闭，使用独立接口、数据表和可回放事件流。新报告发布前保留旧报告，原下载和赞踩不被覆盖。
 
 网站负责用户登录，BFF 默认透传 Cookie，由 Problem Locator 从 Redis 的 `user.userid` 计算稳定的 `owner_key` 并检查会话归属；显式使用 `trusted_header` 时才由原 BFF 登录模块计算身份。部署方须限制哪些来源可以访问 xiaodao，浏览器不得直接指定会话所属用户。会话详情格式已升级为 v3，事件格式已升级为 v2，网站与服务端需一起升级。底层独立 Case 和七个 MCP 工具继续保留。
 

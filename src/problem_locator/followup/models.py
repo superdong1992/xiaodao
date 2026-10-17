@@ -24,6 +24,7 @@ class FollowupModel(BaseModel):
 class FollowupRequest(FollowupModel):
     request_id: str = Field(min_length=1, max_length=128, pattern=r"\S")
     text: str = Field(min_length=1, max_length=MAX_TEXT_BYTES, pattern=r"\S")
+    attachment_ids: list[OpaqueId] = Field(default_factory=list, max_length=20)
 
     intent: Literal["CORRECTION"] | None = None
     target_followup_id: OpaqueId | None = None
@@ -59,13 +60,17 @@ class FollowupItem(FollowupModel):
     status: FollowupStatus
     context_mode: ContextMode
     text: str
+    attachment_ids: list[OpaqueId] = Field(default_factory=list, max_length=20)
     answer_markdown: str | None = None
+    diagnosis_run_id: OpaqueId | None = None
     failure: FollowupFailure | None = None
     created_at: ServiceTimestamp
     updated_at: ServiceTimestamp
 
     @model_validator(mode="after")
     def coherent_result(self):
+        if self.diagnosis_run_id is not None and (self.status != "COMPLETED" or self.diagnosis_run_id == self.run_id):
+            raise ValueError("继续诊断必须关联新的轮次，并已完成追问交接。")
         if (self.status == "COMPLETED") != (self.answer_markdown is not None):
             raise ValueError("回答正文必须与追问完成状态一致。")
         if self.answer_markdown is not None and (
@@ -74,6 +79,23 @@ class FollowupItem(FollowupModel):
         if (self.status in {"FAILED", "INTERRUPTED"}) != (self.failure is not None):
             raise ValueError("失败说明必须与追问状态一致。")
         return self
+
+
+class DiagnosisDecision(FollowupModel):
+    """Internal handoff, produced by the same invocation that answers a question."""
+
+    action: Literal["CONTINUE_DIAGNOSIS"]
+    effective_problem_text: str = Field(min_length=1, max_length=MAX_TEXT_BYTES, pattern=r"\S")
+    diagnosis_goal: str = Field(min_length=1, max_length=8192, pattern=r"\S")
+    reason: str = Field(min_length=1, max_length=4096, pattern=r"\S")
+    log_mode: Literal["APPEND", "REPLACE"] = "APPEND"
+
+    @field_validator("effective_problem_text", "diagnosis_goal", "reason")
+    @classmethod
+    def text_bytes(cls, value):
+        if len(value.encode("utf-8")) > MAX_TEXT_BYTES:
+            raise ValueError("继续诊断的单项内容不能超过 65536 字节。")
+        return value
 
 
 class FollowupView(FollowupModel):

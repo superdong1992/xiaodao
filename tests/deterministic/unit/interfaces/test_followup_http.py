@@ -65,7 +65,7 @@ def test_submit_list_stop_keep_identity_and_owner(agent):
 
 @pytest.mark.parametrize("method,path,kwargs", [
     ("POST", "", {"json": {"request_id": "id", "text": " ",}}),
-    ("POST", "", {"json": {"request_id": "id", "text": "说明", "attachment_ids": []}}),
+    ("POST", "", {"json": {"request_id": "id", "text": "说明", "attachment_ids": ["invalid"]}}),
     ("POST", "?unexpected=1", {"json": {"request_id": "id", "text": "说明"}}),
     ("GET", "?limit=0", {}), ("GET", "?limit=1&limit=2", {}),
     ("GET", "?unknown=x", {}), ("GET", "", {"content": b"{}"}),
@@ -114,7 +114,37 @@ def test_new_routes_do_not_change_existing_sse_or_detail_versions():
     assert schemas["ConversationDetailResponse"]["properties"]["schema_version"]["const"] == 3
     assert schemas["FollowupEvent"]["properties"]["schema_version"]["const"] == 1
     assert schemas["FollowupRequest"]["additionalProperties"] is False
-    assert set(schemas["FollowupRequest"]["properties"]) == {"request_id", "text", "intent", "target_followup_id"}
+    assert set(schemas["FollowupRequest"]["properties"]) == {"request_id", "text", "attachment_ids", "intent", "target_followup_id"}
+
+
+def test_same_followup_endpoint_accepts_uploaded_logs_and_returns_durable_handoff(agent):
+    attachment = "60000000-0000-0000-0000-000000000002"
+    response = run_request(agent, "POST", ROOT, json={
+        "request_id": "with-logs", "text": "结合服务端日志再看看原因", "attachment_ids": [attachment]})
+    assert response.status_code == 200
+    assert agent.followups.calls[-1][3]["attachment_ids"] == [attachment]
+    next_run = "60000000-0000-0000-0000-000000000003"
+    original = agent.followups.get
+    def handed_off(*args, **kwargs):
+        value = original(*args, **kwargs)
+        value["items"] = [{**ITEM, "attachment_ids": [attachment], "diagnosis_run_id": next_run}]
+        return value
+    agent.followups.get = handed_off
+    response = run_request(agent, "GET", ROOT)
+    item = response.json()["data"]["items"][0]
+    assert item["run_id"] == RUN and item["diagnosis_run_id"] == next_run
+
+
+def test_expired_supplement_log_is_an_actionable_410_not_an_uncertain_retry(agent):
+    def expired(*args, **kwargs):
+        raise AgentStoreError("AGENT_RESOURCE_EXPIRED", "日志已清理，请重新上传。", 410)
+    agent.followups.submit = expired
+    response = run_request(agent, "POST", ROOT, json={
+        "request_id": "expired", "text": "请核对日志", "attachment_ids": [FID]})
+    assert response.status_code == 410
+    assert response.json()["error"]["code"] == "AGENT_RESOURCE_EXPIRED"
+    assert "410" in app_for(FakeAgent()).openapi()["paths"][
+        "/api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups"]["post"]["responses"]
 
 
 class Feedback:

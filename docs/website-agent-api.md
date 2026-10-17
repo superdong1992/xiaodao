@@ -8,7 +8,7 @@ Web 会话正文、报告和历史问答永久保存，用户主动删除时再�
 
 每条回答赞踩、独立文字负反馈和管理员资料接入见[本次增量适配说明](website-answer-feedback-upgrade.md)。原报告评价接口不变，旧网站无需强制适配新能力。
 
-报告后的解释、质疑和文字补充请接入[报告追问](website-report-followup.md)。追问使用独立接口和 schema_version=1 的事件流，不修改正式报告和赞踩。新页面在同一会话内连续追问；独立定位统一新建对话。原消息接口的新轮行为仍保留兼容，但追问失败后不能退回消息接口。
+报告后的提问、更正和补日志统一接入[报告追问](website-report-followup.md)。xiaodao 在同一次追问调用中判断：能回答则直接答复；材料足够但需 Skill、解析或验证时建立关联诊断；缺少用户材料时在同一入口索要。追问保留独立接口和 schema_version=1 的事件流，旧正式报告和赞踩不会被覆盖。新页面不再要求用户选择第二个继续诊断入口；独立问题仍新建对话。原消息接口的新轮行为保留兼容，但追问失败后不能退回消息接口。
 
 适用于 xiaodao `8.2.0`、V11 / `v11-contract-r3`。网站把用户原话和日志交给 xiaodao，展示追问、执行进度和经过服务端验证的定位报告。一个会话包含多轮独立诊断，历史消息、追问和结果按轮次保留。页面所需的信息从会话接口读取，文件单独流式传输。会话查询响应的版本为 `schema_version=3`；SSE 为 schema_version=2，报告内部数据格式仍为 schema 3。
 
@@ -64,7 +64,7 @@ Web 会话正文、报告和历史问答永久保存，用户主动删除时再�
 | 会话 | `PUT /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/feedback` | JSON：`request_id`、`rating`（`LIKE` 或 `DISLIKE`） |
 | 会话 | `POST /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/feedback/comments` | 独立文字负反馈：`request_id`，可选 `text`、`analysis_text`、`analysis_reference`；首次须已点踩，不产生聊天回答 |
 | 会话 | `GET /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups` | 指定报告的追问快照，支持 `cursor`、`limit`，默认最新 50 条、最大 100 条 |
-| 会话 | `POST /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups` | 提交追问，JSON：稳定 `request_id` 和非空 `text`；纠正可加 `intent=CORRECTION`、`target_followup_id`；会调用模型 |
+| 会话 | `POST /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups` | 统一提交追问和补日志，JSON：稳定 `request_id`、非空 `text`、可选 `attachment_ids`；纠正可加 `intent=CORRECTION`、`target_followup_id`；会调用模型 |
 | 会话 | `GET /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups/events` | 独立追问 SSE，可带 `Last-Event-ID`，不混入诊断事件流 |
 | 会话 | `POST /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/followups/{followup_id}/stop` | 停止指定追问，JSON：稳定 `request_id` |
 | 会话 | `POST /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/continuation-drafts` | 从最新报告准备继续诊断草稿，尚未创建新轮次 |
@@ -439,7 +439,8 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | 模型 | 字段 | 含义 |
 | --- | --- | --- |
 | `FollowupRequest` | `request_id` | 1 到 128 个 Unicode 字符，不能全为空白；同一逻辑请求重试保持原 ID。 |
-| `FollowupRequest` | `text` | 非空白文字，最多 65536 字符且最多 65536 UTF-8 字节；不接受附件。 |
+| `FollowupRequest` | `text` | 非空白文字，最多 65536 字符且最多 65536 UTF-8 字节；随日志提交时说明本次问题。 |
+| `FollowupRequest` | `attachment_ids` | 可选，默认空数组，最多 20 个同会话已上传日志 UUID；重试保留原完整集合，不在此接口上传文件字节。 |
 | `FollowupRequest` | `intent` | 可选 `CORRECTION`，明确指出纠正；省略或 null 为普通追问。 |
 | `FollowupRequest` | `target_followup_id` | 仅纠正可带非空 UUID，指向同轮已完成回答；省略或 null 时纠正原报告。 |
 | `FollowupStopRequest` | `request_id` | 停止操作的稳定请求 ID，限制与提交相同。 |
@@ -452,7 +453,9 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `FollowupItem` | `status` | `QUEUED`、`RUNNING`、`CANCELLING`、`COMPLETED`、`FAILED`、`INTERRUPTED` 或 `CANCELLED`。 |
 | `FollowupItem` | `context_mode` | `REPORT_ONLY` 仅依据报告和已有问答，或 `REPORT_AND_LOGS` 可结合原日志。 |
 | `FollowupItem` | `text` | 保存的原始追问文字。 |
-| `FollowupItem` | `answer_markdown` | 完成后返回 Markdown 答复，最多 65536 UTF-8 字节；其他状态为 null。 |
+| `FollowupItem` | `attachment_ids` | 本次追问提交的日志 UUID；旧记录缺少此字段时按空数组处理。 |
+| `FollowupItem` | `answer_markdown` | 完成后返回 Markdown 答复或诊断交接说明，最多 65536 UTF-8 字节；其他状态为 null。交接说明不是新版正式报告。 |
+| `FollowupItem` | `diagnosis_run_id` | 后端已原子创建的关联诊断轮次 UUID；普通回答为 null，旧记录可能缺省。读取此轮进度，不因刷新或事件重放重复创建。 |
 | `FollowupItem` | `failure` | 失败或中断时返回 `FollowupFailure`，其他状态为 null。 |
 | `FollowupItem` | `created_at` | 追问首次保存的服务时间。 |
 | `FollowupItem` | `updated_at` | 追问状态最近变化的服务时间。 |
@@ -488,6 +491,12 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `FollowupEvent` | `data` | 最新 `FollowupItem`，用于替换该追问的状态和答复。 |
 | `FollowupEventBatch` | `events` | 服务内部一次读取的追问事件数组；HTTP 按 SSE 逐条发送。 |
 | `FollowupEventBatch` | `stream_closed` | 当前轮的追问是否全部终止且没有后续事件。 |
+
+普通回答只调用一次追问模型，不创建 Case。内部 `CONTINUE_DIAGNOSIS` 决策仅在材料足够且需要诊断工具时触发新轮次；缺少必须由用户补充的材料时直接在问答中索要。原追问完成与关联 run 创建在同一事务提交，历史记录与 SSE 使用同一 `diagnosis_run_id`。新报告发布前继续展示旧报告；新轮失败不会撤销旧报告或推进已发布版本。带 `diagnosis_run_id` 的交接项返回 `can_rate=false`，不能提交赞踩或文字负反馈，也不会进入经验提炼。新报告和其他普通回答的评价仍各自独立。
+
+关联轮次进入 `WAITING_INPUT` 时，同一输入区展示后端 `current_questions`，补充通过既有诊断消息接口发送，`target_run_id` 固定为该 `diagnosis_run_id`。原追问仍绑定旧报告；不能把补充继续发往旧报告 followups，也不能读取尚未生成的新报告追问。该场景遇到 `409 / AGENT_RUN_CHANGED` 时刷新原目标，不自动转发追问。新报告就绪后再切换版本。页面只依据后端状态选择提交目标，不另做意图判断。
+
+追问提交的日志已清理或附件已失效时，服务端可返回 `410 / AGENT_RESOURCE_EXPIRED` 或 `AGENT_ATTACHMENT_EXPIRED`。网站 BFF 保留 410；浏览器可清除已明确拒绝的待重试请求，让用户移除过期附件或重新上传。不能把此响应包装成未知的 502，否则页面会一直保留不能成功的原请求。
 
 ### 会话管理字段对照
 
@@ -558,6 +567,8 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `AgentEvent` | `run_id` | 该事件所属轮次；sequence 仍在整个会话递增。 |
 
 ### 继续诊断字段
+
+以下显式草稿接口供旧客户端兼容使用。新版页面通过统一追问入口自动交接，仅继续使用版本列表和报告对比，不要求用户先创建或确认草稿。
 
 主流程和页面接入见[继续诊断与报告版本](website-report-followup.md#继续诊断与报告版本)。创建、修改和确认分别使用稳定的请求 ID；草稿只是待确认输入，GET 不触发模型或诊断。普通追问继续保留原接口。
 
@@ -889,7 +900,7 @@ node --test examples/website-agent/server.test.mjs
 
 历史兼容说明：早期 `8.0.0` 预览版曾把命名事件改成只含 data 的事件帧，那次 SSE 调整本身没有改变 V11 数据格式。仍使用旧版 `event:` 监听器的网站须改用 `onmessage`，从 JSON 读取 `type` 和 `sequence`，不再依赖 `lastEventId` 或服务端 `retry:`。这段历史说明不代表本次 8.1 升级无需处理数据格式变化。
 
-`INTAKE_CLAUDE_COMMAND` 配置信息整理角色的独立命令；未设置时沿用路由角色命令。该角色按已创建 Case 的 requirements 整理补充参数，也可在继续诊断确认前整理一次自然语言更正草稿；不使用诊断工具、不读取日志，也不发布报告。只有用户确认草稿后才创建新的正式诊断。
+`INTAKE_CLAUDE_COMMAND` 配置信息整理角色的独立命令；未设置时沿用路由角色命令。该角色按已创建 Case 的 requirements 整理补充参数，也可为旧版继续诊断接口整理一次自然语言更正草稿；不使用诊断工具、不读取日志，也不发布报告。旧草稿接口只有在用户确认后才创建正式诊断；新版统一追问由同一次追问模型判断是否需要诊断工具，后端据此交接关联轮次，不额外调用 INTAKE 分类。
 
 `METHODS_EVIDENCE_VALIDATION` 当前默认为 `off`：直接交付 Skill Markdown，关闭输出后的依据核验、证据一致性复核、Candidate 语义判定和独立 Reviewer。即使旧配置仍有 `SPECIALIZED_REVIEWER_ENABLED=true`，也不会启动审核。模型执行前的 Logparse、固定日志快照、marker 扫描和命中方法卡加载保持不变。新 Job 使用创建时固定的 `agent-profile/skill-direct` 和 `output-contract/skill-direct`，保持 `SPECIALIZED` 模式与 `selected_skill_ref`；Case 使用 `generic_result_v2` 记录 Markdown 和实际 `skill_name`。已有 Job 保留创建时固定的配置标识。升级或切换策略前，应先结束活跃任务，再重启服务。
 

@@ -9,7 +9,7 @@ import base64
 import hashlib
 import json
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import timedelta
 
 from problem_locator.agent.models import AgentStoreError
@@ -19,7 +19,7 @@ from problem_locator.storage.database import (dialect_for, lock_conversation, lo
 from problem_locator.timestamps import format_timestamp, now_timestamp, parse_timestamp
 
 from .context import build_prompt
-from .models import (ACTIVE, MAX_TURNS, FollowupEvent, FollowupEventBatch, FollowupFailure,
+from .models import (ACTIVE, MAX_TEXT_BYTES, MAX_TURNS, FollowupEvent, FollowupEventBatch, FollowupFailure,
     FollowupItem, FollowupReceipt, FollowupSource, FollowupStopReceipt)
 
 _TABLES = ("agent_followup_metadata", "agent_followup_snapshots", "agent_followup_tasks",
@@ -237,18 +237,21 @@ class FollowupStore:
             db.execute("UPDATE agent_followup_snapshots SET status='FAILED',error_code=?,updated_at=? WHERE run_id=? AND status IN ('PENDING','BUILDING')", (code, self.now(), rid))
 
     @staticmethod
-    def _fingerprint(rid, text, *, intent=None, target_followup_id=None):
+    def _fingerprint(rid, text, *, intent=None, target_followup_id=None, attachment_ids=()):
         # Existing ordinary requests must replay after the storage upgrade.
         value = [rid, text] if intent is None else [rid, text, intent, target_followup_id]
+        if attachment_ids:
+            value.append(list(attachment_ids))
         return hashlib.sha256(_json(value).encode()).hexdigest()
 
-    def request(self, cid, rid, request_id, text, owner, *, intent=None, target_followup_id=None):
+    def request(self, cid, rid, request_id, text, owner, *, intent=None, target_followup_id=None, attachment_ids=()):
         with self.repository.database_read() as db:
             self.scope(db, cid, rid, owner)
             row = _one(db, "SELECT * FROM agent_followup_tasks WHERE conversation_id=? AND request_id=?", (cid, request_id))
             if row is None:
                 return None
-            if row["fingerprint"] != self._fingerprint(rid, text, intent=intent, target_followup_id=target_followup_id):
+            if row["fingerprint"] != self._fingerprint(rid, text, intent=intent,
+                    target_followup_id=target_followup_id, attachment_ids=attachment_ids):
                 raise AgentStoreError("AGENT_IDEMPOTENCY_CONFLICT", "同一 request_id 的内容不能更改。", 409)
             return FollowupReceipt.model_validate_json(row["receipt"])
 
@@ -267,12 +270,13 @@ class FollowupStore:
         clause, args = ("", (rid,)) if before is None else (" AND ordinal<?", (rid, before))
         return [json.loads(row[0]) for row in db.execute("SELECT body FROM agent_followup_tasks WHERE run_id=?" + clause + " ORDER BY ordinal", args)]
 
-    def submit(self, cid, rid, request, source, owner, *, logs_supported=True):
+    def submit(self, cid, rid, request, source, owner, *, logs_supported=True, attachment_ids=None):
         with self.repository.database_transaction() as db:
             lock_conversation(db, cid)
             self.scope(db, cid, rid, owner)
             previous = _one(db, "SELECT * FROM agent_followup_tasks WHERE conversation_id=? AND request_id=?", (cid, request.request_id))
-            fingerprint = self._fingerprint(rid, request.text, intent=request.intent, target_followup_id=request.target_followup_id)
+            fingerprint = self._fingerprint(rid, request.text, intent=request.intent,
+                target_followup_id=request.target_followup_id, attachment_ids=request.attachment_ids)
             if previous is not None:
                 if previous["fingerprint"] != fingerprint:
                     raise AgentStoreError("AGENT_IDEMPOTENCY_CONFLICT", "同一 request_id 的内容不能更改。", 409)
@@ -294,7 +298,9 @@ class FollowupStore:
                 raise fail("CONTEXT_LIMIT", "追问上下文已达到上限，请新建对话。", 413) from None
             fid, now = str(uuid.uuid4()), self.now()
             item = FollowupItem(followup_id=fid, run_id=rid, request_id=request.request_id,
-                ordinal=len(history) + 1, status="QUEUED", context_mode=mode, text=request.text, created_at=now, updated_at=now)
+                ordinal=len(history) + 1, status="QUEUED", context_mode=mode, text=request.text,
+                attachment_ids=request.attachment_ids if attachment_ids is None else attachment_ids,
+                created_at=now, updated_at=now)
             sequence = self._append(db, cid, item, "followup.accepted")
             receipt = FollowupReceipt(conversation_id=cid, run_id=rid, followup_id=fid,
                 request_id=request.request_id, event_id=sequence)
@@ -333,7 +339,7 @@ class FollowupStore:
                 json.loads(row["correction_json"]), self._history(db, rid, row["ordinal"]))
 
     def _enqueue_correction(self, db, row, item):
-        if self.memory_store is None:
+        if self.memory_store is None or item.diagnosis_run_id is not None:
             return
         correction = json.loads(row["correction_json"])
         if not correction:
@@ -403,13 +409,14 @@ class FollowupStore:
             busy = db.execute("SELECT 1 FROM agent_followup_tasks WHERE run_id=? AND status IN ('QUEUED','RUNNING','CANCELLING')", (rid,)).fetchone()
             return FollowupEventBatch(events=events, stream_closed=busy is None and (events[-1].sequence if events else after) >= last)
 
-    def _transition(self, db, row, status, *, answer=None, code=None, emit=True):
+    def _transition(self, db, row, status, *, answer=None, code=None, emit=True, diagnosis_run_id=None):
         old = FollowupItem.model_validate_json(row["body"])
         if old.status == status:
             return old
         failure = None if code is None else FollowupFailure(code=code, message=_FAILURES[code])
         item = FollowupItem.model_validate({**old.model_dump(), "status": status,
-            "answer_markdown": answer, "failure": None if failure is None else failure.model_dump(), "updated_at": self.now()})
+            "answer_markdown": answer, "diagnosis_run_id": diagnosis_run_id,
+            "failure": None if failure is None else failure.model_dump(), "updated_at": self.now()})
         db.execute("UPDATE agent_followup_tasks SET status=?,body=? WHERE followup_id=?", (status, _json(item), item.followup_id))
         if emit and self.alive(db, row["conversation_id"], row["run_id"]):
             self._append(db, row["conversation_id"], item, "followup.updated")
@@ -439,10 +446,21 @@ class FollowupStore:
 
     def task_context(self, task):
         with self.repository.database_read() as db:
-            source = _one(db, "SELECT * FROM agent_followup_snapshots WHERE run_id=?", (task["run_id"],))
+            effective_text = dialect_for(db).json_text("r.body", "$.report_inputs.effective_problem_text")
+            source = _one(db, "SELECT s.*," + effective_text + " AS effective_problem_text "
+                "FROM agent_followup_snapshots s LEFT JOIN agent_conversation_runs r "
+                "ON r.run_id=s.run_id AND r.conversation_id=s.conversation_id WHERE s.run_id=?", (task["run_id"],))
             if source is None:
                 raise ValueError("followup source was removed")
-            return self._source(source), self._history(db, task["run_id"], task["ordinal"]), source
+            current = self._source(source)
+            effective = source.pop("effective_problem_text")
+            if effective is not None:
+                if not isinstance(effective, str) or not effective.strip() or len(effective.encode("utf-8")) > MAX_TEXT_BYTES:
+                    raise ValueError("confirmed problem exceeds the followup input contract")
+                # Old snapshots may predate capture of named facts. Keep their
+                # log bytes immutable and use the run's adopted text in context.
+                current = replace(current, problem_text=effective)
+            return current, self._history(db, task["run_id"], task["ordinal"]), source
 
     def execution_allowed(self, fid):
         with self.repository.database_read() as db:

@@ -16,7 +16,7 @@
 
 本次沿用当前版本演进，不另起 8.3 版本。新增接口不改变七个 MCP 工具，也不要求旧网站立刻上线文字反馈。部署后以在线 OpenAPI 中的两个 POST 路径为准。
 
-按钮、反馈输入框和页面布局由网站实现。本次没有新增 SSE 事件、经验管理界面或提炼状态展示。原 FollowupItem、FollowupView、提交回执和追问事件的字段与 schema_version 均不变。
+按钮、反馈输入框和页面布局由网站实现。文字反馈本身不新增 SSE 事件、经验管理界面或提炼状态展示。统一追问另在 `FollowupItem` 增加 `attachment_ids` 和可空 `diagnosis_run_id`，旧记录缺省时分别按空数组和 null 处理；`FollowupView`、提交回执和追问事件沿用原 schema_version。带 `diagnosis_run_id` 的交接说明不是回答结论，`can_rate=false`，不接受赞踩、文字意见或经验提炼。新版正式报告发布后使用其自己的 run_id 评价，不能复用旧报告或交接项的投票目标。
 
 ## 每条回答独立评价
 

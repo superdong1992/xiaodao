@@ -11,10 +11,13 @@ const bounded = (value) => typeof value === "string" && encoder.encode(value).le
 export const validFollowupId = (value) => typeof value === "string" && UUID.test(value);
 export const validFollowupRequestId = (value) => typeof value === "string" && !!value.trim() && [...value].length <= 128;
 export const validFollowupText = (value) => bounded(value) && !!value.trim() && [...value].length <= 65536;
+export const validFollowupAttachments = (value) => Array.isArray(value) && value.length <= 20 &&
+  value.every(validFollowupId) && new Set(value).size === value.length;
 /** 纠正仍走追问入口；不允许普通问题悄悄携带纠正目标。 */
 export function validFollowupInput(value) {
   return record(value) && validFollowupRequestId(value.request_id) && validFollowupText(value.text) &&
-    Object.keys(value).every((key) => ["request_id", "text", "intent", "target_followup_id"].includes(key)) &&
+    Object.keys(value).every((key) => ["request_id", "text", "intent", "target_followup_id", "attachment_ids"].includes(key)) &&
+    (!Object.hasOwn(value, "attachment_ids") || validFollowupAttachments(value.attachment_ids)) &&
     (!Object.hasOwn(value, "intent") || value.intent === null || value.intent === "CORRECTION") &&
     (!Object.hasOwn(value, "target_followup_id") || value.target_followup_id === null || value.intent === "CORRECTION" && validFollowupId(value.target_followup_id));
 }
@@ -36,7 +39,10 @@ function requireValid(condition) {
   if (!condition) throw new TypeError("追问响应与所选报告不一致或格式无效。");
 }
 export function validateFollowupItem(value, runId) {
-  requireValid(exact(value, ["followup_id", "run_id", "request_id", "ordinal", "status", "context_mode", "text", "answer_markdown", "failure", "created_at", "updated_at"]) &&
+  const extra = ["attachment_ids", "diagnosis_run_id"].filter((key) => Object.hasOwn(value ?? {}, key));
+  requireValid(exact(value, ["followup_id", "run_id", "request_id", "ordinal", "status", "context_mode", "text", "answer_markdown", "failure", "created_at", "updated_at", ...extra]) &&
+    (!Object.hasOwn(value, "attachment_ids") || validFollowupAttachments(value.attachment_ids)) &&
+    (!Object.hasOwn(value, "diagnosis_run_id") || value.diagnosis_run_id === null || validFollowupId(value.diagnosis_run_id)) &&
     validFollowupId(value.followup_id) && validFollowupId(value.run_id) && (runId === undefined || value.run_id === runId) &&
     validFollowupRequestId(value.request_id) && integer(value.ordinal, 1) && states.includes(value.status) &&
     ["REPORT_ONLY", "REPORT_AND_LOGS"].includes(value.context_mode) && validFollowupText(value.text) &&

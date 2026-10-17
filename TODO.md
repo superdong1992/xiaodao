@@ -4,6 +4,20 @@
 
 本文件是仓库活跃待办的唯一清单。已完成事项由代码、当前设计与 Git 历史证明，不在这里保留关闭项。
 
+## 统一追问入口与自动诊断交接（2026-10-17）
+
+- 当前 `ec37d84` 已确认普通追问只会返回 Markdown，另一个草稿入口才做意图分类。按用户确认的规则，统一入口在同次追问中核对上下文：能回答则直接回答；材料足够但需要 Skill、解析或验证时交接关联诊断；缺少用户材料时先索要。新版页面去掉第二入口，保留补日志、报告版本与对比；旧草稿 API 保留兼容。
+- 关联记录沿用 `FIXED_ISSUES.md` 的 PL-FIX-083（2026-10-17），不把历史草稿入口的 PASS 作为本次结论。交接创建 run 与 `diagnosis_run_id` 必须同事务；普通问答、只读恢复和失败重试不得多调用模型或重复开案。最终验收仍须先看计划，再由正式入口执行完整 `dev.default`，不得调用真实模型或放宽门槛。
+- **反馈兼容专项通过，待推送前完整验证**：新增 `test_followup_handoff_feedback.py` 先复现 2 failed、1 passed；修正后与 `test_answer_feedback_memory.py`、`test_feedback_comments.py` 联合 34 passed，1.31 秒。命令：`.venv/Scripts/python.exe -m pytest tests/deterministic/unit/agent/test_followup_handoff_feedback.py tests/deterministic/unit/agent/test_answer_feedback_memory.py tests/deterministic/unit/agent/test_feedback_comments.py -q --basetemp=.tmp/handoff-feedback-green-20261017 -p no:cacheprovider`。交接说明 `can_rate=false`，拒绝投票、文字意见与学习；普通回答的负反馈和管理员分析资料保持独立。
+- 同次决策与 HTTP 专项：Linux Python 3.12.13，`test_followup_decision.py`、`test_report_followup.py`、`test_followup_http.py`、`test_web_api.py` 联合 97 passed，10.58 秒，使用 `-q --tb=short -p no:cacheprovider --basetemp=/tmp/followup-entry-root-20261017-a1`。真实代码旅程 `test_unified_followup.py`、`test_report_followups.py`、`test_followup_decision.py` 联合 15 passed，14.89 秒，1 条既有 Starlette 警告；覆盖 HTTP 普通回答、交接新案、Generic 解析两包、新报告与版本，旧案不变。均使用确定性模型替身。
+- 交接与真实 PostgreSQL 专项：旧追问、公开确认和新交接联合 70 passed，5.09 秒，产物 `/tmp/followup-handoff-final-20261017`；最终 unit 15 项与 PostgreSQL 4 项联合 19 passed，7.28 秒，1 条既有 Starlette 警告，产物 `/tmp/followup-handoff-projection-20261017`。各轮范围重叠，不累计计数。旧日志快照遮蔽有效补充先复现 1 failed，现同查询投影有效问题，零额外查询且旧快照字节不变；合法 64 KiB 问题的内部 JSON 封装已留余量，普通 Markdown 上限不变。
+- 页面等待补充旅程先复现回归（`51de1e`），现同一追问记录展示后端 `current_questions`，原输入区向后端指定 `diagnosis_run_id` 提交诊断补充，新报告就绪后再更新版本；前端不判断意图。409 未刷新原目标（`fef4d7`）和 BFF 将附件过期 410 改成 502（`4fe2ee`）也已修复：刷新固定目标、不自动改发追问，透传 410 后允许移除或重新上传过期附件。
+- 页面专项 `node --test examples/website-agent/unified-followup.test.mjs examples/website-agent/followup.test.mjs examples/website-agent/continuation.test.mjs examples/website-agent/file-sha256.test.mjs examples/website-agent/browser-client.test.mjs examples/website-agent/preview.test.mjs examples/website-agent/onboarding.test.mjs` 为 122 passed、0 failed，221.842 毫秒，包含新增统一入口 9 项。后端声明 410 后 `test_followup_http.py` 37 passed、4.04 秒，产物 `/tmp/followup-entry-http-410-20261017`。专项通过，本轮仍待最终源码完整验证。
+- 文档检查 `node --test tools/test-flow/tests/website-agent-guide.test.mjs tools/test-flow/tests/rest-api-guide.test.mjs tools/test-flow/tests/docs-drift.test.mjs` 为 50 passed。部署清单同步 `log-upload-controller.js` 及两个哈希文件，旧草稿确认规则不再描述为统一入口的必经步骤。最终结论仅回填 PL-FIX-083 的“2026-10-17，统一追问”最新 verdict 元数据行。
+- 首轮正式 `dev.default` 的 `run-20261017T112218Z-0a8bd7b4` 为 FAIL，快照 `c6a88f288ea5423c9c7f82b3f14802419660ca03a3de86733fbe619bead5e4df`；本机证据保存在 `.tmp/unified-followup-evidence-20261017/run-20261017T112218Z-0a8bd7b4/verdict.json`，不随源码分发。`framework.node-tests` 的旧升级文档断言失败，affected/full 尚未执行。当前工作区专项再次复现 7 passed、1 failed，已将笼统的开关断言改为分别验证“统一追问需启用开关”和“旧草稿确认独立于开关”。代码与文档核对一致，未修改业务实现或性能门槛。
+- **文档断言修正专项通过，待重新完整验证**：`node --test tools/test-flow/tests/production-upgrade.test.mjs tools/test-flow/tests/website-agent-guide.test.mjs tools/test-flow/tests/rest-api-guide.test.mjs tools/test-flow/tests/docs-drift.test.mjs` 为 58 passed、0 failed、0 skipped，311.1995 毫秒。保留首轮 FAIL 与全部证据，重新查看计划后验证修正后的最终源码，不将专项通过写成正式 PASS。
+- 第二轮 `run-20261017T112709Z-63e563c8` 为 FAIL，快照 `b1e17a59b9340ef538209633a398f4755040c9f07225169665ba1e5013b5b571`，本机证据保存在 `.tmp/unified-followup-evidence-20261017/run-20261017T112709Z-63e563c8/verdict.json`。`framework.node-tests` 已通过，`docs.current` 因本文件将忽略目录中的本地证据写成 Markdown 链接而失败，affected/full 仍未执行。现改用明确的本机路径文字和 run ID，保留证据文件与原链接检查；后续须在新 Git 可见源码副本先跑文档专项，再执行正式流程，不能以开发工作区恰有本地证据作为可分发源码已通过的依据。
+
 ## 独立文字负反馈推送验收（2026-10-17）
 
 - 已实现报告和逐条回答的 `POST …/feedback/comments`，不经过追问接口，不改变已有赞踩合同。网站后端可附带自身分析流程的管理员文字资料；浏览器仅提交用户意见。接入、重试快照、权限、数据保留和部署文件清单见 [网站适配说明](docs/website-answer-feedback-upgrade.md)。
