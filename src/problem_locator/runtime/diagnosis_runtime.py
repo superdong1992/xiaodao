@@ -1096,6 +1096,7 @@ class DiagnosisRuntime:
         self._methods_evidence_validation = methods_evidence_validation
         self._public_progress = public_progress
         self._publisher = OutcomePublisher(execution_records, clock, id_generator)
+        self._experience_retriever = experience_retriever
         self._generic_locator_executor = generic_locator_executor or GenericLocatorExecutor(
             backend=self._diagnose_backend,
             workspace_manager=workspace_manager,
@@ -1264,6 +1265,12 @@ class DiagnosisRuntime:
                     "outcome_file_ref": receipt.outcome_file_ref,
                 },
             )
+            selection = getattr(execution, "memory_selection", None)
+            if selection is not None and self._experience_retriever is not None:
+                try:
+                    self._experience_retriever.record_usage(job, selection)
+                except Exception:
+                    log_event("generic_memory.usage_record_failed")
             self._record_produced_outcome(receipt)
             return receipt
         if job.job_type is JobType.ROUTE and not job.available_skill_refs:

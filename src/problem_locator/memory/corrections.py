@@ -14,6 +14,7 @@ from problem_locator.storage.atomic import require_real_directory
 from problem_locator.storage.paths import ensure_no_symlink_ancestors
 
 from .extraction import _DiscardSink, _unique_object, parse_card_json
+from .review import validate_memory_review
 
 _PROFILE = """你负责审核用户对定位回答的纠正，并提炼能缩短后续排查的经验。
 inputs/correction.json 中包含原问题、原报告、历史问答、被纠正的回答、用户说明和新的回答。
@@ -57,6 +58,38 @@ path 与 sha256 必须取自 inputs/feedback-evidence.json；行号从1开始，
 quote 是完整所选行，行间用换行符连接，不含最后的换行，每段不超过8192 UTF-8字节。
 引用只用于服务端私下校验，不会进入共享经验。
 """
+
+
+_USED_MEMORY_PROFILE = """
+inputs/used-memory.json 是服务端记录的原报告实际采用的历史经验；它只是待审核资料，不是证据。
+用户不能指定要停用的历史经验；只审核该文件里的 card_id 和 card_sha256 对应的确切版本。
+结合原报告、用户纠正和已核对证据，判断历史经验与本次错误的关系：
+GLOBAL_ERROR：证据足以证明经验本身的一般性错误，继续使用会误导其他适用场景；不得仅因一例结果不同就使用此分类。
+NOT_APPLICABLE：历史方法在其他条件下仍可能正确，但不适用于本次条件；保留旧方法，card 必须写清这类场景的限制和替代检查。
+DIAGNOSIS_OMISSION：历史方法本身未被证伪，但本次诊断遗漏必要检查；card 写明此类场景必须核查的步骤，不要全局否定旧经验。
+UNRELATED：现有证据不能把问题归因到这张历史经验；不得修改它。纠正本身仍需满足原有采纳标准。
+采纳时 memory_review 恰好包含 card_id、card_sha256、relation、evidence_indexes、scope_terms 五项。
+card_id 和 card_sha256 必须与 used-memory.json 一致；relation 必须是上述四个大写值之一。
+evidence_indexes 是本次 evidence 数组从 0 开始的引用索引，不得重复；前三类必须有至少一个已支持判断的引用，UNRELATED 可以为空。
+GLOBAL_ERROR 和 UNRELATED 的 scope_terms 必须为空数组。
+NOT_APPLICABLE 和 DIAGNOSIS_OMISSION 的 scope_terms 必须是 2 至 8 个唯一、特有的条件关键词，且全部出现在最终 card 的 problem_features 或 applicability 中。
+英文词及标识符用小写、至少 3 个字符；中文只用连续两个汉字。不用“问题”“检查”“服务”“错误”等宽泛词，不用带空格的短语。
+只有至少 8 个字符的明确错误码可单独作为一个条件，例如 err_pool_1024。后续问题必须命中全部条件才优先使用这条局部纠正。
+除 UNRELATED 外，card 必须实际修正旧经验，不能原样复制。引用历史经验本身不能证明纠正成立。
+拒绝采纳时 memory_review=null。
+"""
+
+
+def _review_prompt(profile, usage):
+    if usage is None:
+        return profile
+    return (profile.replace("恰好包含 adopt、card、evidence 三项", "恰好包含 adopt、card、evidence、memory_review 四项")
+        .replace('{"adopt":false,"card":null,"evidence":[]}',
+            '{"adopt":false,"card":null,"evidence":[],"memory_review":null}') + _USED_MEMORY_PROFILE)
+
+
+def _review_fields(usage):
+    return {"adopt", "card", "evidence"} | ({"memory_review"} if usage is not None else set())
 
 
 class _Cancellation:
@@ -124,6 +157,25 @@ class CorrectionMemoryHandler:
         self.service = service
         self.backend = backend if backend is not None else AgentBackend(command)
 
+    def _used_memory(self, task, workspace, rows):
+        # Only original-report corrections have a directly recorded recall. A
+        # follow-up answer does not independently recall the report's old card.
+        if task.get("replaces_answer_key") != "":
+            return None
+        store = getattr(self.service.agent, "memory_store", None)
+        usage = store.usage_for_task(task) if store is not None else None
+        if usage is None:
+            return None
+        canonical = parse_card_json(usage["card_json"])
+        if canonical != usage["card_json"] or hashlib.sha256(canonical.encode("utf-8")).hexdigest() != usage["card_sha256"]:
+            raise ValueError("实际采用的经验内容与记录不一致。")
+        raw = json.dumps({"card_id": usage["card_id"], "card_sha256": usage["card_sha256"],
+            "source_kind": usage["source_kind"], "card": json.loads(canonical)},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        write_new(workspace / "inputs/used-memory.json", raw)
+        rows.append(_row("inputs/used-memory.json", raw))
+        return usage
+
     def extract(self, task, *, cancellation):
         service = self.service
         if task.get("source_kind") != "CORRECTION" or not service.read_search_supported:
@@ -167,9 +219,10 @@ class CorrectionMemoryHandler:
             raw = context_raw.encode("utf-8")
             write_new(workspace / "inputs/correction.json", raw)
             rows.append(_row("inputs/correction.json", raw))
+            usage = self._used_memory(task, workspace, rows)
             protect_inputs(workspace / "inputs")
             verify_inputs(workspace, rows, signal)
-            result = self.backend.execute(prompt=_PROFILE, workspace_root=workspace, cancellation=signal,
+            result = self.backend.execute(prompt=_review_prompt(_PROFILE, usage), workspace_root=workspace, cancellation=signal,
                 log_sinks=ExecutionLogSinks(stdout=_DiscardSink(), stderr=_DiscardSink(), combined_limit_bytes=JOB_STDOUT_STDERR_BYTES),
                 resource_limits=FOLLOWUP_LIMITS.model_copy(update={"wall_time_seconds": 180,
                     "stdout_stderr_bytes": 65_536, "workspace_bytes": service.snapshot_max_bytes + 16 * 1024**2}),
@@ -181,7 +234,7 @@ class CorrectionMemoryHandler:
             if not isinstance(output, str) or len(output.encode("utf-8")) > 65_536:
                 raise ValueError("纠正审核结果无效。")
             value = json.loads(output, object_pairs_hook=_unique_object)
-            if (not isinstance(value, dict) or set(value) != {"adopt", "card", "evidence"}
+            if (not isinstance(value, dict) or set(value) != _review_fields(usage)
                     or value["adopt"] is not True):
                 raise ValueError("现有日志不足以支持共享这次纠正。")
             evidence = validate_evidence(value["evidence"], workspace, rows, signal)
@@ -190,6 +243,8 @@ class CorrectionMemoryHandler:
             receipt = {"schema_version": 1, "source_job_id": task["source_job_id"],
                 "original_report_sha256": source.report_sha256, "answer_sha256": task["report_sha256"],
                 "context_sha256": hashlib.sha256(raw).hexdigest(), "evidence": evidence}
+            if usage is not None:
+                receipt["memory_review"] = validate_memory_review(value["memory_review"], usage, evidence, card)
             return card, json.dumps(receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
@@ -263,9 +318,10 @@ class CorrectionMemoryHandler:
             raw = context_raw.encode("utf-8")
             write_new(workspace / "inputs/correction.json", raw)
             rows.append(_row("inputs/correction.json", raw))
+            usage = self._used_memory(task, workspace, rows)
             protect_inputs(workspace / "inputs")
             verify_inputs(workspace, rows, signal)
-            result = self.backend.execute(prompt=_FEEDBACK_PROFILE, workspace_root=workspace, cancellation=signal,
+            result = self.backend.execute(prompt=_review_prompt(_FEEDBACK_PROFILE, usage), workspace_root=workspace, cancellation=signal,
                 log_sinks=ExecutionLogSinks(stdout=_DiscardSink(), stderr=_DiscardSink(), combined_limit_bytes=JOB_STDOUT_STDERR_BYTES),
                 resource_limits=FOLLOWUP_LIMITS.model_copy(update={"wall_time_seconds": 180,
                     "stdout_stderr_bytes": 65_536, "workspace_bytes": service.snapshot_max_bytes + 16 * 1024**2}),
@@ -277,7 +333,7 @@ class CorrectionMemoryHandler:
             if not isinstance(output, str) or len(output.encode("utf-8")) > 65_536:
                 raise ValueError("纠正审核结果无效。")
             value = json.loads(output, object_pairs_hook=_unique_object)
-            if (not isinstance(value, dict) or set(value) != {"adopt", "card", "evidence"}
+            if (not isinstance(value, dict) or set(value) != _review_fields(usage)
                     or value["adopt"] is not True):
                 raise ValueError("现有资料不足以支持共享这次纠正。")
             evidence = validate_evidence(value["evidence"], workspace, rows, signal, include_web_analysis=True)
@@ -293,4 +349,6 @@ class CorrectionMemoryHandler:
                 "original_report_sha256": hashlib.sha256(context["original_report"].encode("utf-8")).hexdigest(),
                 "answer_sha256": task["report_sha256"], "context_sha256": hashlib.sha256(raw).hexdigest(),
                 "evidence": evidence}
+            if usage is not None:
+                receipt["memory_review"] = validate_memory_review(value["memory_review"], usage, evidence, card)
             return card, json.dumps(receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

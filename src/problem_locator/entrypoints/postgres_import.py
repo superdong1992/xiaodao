@@ -22,6 +22,7 @@ from problem_locator.followup.models import FollowupEvent, FollowupItem, Followu
 from problem_locator.followup.store import FollowupStore
 from problem_locator.memory.store import LEGACY_DEFAULTS, MemoryStore
 from problem_locator.memory.comments import COMMENT_TABLE, COMMENT_VERSION, COMMENT_VERSION_KEY
+from problem_locator.memory.usage import USAGE_TABLES, USAGE_COLUMNS, USAGE_VERSION, USAGE_VERSION_KEY
 from problem_locator.storage.atomic import read_stable_file_bytes, write_synced_file
 from problem_locator.storage.coordination import StorageCoordinationLock
 from problem_locator.storage.database import table_columns, table_names
@@ -56,7 +57,7 @@ def _source_schema(db):
     objects = db.execute("SELECT type,name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").fetchall()
     _require(not any(kind in {"view", "trigger"} for kind, _ in objects), "源数据库包含不受支持的视图或触发器。")
     tables = {name for kind, name in objects if kind == "table"}
-    allowed = safety._CORE_TABLES | safety._AGENT_TABLES | safety._AGENT_V2_TABLES | _MEMORY | _FOLLOWUP | _CONTINUATION | {
+    allowed = safety._CORE_TABLES | safety._AGENT_TABLES | safety._AGENT_V2_TABLES | _MEMORY | _FOLLOWUP | _CONTINUATION | USAGE_TABLES | {
         "completed_case_retention", "history_cleanup_jobs", "agent_report_archives", COMMENT_TABLE}
     _require(safety._CORE_TABLES <= tables and tables <= allowed, "源数据库的表结构不属于受支持的 V11 格式。", "VERSION_UNSUPPORTED")
     for group in (safety._AGENT_TABLES | safety._AGENT_V2_TABLES, _MEMORY, _FOLLOWUP, _CONTINUATION):
@@ -80,6 +81,12 @@ def _source_schema(db):
     if COMMENT_TABLE in tables:
         _require(metadata[COMMENT_VERSION_KEY] == COMMENT_VERSION and _MEMORY <= tables,
             "源文字反馈存储版本不受支持。", "VERSION_UNSUPPORTED")
+    _require(bool(tables.intersection(USAGE_TABLES)) == (USAGE_VERSION_KEY in metadata),
+        "源经验使用表与版本标记不一致。", "VERSION_UNSUPPORTED")
+    if tables.intersection(USAGE_TABLES):
+        _require(USAGE_TABLES <= tables and _MEMORY <= tables and metadata[USAGE_VERSION_KEY] == USAGE_VERSION
+            and all(table_columns(db, table) == USAGE_COLUMNS[table] for table in USAGE_TABLES),
+            "源经验使用记录不完整或版本不受支持。", "VERSION_UNSUPPORTED")
     if _FOLLOWUP <= tables:
         followup_version = dict(db.execute("SELECT key,value FROM agent_followup_metadata")).get("storage_version")
         _require(followup_version in {"1", "2"},
@@ -306,6 +313,8 @@ def _import_rows(sqlite, repository, tables, source, target, mappings):
                     additions.append(("agent_storage_version", "2"))
                 if "memory_storage_version" not in metadata:
                     additions.append(("memory_storage_version", "2"))
+                if USAGE_VERSION_KEY not in metadata:
+                    additions.append((USAGE_VERSION_KEY, USAGE_VERSION))
                 if COMMENT_VERSION_KEY not in metadata:
                     additions.append((COMMENT_VERSION_KEY, COMMENT_VERSION))
                 db.executemany(insert, additions)

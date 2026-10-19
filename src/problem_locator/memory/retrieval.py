@@ -1,4 +1,4 @@
-"""Deterministic, bounded recall of a single unverified historical card."""
+"""Deterministic, bounded recall with evidence-backed correction scope."""
 from __future__ import annotations
 
 import hashlib
@@ -90,6 +90,46 @@ def _reference_text(card_id, content, source_kind):
         f'"source_kind":"{source_kind}"}}')
 
 
+def _revision_target(row, query, verified, features):
+    """Validate current revision metadata; never cache its scope or eligibility."""
+    kind, target, raw_scope = (row.get("revision_kind"), row.get("revises_sha256"),
+        row.get("scope_terms_json"))
+    if kind is None:
+        if target is not None or raw_scope is not None:
+            raise ValueError("incomplete revision metadata")
+        return None
+    if (not verified or kind not in {"GLOBAL_ERROR", "NOT_APPLICABLE", "DIAGNOSIS_OMISSION"}
+            or not isinstance(target, str) or re.fullmatch(r"[0-9a-f]{64}", target) is None
+            or target == row["card_sha256"]):
+        raise ValueError("invalid revision identity")
+    if kind == "GLOBAL_ERROR":
+        if raw_scope not in (None, "[]"):
+            raise ValueError("global revision cannot have a query scope")
+        # Persistent global exclusions are enforced in the store's page query.
+        return None
+    if not isinstance(raw_scope, str) or len(raw_scope) > 2048:
+        raise ValueError("invalid revision scope")
+    terms = json.loads(raw_scope)
+    if (not isinstance(terms, list) or not 1 <= len(terms) <= 8
+            or any(not isinstance(term, str) or keywords(term) != {term} for term in terms)
+            or len(set(terms)) != len(terms)
+            or (len(terms) == 1 and (len(terms[0]) < 8
+                or _ERROR_CODE.fullmatch(terms[0]) is None))):
+        raise ValueError("invalid revision scope")
+    if not set(terms) <= features:
+        raise ValueError("revision scope is absent from its corrected guidance")
+    if not set(terms) <= query:
+        raise ValueError("revision does not apply to this query")
+    return target
+
+
+def _matches(features, query, frequencies):
+    common = features & query
+    # An exact, sufficiently long rare error code can stand on its own.
+    return len(common) >= 2 or any(len(token) >= 8 and frequencies[token] == 1
+        and _ERROR_CODE.fullmatch(token) is not None for token in common)
+
+
 class ExperienceRetriever:
     def __init__(self, store: RecallStore) -> None:
         self._store = store
@@ -135,12 +175,22 @@ class ExperienceRetriever:
             log_event("memory.retrieval.failed", exception_type=type(exc).__name__)
             return None
 
+    def record_usage(self, job, selection: MemorySelection) -> None:
+        """One best-effort write after successful diagnosis publication."""
+        try:
+            self._store.record_usage(job, selection)
+        except Exception as exc:
+            log_event("memory.usage.failed", exception_type=type(exc).__name__)
+
     def _select(self, skill_name: str, problem_text: str) -> MemorySelection | None:
         query = keywords(problem_text)
         if not query:
             return None
         candidates = {}
         frequencies = Counter()
+        counted_content = set()
+        scoped_content = set()
+        suppressed = set()
         read_cards = getattr(self._store, "iter_active_cards", None) or self._store.active_cards
         for row in read_cards(skill_name):
             try:
@@ -159,34 +209,46 @@ class ExperienceRetriever:
                 # A disjoint card cannot affect query-token frequencies or win.
                 if not features & query:
                     continue
-                if _REFERENCE_OVERHEAD_BYTES + content.utf8_bytes + len(source_kind) > MAX_CARD_BYTES:
+                verified = source_kind == "CORRECTION" and row.get("correction_verified") is True
+                target = _revision_target(row, query, verified, features)
+                fits = _REFERENCE_OVERHEAD_BYTES + content.utf8_bytes + len(source_kind) <= MAX_CARD_BYTES
+                # A valid matching correction must not fall back to the advice it
+                # revises just because its own reference envelope cannot fit.
+                if not fits and target is None:
                     continue
-                # Deduplicate only validated, eligible content. Source tasks stay
-                # independent so a vote or deletion revokes only its own source.
                 key = (content.sha256, content.canonical)
-                candidate = (features, str(row["updated_at"]), card_id, source_kind, content)
-                previous = candidates.get(key)
-                if previous is None:
-                    candidates[key] = candidate
+                if key not in counted_content:
+                    counted_content.add(key)
                     frequencies.update(features & query)
-                elif candidate[1:3] > previous[1:3]:
+                if target is not None:
+                    suppressed.add(target)
+                    scoped_content.add(key)
+                if not fits:
+                    continue
+                # Keep all matching revision edges above, even when content is
+                # shared. Source tasks and their current votes stay independent.
+                candidate = (features, verified, str(row["updated_at"]), card_id, source_kind, content)
+                previous = candidates.get(key)
+                if previous is None or candidate[1:4] > previous[1:4]:
                     candidates[key] = candidate
             except (ValueError, TypeError, KeyError):
                 continue
         eligible = []
-        for features, updated_at, card_id, source_kind, content in candidates.values():
-            common = features & query
-            # An exact, sufficiently long rare error code can stand on its own.
-            rare_code = any(len(token) >= 8 and frequencies[token] == 1
-                and _ERROR_CODE.fullmatch(token) is not None for token in common)
-            if len(common) < 2 and not rare_code:
+        for features, verified, updated_at, card_id, source_kind, content in candidates.values():
+            # A validated scope already matches at least two keywords, or one
+            # explicit error code. The old/new pair must not make that code lose
+            # eligibility merely by increasing its historical frequency.
+            scoped = (content.sha256, content.canonical) in scoped_content
+            if content.sha256 in suppressed or (not scoped and not _matches(features, query, frequencies)):
                 continue
-            eligible.append((len(common), len(common) / max(1, len(features)),
+            common = features & query
+            eligible.append((len(common), verified, len(common) / max(1, len(features)),
                 updated_at, card_id, source_kind, content))
         if not eligible:
             return None
-        # Relevance, then recency, then stable opaque ID; deterministic for a snapshot.
-        _, _, _, card_id, source_kind, content = max(eligible, key=lambda item: item[:4])
+        # Corrections win only at equal overlap; unrelated or weakly matching
+        # corrections cannot override more relevant guidance by their label.
+        _, _, _, _, card_id, source_kind, content = max(eligible, key=lambda item: item[:5])
         reference = _reference_text(card_id, content, source_kind)
         selection = MemorySelection(card_id, content.sha256, content.canonical, reference, source_kind)
         # A source may be revoked while later pages are read. Check its current

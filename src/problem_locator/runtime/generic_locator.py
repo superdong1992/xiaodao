@@ -9,6 +9,10 @@ import re
 import stat
 from dataclasses import dataclass
 from time import monotonic
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from problem_locator.memory.retrieval import MemorySelection
 
 from problem_locator.contracts import (
     ApplicationPortError,
@@ -73,6 +77,7 @@ class GenericLocatorExecution:
     outcome: JobOutcome
     workspace: PreparedWorkspace
     prompt: str
+    memory_selection: MemorySelection | None = None
 
 
 def _invalid_result() -> RuntimeExecutionError:
@@ -362,6 +367,7 @@ class GenericLocatorExecutor:
         parsed_logs = None if log_manifest_bytes is None else parse_canonical_json_bytes(log_manifest_bytes)
         empty_logs = parsed_logs is not None and not parsed_logs["logs"]
         memory_recall_ms, memory_used = 0.0, False
+        memory_selection = None
         # Optional memory never displaces the original problem or output contract.
         # A nonempty reference also needs two framing newlines. Skip pointless
         # storage work when no model will run or even that framing cannot fit.
@@ -380,6 +386,8 @@ class GenericLocatorExecutor:
                     if len(candidate.encode("utf-8")) <= job.resource_limits.context_bytes:
                         prompt = candidate
                         memory_used = bool(selection.reference_text)
+                        if memory_used:
+                            memory_selection = selection
             except Exception:
                 # Do not log the query, card, exception text, or another user's data.
                 log_event("generic_memory.retrieval_failed", level=logging.WARNING)
@@ -445,6 +453,7 @@ class GenericLocatorExecutor:
             outcome=outcome,
             workspace=workspace,
             prompt=prompt,
+            memory_selection=memory_selection,
         )
 
     def _open_log_sinks(self, job: Job) -> ExecutionLogSinks:

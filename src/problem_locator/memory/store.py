@@ -12,6 +12,7 @@ from problem_locator.storage.database import (dialect_for, lock_conversation, lo
 from problem_locator.timestamps import format_timestamp, now_timestamp, parse_timestamp
 
 from .comments import FeedbackCommentStoreMixin, initialize_comments
+from .usage import MemoryUsageMixin, initialize_usage
 from .models import FeedbackRequest, FeedbackSource, FeedbackView, FollowupFeedbackView
 
 MAX_CARD_BYTES = 4096
@@ -68,7 +69,7 @@ def _unsupported():
     return AgentStoreError("AGENT_FEEDBACK_UNSUPPORTED", "回答来源已变化，请刷新后重试。", 409)
 
 
-class MemoryStore(FeedbackCommentStoreMixin):
+class MemoryStore(MemoryUsageMixin, FeedbackCommentStoreMixin):
     def __init__(self, repository, clock=None):
         self.repository, self.clock = repository, clock
         with repository.database_transaction() as db:
@@ -94,6 +95,7 @@ class MemoryStore(FeedbackCommentStoreMixin):
                      for table, defaults in LEGACY_DEFAULTS.items()):
                 raise AgentStoreError("STATE_SCHEMA_UNSUPPORTED", "反馈数据表结构不受支持，请保留原目录。", 503)
             initialize_comments(db)
+            initialize_usage(db)
             for statement in _INDEXES:
                 db.execute(statement)
             if "extraction_attempted" not in table_columns(db, "memory_feedback"):
@@ -226,7 +228,10 @@ class MemoryStore(FeedbackCommentStoreMixin):
                         (run_id, answer_key))
             elif task is not None:
                 active = (request.rating == "LIKE" and task["status"] == "READY" and task["card_json"] is not None
-                    and not task["superseded"] and not self._superseded(db, run_id, answer_key))
+                    and not task["superseded"] and not self._superseded(db, run_id, answer_key)
+                    and not self._globally_replaced(db, task["skill_name"], task["card_sha256"]))
+                if active:
+                    active = self._activate_revision(db, task["task_id"])
                 db.execute("UPDATE memory_tasks SET active=? WHERE task_id=?", (int(active), task["task_id"]))
             return self._view(db, conversation_id, run_id, True, answer_key)
 
@@ -256,6 +261,7 @@ class MemoryStore(FeedbackCommentStoreMixin):
             if not self._comment_can_finish(db, task):
                 db.execute("UPDATE memory_tasks SET status='FAILED',active=0,problem_text=NULL,report_markdown=NULL,context_json=NULL,updated_at=? WHERE task_id=?", (now, task_id))
                 return False
+            lock_key(db, "memory", "admission")
             correction = task["source_kind"] == "CORRECTION"
             if correction:
                 if not isinstance(evidence_json, str) or len(evidence_json.encode()) > 65_536 or not isinstance(json.loads(evidence_json), dict) or not json.loads(evidence_json):
@@ -270,10 +276,13 @@ class MemoryStore(FeedbackCommentStoreMixin):
             if alive is None or (rating is None and not correction) or parse_timestamp(task["created_at"]) <= parse_timestamp(_before(now, SOURCE_RETENTION_DAYS)):
                 db.execute("UPDATE memory_tasks SET status='FAILED',active=0,problem_text=NULL,report_markdown=NULL,context_json=NULL,updated_at=? WHERE task_id=?", (now, task_id))
                 return False
-            superseded = task["superseded"] or self._superseded(db, task["run_id"], task["answer_key"])
+            revision = self._validated_revision(db, task, content, json.loads(evidence_json)) if correction else None
+            superseded = (task["superseded"] or self._superseded(db, task["run_id"], task["answer_key"])
+                or self._globally_replaced(db, task["skill_name"], hashlib.sha256(content.encode()).hexdigest()))
             active = not superseded and (rating is None or rating[0] == "LIKE")
             db.execute("UPDATE memory_tasks SET status='READY',problem_text=NULL,report_markdown=NULL,context_json=NULL,card_json=?,card_sha256=?,evidence_json=?,active=?,superseded=?,completed_at=?,updated_at=? WHERE task_id=?", (content, hashlib.sha256(content.encode("utf-8")).hexdigest(), evidence_json, int(active), int(superseded), now, now, task_id))
             if correction:
+                self._publish_revision(db, task, revision, active=active)
                 self._supersede_prior_comments(db, task)
                 db.execute("UPDATE memory_tasks SET active=0,superseded=1,problem_text=CASE WHEN status='PENDING' THEN NULL ELSE problem_text END,report_markdown=CASE WHEN status='PENDING' THEN NULL ELSE report_markdown END,context_json=CASE WHEN status='PENDING' THEN NULL ELSE context_json END,status=CASE WHEN status='PENDING' THEN 'FAILED' ELSE status END WHERE run_id=? AND answer_key=?", (task["run_id"], task["replaces_answer_key"]))
             return True
@@ -298,48 +307,51 @@ class MemoryStore(FeedbackCommentStoreMixin):
 
     @staticmethod
     def _card_row(row):
-        return dict(zip(("card_id", "card_json", "card_sha256", "updated_at", "skill_name", "run_id", "answer_key", "source_kind"),
+        values = dict(zip(("card_id", "card_json", "card_sha256", "updated_at", "skill_name", "run_id", "answer_key", "source_kind",
+            "correction_verified", "revises_sha256", "revision_kind", "scope_terms_json"),
             (*row[:3], _timestamp(row[3]), *row[4:])))
+        values["correction_verified"] = bool(values["correction_verified"])
+        return values
+
+    _CARD_SELECT = ("SELECT t.task_id,t.card_json,t.card_sha256,t.updated_at,t.skill_name,t.run_id,t.answer_key,t.source_kind,"
+        "CASE WHEN t.source_kind='CORRECTION' AND t.evidence_json IS NOT NULL THEN 1 ELSE 0 END,"
+        "v.old_card_sha256,v.relation,v.scope_terms_json FROM memory_tasks t "
+        "LEFT JOIN memory_revisions v ON v.correction_task_id=t.task_id AND v.skill_name=t.skill_name AND v.published=1 ")
+    _CARD_WHERE = ("WHERE t.skill_name=? AND t.active=1 AND t.superseded=0 AND t.status='READY' AND t.card_json IS NOT NULL "
+        "AND NOT EXISTS (SELECT 1 FROM memory_revisions x WHERE x.skill_name=t.skill_name "
+        "AND x.old_card_sha256=t.card_sha256 AND x.relation='GLOBAL_ERROR' AND x.published=1) ")
 
     def active_cards(self, skill_name):
-        """Compatibility view; production recall uses bounded keyset pages below."""
+        """Compatibility view; production reads bounded keyset pages."""
         with self.repository.database_read() as db:
-            completed = dialect_for(db).timestamp("completed_at")
-            rows = db.execute("SELECT task_id,card_json,card_sha256,updated_at,skill_name,run_id,answer_key,source_kind FROM memory_tasks "
-                "WHERE skill_name=? AND active=1 AND superseded=0 AND status='READY' AND card_json IS NOT NULL "
-                f"ORDER BY {completed} DESC,task_id", (skill_name,)).fetchall()
+            completed = dialect_for(db).timestamp("t.completed_at")
+            rows = db.execute(self._CARD_SELECT + self._CARD_WHERE +
+                f"ORDER BY {completed} DESC,t.task_id", (skill_name,)).fetchall()
             return [self._card_row(row) for row in rows]
 
     def iter_active_cards(self, skill_name):
-        """Read every retained source in bounded batches, independent of task quota.
-
-        A stable key avoids OFFSET shifts when votes or deletion remove sources.
-        Release the read lease before parsing each page; no model call holds it.
-        """
+        """Indexed revision projection per page, without per-card SQL lookups."""
         after = ""
         while True:
             with self.repository.database_read() as db:
-                rows = db.execute("SELECT task_id,card_json,card_sha256,updated_at,skill_name,run_id,answer_key,source_kind FROM memory_tasks "
-                    "WHERE skill_name=? AND active=1 AND superseded=0 AND status='READY' AND card_json IS NOT NULL "
-                    "AND task_id>? ORDER BY task_id LIMIT ?", (skill_name, after, CARD_SCAN_BATCH_SIZE)).fetchall()
+                rows = db.execute(self._CARD_SELECT + self._CARD_WHERE +
+                    "AND t.task_id>? ORDER BY t.task_id LIMIT ?", (skill_name, after, CARD_SCAN_BATCH_SIZE)).fetchall()
             if not rows:
                 return
             after = rows[-1][0]
-            for row in rows:
-                yield self._card_row(row)
+            yield from (self._card_row(row) for row in rows)
             if len(rows) < CARD_SCAN_BATCH_SIZE:
                 return
 
     def is_card_active(self, skill_name, selection):
-        """Recheck a chosen source after paginated recall, without caching votes."""
         with self.repository.database_read() as db:
-            return db.execute("SELECT 1 FROM memory_tasks WHERE task_id=? AND skill_name=? "
-                "AND active=1 AND superseded=0 AND status='READY' AND card_json=? "
-                "AND card_sha256=? AND source_kind=?",
-                (selection.card_id, skill_name, selection.card_json, selection.card_sha256,
+            return db.execute("SELECT 1 FROM memory_tasks t " + self._CARD_WHERE +
+                "AND t.task_id=? AND t.card_json=? AND t.card_sha256=? AND t.source_kind=?",
+                (skill_name, selection.card_id, selection.card_json, selection.card_sha256,
                  selection.source_kind)).fetchone() is not None
 
     def revoke_conversation(self, db, conversation_id):
+        self._revoke_usage(db, conversation_id)
         db.execute("UPDATE memory_feedback_comments SET text=NULL,analysis_text=NULL,analysis_reference=NULL WHERE conversation_id=?", (conversation_id,))
         db.execute("UPDATE memory_tasks SET status='DELETED',active=0,problem_text=NULL,report_markdown=NULL,context_json=NULL,evidence_json=NULL,card_json=NULL,card_sha256=NULL,updated_at=? WHERE conversation_id=?", (self._now(), conversation_id))
 
@@ -354,6 +366,7 @@ class MemoryStore(FeedbackCommentStoreMixin):
             f"AND coalesce({dialect.json_int('r.body', '$.resources_expired')},0)=0)")
 
     def _prune(self, db, now):
+        self._prune_usage(db)
         self._prune_comments(db, now)
         dialect = dialect_for(db)
         raw = db.execute("UPDATE memory_tasks SET status='FAILED',active=0,problem_text=NULL,report_markdown=NULL,context_json=NULL,updated_at=? "
