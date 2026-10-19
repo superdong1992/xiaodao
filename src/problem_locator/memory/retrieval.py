@@ -6,6 +6,7 @@ import json
 import re
 import uuid
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -32,7 +33,7 @@ _REFERENCE_PREFIX = (
 
 
 class RecallStore(Protocol):
-    def active_cards(self, skill_name: str) -> list[dict]: ...
+    def active_cards(self, skill_name: str) -> Iterable[dict]: ...
 
 
 def keywords(text: str) -> frozenset[str]:
@@ -79,9 +80,10 @@ class ExperienceRetriever:
         query = keywords(problem_text)
         if not query:
             return None
-        candidates = []
+        candidates = {}
         frequencies = Counter()
-        for row in self._store.active_cards(skill_name):
+        read_cards = getattr(self._store, "iter_active_cards", None) or self._store.active_cards
+        for row in read_cards(skill_name):
             try:
                 if row["skill_name"] != skill_name:
                     continue
@@ -99,6 +101,9 @@ class ExperienceRetriever:
                     continue
                 card = json.loads(canonical)
                 features = keywords(" ".join(card["problem_features"] + card["applicability"]))
+                # A disjoint card cannot affect query-token frequencies or win.
+                if not features & query:
+                    continue
                 reference = _REFERENCE_PREFIX + json.dumps({"card_id": card_id,
                     "card_sha256": row["card_sha256"], "schema_version": CARD_VERSION,
                     "source_kind": source_kind,
@@ -106,12 +111,20 @@ class ExperienceRetriever:
                 if len(reference.encode("utf-8")) > MAX_CARD_BYTES:
                     continue
                 selection = MemorySelection(card_id, row["card_sha256"], canonical, reference, source_kind)
-                candidates.append((features, str(row["updated_at"]), selection))
-                frequencies.update(features)
+                # Deduplicate only validated, eligible content. Source tasks stay
+                # independent so a vote or deletion revokes only its own source.
+                key = (selection.card_sha256, canonical)
+                candidate = (features, str(row["updated_at"]), selection)
+                previous = candidates.get(key)
+                if previous is None:
+                    candidates[key] = candidate
+                    frequencies.update(features & query)
+                elif (candidate[1], selection.card_id) > (previous[1], previous[2].card_id):
+                    candidates[key] = candidate
             except (ValueError, TypeError, KeyError):
                 continue
         eligible = []
-        for features, updated_at, selection in candidates:
+        for features, updated_at, selection in candidates.values():
             common = features & query
             # An exact, sufficiently long rare error code can stand on its own.
             rare_code = any(len(token) >= 8 and frequencies[token] == 1

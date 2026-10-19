@@ -19,7 +19,7 @@ MAX_SOURCES = 10_000
 MAX_TASKS = 10_000
 MAX_REQUESTS_PER_REPORT = 128
 SOURCE_RETENTION_DAYS = 7
-CARD_RETENTION_DAYS = 90
+CARD_SCAN_BATCH_SIZE = 256
 STORAGE_VERSION = "2"
 _TABLES = ("memory_feedback", "memory_feedback_requests", "memory_tasks")
 _SCHEMA = (
@@ -32,6 +32,7 @@ _INDEXES = (
     "CREATE INDEX IF NOT EXISTS memory_feedback_conversation ON memory_feedback(conversation_id)",
     "CREATE INDEX IF NOT EXISTS memory_tasks_pending ON memory_tasks(status,created_at,task_id)",
     "CREATE INDEX IF NOT EXISTS memory_cards_active ON memory_tasks(skill_name,active,completed_at)",
+    "CREATE INDEX IF NOT EXISTS memory_cards_scan ON memory_tasks(skill_name,active,task_id)",
     "CREATE INDEX IF NOT EXISTS memory_tasks_conversation ON memory_tasks(conversation_id)",
     "CREATE INDEX IF NOT EXISTS memory_replacements ON memory_tasks(run_id,replaces_answer_key)",
 )
@@ -153,19 +154,15 @@ class MemoryStore(FeedbackCommentStoreMixin):
     @staticmethod
     def _superseded(db, run_id, answer_key):
         # Accepted correction tasks are durable replacement receipts, even after
-        # their card expires or the user later dislikes that correction answer.
+        # their card is unavailable or the user later dislikes that correction answer.
         return db.execute("SELECT 1 FROM memory_tasks WHERE run_id=? AND replaces_answer_key=? AND source_kind='CORRECTION' AND evidence_json IS NOT NULL LIMIT 1", (run_id, answer_key)).fetchone() is not None
 
     def _enqueue(self, db, conversation_id, run_id, source, now):
-        d = dialect_for(db)
-        expired_receipt = ("source_kind='CORRECTION' AND status IN ('READY','FAILED','DELETED') AND card_json IS NULL "
-            f"AND ({self._source_ended(d)} OR {d.timestamp('created_at')}<={d.timestamp('?')})")
         if (not source.problem_text.strip() or not source.skill_name.strip()
                 or len(source.problem_text.encode("utf-8")) > 65_536
                 or len(source.report_markdown.encode("utf-8")) > 65_536
                 or len(source.context_json.encode("utf-8")) > 262_144
-                or db.execute("SELECT count(*) FROM memory_tasks WHERE NOT (" + expired_receipt + ")",
-                    (_before(now, SOURCE_RETENTION_DAYS),)).fetchone()[0] >= MAX_TASKS
+                or db.execute("SELECT count(*) FROM memory_tasks WHERE status IN ('PENDING','RUNNING')").fetchone()[0] >= MAX_TASKS
                 or self._superseded(db, run_id, source.answer_key)):
             return False
         if db.execute("SELECT 1 FROM memory_tasks WHERE run_id=? AND answer_key=?", (run_id, source.answer_key)).fetchone() is not None:
@@ -229,8 +226,7 @@ class MemoryStore(FeedbackCommentStoreMixin):
                         (run_id, answer_key))
             elif task is not None:
                 active = (request.rating == "LIKE" and task["status"] == "READY" and task["card_json"] is not None
-                    and not task["superseded"] and not self._superseded(db, run_id, answer_key)
-                    and parse_timestamp(task["completed_at"]) > parse_timestamp(_before(now, CARD_RETENTION_DAYS)))
+                    and not task["superseded"] and not self._superseded(db, run_id, answer_key))
                 db.execute("UPDATE memory_tasks SET active=? WHERE task_id=?", (int(active), task["task_id"]))
             return self._view(db, conversation_id, run_id, True, answer_key)
 
@@ -300,13 +296,39 @@ class MemoryStore(FeedbackCommentStoreMixin):
             result = db.execute("UPDATE memory_tasks SET status='FAILED',active=0,problem_text=NULL,report_markdown=NULL,context_json=NULL,updated_at=? WHERE status='RUNNING'", (self._now(),))
             return result.rowcount
 
+    @staticmethod
+    def _card_row(row):
+        return dict(zip(("card_id", "card_json", "card_sha256", "updated_at", "skill_name", "run_id", "answer_key", "source_kind"),
+            (*row[:3], _timestamp(row[3]), *row[4:])))
+
     def active_cards(self, skill_name):
+        """Compatibility view; production recall uses bounded keyset pages below."""
         with self.repository.database_read() as db:
-            dialect = dialect_for(db)
-            completed = dialect.timestamp("completed_at")
+            completed = dialect_for(db).timestamp("completed_at")
             rows = db.execute("SELECT task_id,card_json,card_sha256,updated_at,skill_name,run_id,answer_key,source_kind FROM memory_tasks "
-                f"WHERE skill_name=? AND active=1 AND superseded=0 AND status='READY' AND card_json IS NOT NULL AND {completed}>{dialect.timestamp('?')} ORDER BY {completed} DESC,task_id LIMIT ?", (skill_name, _before(self._now(), CARD_RETENTION_DAYS), MAX_TASKS)).fetchall()
-            return [dict(zip(("card_id", "card_json", "card_sha256", "updated_at", "skill_name", "run_id", "answer_key", "source_kind"), (*row[:3], _timestamp(row[3]), *row[4:]))) for row in rows]
+                "WHERE skill_name=? AND active=1 AND superseded=0 AND status='READY' AND card_json IS NOT NULL "
+                f"ORDER BY {completed} DESC,task_id", (skill_name,)).fetchall()
+            return [self._card_row(row) for row in rows]
+
+    def iter_active_cards(self, skill_name):
+        """Read every retained source in bounded batches, independent of task quota.
+
+        A stable key avoids OFFSET shifts when votes or deletion remove sources.
+        Release the read lease before parsing each page; no model call holds it.
+        """
+        after = ""
+        while True:
+            with self.repository.database_read() as db:
+                rows = db.execute("SELECT task_id,card_json,card_sha256,updated_at,skill_name,run_id,answer_key,source_kind FROM memory_tasks "
+                    "WHERE skill_name=? AND active=1 AND superseded=0 AND status='READY' AND card_json IS NOT NULL "
+                    "AND task_id>? ORDER BY task_id LIMIT ?", (skill_name, after, CARD_SCAN_BATCH_SIZE)).fetchall()
+            if not rows:
+                return
+            after = rows[-1][0]
+            for row in rows:
+                yield self._card_row(row)
+            if len(rows) < CARD_SCAN_BATCH_SIZE:
+                return
 
     def revoke_conversation(self, db, conversation_id):
         db.execute("UPDATE memory_feedback_comments SET text=NULL,analysis_text=NULL,analysis_reference=NULL WHERE conversation_id=?", (conversation_id,))
@@ -327,16 +349,13 @@ class MemoryStore(FeedbackCommentStoreMixin):
         dialect = dialect_for(db)
         raw = db.execute("UPDATE memory_tasks SET status='FAILED',active=0,problem_text=NULL,report_markdown=NULL,context_json=NULL,updated_at=? "
             f"WHERE status IN ('PENDING','RUNNING') AND {dialect.timestamp('created_at')}<={dialect.timestamp('?')}", (now, _before(now, SOURCE_RETENTION_DAYS))).rowcount
-        cards = db.execute("UPDATE memory_tasks SET active=0,card_json=NULL,card_sha256=NULL "
-                           f"WHERE card_json IS NOT NULL AND {dialect.timestamp('completed_at')}<={dialect.timestamp('?')}",
-                           (_before(now, CARD_RETENTION_DAYS),)).rowcount
         # Web runs and votes are permanent. Only live sources consume their
-        # quota; extraction tasks and cards still have independent lifetimes.
+        # quota. Completed cards persist until explicit source revocation.
         ended = self._source_ended(dialect)
         db.execute("UPDATE memory_tasks SET status='FAILED',active=0,problem_text=NULL,report_markdown=NULL,context_json=NULL,updated_at=? WHERE status IN ('PENDING','RUNNING') AND " + ended, (now,))
         # A compact correction row is also the one-shot/replacement receipt.
         # Keep it while its report exists, but do not charge expired receipts
-        # against the live task quota. The original text and card still expire.
+        # against the live task quota. Private source text still expires.
         orphan = "NOT EXISTS (SELECT 1 FROM agent_conversation_runs r WHERE r.run_id=memory_tasks.run_id)"
         tasks = db.execute("DELETE FROM memory_tasks WHERE (source_kind<>'CORRECTION' OR " + orphan + ") AND ("
                            "(status='READY' AND card_json IS NULL) OR "
@@ -344,7 +363,7 @@ class MemoryStore(FeedbackCommentStoreMixin):
                            (_before(now, SOURCE_RETENTION_DAYS),)).rowcount
         requests = db.execute("DELETE FROM memory_feedback_requests WHERE NOT EXISTS (SELECT 1 FROM agent_conversation_runs r WHERE r.run_id=memory_feedback_requests.run_id)").rowcount
         feedback = db.execute("DELETE FROM memory_feedback WHERE NOT EXISTS (SELECT 1 FROM agent_conversation_runs r WHERE r.run_id=memory_feedback.run_id)").rowcount
-        return {"expired_sources": raw, "expired_cards": cards, "tasks": tasks, "requests": requests, "feedback": feedback}
+        return {"expired_sources": raw, "expired_cards": 0, "tasks": tasks, "requests": requests, "feedback": feedback}
 
     def prune(self):
         with self.repository.database_transaction() as db:

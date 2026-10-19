@@ -243,7 +243,9 @@ def test_rare_long_error_code_can_match_alone_but_plain_word_cannot():
     recall = ExperienceRetriever(Store(cards=[rare]))
     assert recall.select("generic", "ECONNREFUSED") is not None
     assert recall.select("generic", "Redis") is None
-    assert ExperienceRetriever(Store(cards=[rare, row(raw=rare["card_json"])])) .select(
+    distinct = row(raw=card_json(problem_features=["ECONNREFUSED"], applicability=["网络连接"],
+        steps=["先检查服务监听状态"]))
+    assert ExperienceRetriever(Store(cards=[rare, distinct])).select(
         "generic", "ECONNREFUSED") is None
 
 

@@ -178,7 +178,7 @@ def _memory_task(stack, task_id):
                           "FROM memory_tasks WHERE task_id=?", (task_id,)).fetchone()
 
 
-def test_natural_conversation_expiry_keeps_ready_memory_until_card_ttl(stack):
+def test_natural_conversation_expiry_keeps_ready_memory_permanently(stack):
     history = _memory_history(stack)
     cards = history.memory.active_cards(history.source.skill_name)
     assert len(cards) == 1
@@ -189,7 +189,7 @@ def test_natural_conversation_expiry_keeps_ready_memory_until_card_ttl(stack):
     assert all(not path.exists() for path in history.paths)
     history.memory.prune()
     assert history.memory.active_cards(history.source.skill_name) == cards
-    # Web history is permanent while the completed card keeps its own age.
+    # Web history and completed cards survive resource expiry and the old card TTL.
     stack.clock.value = "2026-08-14T00:01:00.000Z"
     stack.history.run_once()
     with stack.repository.database_read() as db:
@@ -199,9 +199,13 @@ def test_natural_conversation_expiry_keeps_ready_memory_until_card_ttl(stack):
     stack.clock.value = "2026-10-29T00:00:59.999Z"
     assert history.memory.active_cards(history.source.skill_name) == cards
     stack.clock.value = "2026-10-29T00:01:00.000Z"
-    assert history.memory.active_cards(history.source.skill_name) == []
+    assert history.memory.active_cards(history.source.skill_name) == cards
+    assert history.memory.prune()["expired_cards"] == 0
+    assert _memory_task(stack, history.task_id) == ("READY", None, None, cards[0]["card_json"], 1)
+    stack.clock.value = "2036-10-29T00:01:00.000Z"
+    stack.history.run_once()
     history.memory.prune()
-    assert _memory_task(stack, history.task_id) is None
+    assert history.memory.active_cards(history.source.skill_name) == cards
 
 
 @pytest.mark.parametrize("status", ["PENDING", "RUNNING"])

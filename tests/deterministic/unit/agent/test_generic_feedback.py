@@ -240,7 +240,7 @@ def _expire_resources(system):
     ("FAILED", "2026-09-28T00:00:00.000Z"),
     ("READY", "2026-12-20T00:00:00.000Z"),
 ])
-def test_permanent_history_releases_task_quota_at_its_own_ttl(system, monkeypatch, status, expired_at):
+def test_permanent_history_preserves_card_and_releases_terminal_task_quota(system, monkeypatch, status, expired_at):
     monkeypatch.setattr(memory_module, "MAX_TASKS", 1)
     put(system)
     task = system.memory.claim_task()
@@ -254,16 +254,16 @@ def test_permanent_history_releases_task_quota_at_its_own_ttl(system, monkeypatc
         request_id="new-report-like", rating="LIKE", source=source).rating == "LIKE"
     replacement = system.memory.claim_task()
     assert replacement is not None and replacement["run_id"] == created.run_id
-    assert len(task_rows(system)) == 1
+    assert len(task_rows(system)) == (2 if status == "READY" else 1)
     assert not system.memory.finish_task(task["task_id"], CARD)
-    # The old run, vote and replay receipt remain readable after its task goes.
+    # The old run, vote and replay receipt survive private task cleanup.
     assert system.agent_store.get_run(system.created.conversation_id, system.created.run_id)
     assert put(system).rating == "LIKE"
     monkeypatch.setattr(memory_module, "MAX_TASKS", 2)
     put(system, "down-after-expiry", "DISLIKE")
     put(system, "up-after-expiry")
     assert system.memory.claim_task() is None
-    assert len(task_rows(system)) == 1
+    assert len(task_rows(system)) == (2 if status == "READY" else 1)
 
 
 def test_expired_resource_history_keeps_vote_but_releases_source_quota(system, monkeypatch):
@@ -362,7 +362,7 @@ def test_memory_source_expiry_compares_instants_across_offsets(system, created_a
 
 
 @pytest.mark.parametrize("completed_at", ["2026-09-21T00:00:00.001Z", "2026-09-21T08:00:00.001+08:00"])
-def test_memory_card_expiry_and_relike_compare_instants_across_offsets(system, completed_at):
+def test_memory_card_stays_available_and_relike_works_across_old_expiry_offsets(system, completed_at):
     put(system)
     task = system.memory.claim_task()
     assert system.memory.finish_task(task["task_id"], CARD)
@@ -375,8 +375,8 @@ def test_memory_card_expiry_and_relike_compare_instants_across_offsets(system, c
     put(system, "up-again")
     assert len(system.memory.active_cards(system.source.skill_name)) == 1
     system.clock.value = "2026-12-20T08:00:00.001+08:00"
-    assert system.memory.active_cards(system.source.skill_name) == []
-    assert system.memory.prune()["expired_cards"] == 1
+    assert len(system.memory.active_cards(system.source.skill_name)) == 1
+    assert system.memory.prune()["expired_cards"] == 0
 
 
 def test_memory_queue_and_card_order_follow_instants_across_offsets(system):
@@ -405,7 +405,7 @@ def test_memory_queue_and_card_order_follow_instants_across_offsets(system):
         second["task_id"], first["task_id"]]
 
 
-def test_card_survives_natural_source_retention_but_expires_after_ninety_days(system):
+def test_card_survives_natural_source_retention_and_old_ninety_day_boundary(system):
     put(system)
     task = system.memory.claim_task()
     system.memory.finish_task(task["task_id"], CARD)
@@ -417,9 +417,9 @@ def test_card_survives_natural_source_retention_but_expires_after_ninety_days(sy
         assert db.execute("SELECT count(*) FROM memory_feedback_requests").fetchone()[0] == 0
         assert db.execute("SELECT count(*) FROM memory_feedback").fetchone()[0] == 0
     system.clock.value = "2026-12-20T00:00:00.000Z"
-    assert system.memory.active_cards(system.source.skill_name) == []
+    assert len(system.memory.active_cards(system.source.skill_name)) == 1
     system.memory.prune()
-    assert task_rows(system) == []
+    assert len(task_rows(system)) == 1
 
 
 @pytest.mark.parametrize("payload", ["[]", "not json", "{\"x\":NaN}", json.dumps({"large": "x" * 4096})])

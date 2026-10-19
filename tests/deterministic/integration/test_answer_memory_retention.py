@@ -6,6 +6,7 @@ import pytest
 from problem_locator.entrypoints.postgres_import import _import_source_rows
 from problem_locator.memory import store as memory_module
 from problem_locator.memory.store import MemoryStore
+from problem_locator.memory.extraction import parse_card_json
 from problem_locator.storage.database import table_columns
 from tests.deterministic.unit.agent.test_answer_feedback_memory import (
     EVIDENCE, FID, OTHER_FID, answer_source, answer_vote, enqueue,
@@ -16,7 +17,7 @@ from tests.deterministic.unit.agent.test_generic_feedback import (
 
 
 @pytest.mark.parametrize("accepted", [False, True])
-def test_expired_correction_keeps_one_shot_and_replacement_receipt_without_using_task_quota(
+def test_retained_correction_keeps_card_and_replacement_receipt_without_using_task_quota(
     system, monkeypatch, accepted,
 ):
     put(system, rating="DISLIKE")
@@ -33,7 +34,7 @@ def test_expired_correction_keeps_one_shot_and_replacement_receipt_without_using
     with system.repository.database_read() as db:
         assert db.execute("SELECT problem_text,report_markdown,context_json,card_json,evidence_json "
             "FROM memory_tasks WHERE answer_key=?", (FID,)).fetchone() == (
-                None, None, None, None, EVIDENCE if accepted else None)
+                None, None, None, parse_card_json(CARD) if accepted else None, EVIDENCE if accepted else None)
     assert not enqueue(system, correction)
     assert system.memory.get_feedback(system.created.conversation_id, system.created.run_id,
         owner_key=OWNER, can_rate=False).rating == "DISLIKE"
@@ -47,7 +48,7 @@ def test_expired_correction_keeps_one_shot_and_replacement_receipt_without_using
     latest = system.memory.claim_task()
     assert latest is not None and latest["answer_key"] == OTHER_FID
     assert not enqueue(system, correction)
-    assert system.memory.active_cards(system.source.skill_name) == []
+    assert [row["answer_key"] for row in system.memory.active_cards(system.source.skill_name)] == ([FID] if accepted else [])
 
 
 def test_answer_scoped_extraction_receipts_survive_upgrade_import_projection_and_task_expiry(system):
