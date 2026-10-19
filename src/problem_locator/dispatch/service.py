@@ -148,6 +148,10 @@ class SchedulerService:
     def wait_until_idle(self, timeout_seconds: float) -> bool:
         return self._dispatcher.wait_until_idle(timeout_seconds)
 
+    def foreground_idle(self) -> bool:
+        """Nonblocking observation of both route and diagnosis lanes."""
+        return self.ready and self._dispatcher.wait_until_idle(0)
+
     def _record_fatal_worker_error(self, job_id: str, error: Exception) -> None:
         # Recovery can enable a queued worker before start() has returned.
         runtime_epoch = self._epoch_context.current

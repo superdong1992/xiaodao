@@ -4,13 +4,11 @@
 
 本文件是仓库活跃待办的唯一清单。已完成事项由代码、当前设计与 Git 历史证明，不在这里保留关闭项。
 
-## 经验长期保留与召回去重推送验收（2026-10-19）
+## 诊断速度与经验反馈优化验收（2026-10-19）
 
-- 基于 `0bdc96c`，经验卡改为不按时间过期，活动提炼任务的 10,000 条额度只计算 PENDING/RUNNING；长期历史按分页完整检索，完全相同的内容只在召回时去重，来源、投票及纠正关系独立。固定 90 天是原保留策略，本次按新需求调整；重复来源导致稀有关键词失配属于已复现并修正的问题，统一登记在 `FIXED_ISSUES.md` 的 PL-FIX-094。
-- **专项通过，待推送前完整验证**：存储相关新期望先复现 10 failed，稀有错误码专项另复现 1 failed；修正后存储相关专项 72 passed、检索相关专项 84 passed、文档专项 8 passed。直接用例为 `test_permanent_memory.py`、`test_permanent_memory_retrieval.py` 和相关既有反馈测试；文档命令为 `node --test tools/test-flow/tests/docs-drift.test.mjs tools/test-flow/tests/rest-api-guide.test.mjs`。Linux 单元、运行时、保留集成及真实 PostgreSQL 联合专项 216 passed、18.97 秒，包含永久卡和并发准入，零模型调用。各组存在交集，不累计计数。
-- 首轮正式 `run-20261019T025442Z-4d7adaad` 为 FAIL（快照 `e8697d17280e036a8f7d9280ab6275d7fc6947a1c3d47ff065e988567b6f2e73`），已保留完整证据。唯一失败来自存储清理用例仍要求卡片按旧 90 天规则失效；现更新为永久保留，保留资源清理与主动删除验证。修正后相关联合专项 55 passed、0.77 秒；源码注释同步，不改功能实现或测试门槛，待重新审阅计划并运行完整 `dev.default`。
-- Web API、响应 schema、七个 MCP 工具无需适配，只需升级服务端；原文字反馈、管理员资料接入要求及默认关闭的 `GENERIC_MEMORY_ENABLED` 保持。原文和数据库文字反馈的 7 天期限、核验工作区清理策略不变；旧策略已清除的卡片无法恢复、不自动重学。说明见[经验库接入](docs/generic-feedback-memory.md)、[文字反馈适配](docs/website-answer-feedback-upgrade.md)和[存储策略](docs/storage-retention.md)。
-- 推送前先查看 `dev.default --plan-only`，再以最终源码运行 affected + full deterministic，零真实模型调用；本次状态只看 PL-FIX-094 的最新 verdict 引用元数据，不沿用历史 PASS。完整验证通过后只回填该独立元数据行；测试证据保留，源码变更后须重新完整验证。实际诊断质量与耗时改善仍需真实场景验收，确定性通过不能代替该结论。
+- 基线 `2e245f8` 的重复完整校验、扫描期间停用来源仍被返回、前台繁忙仍启动后台学习均已核对或复现；实现聚焦诊断速度，关联 `FIXED_ISSUES.md` 的 PL-FIX-095。PL-FIX-094 的长期保留增量已由其对应 verdict 验证并推送，本轮不重做保留策略。
+- **专项通过，待推送前完整验证**：Linux 集中专项 185 passed、0 skipped、10.99 秒，含真实 PostgreSQL 25 项；范围覆盖新增召回、来源复核、后台避让及既有反馈、日志、追问、组合入口。准确命令见本机 `.tmp/memory-speed-env-20261019/run-scoped-01.sh`，组件基准另保存在 `.tmp/memory-recall-benchmark-20261019`，不把专项或基准当作正式结论。整理交付字节后，查看正式 `dev.default --plan-only`，再运行 affected 与 full deterministic。只以对应源码快照的 `verdict.json` 为完整结论，保留全部失败和成功证据；不调用真实模型，不放宽测试范围、持久化或 300 秒门槛。
+- 外部只需升级小刀服务端，现有 Web 接口和前端接入不变。没有新增在线模型调用；已发出的学习不抢断，前台无需等待。实际质量与总耗时仍需用固定典型问题对比验证，组件合成基准不能外推为线上完整诊断提速。
 
 ## 统一追问判断复核（2026-10-17）
 

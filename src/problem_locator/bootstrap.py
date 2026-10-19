@@ -1371,6 +1371,8 @@ def _assemble(
             workspace_root=layout.workspaces, enabled=settings.generic_memory_enabled,
             correction_handler=CorrectionMemoryHandler(
                 agent.followups, settings.diagnose_claude_command or settings.claude_command),
+            can_start=lambda: (scheduler.foreground_idle() and agent.foreground_idle()
+                and agent.followups.foreground_idle()),
         )
         runtime = DiagnosisRuntime(
             state_repository=repository,

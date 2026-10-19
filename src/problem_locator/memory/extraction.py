@@ -9,7 +9,7 @@ import time
 import uuid
 import unicodedata
 from pathlib import Path
-from typing import Protocol, Any
+from typing import Callable, Protocol, Any
 
 from problem_locator.contracts import JOB_STDOUT_STDERR_BYTES, CancellationReason, ExecutionLogSinks, ResourceLimits
 from problem_locator.diagnostics import log_event
@@ -149,10 +149,12 @@ class MemoryExtractionWorker:
     """Single-thread queue consumer with durable at-most-once claim semantics."""
     def __init__(self, store: ExtractionStore, command: str, *, workspace_root: Path,
                  backend: AgentBackend | None = None, poll_seconds: float = 1.0,
-                 enabled: bool = True, correction_handler: Any | None = None) -> None:
+                 enabled: bool = True, correction_handler: Any | None = None,
+                 can_start: Callable[[], bool] | None = None) -> None:
         if poll_seconds <= 0:
             raise ValueError("poll_seconds must be positive")
         self._enabled = enabled
+        self._can_start = can_start
         self._correction_handler = correction_handler
         self._store = store
         self._backend = backend if backend is not None else AgentBackend(command)
@@ -218,6 +220,10 @@ class MemoryExtractionWorker:
         task = None
         workspace = None
         try:
+            # Observe before claiming: waiting must not consume the once-only task.
+            # Already-started calls finish normally even if foreground work arrives.
+            if self._can_start is not None and self._can_start() is not True:
+                return False
             task = self._store.claim_task()
             if task is None:
                 return False

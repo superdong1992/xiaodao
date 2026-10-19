@@ -73,6 +73,7 @@ class FollowupStore:
         self.memory_store = memory_store
         self.epoch = str(uuid.uuid4())
         self.notify = lambda: None
+        self.last_claim_empty = False
         with repository.database_transaction() as db:
             lock_key(db, "schema", "agent-followup")
             existing = table_names(db).intersection(_TABLES)
@@ -430,6 +431,7 @@ class FollowupStore:
         return item
 
     def claim_task(self):
+        self.last_claim_empty = False
         with self.repository.database_transaction() as db:
             dialect = dialect_for(db)
             suffix = " FOR UPDATE OF t SKIP LOCKED" if dialect.postgres else ""
@@ -437,6 +439,7 @@ class FollowupStore:
                 "JOIN agent_conversation_runs r ON r.run_id=t.run_id WHERE t.status='QUEUED' AND c.deleted_at IS NULL "
                 f"ORDER BY {dialect.order_column('t')} LIMIT 1" + suffix)
             if row is None:
+                self.last_claim_empty = True
                 return None
             # A deleter holds the conversation lock before touching tasks.
             # Never wait for that lock while retaining this queue row lock.

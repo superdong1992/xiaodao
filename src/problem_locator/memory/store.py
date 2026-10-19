@@ -330,6 +330,15 @@ class MemoryStore(FeedbackCommentStoreMixin):
             if len(rows) < CARD_SCAN_BATCH_SIZE:
                 return
 
+    def is_card_active(self, skill_name, selection):
+        """Recheck a chosen source after paginated recall, without caching votes."""
+        with self.repository.database_read() as db:
+            return db.execute("SELECT 1 FROM memory_tasks WHERE task_id=? AND skill_name=? "
+                "AND active=1 AND superseded=0 AND status='READY' AND card_json=? "
+                "AND card_sha256=? AND source_kind=?",
+                (selection.card_id, skill_name, selection.card_json, selection.card_sha256,
+                 selection.source_kind)).fetchone() is not None
+
     def revoke_conversation(self, db, conversation_id):
         db.execute("UPDATE memory_feedback_comments SET text=NULL,analysis_text=NULL,analysis_reference=NULL WHERE conversation_id=?", (conversation_id,))
         db.execute("UPDATE memory_tasks SET status='DELETED',active=0,problem_text=NULL,report_markdown=NULL,context_json=NULL,evidence_json=NULL,card_json=NULL,card_sha256=NULL,updated_at=? WHERE conversation_id=?", (self._now(), conversation_id))

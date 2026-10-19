@@ -72,9 +72,12 @@ class FollowupWorker:
             return False
         task = None
         invoked = False
+        observation = service.foreground_activity.begin_scan()
         try:
             task = service.store.claim_task()
             if task is None:
+                if service.store.last_claim_empty:
+                    service.foreground_activity.observed_empty(observation)
                 return False
             signal = CancellationController()
             with self._lock:

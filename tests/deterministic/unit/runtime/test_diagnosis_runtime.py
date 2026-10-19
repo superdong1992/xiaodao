@@ -922,7 +922,7 @@ def _generic_runtime_fixture(
     return runtime, job, state, records
 
 
-def test_generic_memory_is_separate_from_problem_and_preserved_in_execution_audit(tmp_path):
+def test_generic_memory_is_separate_from_problem_and_preserved_in_execution_audit(tmp_path, monkeypatch):
     reference = '历史参考（未经验证）\n{"card_id":"card-1","card_sha256":"hash-1","steps":["先检查连接池"]}'
     calls = []
 
@@ -930,6 +930,17 @@ def test_generic_memory_is_separate_from_problem_and_preserved_in_execution_audi
         calls.append((skill_name, problem_text))
         return SimpleNamespace(reference_text=reference)
 
+    import problem_locator.runtime.generic_locator as locator
+    completed = []
+    original_completed = locator.record_stage_completed
+
+    def capture(stage, started, **kwargs):
+        if stage is ExecutionStage.CONTEXT_BUILD:
+            completed.append(kwargs["data"])
+        return original_completed(stage, started, **kwargs)
+
+    monkeypatch.setattr(locator, "record_stage_completed", capture)
+    monkeypatch.setattr(locator, "monotonic", iter((1.0, 1.125)).__next__)
     report = "# 正式报告\n\n只保留本轮报告原文。\n"
     backend = _GenericRuntimeBackend(None, v2_result_bytes=_generic_v2_result_bytes(report))
     runtime, job, _, records = _generic_runtime_fixture(
@@ -937,31 +948,48 @@ def test_generic_memory_is_separate_from_problem_and_preserved_in_execution_audi
     receipt = runtime.execute(job, InMemoryCancellationSignal())
     prompt = backend.calls[0]["prompt"]
     assert calls == [(job.generic_skill_name, job.generic_problem_text)]
+    assert len(backend.calls) == 1
+    assert len(completed) == 1 and completed[0]["memory_used"] is True
+    assert completed[0]["memory_recall_ms"] == 125.0
     assert f"{job.generic_problem_text}\n<<<END_RAW_PROBLEM_TEXT>>>\n\n{reference}" in prompt
     assert records.read_audit_bytes(job.job_id, "context.txt") == prompt.encode("utf-8")
     assert receipt.job_outcome.payload.report_markdown == report
     assert receipt.job_outcome.payload.report_sha256 == hashlib.sha256(report.encode()).hexdigest()
 
 
-@pytest.mark.parametrize("kind", ["failure", "oversized", "budget"])
+@pytest.mark.parametrize("kind", ["failure", "oversized", "budget", "budget-one", "budget-two"])
 def test_generic_memory_failure_or_budget_never_removes_problem(tmp_path, kind, monkeypatch):
+    import problem_locator.runtime.generic_locator as locator
+    completed = []
+    original_completed = locator.record_stage_completed
+
+    def capture(stage, started, **kwargs):
+        if stage is ExecutionStage.CONTEXT_BUILD:
+            completed.append(kwargs["data"])
+        return original_completed(stage, started, **kwargs)
+
+    monkeypatch.setattr(locator, "record_stage_completed", capture)
     (tmp_path / "baseline").mkdir()
     (tmp_path / "with-memory").mkdir()
     baseline_backend = _GenericRuntimeBackend(_generic_result_bytes())
     baseline, baseline_job, _, _ = _generic_runtime_fixture(tmp_path / "baseline", baseline_backend)
-    if kind == "budget":
+    if kind.startswith("budget"):
         # Simulate large mandatory Skill instructions within the fixed role budget.
         from problem_locator.runtime.generic_locator import GenericLocatorExecutor
         build_prompt = GenericLocatorExecutor.build_prompt
         assets = baseline._resolve_assets(baseline_job)
+        headroom = {"budget": 0, "budget-one": 1, "budget-two": 2}[kind]
         padding = " " * (baseline_job.resource_limits.context_bytes
-                         - len(build_prompt(baseline_job, assets).encode("utf-8")))
+                         - len(build_prompt(baseline_job, assets).encode("utf-8")) - headroom)
         monkeypatch.setattr(GenericLocatorExecutor, "build_prompt", staticmethod(
             lambda *args, **kwargs: padding + build_prompt(*args, **kwargs)))
     baseline.execute(baseline_job, InMemoryCancellationSignal())
     original = baseline_backend.calls[0]["prompt"]
 
+    selections = []
+
     def select(*args):
+        selections.append(args)
         if kind == "failure":
             raise RuntimeError("私密查询内容不能进入日志")
         return SimpleNamespace(reference_text="x" * (4097 if kind == "oversized" else 100))
@@ -972,6 +1000,13 @@ def test_generic_memory_failure_or_budget_never_removes_problem(tmp_path, kind, 
     receipt = runtime.execute(job, InMemoryCancellationSignal())
     assert receipt.job_outcome.result_type is OutcomeResultType.COMPLETED, receipt.job_outcome.error
     assert backend.calls[0]["prompt"] == original
+    assert len(backend.calls) == 1
+    assert len(selections) == (0 if kind.startswith("budget") else 1)
+    assert "memory_used" not in completed[0] and "memory_recall_ms" not in completed[0]
+    assert completed[-1]["memory_used"] is False
+    assert completed[-1]["memory_recall_ms"] >= 0
+    if kind.startswith("budget"):
+        assert completed[-1]["memory_recall_ms"] == 0.0
     assert records.read_audit_bytes(job.job_id, "context.txt") == original.encode("utf-8")
 
 

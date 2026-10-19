@@ -115,7 +115,7 @@ def test_public_create_app_does_not_expose_the_test_skill_override(
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_memory_worker_and_recall_follow_the_same_feature_flag(tmp_path, enabled):
+def test_memory_worker_and_recall_follow_the_same_feature_flag(tmp_path, enabled, monkeypatch):
     skills = tmp_path / "skills"
     skills.mkdir()
     app = create_app(replace(_settings(tmp_path / "data", skill_dir=skills),
@@ -123,6 +123,16 @@ def test_memory_worker_and_recall_follow_the_same_feature_flag(tmp_path, enabled
     graph = app.state.problem_locator_composition
     assert graph.memory_worker is not None
     assert graph.memory_worker._enabled is enabled
+    assert graph.memory_worker._can_start() is False  # Startup state is unknown.
+    with monkeypatch.context() as idle:
+        components = (graph.scheduler, graph.agent, graph.agent.followups)
+        for component in components:
+            idle.setattr(component, "foreground_idle", lambda: True)
+        assert graph.memory_worker._can_start() is True
+        for component in components:
+            idle.setattr(component, "foreground_idle", lambda: False)
+            assert graph.memory_worker._can_start() is False
+            idle.setattr(component, "foreground_idle", lambda: True)
     assert graph.agent.feedback is not None
     assert graph.agent.feedback.memory_enabled is enabled
     assert (graph.runtime._generic_locator_executor._experience_retriever is not None) is enabled

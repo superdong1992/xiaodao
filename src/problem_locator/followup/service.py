@@ -10,6 +10,7 @@ from problem_locator.agent.models import AgentStoreError
 from problem_locator.contracts import DiagnosisMode, JobStatus
 from problem_locator.contracts.models import is_specialized_direct, specialized_direct_skill_name
 from problem_locator.diagnostics import log_event
+from problem_locator.dispatch.activity import QueueIdleObservation
 from problem_locator.runtime.claude_command import supports_read_search
 
 from .models import (MAX_TEXT_BYTES, MAX_TURNS, FollowupRequest, FollowupSource,
@@ -36,9 +37,22 @@ class ReportFollowupService:
         self._observe_lock, self._lifecycle = threading.Lock(), threading.Lock()
         self._observe_pending = set()
         self._threads = []
-        self.store.notify = self._wake.set
+        self.foreground_activity = QueueIdleObservation()
+        self.store.notify = self._changed
         self.worker = FollowupWorker(self, command, backend=backend)
         self.snapshot_worker = SnapshotWorker(self)
+
+    def _changed(self):
+        self.foreground_activity.invalidate()
+        self._wake.set()
+
+    def foreground_idle(self):
+        if self._stop.is_set():
+            return False
+        if not self.enabled:
+            return True
+        return (bool(self._threads) and self._threads[0].is_alive()
+            and self.foreground_activity.idle and not self.worker._processing.locked())
 
     def _source(self, cid, rid):
         run = self.agent.store.get_run(cid, rid)

@@ -10,6 +10,7 @@ from problem_locator.agent.store import _json
 from problem_locator.contracts.limits import MAX_CASE_RESOURCE_BYTES
 from problem_locator.diagnostics import log_event
 from problem_locator.dispatch.cancellation import CancellationController
+from problem_locator.dispatch.activity import QueueIdleObservation
 from problem_locator.storage.database import lock_conversation
 
 from .models import (
@@ -75,6 +76,8 @@ class ContinuationService:
         self.agent, self.store = agent, agent.store
         self.repository = self.store.repository
         self._processing = threading.Lock()
+        self.foreground_activity = QueueIdleObservation()
+        self._last_scan_empty = False
         with self.repository.database_transaction() as db:
             self.ensure_schema(db)
 
@@ -499,8 +502,13 @@ class ContinuationService:
         if (self.agent._stop.is_set() or (operational is not None and not operational.accepting)
                 or not self._processing.acquire(blocking=False)):
             return False
+        observation = self.foreground_activity.begin_scan()
+        self._last_scan_empty = False
         try:
-            return self._run_once(conversation_id)
+            result = self._run_once(conversation_id)
+            if self._last_scan_empty:
+                self.foreground_activity.observed_empty(observation)
+            return result
         finally:
             self._processing.release()
 
@@ -513,6 +521,7 @@ class ContinuationService:
                 params = (conversation_id,)
             rows = db.execute(query + " ORDER BY draft_id LIMIT 1", params).fetchall()
         if not rows:
+            self._last_scan_empty = conversation_id is None
             return False
         cid, did = rows[0]
         signal = CancellationController()

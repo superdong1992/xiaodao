@@ -17,6 +17,7 @@ from problem_locator.contracts.models import ProblemSpecInput, derive_attachment
 from problem_locator.diagnostics import log_event
 from problem_locator.application.reports import result_source_job_id
 from problem_locator.dispatch.cancellation import CancellationController
+from problem_locator.dispatch.activity import QueueIdleObservation
 
 from .intake import (
     ClaudeIntakeEngine, IntakeAttachment, IntakeDecision, IntakeInput, IntakeMessage,
@@ -81,6 +82,7 @@ class AgentConversationService:
         self._continuation_thread = None
         self._attachment_workers = AttachmentWorkers(self)
         self._failure = None
+        self._intake_activity = QueueIdleObservation()
         self._phase = "AGENT"
         store.on_change = self._changed
 
@@ -95,6 +97,8 @@ class AgentConversationService:
         self._local.phase = value
 
     def _changed(self, _conversation_id):
+        self._intake_activity.invalidate()
+        self.continuations.foreground_activity.invalidate()
         self._wake.set()
         self._control_wake.set()
         self._continuation_wake.set()
@@ -143,6 +147,17 @@ class AgentConversationService:
             if thread is not None:
                 thread.join(max(0.0, deadline - time.monotonic()))
         return attachments_stopped and followups_stopped and all(thread is None or not thread.is_alive() for thread in threads)
+
+    def foreground_idle(self):
+        """Use existing worker observations; never scan conversations here."""
+        if (self._stop.is_set() or self._failure is not None
+                or self._thread is None or not self._thread.is_alive()
+                or self._continuation_thread is None or not self._continuation_thread.is_alive()
+                or not self._intake_activity.idle or not self.continuations.foreground_activity.idle
+                or self._processing.locked() or self.continuations._processing.locked()):
+            return False
+        with self._run_lock:
+            return not self._active_runs
 
     def _available(self):
         if self._stop.is_set() or self._failure is not None:
@@ -665,8 +680,11 @@ class AgentConversationService:
             return False
         progressed = False
         attachments = []
+        observation = self._intake_activity.begin_scan()
         try:
             targets = [conversation_id] if conversation_id else self.store.pending_conversations()
+            if not targets and conversation_id is None:
+                self._intake_activity.observed_empty(observation)
             for selected in targets:
                 if self._stop.is_set():
                     break

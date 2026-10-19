@@ -263,7 +263,7 @@ def test_generic_logs_supplements_and_memory_share_one_bounded_skill_invocation(
     assert receipt.job_outcome.error is None
     assert "connection pool wait 2800ms" in receipt.job_outcome.payload.report_markdown
     assert len(backend.calls) == 1 and backend.observed
-    assert selections == [(job.generic_skill_name, "\n".join([job.generic_problem_text, supplement]))]
+    assert selections == ([(job.generic_skill_name, "\n".join([job.generic_problem_text, supplement]))] if memory_fits else [])
     prompt = backend.calls[0]["prompt"]
     assert f"{job.generic_problem_text}\n<<<END_RAW_PROBLEM_TEXT>>>" in prompt
     assert f"{supplement}\n<<<END_SUPPLEMENT_TEXT>>>" in prompt
@@ -273,14 +273,29 @@ def test_generic_logs_supplements_and_memory_share_one_bounded_skill_invocation(
     assert records.read_audit_bytes(job.job_id, "context.txt") == prompt.encode("utf-8")
 
 
-def test_generic_runtime_empty_parsed_logs_resolves_without_backend(tmp_path: Path, pinned_asset) -> None:
+def test_generic_runtime_empty_parsed_logs_resolves_without_backend(tmp_path: Path, pinned_asset, monkeypatch) -> None:
+    import problem_locator.runtime.generic_locator as locator
+    completed = []
+    original_completed = locator.record_stage_completed
+
+    def capture(stage, started, **kwargs):
+        if stage is locator.ExecutionStage.CONTEXT_BUILD:
+            completed.append(kwargs["data"])
+        return original_completed(stage, started, **kwargs)
+
+    monkeypatch.setattr(locator, "record_stage_completed", capture)
     backend = _GenericRuntimeBackend(None)
-    runtime, job, _ = _runtime(tmp_path, pinned_asset, backend, mode="empty")
+    selections = []
+    runtime, job, records = _runtime(tmp_path, pinned_asset, backend, mode="empty",
+        experience_retriever=SimpleNamespace(select=lambda *args: selections.append(args)))
     receipt = runtime.execute(job, InMemoryCancellationSignal())
     assert receipt.job_outcome.error is None
     assert receipt.job_outcome.payload.status.value == "UNRESOLVED"
     assert "未找到可分析日志" in receipt.job_outcome.payload.report_markdown
-    assert backend.calls == []
+    assert backend.calls == [] and selections == []
+    assert len(completed) == 1
+    assert completed[0]["memory_recall_ms"] == 0.0 and completed[0]["memory_used"] is False
+    assert job.generic_problem_text.encode("utf-8") in records.read_audit_bytes(job.job_id, "context.txt")
 
 
 def test_empty_runtime_cancel(tmp_path: Path, pinned_asset, monkeypatch: pytest.MonkeyPatch) -> None:

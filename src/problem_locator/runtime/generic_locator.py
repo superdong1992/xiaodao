@@ -8,6 +8,7 @@ import os
 import re
 import stat
 from dataclasses import dataclass
+from time import monotonic
 
 from problem_locator.contracts import (
     ApplicationPortError,
@@ -350,36 +351,49 @@ class GenericLocatorExecutor:
             prompt = self.build_prompt(job, assets)
         except (TypeError, UnicodeEncodeError, ValueError):
             raise _invalid_result() from None
-        if len(prompt.encode("utf-8")) > job.resource_limits.context_bytes:
+        mandatory_bytes = len(prompt.encode("utf-8"))
+        if mandatory_bytes > job.resource_limits.context_bytes:
             raise runtime_failure(
                 stage=ExecutionStage.CONTEXT_BUILD,
                 code=ErrorCode.CONTEXT_LIMIT,
                 message="The generic locator prompt exceeds the fixed context budget.",
                 retryable=False,
             )
+        parsed_logs = None if log_manifest_bytes is None else parse_canonical_json_bytes(log_manifest_bytes)
+        empty_logs = parsed_logs is not None and not parsed_logs["logs"]
+        memory_recall_ms, memory_used = 0.0, False
         # Optional memory never displaces the original problem or output contract.
-        # context.txt records the exact immutable input used by this invocation.
-        if self._experience_retriever is not None:
+        # A nonempty reference also needs two framing newlines. Skip pointless
+        # storage work when no model will run or even that framing cannot fit.
+        if (self._experience_retriever is not None and not empty_logs
+                and job.resource_limits.context_bytes - mandatory_bytes > 2):
             try:
-                selection = self._experience_retriever.select(
-                    job.generic_skill_name, "\n".join([job.generic_problem_text, *job.generic_supplement_texts]),
-                )
+                recalling = monotonic()
+                try:
+                    selection = self._experience_retriever.select(
+                        job.generic_skill_name, "\n".join([job.generic_problem_text, *job.generic_supplement_texts]),
+                    )
+                finally:
+                    memory_recall_ms = (monotonic() - recalling) * 1000
                 if selection is not None and len(selection.reference_text.encode("utf-8")) <= 4096:
                     candidate = self.build_prompt(job, assets, experience_reference=selection.reference_text)
                     if len(candidate.encode("utf-8")) <= job.resource_limits.context_bytes:
                         prompt = candidate
+                        memory_used = bool(selection.reference_text)
             except Exception:
                 # Do not log the query, card, exception text, or another user's data.
                 log_event("generic_memory.retrieval_failed", level=logging.WARNING)
         self._workspace_manager.write_context(workspace, prompt)
         self._publish_audit(job, "context.txt", prompt.encode("utf-8"))
+        context_data = {"utf8_bytes": len(prompt.encode("utf-8")), "generic": True}
+        if self._experience_retriever is not None:
+            context_data.update(memory_recall_ms=memory_recall_ms, memory_used=memory_used)
         record_stage_completed(
             ExecutionStage.CONTEXT_BUILD,
             building,
-            data={"utf8_bytes": len(prompt.encode("utf-8")), "generic": True},
+            data=context_data,
         )
-        parsed_logs = None if log_manifest_bytes is None else parse_canonical_json_bytes(log_manifest_bytes)
-        if parsed_logs is not None and not parsed_logs["logs"]:
+        if empty_logs:
             empty_report = (b"<<<GENERIC_DIAGNOSIS_RESULT_V2:UNRESOLVED>>>\n" +
                 "未找到可分析日志。\n\n日志包已解析，但没有生成可供通用定位读取的日志文件，暂时无法结合日志确认原因。请检查日志包内容及服务端产品解析配置。\n".encode("utf-8"))
             with (workspace.root / "output" / GENERIC_RESULT_V2_FILENAME).open("xb") as stream:
