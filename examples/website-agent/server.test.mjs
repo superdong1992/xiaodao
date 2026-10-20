@@ -22,6 +22,7 @@ import "./followup.test.mjs";
 import "./feedback-comments.test.mjs";
 import "./continuation.test.mjs";
 import "./file-sha256.test.mjs";
+import "./log-upload-controller.test.mjs";
 import "./unified-followup.test.mjs";
 
 test("TypeScript compatibility entry exports the same BFF implementation", () => {

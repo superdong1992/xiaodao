@@ -93,7 +93,9 @@ const executeUpload = new AsyncFunction("client", "crypto", "file", "conversatio
   `const selectedRunId = "selected-run";\n${upload}\nreturn { metadata, submitLogs };`);
 
 for (const [name, contentType] of [["logs.zip", "application/zip"], ["LOGS.zip", "application/zip"],
-  ["logs.tar", "application/x-tar"], ["logs.tar.gz", "application/gzip"], ["日志.tgz", "application/gzip"], ["logs.gz", "application/gzip"]]) {
+  ["logs.tar", "application/x-tar"], ["logs.tar.gz", "application/gzip"], ["日志.tgz", "application/gzip"], ["logs.gz", "application/gzip"],
+  ["logs.log", "text/plain"], ["logs.txt", "text/plain"], ["logs.json", "application/json"],
+  ["logs.jsonl", "application/x-ndjson"], ["logs.ndjson", "application/x-ndjson"]]) {
   test(`copied upload example preserves legal filename and MIME: ${name}`, async () => {
     const file = new File(["bytes"], name, { type: "" });
     let hashes = 0;
@@ -107,7 +109,8 @@ for (const [name, contentType] of [["logs.zip", "application/zip"], ["LOGS.zip",
 }
 
 for (const file of [{ name: "LOGS.ZIP", size: 10 }, { name: "logs.TAR.gz", size: 10 },
-  { name: "logs.txt", size: 10 }, { name: "logs.zip", size: 0 }, { name: "logs.zip", size: 2684354561 }]) {
+  { name: "logs.bin", size: 10 }, { name: "logs.TXT", size: 10 },
+  { name: "logs.zip", size: 0 }, { name: "logs.zip", size: 2684354561 }]) {
   test(`copied upload example rejects invalid name/size before hashing: ${file.name}/${file.size}`, async () => {
     let hashes = 0;
     await assert.rejects(executeUpload({}, ids(), file, "conversation", {

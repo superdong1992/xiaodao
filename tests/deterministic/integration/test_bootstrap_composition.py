@@ -170,6 +170,44 @@ def test_production_app_starts_with_empty_diagnosis_skill_catalog(
     assert graph.instance_lock.is_acquired() is False
 
 
+def test_generic_only_production_app_starts_without_constructing_logparse(tmp_path, monkeypatch):
+    skills = tmp_path / "empty-skills"
+    skills.mkdir()
+    settings = replace(_settings(tmp_path / "data", skill_dir=skills),
+                       logparse_repo=None, logparse_config_path=None)
+
+    def unexpected_logparse(*args, **kwargs):
+        raise AssertionError("Generic-only startup must not construct Logparse")
+
+    monkeypatch.setattr("problem_locator.bootstrap.build_logparse_runtime", unexpected_logparse)
+    app = create_app(settings)
+    graph = app.state.problem_locator_composition
+    assert graph is not None
+    assert graph.logparse_asset is graph.logparse_broker_factory is None
+    assert graph.runtime._logparse_broker_factory is None
+    assert graph.asset_catalog.generic_diagnose_bindings(with_logs=True).generic_log_preparation == "direct-v1"
+    with TestClient(app) as client:
+        assert client.get("/ready").status_code == 200
+    assert graph.closed and not graph.instance_lock.is_acquired()
+
+
+def test_specialized_logparse_dependency_remains_required_at_startup(tmp_path):
+    settings = replace(_settings(tmp_path / "data"), logparse_repo=None, logparse_config_path=None)
+    from problem_locator.runtime.catalog import VersionedAssetCatalog
+
+    with pytest.raises(ValueError, match="requires a paired logparse"):
+        VersionedAssetCatalog(skill_dir=SKILL_DIR, generic_skill_name=settings.generic_skill_name,
+                              defer_snapshot=True)
+    app = create_app(settings)
+    assert app.state.problem_locator_composition is None
+    assert app.state.problem_locator_owner.error.code is ErrorCode.CONFIG_INVALID
+    with TestClient(app) as client:
+        response = client.get("/ready")
+        assert response.status_code == 500
+        assert response.json()["error"]["code"] == ErrorCode.CONFIG_INVALID.value
+    assert not settings.data_root.exists()
+
+
 def test_production_clock_ids_and_notifier_follow_frozen_shapes() -> None:
     timestamp = ProductionClock().now()
     assert re.fullmatch(

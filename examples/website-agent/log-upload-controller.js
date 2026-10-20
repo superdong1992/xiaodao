@@ -1,6 +1,8 @@
 import { sha256File } from "./file-sha256.js";
 
-const MIME = [[".tar.gz", "application/gzip"], [".tgz", "application/gzip"], [".zip", "application/zip"], [".tar", "application/x-tar"], [".gz", "application/gzip"]];
+const MIME = [[".tar.gz", "application/gzip"], [".tgz", "application/gzip"], [".zip", "application/zip"], [".tar", "application/x-tar"], [".gz", "application/gzip"],
+  [".log", "text/plain"], [".txt", "text/plain"], [".json", "application/json"], [".jsonl", "application/x-ndjson"], [".ndjson", "application/x-ndjson"]];
+export const LOG_FILE_ACCEPT = MIME.map(([suffix]) => suffix).join(",");
 const fileType = (file) => MIME.find(([suffix]) => file.name.toLowerCase().endsWith(suffix));
 
 /** 原上传流程的独立队列；不判断用户意图，也不创建诊断。 */
@@ -13,13 +15,13 @@ export function createLogUploadController({ client, conversationId, makeRequestI
   async function uploadFiles(selected) {
     if (disposed || !canChange() || state.uploading) return;
     const additions = [...new Set(selected)].filter((file) => !files.has(file));
-    if (state.uploads.length + additions.length > 20) throw new Error("一次最多选择 20 个日志包。");
+    if (state.uploads.length + additions.length > 20) throw new Error("一次最多选择 20 个日志文件或归档。");
     if ([...state.uploads, ...additions].reduce((sum, file) => sum + file.size, 0) > 5_368_709_120)
-      throw new Error("所选日志包的总大小不能超过 5 GiB。");
+      throw new Error("所选日志文件或归档的总大小不能超过 5 GiB。");
     for (const file of additions) {
       const type = fileType(file);
       if (!type || !file.name.endsWith(type[0]) || file.size < 1 || file.size > 2_684_354_560)
-        throw new Error("请选择后缀为小写 zip、tar、tar.gz、tgz 或 gz 的日志包，单包大小为 1 字节到 2.5 GiB。");
+        throw new Error("请选择小写后缀的 log、txt、json、jsonl、ndjson 日志或 zip、tar、tar.gz、tgz、gz 归档，单文件大小为 1 字节到 2.5 GiB。");
     }
     for (const file of additions) {
       const item = { local_id: makeRequestId(), name: file.name, size: file.size, status: "WAITING", attachment_id: null };

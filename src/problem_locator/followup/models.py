@@ -177,3 +177,4 @@ class FollowupSource:
     has_logs: bool
     occurred_at: str
     skill_name: str = ""
+    has_log_manifest: bool = False

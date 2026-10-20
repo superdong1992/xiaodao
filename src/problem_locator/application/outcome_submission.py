@@ -27,6 +27,8 @@ from problem_locator.contracts import (
     ExecutionFailedTriggerPayload,
     ExecutionFileRef,
     GenericReportMetadataV1,
+    GENERIC_DIRECT_LOG_CONTENT_TYPES,
+    GENERIC_LEGACY_LOG_CONTENT_TYPES,
     Job,
     JobOutcome,
     JobStatus,
@@ -449,7 +451,10 @@ class OutcomeSubmissionService:
             trigger = _outcome_trigger(
                 snapshot,
                 outcome,
-                _outcome_continuation(snapshot, outcome),
+                _outcome_continuation(snapshot, outcome, generic_log_preparation=(
+                    bindings[JobType.DIAGNOSE].generic_log_preparation
+                    if JobType.DIAGNOSE in bindings else None
+                )),
                 bindings,
                 outcome_trigger_id,
             )
@@ -1875,19 +1880,19 @@ def _case_snapshot(snapshot: StateFile, case_id: str):
 
 
 def _outcome_continuation(
-    snapshot: StateFile, outcome: JobOutcome,
+    snapshot: StateFile, outcome: JobOutcome, *, generic_log_preparation: str | None = None,
 ) -> ContinuationResourceView:
     continuation = continuation_for_outcome(snapshot, outcome)
     if (outcome.job_type is JobType.ROUTE
         and outcome.result_type is OutcomeResultType.NO_CAPABILITY):
         attachments = snapshot.cases[outcome.case_id].attachments
-        # Specialist history can include ordinary text and other evidence
-        # attachments. Only supported product archives can become Generic logs.
+        # Keep the successor's fixed preparation strategy: legacy jobs retain
+        # archive-only inputs; direct preparation also accepts ordinary logs.
+        accepted = (GENERIC_DIRECT_LOG_CONTENT_TYPES if generic_log_preparation == "direct-v1"
+            else GENERIC_LEGACY_LOG_CONTENT_TYPES)
         return continuation.model_copy(update={"attachment_refs": [
             attachment_id for attachment_id in continuation.attachment_refs
-            if attachments[attachment_id].content_type in {
-                "application/gzip", "application/zip", "application/x-tar",
-            }
+            if attachments[attachment_id].content_type in accepted
         ]})
     return continuation
 

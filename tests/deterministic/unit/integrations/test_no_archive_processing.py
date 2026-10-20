@@ -15,10 +15,18 @@ SKILL_DIRS = (
 )
 LOGPARSE_ROOT = SRC_ROOT / "integrations" / "logparse"
 
-# Archive APIs remain forbidden for uploaded-input handling. These are the
-# exact user-result and server-owned audit-bundle seams; none extracts an input
-# archive.
+# Archive APIs are confined to result/audit serialization and the controlled
+# Generic input reader. It streams members into generated names; extraction
+# into caller-supplied paths remains forbidden everywhere.
 CONTROLLED_ARCHIVE_ALLOWLIST = {
+    ("src/problem_locator/runtime/direct_generic_logs.py", "<module>"):
+        frozenset({"import:zipfile", "import:tarfile", "import:gzip"}),
+    ("src/problem_locator/runtime/direct_generic_logs.py", "zip_members"):
+        frozenset({"call:zipfile.ZipFile", "call:archive.infolist", "call:archive.open"}),
+    ("src/problem_locator/runtime/direct_generic_logs.py", "tar_members"):
+        frozenset({"call:tarfile.open", "call:archive.extractfile"}),
+    ("src/problem_locator/runtime/direct_generic_logs.py", "prepare_direct_generic_sources"):
+        frozenset({"call:gzip.GzipFile"}),
     (
         "src/problem_locator/integrations/result_archive.py",
         "_write_result_archive_file",
@@ -73,11 +81,13 @@ ARCHIVE_CALLS = frozenset(
         "zipfile.ZipInfo",
         "tarfile.open",
         "gzip.open",
+        "gzip.GzipFile",
         "shutil.unpack_archive",
         "archive.infolist",
         "archive.writestr",
         "archive.extract",
         "archive.extractall",
+        "archive.extractfile",
         "archive.open",
         "archive.read",
     }
@@ -212,7 +222,7 @@ def _paragraphs(text: str) -> list[str]:
     return [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
 
 
-def test_archive_apis_are_absent_except_controlled_user_result_seams() -> None:
+def test_archive_apis_are_absent_except_controlled_result_and_generic_input_seams() -> None:
     actual: dict[tuple[str, str], set[str]] = {}
     uses: list[_Use] = []
     for path in _python_files():

@@ -35,7 +35,7 @@ Web 会话正文、报告和历史问答永久保存，用户主动删除时再�
 
 先发描述、再单独发送附件也支持上述流程：服务端会检查此前是否还有未提取的文字，不会因为最新消息没有 `text` 就跳过首条描述。文字已经整理后，仅选择或补交附件不再调用提取模型。网站可以先把一个日志包上传到 `READY`，再用同一条消息发送问题文字和 `attachment_ids`。
 
-专用定位按 Skill 要求接收日志；通用定位可不带日志。内置日志输入支持最多 20 份归档，每个包独立解析，同名文件保留各自来源。尚未采用附件时，以最近一条携带 `attachment_ids` 的消息作为本轮完整附件选择；只发文字不会清除已有选择。重新发送引用目标附件 ID 的消息即可选择已有文件，无需重复上传。自定义 Skill 仍遵守自己的输入数量要求。
+专用定位按 Skill 要求接收日志归档；通用定位可不带日志，也可直接接收 UTF-8 文本（允许 BOM）或归档。内置日志输入支持最多 20 份文件，每个文件独立准备，同名文件保留各自来源。新通用诊断直接读取 `.log/.txt/.json/.jsonl/.ndjson`，或安全展开 `.zip/.tar/.tar.gz/.tgz/.gz`，不调用 Logparse。部分文件不可读时明确列出原因，继续分析可读文件；没有可读日志时按问题文字继续定位，损坏归档或不安全输入明确失败。尚未采用附件时，以最近一条携带 `attachment_ids` 的消息作为本轮完整附件选择；只发文字不会清除已有选择。重新发送引用目标附件 ID 的消息即可选择已有文件，无需重复上传。自定义 Skill 仍遵守自己的输入数量要求，专用日志类型要求不变。
 
 通用定位会自动分析随问题提交的日志，不要求填写时间、槽位、进程或 PID，也不调用 Intake 提取这些参数。分析开始后补交有效日志，会停止旧 Job，在同一 Case 和同一轮次重新分析；新日志替换旧包，原始问题保留，随日志发送的文字作为补充描述。请求重放不会重复启动。已固定本次重启请求后，若旧报告抢先完成提交，本次重启返回 `409`，日志文件仍保留，但不会发布该消息的 `message.accepted`。请求进入服务端时若本轮已经结束，则按原消息规则处理：有文本的新请求开启新轮，只有附件则提示提供问题原话；前端须核对收据中的 `run_id`。专用定位的附件采用规则不变。
 
@@ -43,7 +43,7 @@ Web 会话正文、报告和历史问答永久保存，用户主动删除时再�
 
 时间须包含完整日期、时分秒及 `Z` 或明确时区偏移，日期与时间之间支持 `T` 或一个普通空格，例如 `2026-09-16 10:00:00+08:00`。不接受缺少时区的时间，也不会舍弃亚毫秒精度。Skill 已登记的角色说明会随对应字段要求传给提取模型，每段说明最多使用 256 个 UTF-8 字节；没有登记的字段别名和含义不会自动补造。
 
-专用定位的参数提取读取用户消息和附件元数据，不读取日志正文。专用 Skill 要求的问题时间、进程、槽位等参数应写在问题文字中；仅存在于日志文件内的信息不会自动补齐这些输入。通用定位不走这一步，由通用 Skill 自行读取已解析的日志寻找线索。
+专用定位的参数提取读取用户消息和附件元数据，不读取日志正文。专用 Skill 要求的问题时间、进程、槽位等参数应写在问题文字中；仅存在于日志文件内的信息不会自动补齐这些输入。通用定位不走这一步，由通用 Skill 自行读取已准备的只读日志寻找线索。新 Job 使用 `direct-v1`，已有 Job 保留原准备方式；详细边界和前端适配见[通用日志直接读取](generic-direct-log-input.md)。
 
 性能边界：空闲会话只读取轻量处理状态和带索引的未完成命令，不重载消息历史或查询 Case。首条消息会补上旧流程漏掉的一次必要提取；没有可提取参数的首条也可能耗用这一次调用，因此零模型验证不能保证真实模型的端到端时延不变。模型失败不自动重试。
 
@@ -219,7 +219,7 @@ Content-Type: application/json
 
 ### 预约和上传日志
 
-文件名只接受现有压缩日志格式：`.zip`、`.tar`、`.tar.gz`、`.tgz`、`.gz`。文件名不得包含目录或控制字符，压缩后缀使用小写。类型分别为 `application/zip`、`application/x-tar`、`application/gzip`。单文件最多 2,684,354,560 字节，每会话最多 20 个附件且总量受服务端限制；不支持截图或 PDF 解析。
+文件名支持 `.log`、`.txt`、`.json`、`.jsonl`、`.ndjson` 文本以及 `.zip`、`.tar`、`.tar.gz`、`.tgz`、`.gz` 归档。文件名不得包含目录或控制字符，后缀使用小写。文本类型为 `text/plain`、`application/json`、`application/x-ndjson` 或显式 `application/jsonl`；归档类型仍为 `application/zip`、`application/x-tar`、`application/gzip`。单文件最多 2,684,354,560 字节，每会话最多 20 个附件且总量受服务端限制；不支持截图或 PDF 解析。完整后缀映射见[通用日志直接读取](generic-direct-log-input.md)。
 
 先计算文件真实字节数和完整 SHA-256，再预约。以下哈希值仅演示字段格式，不能直接用于上传真实文件。
 
@@ -952,7 +952,7 @@ node --test examples/website-agent/server.test.mjs
 | `ConversationDownloadArtifact` | `created_at` | 文件发布的服务时间。 |
 | `ConversationDownloadArtifact` | `downloadable` | 固定为 true；会话仅提供可下载的正式产物。 |
 | `ConversationDownloadArtifact` | `download_url` | 已核验标识构成的文件入口；网站后端重写为授权后的同源 URL。 |
-| `AgentProgressData` | `stage` | 当前最新的公开执行阶段，例如 ROUTE、LOGPARSE、DIAGNOSE、REVIEW、ARCHIVE 或 INTAKE。 |
+| `AgentProgressData` | `stage` | 当前最新的公开执行阶段，例如 ROUTE、GENERIC_LOG_PREPARE（正在准备日志）、LOGPARSE、DIAGNOSE、REVIEW、ARCHIVE 或 INTAKE。 |
 | `AgentProgressData` | `message` | 与 stage 对应的固定中文进度说明，不包含模型内部推理。 |
 | `UserResultPayloadV3` | `candidate_factors` | 尚未确认为原因的候选因素。 |
 | `UserResultPayloadV3` | `causal_factors` | 报告保留的致因因素。 |

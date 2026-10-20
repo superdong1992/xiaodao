@@ -124,6 +124,9 @@ from .generic_locator import GenericLocatorExecutor
 from .skill_direct import parse_skill_direct_response
 from .input_profile import expand_profile_requirements, load_builtin_input_profile
 from .generic_logs import freeze_generic_logs, freeze_generic_log_batch
+from .direct_generic_logs import DirectGenericLogError, prepare_direct_generic_sources
+from problem_locator.contracts.models import GENERIC_DIRECT_LOG_CONTENT_TYPES
+from problem_locator.storage.capacity import StorageCapacityError
 from problem_locator.integrations.logparse.outputs import validate_generic_parse_result
 from problem_locator.integrations.logparse.paths import resolve_workspace_path
 from .outcome_finalizer import (
@@ -3653,11 +3656,14 @@ class DiagnosisRuntime:
     def _publish_generic_preflight(self, job: Job) -> RuntimeExecutionReceipt:
         """Hand off the selected web upload before any Generic model invocation."""
         template = load_builtin_input_profile()["log_archive_requirement"]
+        constraints = dict(template["constraints"])
+        if job.generic_log_preparation == "direct-v1":
+            constraints["allowed_content_types"] = sorted(GENERIC_DIRECT_LOG_CONTENT_TYPES)
         requirement_id = self._id_generator.derive("pending_requirement", (job.job_id, "ATTACHMENT", "log_archive"))
         requirement = PendingRequirement(
             requirement_id=requirement_id, kind=RequirementKind.ATTACHMENT,
-            name="log_archive", prompt="正在准备本轮选择的日志归档。", required=True,
-            constraints=AttachmentRequirementConstraints.model_validate(template["constraints"]),
+            name="log_archive", prompt="正在准备本轮选择的日志附件。", required=True,
+            constraints=AttachmentRequirementConstraints.model_validate(constraints),
             status=RequirementStatus.OPEN, requested_by_job_id=job.job_id,
             fulfilled_by_refs=[], supplement_policy=SupplementPolicy.MISSING_ONLY,
         )
@@ -3672,7 +3678,7 @@ class DiagnosisRuntime:
                     add_open_questions=[], resolve_questions=[], add_pending_requirements=[requirement],
                     fulfill_requirements=[], add_evidence_bindings=[],
                 ), requested_input=[], requested_attachments=[requirement_id],
-                candidate_conclusion_draft=None, recommended_next_step="导入并提交本轮选择的日志归档。",
+                candidate_conclusion_draft=None, recommended_next_step="导入并提交本轮选择的日志附件。",
             ), consumed_evidence_refs=[], proposed_evidence=[], proposed_artifacts=[],
             error=None, produced_at=self._clock.now(), decision_audit=None,
         )
@@ -3683,6 +3689,8 @@ class DiagnosisRuntime:
     def _prepare_generic_logs(
         self, job: Job, aggregate: CaseAggregate, cancellation: CancellationSignal,
     ) -> tuple[PreparedWorkspace, bytes]:
+        if job.generic_log_preparation == "direct-v1":
+            return self._prepare_direct_generic_logs(job, aggregate, cancellation)
         if self._logparse_broker_factory is None or job.logparse_product is None:
             raise runtime_failure(stage=ExecutionStage.ASSET_RESOLUTION,
                 code=ErrorCode.ASSET_VERSION_UNAVAILABLE, message="通用定位的日志解析配置不可用。")
@@ -3715,6 +3723,54 @@ class DiagnosisRuntime:
                 code=ErrorCode.LOGPARSE_OUTPUT_INVALID, message="日志解析结果或文件校验失败。") from None
         self._publish_audit_bytes(job, "generic_logs.json", receipt_bytes)
         return workspace, receipt_bytes
+
+    def _prepare_direct_generic_logs(
+        self, job: Job, aggregate: CaseAggregate, cancellation: CancellationSignal,
+    ) -> tuple[PreparedWorkspace, bytes]:
+        self._announce(job, "GENERIC_LOG_PREPARE")
+        limits = self._backend_test_limits or BackendExecutionLimits.from_resource_limits(job.resource_limits)
+        deadline = time.monotonic() + limits.wall_time_seconds
+
+        def check_abort() -> None:
+            if cancellation.is_cancelled():
+                raise runtime_failure(stage=ExecutionStage.WORKSPACE_PREPARE,
+                    code=ErrorCode.BACKEND_CANCELLED, message="日志准备已取消。",
+                    retryable=cancellation.reason is CancellationReason.SERVICE_SHUTDOWN)
+            if time.monotonic() >= deadline:
+                raise runtime_failure(stage=ExecutionStage.WORKSPACE_PREPARE,
+                    code=ErrorCode.BACKEND_TIMEOUT, message="日志准备超时。", retryable=True)
+
+        started = record_stage_started(ExecutionStage.WORKSPACE_PREPARE,
+            data={"operation": "generic-direct-log-preparation", "version": "direct-v1"})
+        sources = self._workspace_manager.prepare_generic_source_workspace(
+            job, aggregate, self._resource_store, check_abort=check_abort,
+        )
+        workspace = self._workspace_manager.prepare_generic_main_metadata_only(job, aggregate)
+        entries = {entry.resource_id: entry for entry in sources.manifest.entries
+                   if entry.input_kind == "ATTACHMENT"}
+        try:
+            receipt = prepare_direct_generic_sources(workspace,
+                sources=[(sources.root / entries[item.attachment_id].relative_path, item)
+                         for item in sources.attachments],
+                cancellation=cancellation, deadline=deadline, capacity=workspace.capacity)
+            check_abort()
+        except DirectGenericLogError as exc:
+            raise runtime_failure(stage=ExecutionStage.WORKSPACE_PREPARE,
+                code=ErrorCode.WORKSPACE_PREPARE_FAILED, message=str(exc),
+                details=[ApplicationErrorDetail(field="attachment_ids", resource_type="GENERIC_LOG_INPUT",
+                    resource_id=None, resource_ref=None, expected="readable-safe-input",
+                    actual=exc.reason_code, limit=None, observed=None)]) from None
+        except StorageCapacityError as exc:
+            raise runtime_failure(stage=ExecutionStage.WORKSPACE_PREPARE,
+                code=ErrorCode.WORKSPACE_PREPARE_FAILED, message=str(exc), retryable=True) from exc
+        except (OSError, TypeError, ValueError):
+            raise runtime_failure(stage=ExecutionStage.WORKSPACE_PREPARE,
+                code=ErrorCode.WORKSPACE_PREPARE_FAILED, message="日志附件准备或完整性校验失败。") from None
+        self._publish_audit_bytes(job, "generic_logs.json", receipt)
+        record_stage_completed(ExecutionStage.WORKSPACE_PREPARE, started,
+            data={"operation": "generic-direct-log-preparation",
+                  "attachment_count": len(sources.attachments)})
+        return workspace, receipt
 
     def _prepare_generic_log_source(
         self, job: Job, aggregate: CaseAggregate, attachment_id: str, *,

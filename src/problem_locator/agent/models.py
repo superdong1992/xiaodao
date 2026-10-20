@@ -9,7 +9,7 @@ from problem_locator.contracts.models import GenericResult, NonEmptyText, Opaque
 
 PUBLIC_PROGRESS_MESSAGES = {
     "INTAKE": "正在整理问题", "ROUTE": "正在选择定位方法",
-    "LOGPARSE": "正在解析日志", "DIAGNOSE": "正在分析日志",
+    "LOGPARSE": "正在解析日志", "GENERIC_LOG_PREPARE": "正在准备日志", "DIAGNOSE": "正在分析日志",
     "REVIEW": "正在审核结论", "ARCHIVE": "正在整理目标日志",
     "ROUTING": "正在选择定位方法", "DIAGNOSING": "正在分析日志",
     "VERIFYING": "正在核对证据", "REVIEWING": "正在审核结论",
@@ -240,7 +240,7 @@ class AssistantQuestionData(AgentModel):
 
 
 class AgentProgressData(AgentModel):
-    stage: Literal["INTAKE", "ROUTE", "LOGPARSE", "DIAGNOSE", "REVIEW", "ARCHIVE",
+    stage: Literal["INTAKE", "ROUTE", "LOGPARSE", "GENERIC_LOG_PREPARE", "DIAGNOSE", "REVIEW", "ARCHIVE",
                    "ROUTING", "DIAGNOSING", "VERIFYING", "REVIEWING", "REPORTING"]
     message: NonEmptyText
 

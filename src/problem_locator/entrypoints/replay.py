@@ -438,6 +438,8 @@ def validate_replay_paths(request: ReplayRequest, settings: Settings) -> None:
         ("logparse-repo", settings.logparse_repo),
         ("logparse-config", settings.logparse_config_path),
     ):
+        if path is None:
+            continue
         if not Path(path).is_absolute():
             raise _fail(
                 ErrorCode.CONFIG_INVALID,
@@ -462,8 +464,8 @@ def validate_replay_paths(request: ReplayRequest, settings: Settings) -> None:
     protected = [
         request.source_data_root,
         settings.skill_dir,
-        settings.logparse_repo,
-        settings.logparse_config_path,
+        *([settings.logparse_repo] if settings.logparse_repo is not None else []),
+        *([settings.logparse_config_path] if settings.logparse_config_path is not None else []),
     ]
     if settings.dfx_log_dir is not None:
         protected.append(settings.dfx_log_dir)
@@ -573,6 +575,7 @@ def _rebind_pending_job(job: Job, bindings: Any) -> Job:
         diagnosis_mode=bindings.diagnosis_mode,
         review_policy=bindings.review_policy,
         generic_skill_name=bindings.generic_skill_name,
+        generic_log_preparation=bindings.generic_log_preparation,
         agent_profile_ref=bindings.agent_profile_ref,
         available_skill_refs=bindings.available_skill_refs,
         skill_ref=bindings.skill_ref,
@@ -1085,11 +1088,13 @@ def _prepare_projection(
         )
 
         try:
-            logparse_asset, broker_factory = build_logparse_runtime(
-                settings.logparse_repo,
-                settings.logparse_config_path,
-                settings.logparse_python,
-            )
+            logparse_asset = broker_factory = None
+            if settings.logparse_repo is not None:
+                logparse_asset, broker_factory = build_logparse_runtime(
+                    settings.logparse_repo,
+                    settings.logparse_config_path,
+                    settings.logparse_python,
+                )
             catalog = VersionedAssetCatalog(
                 skill_dir=settings.skill_dir,
                 logparse_tool=logparse_asset,

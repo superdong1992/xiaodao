@@ -66,9 +66,14 @@ def build_prompt(source, history, question, mode, *, read_search=False, correcti
         snapshot_status=snapshot_status,
         request_key=request_key, diagnosis_context=diagnosis_context)
     instructions = ("原始日志的只读副本在 inputs/logs.json 列出的 inputs/logs/ 文件中。"
-        "可以用 Read、Grep 核对有关片段；不要读取 inputs 以外的位置。\n"
+        "可以用 Read、Grep 核对有关片段；不要读取 inputs 以外的位置。"
+        "来源清单中的 skipped 和 coverage 说明未采用的文件及范围，不能将它们视为已读取的证据。\n"
         if mode == "REPORT_AND_LOGS" else
         "本次没有可用的原始日志副本；不得声称已重新核对日志。可以回答资料能支持的问题，或按上述条件请求补充、交给框架继续诊断。\n")
+    if (mode == "REPORT_ONLY" and read_search and snapshot_status == "READY"
+            and source.has_log_manifest and not source.has_logs):
+        instructions += ("inputs/logs.json 只保存原附件来源、跳过原因和准备范围，可按需读取以说明为何没有可用日志；"
+            "这份元数据不包含可读日志证据。\n")
     if correction:
         instructions += ("用户正在纠正 correction 指定的回答，question 是其纠正说明。请逐项核对目标回答，"
             "指出哪些说明可被现有证据支持、哪些仍待验证，并优先给出最短的下一步核查路径。"

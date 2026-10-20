@@ -283,6 +283,7 @@ def _runtime_from_job(job: Job) -> RuntimeBindings:
         diagnosis_mode=job.diagnosis_mode,
         review_policy=job.review_policy,
         generic_skill_name=job.generic_skill_name,
+        generic_log_preparation=job.generic_log_preparation,
         agent_profile_ref=job.agent_profile_ref,
         available_skill_refs=job.available_skill_refs,
         skill_ref=job.skill_ref,
@@ -1605,11 +1606,16 @@ class DomainCoordinator:
             or source.status not in {JobStatus.PENDING, JobStatus.RUNNING}):
             return _invalid_state(snapshot.case.status, trigger.trigger_type)
         bindings = trigger.runtime_bindings_by_job_type.get(JobType.DIAGNOSE)
-        if bindings is None or bindings.logparse_tool_ref is None:
-            return _validation("Restarting generic diagnosis requires fixed logparse bindings.")
+        if bindings is None or (
+            bindings.generic_log_preparation is None and bindings.logparse_tool_ref is None
+        ):
+            return _validation("Restarting generic diagnosis requires fixed log preparation bindings.")
         expected = _runtime_from_job(source).model_dump(mode="python")
-        if source.logparse_tool_ref is None:
-            expected.update(logparse_tool_ref=bindings.logparse_tool_ref, logparse_product=bindings.logparse_product)
+        if source.logparse_tool_ref is None and source.generic_log_preparation is None:
+            expected.update(
+                generic_log_preparation=bindings.generic_log_preparation,
+                logparse_tool_ref=bindings.logparse_tool_ref, logparse_product=bindings.logparse_product,
+            )
         if bindings != RuntimeBindings.model_validate(expected):
             return _validation("Generic restart must preserve the source Job runtime bindings.")
         next_job = self._job_spec(
@@ -2164,6 +2170,7 @@ class DomainCoordinator:
             diagnosis_mode=bindings.diagnosis_mode,
             review_policy=bindings.review_policy,
             generic_skill_name=bindings.generic_skill_name,
+            generic_log_preparation=bindings.generic_log_preparation,
             generic_problem_text=generic_problem_text,
             generic_log_archive_expected=generic_log_archive_expected,
             generic_supplement_texts=list(generic_supplement_texts),

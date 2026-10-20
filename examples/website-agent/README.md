@@ -167,17 +167,19 @@ async function submitProblem() {
 
 ```javascript
 const lowercaseName = file.name.toLowerCase();
-const suffix = [".tar.gz", ".tgz", ".gz", ".zip", ".tar"]
+const suffix = [".tar.gz", ".tgz", ".gz", ".zip", ".tar", ".log", ".txt", ".json", ".jsonl", ".ndjson"]
   .find((value) => lowercaseName.endsWith(value));
 if (!suffix || !file.name.endsWith(suffix)) {
-  throw new Error("请选择后缀为小写 .zip、.tar、.tar.gz、.tgz 或 .gz 的日志归档。");
+  throw new Error("请选择小写后缀的 .log、.txt、.json、.jsonl、.ndjson 日志或 .zip、.tar、.tar.gz、.tgz、.gz 归档。");
 }
 if (file.size < 1 || file.size > 2_684_354_560) {
-  throw new Error("日志归档大小须为 1～2,684,354,560 字节。");
+  throw new Error("日志文件或归档大小须为 1～2,684,354,560 字节。");
 }
 const contentType = {
   ".zip": "application/zip", ".tar": "application/x-tar",
   ".tar.gz": "application/gzip", ".tgz": "application/gzip", ".gz": "application/gzip",
+  ".log": "text/plain", ".txt": "text/plain", ".json": "application/json",
+  ".jsonl": "application/x-ndjson", ".ndjson": "application/x-ndjson",
 }[suffix];
 const metadata = {
   request_id: crypto.randomUUID(), name: file.name, content_type: contentType,
@@ -196,6 +198,8 @@ async function submitLogs() {
 ```
 
 `websiteUpload.sha256(file)` 可以接入网站现有组件，也可以使用 `file-sha256.js` 导出的 `sha256File(file)`，返回文件实际 SHA-256 的 64 位小写十六进制值。追问上传队列默认在 `file-sha256-worker.js` 中校验，按 1 MiB 读取，不会一次读取数 GiB 文件。网站 CSP 需允许 `worker-src 'self'`；Worker 不可用时，同一算法每处理 64 KiB 就让出主线程。`sha256File(file, {signal, onProgress})` 支持取消与字节进度；页面区分校验百分比和网络上传，取消后可用原文件、原预约重试。
+
+新建通用诊断直接读取 UTF-8 文本（允许 BOM）或安全展开归档中的文本，不调用 Logparse；专用诊断仍按 Skill 要求使用 Logparse 归档。通用流程会列明空文件、二进制、未知编码和未展开的嵌套归档；没有可读日志时说明原因，再按问题文字继续分析。损坏归档和超限输入明确失败。前端按服务端 `progress.message` 显示进度，新增 `GENERIC_LOG_PREPARE` 表示“正在准备日志”。
 
 示例先检查后缀和大小，再计算哈希，全程保留文件原名。`file.type` 可能为空，因此根据支持的小写压缩后缀确定 MIME；服务端仍会核验实际上传内容。仅带附件的消息应省略 `text` 或传 null，不传空字符串。
 

@@ -1300,6 +1300,7 @@ def build_job(
         diagnosis_mode=spec.diagnosis_mode,
         review_policy=spec.review_policy,
         generic_skill_name=spec.generic_skill_name,
+        generic_log_preparation=spec.generic_log_preparation,
         generic_problem_text=spec.generic_problem_text,
         generic_log_archive_expected=spec.generic_log_archive_expected,
         generic_supplement_texts=list(spec.generic_supplement_texts),

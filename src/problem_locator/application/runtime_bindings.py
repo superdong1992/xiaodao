@@ -95,6 +95,7 @@ def runtime_bindings_from_job_spec(spec: JobSpec) -> RuntimeBindings:
         diagnosis_mode=spec.diagnosis_mode,
         review_policy=spec.review_policy,
         generic_skill_name=spec.generic_skill_name,
+        generic_log_preparation=spec.generic_log_preparation,
         agent_profile_ref=spec.agent_profile_ref,
         available_skill_refs=list(spec.available_skill_refs),
         skill_ref=spec.skill_ref,

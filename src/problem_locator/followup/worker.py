@@ -103,7 +103,10 @@ class FollowupWorker:
                 workspace.mkdir(mode=0o700)
                 for name in ("inputs", "runtime", "output"):
                     (workspace / name).mkdir(mode=0o700)
-                rows = copy_snapshot(service, snapshot, workspace, cancellation) if mode == "REPORT_AND_LOGS" else []
+                copy_preparation = (mode == "REPORT_ONLY" and source.has_log_manifest and not source.has_logs
+                    and snapshot["status"] == "READY")
+                copied_snapshot = mode == "REPORT_AND_LOGS" or copy_preparation
+                rows = copy_snapshot(service, snapshot, workspace, cancellation) if copied_snapshot else []
                 generated = {
                     "inputs/context.json": json.dumps(context, ensure_ascii=False, sort_keys=True).encode("utf-8"),
                     "inputs/history.md": history_markdown(history).encode("utf-8"),
@@ -112,7 +115,7 @@ class FollowupWorker:
                 if attempt and attempt.get("user_messages_file"):
                     generated[attempt["user_messages_file"]] = json.dumps(
                         diagnosis_context["latest_attempt"]["user_messages"], ensure_ascii=False).encode("utf-8")
-                if mode == "REPORT_ONLY":
+                if mode == "REPORT_ONLY" and not copied_snapshot:
                     generated.update({"inputs/problem.txt": source.problem_text.encode("utf-8"),
                         "inputs/report.md": source.report_markdown.encode("utf-8")})
                 for relative, raw in generated.items():

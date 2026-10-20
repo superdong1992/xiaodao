@@ -23,11 +23,14 @@ from .atomic import is_reparse_point
 
 _OPAQUE_ID = TypeAdapter(OpaqueId)
 _LOGPARSE_PREPROCESS_WORKSPACE_SUFFIX = ".logparse-preprocess"
+_GENERIC_PREPROCESS_WORKSPACE_SUFFIX = ".generic-preprocess"
 
 
 def workspace_owner_id(segment: str) -> str:
     """Validate a managed workspace name and return its owning Job identity."""
 
+    if segment.endswith(_GENERIC_PREPROCESS_WORKSPACE_SUFFIX):
+        return _OPAQUE_ID.validate_python(segment.removesuffix(_GENERIC_PREPROCESS_WORKSPACE_SUFFIX))
     marker = _LOGPARSE_PREPROCESS_WORKSPACE_SUFFIX + "."
     if marker in segment:
         owner_id, attachment_id = segment.split(marker, 1)
@@ -41,7 +44,8 @@ def job_workspace_names(job_id: str, workspaces: Path | None = None) -> tuple[st
     """Enumerate only the product-owned workspace names for one Job."""
 
     owner_id = _OPAQUE_ID.validate_python(job_id)
-    names = [owner_id, f"{owner_id}{_LOGPARSE_PREPROCESS_WORKSPACE_SUFFIX}"]
+    names = [owner_id, f"{owner_id}{_LOGPARSE_PREPROCESS_WORKSPACE_SUFFIX}",
+             f"{owner_id}{_GENERIC_PREPROCESS_WORKSPACE_SUFFIX}"]
     if workspaces is not None and workspaces.is_dir():
         for path in workspaces.iterdir():
             if not path.name.startswith(names[1] + "."):

@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -452,6 +453,18 @@ def test_output_directory_must_not_overlap_source(tmp_path: Path) -> None:
         validate_replay_paths(request, settings)
 
     assert caught.value.error.code is ErrorCode.CONFIG_INVALID
+    assert caught.value.stop_reason == "PATH_OVERLAP"
+
+
+def test_replay_path_validation_accepts_optional_logparse_paths(tmp_path: Path) -> None:
+    settings = replace(_settings(tmp_path), logparse_repo=None, logparse_config_path=None)
+    source = tmp_path / "source"
+    source.mkdir()
+    request = ReplayRequest(source_data_root=source, job_id=JOB_ID,
+                            mode=ReplayMode.DIAGNOSE_ONLY, output_dir=tmp_path / "replay")
+    validate_replay_paths(request, settings)
+    with pytest.raises(ReplayError) as caught:
+        validate_replay_paths(replace(request, output_dir=settings.skill_dir / "replay"), settings)
     assert caught.value.stop_reason == "PATH_OVERLAP"
 
 

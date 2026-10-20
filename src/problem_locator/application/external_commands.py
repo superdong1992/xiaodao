@@ -975,14 +975,16 @@ class ExternalCommandHandler:
                 occurred_at = self._clock.now()
                 trigger_id, job_id = self._ids.new("trigger"), self._ids.new("job")
                 bindings = runtime_bindings_from_job(source)
-                if bindings.logparse_tool_ref is None:
+                if bindings.logparse_tool_ref is None and bindings.generic_log_preparation is None:
                     logs = _validated_catalog_bindings(JobType.DIAGNOSE,
                         self._asset_catalog.generic_diagnose_bindings(with_logs=True), expected_skill_ref=None)
                     bindings = RuntimeBindings.model_validate({**bindings.model_dump(mode="python"),
+                        "generic_log_preparation": logs.generic_log_preparation,
                         "logparse_tool_ref": logs.logparse_tool_ref, "logparse_product": logs.logparse_product})
-                if bindings.logparse_tool_ref is None:
-                    _raise_port_error(ErrorCode.CONFIG_INVALID, "尚未配置通用定位的日志解析服务。")
-                refs = [*fixed_asset_refs(source), bindings.logparse_tool_ref]
+                if bindings.logparse_tool_ref is None and bindings.generic_log_preparation is None:
+                    _raise_port_error(ErrorCode.CONFIG_INVALID, "尚未配置通用定位的日志准备方式。")
+                refs = [*fixed_asset_refs(source),
+                    *([bindings.logparse_tool_ref] if bindings.logparse_tool_ref is not None else [])]
                 if not self._asset_catalog.check(refs).available:
                     _raise_port_error(ErrorCode.ASSET_VERSION_UNAVAILABLE, "本次诊断固定的配置已不可用，请重新发起。")
             trigger = ValidatedTrigger(trigger_id=trigger_id, trigger_type=TriggerType.RESTART_GENERIC_DIAGNOSIS,

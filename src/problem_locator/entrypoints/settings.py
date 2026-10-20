@@ -18,8 +18,6 @@ _REQUIRED = (
     "DATA_ROOT",
     "PUBLIC_BASE_URL",
     "SKILL_DIR",
-    "LOGPARSE_REPO",
-    "LOGPARSE_CONFIG_PATH",
     "GENERIC_SKILL_NAME",
 )
 _PATH_KEYS = (
@@ -99,8 +97,8 @@ class Settings:
     claude_command: str
     generic_skill_name: str
     skill_dir: Path
-    logparse_repo: Path
-    logparse_config_path: Path
+    logparse_repo: Path | None
+    logparse_config_path: Path | None
     logparse_python: Path
     dfx_log_level: str
     dfx_log_dir: Path | None
@@ -186,8 +184,13 @@ class Settings:
                 or disk_settings["resource_disk_target_free_percent"] <= disk_settings["resource_disk_low_free_percent"]):
             raise SettingsError("RESOURCE_DISK_TARGET_FREE_BYTES 和 RESOURCE_DISK_TARGET_FREE_PERCENT 必须分别大于触发阈值")
 
-        paths: dict[str, Path] = {}
+        if bool(values.get("LOGPARSE_REPO")) != bool(values.get("LOGPARSE_CONFIG_PATH")):
+            raise SettingsError("LOGPARSE_REPO 和 LOGPARSE_CONFIG_PATH 必须同时配置或同时省略")
+        paths: dict[str, Path | None] = {}
         for key in _PATH_KEYS:
+            if key in {"LOGPARSE_REPO", "LOGPARSE_CONFIG_PATH"} and not values.get(key):
+                paths[key] = None
+                continue
             path = Path(values[key])
             if not path.is_absolute():
                 raise SettingsError(f"{key} must be an absolute path")

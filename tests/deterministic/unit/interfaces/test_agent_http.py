@@ -621,10 +621,16 @@ def test_multiple_subscribers_receive_same_durable_events():
     asyncio.run(scenario())
 
 
-def test_prepare_provides_raw_upload_descriptor_and_upload_uses_bounded_stream():
+@pytest.mark.parametrize("name,content_type", [
+    ("logs.zip", "application/zip"), ("logs.log", "text/plain"),
+    ("logs.txt", "text/plain"), ("logs.json", "application/json"),
+    ("logs.ndjson", "application/x-ndjson"), ("logs.jsonl", "application/jsonl"),
+])
+def test_prepare_provides_raw_upload_descriptor_and_upload_uses_bounded_stream(name, content_type):
     fake = FakeAgent()
+    fake.attachment.update(name=name, content_type=content_type)
     response = run_request(fake, "POST", BASE + "/attachments", json=dict(
-        conversation_id=CONVERSATION, request_id="a-1", name="logs.zip", content_type="application/zip",
+        conversation_id=CONVERSATION, request_id="a-1", name=name, content_type=content_type,
         declared_size=len(PAYLOAD), declared_sha256=DIGEST,
     ))
     upload = response.json()["data"]["upload"]
@@ -632,6 +638,7 @@ def test_prepare_provides_raw_upload_descriptor_and_upload_uses_bounded_stream()
     assert upload["url"] == f"http://xiaodao.internal/prefix{BASE}/attachments/{ATTACHMENT}/content"
     assert upload["expected_content_length"] == len(PAYLOAD)
     assert upload["expires_at"] is None
+    assert upload["required_headers"]["Content-Type"] == content_type
     response = run_request(fake, "PUT", f"{BASE}/attachments/{ATTACHMENT}/content",
                            content=PAYLOAD, headers=upload["required_headers"])
     assert response.json()["data"]["status"] == "READY"

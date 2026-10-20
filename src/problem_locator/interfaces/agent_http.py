@@ -92,7 +92,8 @@ class PrepareAgentAttachmentBody(_AgentHttpModel):
     conversation_id: OpaqueId
     request_id: NonEmptyText
     name: NonEmptyText
-    content_type: Literal["application/zip", "application/gzip", "application/x-tar"]
+    content_type: Literal["application/zip", "application/gzip", "application/x-tar",
+                          "text/plain", "application/json", "application/x-ndjson", "application/jsonl"]
     declared_size: int = Field(ge=1, le=MAX_ATTACHMENT_BYTES)
     declared_sha256: Sha256
 
@@ -559,18 +560,20 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
         f"{_PREFIX}/attachments/{{attachment_id}}/content", tags=["Agent"],
         response_model=SuccessEnvelope[AgentAttachment], responses=errors,
         summary="上传会话日志文件原始字节",
-        description="上传预约声明的原始归档；完整校验长度和 SHA-256 后才公开 READY，失败可重试同一附件。",
+        description="上传预约声明的日志文件或归档；完整校验长度和 SHA-256 后才公开 READY，失败可重试同一附件。",
         operation_id="upload_agent_attachment",
         openapi_extra={
             "requestBody": {"required": True, "content": {
                 media: {"schema": {"type": "string", "format": "binary"}}
-                for media in ("application/zip", "application/gzip", "application/x-tar")
+                for media in ("application/zip", "application/gzip", "application/x-tar",
+                              "text/plain", "application/json", "application/x-ndjson", "application/jsonl")
             }},
             "parameters": [
                 {"name": name, "in": "header", "required": True, "schema": schema}
                 for name, schema in (
                     ("Idempotency-Key", {"type": "string", "format": "uuid"}),
-                    ("Content-Type", {"type": "string", "enum": ["application/zip", "application/gzip", "application/x-tar"]}),
+                    ("Content-Type", {"type": "string", "enum": ["application/zip", "application/gzip", "application/x-tar",
+                                                               "text/plain", "application/json", "application/x-ndjson", "application/jsonl"]}),
                     ("Content-Length", {"type": "integer", "minimum": 1, "maximum": MAX_ATTACHMENT_BYTES}),
                     ("X-Content-SHA256", {"type": "string", "pattern": "^[0-9a-f]{64}$"}),
                 )

@@ -6,7 +6,7 @@ import hashlib
 import os
 import re
 import stat
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -57,6 +57,7 @@ from problem_locator.contracts.serialization import (
     parse_canonical_json_bytes,
 )
 from problem_locator.storage.platform import chmod_no_follow
+from problem_locator.storage.capacity import capacity_reservation, StorageCapacityError
 
 from .failures import RuntimeExecutionError, runtime_failure
 from .methods_grounding import FrozenTargetLogV1
@@ -1455,16 +1456,79 @@ class WorkspaceManager:
 
     def prepare_generic_main_metadata_only(
         self, job: Job, aggregate: CaseAggregate, *,
-        resolved_logparse_plan: ResolvedLogparseParseOnlyPlanInput,
+        resolved_logparse_plan: ResolvedLogparseParseOnlyPlanInput | None = None,
     ) -> PreparedWorkspace:
         """Keep the uploaded archive in the server's preprocessing workspace only."""
         if job.diagnosis_mode is not DiagnosisMode.GENERIC or not job.attachment_refs:
             raise ValueError("generic log workspace requires fixed attachments")
+        if job.generic_log_preparation != "direct-v1" and resolved_logparse_plan is None:
+            raise ValueError("legacy generic log workspace requires its Logparse plan")
         return self._prepare(
             job, aggregate, None, resolved_logparse_plan=resolved_logparse_plan,
             review_subject=None, methods_evaluation_plan=None, workspace_phase=None,
             materialize_payloads=False,
         )
+
+    def prepare_generic_source_workspace(
+        self, job: Job, aggregate: CaseAggregate, resource_store: ResourceStore, *,
+        check_abort: Callable[[], None],
+    ) -> PreparedWorkspace:
+        """Copy fixed uploads outside the Skill workspace, with bounded reads."""
+        if (job.diagnosis_mode is not DiagnosisMode.GENERIC
+                or job.generic_log_preparation != "direct-v1" or not job.attachment_refs):
+            raise ValueError("direct log preparation requires fixed Generic attachments")
+        check_abort()
+        workspace = self._prepare(
+            job, aggregate, None, resolved_logparse_plan=None, review_subject=None,
+            methods_evaluation_plan=None, workspace_phase="generic-preprocess",
+            materialize_payloads=False,
+        )
+        inputs = workspace.root / "inputs"
+        inputs.chmod(0o755)
+        try:
+            entries = {entry.resource_id: entry for entry in workspace.manifest.entries
+                       if isinstance(entry, WorkspaceAttachmentInput)}
+            for attachment in workspace.attachments:
+                entry = entries[attachment.attachment_id]
+                check_abort()
+                reference = _attachment_ref(attachment)
+                destination = _safe_destination(workspace.root, entry.relative_path)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                digest, total = hashlib.sha256(), 0
+                with capacity_reservation(self.capacity, destination, reference.size):
+                    with resource_store.open_read(reference) as source, destination.open("xb") as target:
+                        while True:
+                            check_abort()
+                            chunk = source.read(min(_READ_CHUNK_BYTES, reference.size - total + 1))
+                            if not chunk:
+                                break
+                            total += len(chunk)
+                            if total > reference.size:
+                                raise runtime_failure(stage=ExecutionStage.WORKSPACE_PREPARE,
+                                    code=ErrorCode.RESOURCE_SIZE_MISMATCH,
+                                    message="日志附件大小与上传记录不一致。")
+                            digest.update(chunk)
+                            target.write(chunk)
+                        if total != reference.size or digest.hexdigest() != reference.sha256:
+                            raise runtime_failure(stage=ExecutionStage.WORKSPACE_PREPARE,
+                                code=ErrorCode.RESOURCE_HASH_MISMATCH,
+                                message="日志附件内容与上传记录不一致。")
+                        target.flush()
+                        os.fsync(target.fileno())
+            check_abort()
+        except ApplicationPortError as exc:
+            raise runtime_failure(stage=ExecutionStage.WORKSPACE_PREPARE,
+                code=exc.error.code, message="无法读取本轮选择的日志附件。",
+                details=exc.error.details) from None
+        except StorageCapacityError as exc:
+            raise runtime_failure(stage=ExecutionStage.WORKSPACE_PREPARE,
+                code=ErrorCode.WORKSPACE_PREPARE_FAILED, message=str(exc), retryable=True) from exc
+        except OSError as exc:
+            raise runtime_failure(stage=ExecutionStage.WORKSPACE_PREPARE,
+                code=ErrorCode.WORKSPACE_PREPARE_FAILED, message="日志附件准备失败。") from exc
+        finally:
+            _set_inputs_read_only(inputs)
+        return workspace
 
     def _prepare(
         self,
@@ -1475,7 +1539,7 @@ class WorkspaceManager:
         resolved_logparse_plan: ResolvedLogparsePlanInput | ResolvedLogparseParseOnlyPlanInput | None,
         review_subject: ReviewSubjectV2 | None,
         methods_evaluation_plan: MethodEvaluationPlanV2 | None,
-        workspace_phase: Literal["logparse-preprocess"] | None,
+        workspace_phase: Literal["logparse-preprocess", "generic-preprocess"] | None,
         materialize_payloads: bool,
         preprocessing_attachment_id: str | None = None,
     ) -> PreparedWorkspace:
@@ -1680,6 +1744,7 @@ class WorkspaceManager:
             job_type=job.job_type,
             logparse_tool_ref=job.logparse_tool_ref,
             logparse_product=job.logparse_product,
+            generic_log_preparation=job.generic_log_preparation,
             entries=entries,
             resolved_logparse_plan=resolved_logparse_plan,
             review_subject=review_subject,

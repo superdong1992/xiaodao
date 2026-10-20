@@ -97,7 +97,7 @@ _BUILTIN_SPECS = (
     _BuiltinSpec("profiles/router", AssetKind.AGENT_PROFILE, "agent-profile/router", "2.0.0"),
     _BuiltinSpec("profiles/specialist", AssetKind.AGENT_PROFILE, "agent-profile/specialist", "8.0.0"),
     _BuiltinSpec("profiles/reviewer", AssetKind.AGENT_PROFILE, "agent-profile/reviewer", "7.0.0"),
-    _BuiltinSpec("profiles/generic-locator", AssetKind.AGENT_PROFILE, "agent-profile/generic-locator", "4.0.0"),
+    _BuiltinSpec("profiles/generic-locator", AssetKind.AGENT_PROFILE, "agent-profile/generic-locator", "5.0.0"),
     _BuiltinSpec("tool-bundles/router", AssetKind.TOOL_BUNDLE, "tool-bundle/router", "3.0.0"),
     _BuiltinSpec("tool-bundles/diagnose", AssetKind.TOOL_BUNDLE, "tool-bundle/diagnose", "4.0.0"),
     _BuiltinSpec("tool-bundles/review", AssetKind.TOOL_BUNDLE, "tool-bundle/review", "3.0.0"),
@@ -105,7 +105,7 @@ _BUILTIN_SPECS = (
     _BuiltinSpec("context-policies/route", AssetKind.CONTEXT_POLICY, "context-policy/route"),
     _BuiltinSpec("context-policies/diagnose", AssetKind.CONTEXT_POLICY, "context-policy/diagnose"),
     _BuiltinSpec("context-policies/review", AssetKind.CONTEXT_POLICY, "context-policy/review", "3.0.0"),
-    _BuiltinSpec("context-policies/generic-locator", AssetKind.CONTEXT_POLICY, "context-policy/generic-locator", "3.0.0"),
+    _BuiltinSpec("context-policies/generic-locator", AssetKind.CONTEXT_POLICY, "context-policy/generic-locator", "4.0.0"),
     _BuiltinSpec("output-contracts/route", AssetKind.OUTPUT_CONTRACT, "output-contract/route", "6.0.0"),
     _BuiltinSpec("output-contracts/diagnose", AssetKind.OUTPUT_CONTRACT, "output-contract/diagnose", "11.0.0"),
     _BuiltinSpec("output-contracts/review", AssetKind.OUTPUT_CONTRACT, "output-contract/review", "10.0.0"),
@@ -562,26 +562,20 @@ class VersionedAssetCatalog:
         return _clone(bindings)
 
     def generic_diagnose_bindings(self, *, with_logs: bool = False) -> RuntimeBindings:
-        if with_logs and (
-            self._logparse_tool_ref is None or not self._ref_is_current(self._logparse_tool_ref)
-        ):
-            raise _catalog_port_error(
-                "generic_diagnose_bindings", ErrorCode.ASSET_VERSION_UNAVAILABLE,
-                "通用定位所需的日志解析配置不可用。",
-            )
         try:
             bindings = RuntimeBindings(
                 diagnosis_mode=DiagnosisMode.GENERIC,
                 review_policy=None,
                 generic_skill_name=self._generic_skill_name,
+                generic_log_preparation="direct-v1",
                 agent_profile_ref=self._builtin_ref("agent-profile/generic-locator"),
                 available_skill_refs=[],
                 skill_ref=None,
                 tool_bundle_ref=self._builtin_ref("tool-bundle/generic-locator"),
                 context_policy_ref=self._builtin_ref("context-policy/generic-locator"),
                 output_contract_ref=self._builtin_ref("output-contract/generic-locator"),
-                logparse_tool_ref=_clone(self._logparse_tool_ref) if with_logs else None,
-                logparse_product=self._generic_logparse_product if with_logs else None,
+                logparse_tool_ref=None,
+                logparse_product=None,
                 resource_limits=default_resource_limits(JobType.DIAGNOSE),
             )
         except Exception:

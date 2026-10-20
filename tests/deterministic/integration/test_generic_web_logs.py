@@ -45,6 +45,44 @@ def _stop(service, stack, cid, allow_exit):
     service.control_once()
 
 
+@pytest.mark.parametrize("packaged", [False, True], ids=["raw-text", "ordinary-archive"])
+def test_web_upload_is_actually_read_by_generic_without_logparse(website, monkeypatch, packaged):
+    from tests.deterministic.unit.runtime.test_direct_generic_runtime import ReadingBackend, archive
+
+    stack, store, engine, service, client = website
+    monkeypatch.setattr(stack.catalog, "_route_skill_refs", [])
+    monkeypatch.setattr(stack.catalog, "_logparse_tool_ref", None)
+    monkeypatch.setattr(stack.runtime, "_logparse_broker_factory", None)
+    backend = ReadingBackend()
+    monkeypatch.setattr(stack.runtime._generic_locator_executor, "_backend", backend)
+    cid = service.create_conversation("direct-web-read", owner_key=OWNER_KEY).conversation_id
+    content = b"unique-uploaded-evidence: web-original-bytes\n"
+    name, mime = ("ordinary.zip", "application/zip") if packaged else ("application.log", "text/plain")
+    content = archive(content) if packaged else content
+    prepared = client.post("/api/v1/agent/attachments", json={
+        "conversation_id": cid, "request_id": "direct-upload", "name": name,
+        "content_type": mime, "declared_size": len(content),
+        "declared_sha256": hashlib.sha256(content).hexdigest()})
+    assert prepared.status_code == 200, prepared.text
+    prepared = prepared.json()["data"]
+    upload = prepared["upload"]
+    uploaded = client.put(upload["url"], content=content,
+        headers={key: value for key, value in upload["required_headers"].items() if value is not None})
+    assert uploaded.status_code == 200, uploaded.text
+    service.send_message(cid, "problem", "服务偶发中断", [prepared["attachment"]["attachment_id"]])
+    assert service.run_once(cid)
+    assert stack.scheduler.wait_until_idle(15)
+    assert store.get_status(cid).case_status == "WAITING_ATTACHMENT"
+    assert backend.calls == []
+    assert service.run_once(cid)
+    assert stack.scheduler.wait_until_idle(15)
+    assert store.get_status(cid).case_status == "RESOLVED", store.get_status(cid)
+    assert len(backend.calls) == 1 and backend.observed
+    assert engine.calls == []
+    assert "服务偶发中断" in backend.calls[0]["prompt"]
+    assert "web-original-bytes" not in backend.calls[0]["prompt"]
+
+
 def test_first_web_archive_reaches_generic_job_without_time_or_process_inputs(website, monkeypatch):
     stack, store, engine, service, client = website
     entered, _, allow_exit, jobs, _ = _hold_generic(stack, monkeypatch)

@@ -156,22 +156,29 @@ def build_snapshot(service, task, cancellation):
         raise InputChanged("snapshot destination already exists")
     generated = {"inputs/problem.txt": source.problem_text.encode("utf-8"),
         "inputs/report.md": source.report_markdown.encode("utf-8")}
-    copies, logs, sources = [], [], []
+    copies, logs, sources, preparation = [], [], [], {}
     if hashlib.sha256(generated["inputs/report.md"]).hexdigest() != source.report_sha256:
         raise InputChanged("published report hash differs")
-    if source.has_logs:
+    if source.has_logs or source.has_log_manifest:
         name, audit_name, key, hash_key = (("generic_logs.json", "generic_logs.json", "logs", "sha256")
             if source.source_kind == "GENERIC" else ("target_logs.json", "methods_target_logs.json", "target_logs", "content_sha256"))
         raw = read_small(original, "inputs/" + name)
         if raw != read_small(job_root, audit_name):
             raise InputChanged("log receipt differs from the published execution record")
         payload = json.loads(raw)
+        if source.has_log_manifest and (source.source_kind != "GENERIC"
+                or payload.get("preparation") != "direct-v1"):
+            raise InputChanged("direct input preparation identity changed")
+        if source.source_kind == "GENERIC" and payload.get("preparation") == "direct-v1":
+            preparation = {key: payload[key] for key in ("preparation", "skipped", "coverage") if key in payload}
         sources = payload.get("sources", [])
         if not isinstance(sources, list):
             raise InputChanged("invalid log source manifest")
         entries = payload[key]
         if not isinstance(entries, list) or len(entries) > 10_000:
             raise InputChanged("invalid log manifest")
+        if not source.has_logs and entries:
+            raise InputChanged("text-only source unexpectedly contains readable logs")
         seen = set()
         for ordinal, entry in enumerate(entries, 1):
             path, size, digest = entry.get("log_path"), entry.get("size"), entry.get(hash_key)
@@ -186,9 +193,10 @@ def build_snapshot(service, task, cancellation):
                 "source_label": str(entry.get("label", entry.get("relative_path", path)))[:1024],
                 **{field: entry[field] for field in (
                     "source_id", "source_archive", "source_attachment_id", "source_attachment_name",
+                    "source_attachment_sha256", "relative_path", "encoding",
                 ) if field in entry}})
     generated["inputs/logs.json"] = _json_bytes({"schema_version": 1, "logs": logs,
-        **({"sources": sources} if sources else {})})
+        **({"sources": sources} if sources else {}), **preparation})
     rows = [_row(path, raw) for path, raw in generated.items()] + [row for _, row in copies]
     manifest = {"schema_version": 1, "case_id": source.case_id, "run_id": task["run_id"],
         "source_job_id": job_id, "report_sha256": source.report_sha256, "source_kind": source.source_kind,

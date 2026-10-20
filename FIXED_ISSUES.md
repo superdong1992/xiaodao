@@ -3306,7 +3306,7 @@
 
 ## PL-FIX-072：通用定位遗漏 Web 日志，运行中补交的日志未参与分析
 
-- **状态**：实现和专项用例已补齐，正式结论以本条最终 Test Flow 元数据为准；Linux 实际 Logparse 与局域网 Skill 的生产验收另列于 `TODO.md`。
+- **状态**：2026-10-20 已实现通用流程直接读取附件，相关专项通过；用户明确要求本次推送不再测试，因此本轮没有正式 Test Flow verdict，以下历史 PASS 不覆盖本轮。实际 Linux 环境和局域网 Skill 的生产验收另列于 `TODO.md`。
 - **症状、受影响版本与确认**：8.2.0 / `45d2d68294e` 的通用 Job 在路由完成后立即启动，合同明确禁止绑定附件，提示词只有原始问题；Web 日志只在专有定位的补充需求阶段导入。已核对当前入口、Job 创建、附件导入和 Generic 执行路径，确认首轮附件及运行中补交的日志均可能被遗漏。
 - **根因与修复历史（2026-09-22）**：创建 Case 时记录日志意图，通用预检只等待选定归档，不提取时间、槽位、进程或 PID。现有 Logparse 增加内部 `parse-only`，复用受控解析、claim、取消、并发、时限、工作区预算和产物校验；流式核验并复制解析日志，生成含路径、大小和 SHA-256 的只读清单。提示词保留原问题，单列补充描述并指导 Skill 按需检索、分段读取及引用实际证据。新增内部 `RestartGenericDiagnosis`，同 Case 原子接受消息并替换通用 Job，随后取消旧执行并沿用串行调度；路由中补日志使用内部标记，路由抢先结束时改走明确的通用重启。
 - **不可回归行为**：无日志保持纯文本定位和旧请求幂等；有日志只采用一份归档，新包替换旧包，不自动合并。不增加公开 MCP 工具或嵌套输入；Web 继续使用 `text` 和 `attachment_ids`，Generic V2 Markdown 输出不变。日志正文不整体进入提示词，不把解析清单等同于原包全部文件；解析失败不得静默退回纯文本，空清单返回说明原因的 `UNRESOLVED`。旧结果和旧错误不得覆盖替换后的任务；重复请求不重复执行，结果抢先提交时不接受后再丢弃日志。取消失败须保留重试意图，停止、删除及跨进程中断后不能启动待重启分析。
@@ -3340,3 +3340,12 @@
 - **合并审查范围**：`0217d48..ffa6dc8` 的三项功能、两次合并，共 126 个文件。覆盖历史与资源清理、经验卡自然到期和主动删除、默认关闭、反馈归属与幂等、日志解析及实际字节读取、原问题和补充描述、日志与经验预算共存、专用定位及转通用、取消失败和停止删除竞态、七个公开 MCP 扁平 schema、配置与网站接口。逐项路径及回归对应见 `docs/reviews/2026-09-22-merge-audit.md`；网站交付清单见 `docs/website-agent-changes-2026-09-22.md`。本次同时补齐 PL-FIX-070 的小报告下载保护与到期文档，PL-FIX-071 未发现新回归。
 - **验证边界**：此前通过的定向套件未覆盖本次新增 Web 用例，因此不沿用旧 PASS。所有交付修改完成后重新执行正式 Linux Dev affected + full deterministic，源码快照与最终结论取随后追加的 verdict。没有调用真实模型；实际 Linux Logparse 格式及局域网 Skill 读取日志仍按 `TODO.md` 验收，空清单直接返回 `UNRESOLVED` 的原计划行为保持不变。
 - **最新 Test Flow verdict**：Linux `dev.default` [run-20260922T130358Z-6fb4f87a](.tmp/test-flow-linux-generic-logs/run-20260922T130358Z-6fb4f87a/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:752dd824c032331762f33c8a19f23a78811534d7f465a688722ea3f6b7c218a8`（891 files），与交付工作区核对一致；verdict SHA-256 `995f52e79aa4af9146ff9b0e8fe174f4a22e5dc8ecd91d9a31402ac17ccdeafa`。Core 32、合同 592、单元 3249、集成 183、SameJob 5、MCP 2、Web API 2 及网站示例通过，单元 2 项按平台跳过；affected 按既定范围规则交完整确定性套件覆盖。复用决定由编排器重审，完整确定性阶段重新执行；保留首轮失败证据，模型调用、token 和费用均为 0。本行是验证后的引用元数据，不属于所引用源码快照；仅证明本次实现的 Dev 验证，Linux 实际 Logparse 与局域网真实 Skill 验收仍见 `TODO.md`。
+
+### 2026-10-20：通用流程直接读取用户日志，专用流程保留 Logparse
+
+- **受影响版本、症状与确认**：基线 `96027fe` 中，有附件的通用诊断仍强制调用 Logparse `parse-only`，上传和输入合同只接受归档，普通文本无法直接参与分析；空解析清单直接返回 `UNRESOLVED`，不会继续根据用户描述定位。已核对 Web 上传、附件绑定、运行配置和 Generic 执行路径，确认这是原接入方案的能力限制；本次按用户确认的新要求调整通用流程，保留此前日志交接修复。
+- **根因与实现历史**：原通用任务复用产品日志解析入口，输入与产品解析能力耦合。新增内部 `generic_log_preparation="direct-v1"`，在独立工作区流式校验附件，展开普通 ZIP、TAR、GZIP 并保留可读 UTF-8 文本，生成包含来源、大小、SHA-256、跳过原因和处理范围的 v3 清单。模型按需读取只读日志；没有可读日志时保留原因，继续使用原问题和补充文字分析。新 Generic 不再绑定 Logparse；没有依赖 Logparse 的专用 Skill 时，部署可成对省略解析配置。
+- **不可回归行为**：专用 Skill 的 Logparse、产品、必填参数和附件约束不变。旧 Job 保留原绑定与空清单行为，固定资产缺失仍明确失败，不自动改用新策略。首轮附件先导入再分析；运行中补日志沿用同 Case 的原子替换、取消、幂等和迟到结果保护，停止或删除后不得启动待重启任务。损坏、不安全或超限归档明确失败；二进制、非 UTF-8、空文件和嵌套包记录跳过原因，不能把文字分析说成日志验证。清单存在不代表模型读完所有日志；追问保留来源和处理范围，空清单仍按仅报告模式处理。七个 MCP 输入保持扁平，Web 消息参数和 Generic V2 Markdown 不变。
+- **专项回归测试**：新增 `test_direct_generic_logs.py`、`test_direct_generic_runtime.py`、`test_generic_direct_bindings.py`，覆盖原始字节、UTF-8 BOM、分段读取、多包来源、空清单、归档安全、预算、取消、无 Logparse 运行及旧绑定。`test_generic_web_logs.py` 覆盖真实 HTTP 上传到模型替身读取日志；`test_report_followup.py` 覆盖 v3 和空清单快照；配置、启动、replay、资源清理及合同测试覆盖关联边界。既有 `test_generic_log_messages.py`、继续诊断、材料选择、专用定位和 Logparse 测试继续回归。新增 `log-upload-controller.test.mjs` 已接入网站示例 Gate；页面、接口文档和 Skill 适配说明同步更新。
+- **已执行的有限验证**：Linux 最终相关测试 550 passed、0 failed、0 skipped；专用关联 80 passed，重启及继续诊断关联 83 passed，追问故障等关联 59 passed；页面五个套件 123 passed，文档与上传联合 56 passed。各组有交集，不累计总数。准确命令和本机证据位置见 `TODO.md`；确定性模型替身读取了实际日志字节，但不等同于真实模型验收。性能单次样本仅反映本机缓存条件，不作为生产吞吐或耗时保证。
+- **本轮最新 Test Flow verdict**：未运行；run ID、source snapshot digest 和 verdict 均无。用户于 2026-10-20 明确要求推送且“不用测试”，本次按该指令跳过新的专项与完整 `dev.default`，不修改项目长期测试规则，不沿用历史 PASS，也不登记为正式已验证。上线前实际 Linux Logparse 及局域网通用 Skill 日志分析验收尚未完成。

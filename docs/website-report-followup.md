@@ -65,7 +65,7 @@
 
 最终清单不再只用“追加”或“替换”两个模式推断。例如，最初使用 A，用户随后要求 B 替换 A，又补充 C，最后只补时间，本轮应选择 B、C，不能恢复 A，也不能只留下 C。用户要求排除某个旧包时，最终清单应明确不含它。历史包已过期但本轮不需要它时，不应阻止采用其他可用材料；如果它仍是必要证据，则索取替代日志。未采用的历史材料仍留在记录中，不因排除而删除。
 
-只有最终选中的日志进入解析，按 SHA-256 去重，逐包调用现有 Logparse；最终仍最多 20 包、总计 5 GiB，并受原有上传资源配额约束。旧草稿 API 的 APPEND/REPLACE 规则继续保留，见下节；它们不代表新版统一追问只能表达这两种材料选择。
+只有最终选中的日志进入准备流程，按 SHA-256 去重。新通用诊断直接准备文本和归档中的可读文本；专用诊断逐包调用现有 Logparse。最终仍最多 20 份文件、总计 5 GiB，并受原有上传资源配额约束。追问模型只读取原报告对应的只读快照，不直接打开新上传文件；需要核对新日志时交给正式诊断。旧草稿 API 的 APPEND/REPLACE 规则继续保留，见下节；它们不代表新版统一追问只能表达这两种材料选择。
 
 ### 失败展示、恢复和验证范围
 
@@ -95,7 +95,7 @@ PATCH 额外要求 `expected_revision`；只更新传入字段，`attachment_ids
 
 发送 `FOLLOWUP` 使用 `client.followups.send(conversationId, draft.parent_run_id, {request_id, text: draft.followup_text})`。controller 保存这次发送的请求 ID、原文和成功回执。刷新或网络重试沿用原请求；成功后再次点击只打开已有问答，不重复发送，也不调用 messages 或 confirm。请求结果未确认前不能重新准备草稿。
 
-日志按 SHA-256 去重，每个包单独调用现有 Logparse。Generic 使用 `parse-only`，skill-direct 使用 `parse-targets`，合并清单保留包 ID、原名和文件来源。最终清单最多 20 包、总计 5 GiB；上传仍受既有会话累计资源配额约束。旧包已清理时，选择 REPLACE 并重新上传所需材料。报告正文仍可阅读和对比。
+日志按 SHA-256 去重。新 Generic Job 使用 `direct-v1` 直接读取 UTF-8 文本或安全展开归档中的文本，旧 Generic Job 仍使用创建时固定的 `parse-only`；skill-direct 的 `parse-targets` 不变。合并清单及追问快照保留附件 ID、原名、成员路径、跳过原因和处理范围。没有可读日志的新通用报告按文字分析，追问也明确标为仅依据报告和文字。最终清单最多 20 份文件、总计 5 GiB；上传仍受既有会话累计资源配额约束。旧文件已清理时，选择 REPLACE 并重新上传所需材料。报告正文仍可阅读和对比。
 
 版本接口返回 `root_run_id`、`latest_run_id`、`can_continue` 和 `versions`。每项包含 `run_id`、`parent_run_id`、`version`、`created_at`、`input_changes`、`diagnosis_goal`、`runtime_changes`。只有成功发布的报告进入版本列表；失败轮次仍保留在会话历史中，父报告可以再次继续诊断。Skill、模型执行配置和解析器变化使用保存的元数据比较；模型配置指纹不代表远端实际解析出的模型身份，缺少历史记录时明确提示无法比较。
 

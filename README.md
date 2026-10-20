@@ -97,7 +97,7 @@ Web 会话正文、报告和历史问答永久保存，用户主动删除时再�
 - CPython 3.12（项目要求 `>=3.12,<3.13`）
 - `uv`，并使用仓库中已提交的 `uv.lock`
 - PostgreSQL 15 或更新版本，使用所选主版本最新的维护小版本；建议独立数据库和专用账号。驱动与连接池已随 Python 依赖固定版本，无需客户端安装 PostgreSQL
-- 由部署方维护的 Logparse 源码目录、配置文件及 Python 启动器；源码目录可以来自 Git 检出，也可以由源码压缩包解压得到
+- 使用依赖 Logparse 的专用 Skill 或继续执行旧 Logparse Job 时，需由部署方提供 Logparse 源码目录、配置文件及 Python 启动器；源码目录可以来自 Git 检出，也可以由源码压缩包解压得到。仅使用新通用定位时可省略
 - 用于执行真实 Agent 任务、兼容 Claude 的命令行程序
 
 安装锁定版本的运行时依赖和开发依赖：
@@ -121,13 +121,13 @@ uv lock --check
 | `PUBLIC_BASE_URL` | 是 | 无 | 对外提供服务的 HTTP(S) 根地址，不得包含查询参数或片段 |
 | `SKILL_DIR` | 是 | 无 | 由部署方维护的产品注册目录；每个子目录包含一个 `registration-template.json` 及对应的 Methods 包。须填写实际存在的目录的绝对路径；只使用通用定位时，目录可以为空。生产环境不接受 `TEST_ONLY` 注册，也不得使用 Agent 的个人 Skill 目录 |
 | `GENERIC_SKILL_NAME` | 是 | 无 | Agent 环境中预装的通用定位 Skill 名称；仅允许标准的小写字母和连字符命名格式。启动时不调用 Skill 检查是否已安装 |
-| `GENERIC_LOGPARSE_PRODUCT` | 否 | `default` | 通用定位解析日志时使用的 Logparse 产品标识；由部署方配置，用户无需填写时间、槽位或进程 |
+| `GENERIC_LOGPARSE_PRODUCT` | 否 | `default` | 旧 Generic Job 继续使用其固定的 Logparse 配置；新通用诊断直接准备用户日志，不使用此项。专用诊断仍使用 Skill 声明的产品 |
 | `GENERIC_MEMORY_ENABLED` | 否 | `false` | 控制通用经验提炼和召回，不影响 V2 Markdown 报告赞踩；启用前完成实际 Skill 与脱敏验收 |
 | `REPORT_FOLLOWUP_ENABLED` | 否 | `false` | 开启报告追问和报告发布后的异步日志快照；关闭后仍可读取、停止和清理已有追问 |
 | `REPORT_FOLLOWUP_SNAPSHOT_BYTES` | 否 | `1073741824` | 单份日志快照字节上限，最多 1 GiB，可调低；不计入原诊断资源额度 |
 | `REPORT_FOLLOWUP_STORAGE_BYTES` | 否 | `5368709120` | 日志快照总量字节上限，默认 5 GiB，不能小于单份上限 |
-| `LOGPARSE_REPO` | 是 | 无 | 由部署方维护的 Logparse 源码目录；支持 Git 检出目录和源码压缩包解压目录，启动时按实际内容生成指纹 |
-| `LOGPARSE_CONFIG_PATH` | 是 | 无 | Logparse 工作区内的配置文件 |
+| `LOGPARSE_REPO` | 依 Skill 而定 | 无 | 仅使用通用定位且没有依赖 Logparse 的专用 Skill 时，可与 `LOGPARSE_CONFIG_PATH` 一起省略；配置后仍严格校验源码和指纹 |
+| `LOGPARSE_CONFIG_PATH` | 依 Skill 而定 | 无 | Logparse 工作区内的配置文件，须与 `LOGPARSE_REPO` 成对配置；存在依赖 Logparse 的专用 Skill 时必填 |
 | `BIND_HOST` | 否 | `127.0.0.1` | Uvicorn 监听地址 |
 | `PORT` | 否 | `8000` | Uvicorn 监听端口 |
 | `CLAUDE_COMMAND` | 否 | `claude` | 默认 Agent 命令；调用原生 Claude 的 ROUTE/Specialist 时，服务固定 stream-json、最终响应和文件工具权限相关设置，保留模型和 settings 参数 |
@@ -222,11 +222,11 @@ fences are allowed. For `UNRESOLVED`, state the leading hypotheses and the missi
 information that prevents confirmation.
 ````
 
-GENERIC Job 保留 Case 中完整的 `raw_problem_text`，并可携带本轮明确选择的多份产品日志归档和单独保存的补充描述，数量与总量仍受附件额度限制。Web 随问题提交日志时，服务端先自动导入附件，再逐包调用 Logparse 的 `parse-only` 操作；不按时间、槽位或进程筛选，也不要求用户补齐这些参数。通用 Skill 从 `inputs/generic_logs.json` 读取文件清单，再按需检索和分段读取只读日志。原始归档保留在服务端预处理工作区，不进入通用 Skill 的输入目录。没有日志时仍按原有纯文本流程定位。
+GENERIC Job 保留 Case 中完整的 `raw_problem_text`，并可携带本轮明确选择的多份日志文件或归档和单独保存的补充描述，数量与总量仍受附件额度限制。新 Generic Job 固定使用 `direct-v1`：先导入附件，再直接准备 UTF-8 文本（允许 BOM），或安全展开 `.zip/.tar/.tar.gz/.tgz/.gz` 中的文本，不调用 Logparse，也不按时间、槽位或进程筛选。单独的 `.log/.txt/.json/.jsonl/.ndjson` 文件无需打包。通用 Skill 从 `inputs/generic_logs.json` 读取文件清单，再按需检索和分段读取只读日志；清单保留原附件、成员路径、大小、SHA-256、跳过原因和处理范围。没有日志时仍按原有纯文本流程定位。已有 Generic Job 按创建时固定的准备方式继续执行，旧 Logparse `parse-only` 行为不被改写；专用诊断仍使用原有 Logparse 流程。
 
 运行中补交有效日志会取消旧 Generic Job，在同一 Case、同一会话轮次重新分析；原问题不变，补充文字单独传入，新包替换本轮旧包。旧任务退出后才启动新任务，迟到结果不能覆盖新结果。若旧报告先于重启请求完成提交，接口明确返回冲突，不能接受消息后静默丢弃日志。通用定位不接收专用 Evidence、历史 Outcome 或专用诊断状态，仍可使用 Agent 环境中已授权的工具。
 
-报告应说明实际使用的日志和引用位置。Logparse 整理出的日志不等于原包的全部内容；解析失败明确报错，成功解析但未找到可分析日志时返回 `UNRESOLVED`。日志读取能力须在实际 Linux 部署和私有通用 Skill 中验证，框架协议握手不能替代这项验收。
+报告应说明实际使用的日志和引用位置。通用流程不自动转码，不递归展开嵌套归档；空文件、二进制、无法按 UTF-8 读取的文件和嵌套归档会记录跳过原因。部分文件可读时继续分析其余文件；没有可读日志时说明原因，再按用户问题和补充文字继续分析，由 Skill 决定报告结论，不能声称已核对日志。损坏归档、路径越界、链接和超限输入明确失败。旧 Logparse Job 仍保留空清单直接 `UNRESOLVED` 的行为。日志读取能力须在实际 Linux 部署和私有通用 Skill 中验证，框架协议握手不能替代这项验收。网站适配见[通用日志直接读取](docs/generic-direct-log-input.md)。
 
 服务端采用 V2 协议，同时兼容既有 V1 文件 `output/generic_diagnosis_result.txt`。以下情况均以不可重试的 `OUTCOME_INVALID` 结束：V1 与 V2 文件同时存在；V2 文件不合法；marker 与状态不匹配；正文为空或全为空白；编码不是严格 UTF-8；超过 65536 字节；文件是链接；读取期间内容发生变化。V2 文件损坏时，不会回退到 V1。
 

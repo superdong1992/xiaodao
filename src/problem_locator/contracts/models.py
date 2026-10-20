@@ -160,6 +160,14 @@ _ATTACHMENT_SUFFIXES_BY_CONTENT_TYPE = {
     "application/zip": (AttachmentFilenameSuffix.ZIP,),
     "application/x-tar": (AttachmentFilenameSuffix.TAR,),
 }
+GENERIC_LEGACY_LOG_CONTENT_TYPES = frozenset(_ATTACHMENT_SUFFIXES_BY_CONTENT_TYPE)
+GENERIC_DIRECT_LOG_CONTENT_TYPES = GENERIC_LEGACY_LOG_CONTENT_TYPES | frozenset({
+    "text/plain", "application/json", "application/x-ndjson", "application/jsonl",
+})
+_TEXT_ATTACHMENT_CONTENT_TYPES = {
+    ".log": "text/plain", ".txt": "text/plain", ".json": "application/json",
+    ".jsonl": "application/x-ndjson", ".ndjson": "application/x-ndjson",
+}
 _ATTACHMENT_SUFFIXES_LONGEST_FIRST = tuple(
     sorted(AttachmentFilenameSuffix, key=lambda suffix: len(suffix.value), reverse=True)
 )
@@ -223,7 +231,7 @@ def derive_attachment_filename_suffix(
 
 
 def derive_attachment_content_type(name: str) -> str:
-    """Derive the platform-owned archive media type from a safe filename."""
+    """Derive the platform-owned log media type from a safe filename."""
 
     _validate_attachment_filename(name)
     lowercase_name = name.lower()
@@ -236,6 +244,11 @@ def derive_attachment_content_type(name: str) -> str:
         None,
     )
     if filename_suffix is None:
+        for suffix, content_type in _TEXT_ATTACHMENT_CONTENT_TYPES.items():
+            if lowercase_name.endswith(suffix):
+                if not name.endswith(suffix):
+                    raise ValueError("attachment filename suffix must use canonical lowercase spelling")
+                return content_type
         raise ValueError("content_type cannot be derived from unsupported attachment suffix")
     if not name.endswith(filename_suffix.value):
         raise ValueError("attachment filename suffix must use canonical lowercase spelling")
@@ -425,6 +438,14 @@ class ResourceLimits(ContractModel):
     wall_time_seconds: PositiveInt
     stdout_stderr_bytes: PositiveInt
     workspace_bytes: PositiveInt
+
+
+def _validate_generic_log_preparation(value) -> None:
+    if value.generic_log_preparation is not None and (
+        value.diagnosis_mode is not DiagnosisMode.GENERIC
+        or value.logparse_tool_ref is not None or value.logparse_product is not None
+    ):
+        raise ValueError("direct log preparation requires GENERIC mode without Logparse")
 
 
 def _validate_role_bindings(
@@ -1538,6 +1559,7 @@ class Job(ContractModel):
     diagnosis_mode: DiagnosisMode | None
     review_policy: ReviewPolicy | None = None
     generic_skill_name: SkillName | None
+    generic_log_preparation: Literal["direct-v1"] | None = Field(default=None, exclude_if=lambda value: value is None)
     generic_problem_text: NonEmptyText | None
     generic_log_archive_expected: bool = Field(default=False, exclude_if=lambda value: not value)
     generic_supplement_texts: list[NonEmptyText] = Field(default_factory=list, exclude_if=lambda value: not value)
@@ -1574,6 +1596,7 @@ class Job(ContractModel):
 
     @model_validator(mode="after")
     def validate_job(self) -> Job:
+        _validate_generic_log_preparation(self)
         if self.continuation_context is not None and self.job_type is not JobType.DIAGNOSE:
             raise ValueError("only DIAGNOSE jobs may carry report continuation context")
         if self.continuation_context is not None and (
@@ -2140,6 +2163,7 @@ class RuntimeBindings(ContractModel):
     diagnosis_mode: DiagnosisMode | None
     review_policy: ReviewPolicy | None = None
     generic_skill_name: SkillName | None
+    generic_log_preparation: Literal["direct-v1"] | None = Field(default=None, exclude_if=lambda value: value is None)
     agent_profile_ref: VersionedRef
     available_skill_refs: list[VersionedRef]
     skill_ref: VersionedRef | None
@@ -2152,6 +2176,7 @@ class RuntimeBindings(ContractModel):
 
     @model_validator(mode="after")
     def validate_logparse_pair(self) -> RuntimeBindings:
+        _validate_generic_log_preparation(self)
         _validate_specialized_direct_bindings(self)
         if (self.logparse_tool_ref is None) != (self.logparse_product is None):
             raise ValueError("logparse_tool_ref and logparse_product must be both null or both non-null")
@@ -2459,6 +2484,7 @@ class WorkspaceInputManifest(ContractModel):
     job_id: OpaqueId
     case_id: OpaqueId
     job_type: JobType
+    generic_log_preparation: Literal["direct-v1"] | None = Field(default=None, exclude_if=lambda value: value is None)
     logparse_tool_ref: VersionedRef | None
     logparse_product: NonEmptyText | None
     entries: list[WorkspaceInputEntry]
@@ -2471,6 +2497,11 @@ class WorkspaceInputManifest(ContractModel):
 
     @model_validator(mode="after")
     def validate_manifest(self) -> WorkspaceInputManifest:
+        if self.generic_log_preparation is not None and (
+            self.job_type is not JobType.DIAGNOSE or self.logparse_tool_ref is not None
+            or self.logparse_product is not None or self.resolved_logparse_plan is not None
+        ):
+            raise ValueError("direct Generic log preparation requires DIAGNOSE without Logparse")
         if (self.logparse_tool_ref is None) != (self.logparse_product is None):
             raise ValueError("logparse_tool_ref and logparse_product must be both null or both non-null")
         if self.logparse_tool_ref is not None and self.job_type is not JobType.DIAGNOSE:
@@ -2527,6 +2558,7 @@ def validate_workspace_manifest_for_job(
         "job_id",
         "case_id",
         "job_type",
+        "generic_log_preparation",
         "logparse_tool_ref",
         "logparse_product",
     ):
@@ -4495,6 +4527,7 @@ class JobSpec(ContractModel):
     diagnosis_mode: DiagnosisMode | None
     review_policy: ReviewPolicy | None = None
     generic_skill_name: SkillName | None
+    generic_log_preparation: Literal["direct-v1"] | None = Field(default=None, exclude_if=lambda value: value is None)
     generic_problem_text: NonEmptyText | None
     generic_log_archive_expected: bool = Field(default=False, exclude_if=lambda value: not value)
     generic_supplement_texts: list[NonEmptyText] = Field(default_factory=list, exclude_if=lambda value: not value)
@@ -4525,6 +4558,7 @@ class JobSpec(ContractModel):
 
     @model_validator(mode="after")
     def validate_spec(self) -> JobSpec:
+        _validate_generic_log_preparation(self)
         if self.continuation_context is not None and self.job_type is not JobType.DIAGNOSE:
             raise ValueError("only DIAGNOSE JobSpec may carry report continuation context")
         if self.continuation_context is not None and (
@@ -5438,10 +5472,13 @@ class CaseAggregate(ContractModel):
             if any(ref not in self.artifacts for ref in job.artifact_refs):
                 raise ValueError("Job contains a dangling Artifact reference")
             if job.diagnosis_mode is DiagnosisMode.GENERIC and any(
-                self.attachments[ref].content_type not in {"application/gzip", "application/zip", "application/x-tar"}
+                self.attachments[ref].content_type not in (
+                    GENERIC_DIRECT_LOG_CONTENT_TYPES if job.generic_log_preparation == "direct-v1"
+                    else GENERIC_LEGACY_LOG_CONTENT_TYPES
+                )
                 for ref in job.attachment_refs
             ):
-                raise ValueError("GENERIC Job attachments must be supported product log archives")
+                raise ValueError("GENERIC Job attachments must match their fixed log preparation strategy")
             if any(ref not in self.outcomes for ref in job.previous_outcome_refs):
                 raise ValueError("Job contains a dangling previous Outcome reference")
             if job.replacement_for_job_id is not None:
@@ -7143,6 +7180,8 @@ __all__ = [model.__name__ for model in _CONTRACT_MODEL_TYPES] + [
     "WaitSeconds",
     "WorkspaceInputEntry",
     "default_resource_limits",
+    "GENERIC_DIRECT_LOG_CONTENT_TYPES",
+    "GENERIC_LEGACY_LOG_CONTENT_TYPES",
     "derive_attachment_content_type",
     "derive_attachment_filename_suffix",
     "finalize_generic_result_v2",

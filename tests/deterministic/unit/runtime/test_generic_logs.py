@@ -197,6 +197,9 @@ def _runtime(tmp_path: Path, asset, backend, *, marker: bytes = b"VALID", mode: 
     base_job = _running_generic_job(catalog)
     payload = base_job.model_dump(mode="json")
     payload.update(catalog.generic_diagnose_bindings(with_logs=True).model_dump(mode="json"))
+    # Historical Jobs keep the frozen Logparse path when the new default changes.
+    payload.update(generic_log_preparation=None, logparse_tool_ref=asset.ref.model_dump(mode="json"),
+        logparse_product="compact")
     payload.update(attachment_refs=[ATTACHMENT_ID] if ready else [], generic_log_archive_expected=True,
         generic_supplement_texts=list(supplements))
     job = Job.model_validate(payload)

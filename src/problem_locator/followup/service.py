@@ -15,7 +15,7 @@ from problem_locator.runtime.claude_command import supports_read_search
 
 from .models import (MAX_TEXT_BYTES, MAX_TURNS, FollowupRequest, FollowupSource,
     FollowupStopRequest, FollowupView)
-from .snapshots import SnapshotWorker
+from .snapshots import SnapshotWorker, InputChanged, read_small
 from .store import FollowupStore, fail, timestamp
 from .worker import FollowupWorker
 
@@ -89,8 +89,23 @@ class ReportFollowupService:
             return None
         return FollowupSource(case_id=aggregate.case.case_id, source_job_id=job.job_id,
             problem_text=problem, report_markdown=result.report_markdown, report_sha256=result.report_sha256,
-            source_kind="GENERIC" if generic else "SKILL_DIRECT", has_logs=bool(job.attachment_refs),
-            occurred_at=timestamp(run.get("completed_at") or result.occurred_at), skill_name=result.skill_name)
+            source_kind="GENERIC" if generic else "SKILL_DIRECT", has_logs=self._has_readable_logs(job, generic=generic),
+            occurred_at=timestamp(run.get("completed_at") or result.occurred_at), skill_name=result.skill_name,
+            has_log_manifest=bool(generic and job.attachment_refs
+                and getattr(job, "generic_log_preparation", None) == "direct-v1"))
+
+    def _has_readable_logs(self, job, *, generic):
+        if not job.attachment_refs:
+            return False
+        if not generic or getattr(job, "generic_log_preparation", None) != "direct-v1":
+            return True
+        # A direct-input report may succeed using text alone after every input
+        # was skipped. Uploaded files alone do not prove readable log evidence.
+        try:
+            payload = json.loads(read_small(self.layout.jobs / job.job_id, "generic_logs.json"))
+        except (InputChanged, OSError, ValueError):
+            return False
+        return isinstance(payload, dict) and isinstance(payload.get("logs"), list) and bool(payload["logs"])
 
     def schedule_observe(self, conversation_id):
         if self.enabled and not self._stop.is_set():

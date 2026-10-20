@@ -1,4 +1,5 @@
 import { renderReport } from "./report-view.js";
+import { LOG_FILE_ACCEPT } from "./log-upload-controller.js";
 
 const node = (doc, tag, text) => { const value = doc.createElement(tag); if (text !== undefined) value.textContent = text; return value; };
 const unique = (values) => [...new Set(values)];
@@ -111,7 +112,7 @@ export function mountContinuationView(container, controller, { client, conversat
     const option = make("option", title); option.value = value; logMode.append(option);
   }
   logMode.value = "APPEND";
-  const files = field(initial, "选择新日志包（可多选）", "input"); files.type = "file"; files.multiple = true; files.accept = ".zip,.tar,.tar.gz,.tgz,.gz";
+  const files = field(initial, "选择新日志文件或归档（可多选）", "input"); files.type = "file"; files.multiple = true; files.accept = LOG_FILE_ACCEPT;
   const uploadHint = make("p", "支持 zip、tar、tar.gz、tgz、gz。最多 20 个包，单包不超过 2.5 GiB，总计不超过 5 GiB。");
   const prepare = make("button", "整理并预览"); prepare.type = "submit";
   initial.append(uploadHint, prepare);

@@ -9,7 +9,7 @@ Work only on the private Skill directory the user explicitly places in scope. Pr
 
 Before editing, read [the framework-mode contract](references/framework-mode.md). Apply its marked adapter block once inside the target `SKILL.md`, adapting surrounding prose only where needed to fit the Skill's existing workflow. Do not copy private business instructions or example reports into this repository.
 
-For a log-enabled deployment, also apply that reference's optional log-input contract. A framework call may provide a verified log manifest and separate supplemental text without requiring a problem time, slot, process or PID. A local acceptance run must actually read a log containing a clue absent from the question and identify that clue in the report; the output-mode validator alone does not prove log consumption.
+For a log-enabled deployment, also apply that reference's optional log-input contract. A framework call may provide verified user text logs, safely expanded archive members or legacy Logparse output, plus separate supplemental text without requiring a problem time, slot, process or PID. A local acceptance run must actually read a log containing a clue absent from the question and identify that clue in the report; the output-mode validator alone does not prove log consumption.
 
 After editing, run the local validator with an explicitly chosen non-sensitive
 version label:

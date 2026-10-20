@@ -113,6 +113,10 @@ _UPLOAD_REQUEST_CONTENT = {
         "application/gzip",
         "application/zip",
         "application/x-tar",
+        "text/plain",
+        "application/json",
+        "application/x-ndjson",
+        "application/jsonl",
     )
 }
 

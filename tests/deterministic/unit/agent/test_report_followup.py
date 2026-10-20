@@ -280,6 +280,92 @@ def test_multi_archive_snapshot_preserves_sources_for_same_named_logs(system, ki
     assert json.loads((system.backend.calls[0]["workspace_root"] / "inputs/logs.json").read_bytes()) == snapshot
 
 
+def test_direct_input_snapshot_keeps_original_sources_and_skipped_coverage(system):
+    original, job = make_logs(system, content=b"\xef\xbb\xbfincident_code=QUEUE_OVERFLOW\n")
+    payload = json.loads((original / "inputs/generic_logs.json").read_bytes())
+    payload.update(schema_version=3, preparation="direct-v1",
+        sources=[{"source_attachment_id": CASE, "source_attachment_name": "server.zip",
+                  "source_attachment_sha256": "a" * 64, "source_kind": "archive", "size": 200,
+                  "content_type": "application/zip"}],
+        skipped=[{"relative_path": "core.bin", "reason": "NON_TEXT", "size": 4, "sha256": "b" * 64}],
+        coverage={"entries": 2, "expanded_bytes": 36, "readable_bytes": 32, "complete": False})
+    payload["logs"][0].update(source_attachment_id=CASE, source_attachment_name="server.zip",
+        source_attachment_sha256="a" * 64, relative_path="server/stdout.log", encoding="utf-8-sig")
+    raw = json.dumps(payload, sort_keys=True).encode()
+    (original / "inputs/generic_logs.json").write_bytes(raw)
+    (job / "generic_logs.json").write_bytes(raw)
+    assert system.service.observe_report(system.cid, system.rid)
+    assert system.service.snapshot_worker.run_once()
+    actual = json.loads((job / "followup-inputs/inputs/logs.json").read_bytes())
+    for key in ("preparation", "sources", "skipped", "coverage"):
+        assert actual[key] == payload[key]
+    for key in ("source_attachment_sha256", "relative_path", "encoding", "sha256"):
+        assert actual["logs"][0][key] == payload["logs"][0][key]
+    assert (job / "followup-inputs" / actual["logs"][0]["log_path"]).read_bytes().startswith(b"\xef\xbb\xbf")
+
+
+@pytest.mark.parametrize("empty_reason", ["NO_FILES", "NO_READABLE_TEXT"])
+def test_direct_empty_log_snapshot_preserves_preparation_but_followup_stays_report_only(system, empty_reason):
+    original, job = make_logs(system)
+    system.source = replace(system.source, has_logs=False, has_log_manifest=True)
+    payload = {"schema_version": 3, "preparation": "direct-v1", "logs": [],
+        "sources": [{"source_attachment_id": CASE, "source_attachment_name": "server.zip",
+            "source_attachment_sha256": "a" * 64, "source_kind": "archive", "size": 200,
+            "content_type": "application/zip"}],
+        "skipped": [] if empty_reason == "NO_FILES" else [
+            {"relative_path": "empty.log", "reason": "EMPTY_FILE", "size": 0, "sha256": hashlib.sha256(b"").hexdigest()}],
+        "coverage": {"scope": "INPUT_PREPARATION", "entries": 0 if empty_reason == "NO_FILES" else 1,
+            "expanded_bytes": 0, "readable_bytes": 0, "complete": empty_reason == "NO_FILES",
+            "empty_reason": empty_reason}}
+    raw = json.dumps(payload, sort_keys=True).encode()
+    (original / "inputs/generic_logs.json").write_bytes(raw)
+    (job / "generic_logs.json").write_bytes(raw)
+    assert system.service.observe_report(system.cid, system.rid)
+    assert system.service.snapshot_worker.run_once()
+    snapshot = json.loads((job / "followup-inputs/inputs/logs.json").read_bytes())
+    assert snapshot["logs"] == []
+    for key in ("preparation", "sources", "skipped", "coverage"):
+        assert snapshot[key] == payload[key]
+    submit(system, text="为什么没有使用我上传的日志？")
+    assert system.service.worker.run_once()
+    assert view(system).items[0].context_mode == "REPORT_ONLY"
+    assert view(system).items[0].answer_markdown.startswith("本次回答依据原问题、报告和补充说明，未重新核对原始日志。")
+    invocation = system.backend.calls[0]
+    assert json.loads((invocation["workspace_root"] / "inputs/logs.json").read_bytes()) == snapshot
+    assert not (invocation["workspace_root"] / "inputs/logs").exists()
+    assert "只保存原附件来源、跳过原因和准备范围" in invocation["prompt"]
+
+
+def test_direct_empty_log_snapshot_still_checks_original_receipt_against_audit(system):
+    original, job = make_logs(system)
+    system.source = replace(system.source, has_logs=False, has_log_manifest=True)
+    (original / "inputs/generic_logs.json").write_text(
+        json.dumps({"schema_version": 3, "preparation": "direct-v1", "logs": [], "coverage": {"empty_reason": "NO_FILES"}}),
+        encoding="utf-8")
+    assert system.service.observe_report(system.cid, system.rid)
+    assert not system.service.snapshot_worker.run_once()
+    assert view(system).snapshot_status == "FAILED"
+    assert not (job / "followup-inputs").exists()
+
+
+@pytest.mark.parametrize("logs,expected", [([], False), ([{"log_path": "inputs/logs/one.log"}], True)])
+def test_direct_input_attachment_is_not_enough_to_claim_readable_logs(system, logs, expected):
+    job = SimpleNamespace(job_id=JOB, attachment_refs=[CASE], generic_log_preparation="direct-v1")
+    root = system.repository.layout.jobs / JOB
+    root.mkdir()
+    (root / "generic_logs.json").write_text(json.dumps({"schema_version": 3, "logs": logs}), encoding="utf-8")
+    assert system.service._has_readable_logs(job, generic=True) is expected
+    # Existing Logparse and specialized sources keep their old compatibility.
+    assert system.service._has_readable_logs(job, generic=False) is True
+    job.generic_log_preparation = None
+    assert system.service._has_readable_logs(job, generic=True) is True
+
+
+def test_direct_input_missing_receipt_never_claims_log_evidence(system):
+    job = SimpleNamespace(job_id=JOB, attachment_refs=[CASE], generic_log_preparation="direct-v1")
+    assert system.service._has_readable_logs(job, generic=True) is False
+
+
 def test_changed_log_manifest_quota_and_missing_logs_degrade_without_touching_report(system):
     original, _ = make_logs(system)
     (original / "inputs/generic_logs.json").write_text('{"logs": []}', encoding="utf-8")

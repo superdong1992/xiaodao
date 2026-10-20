@@ -1,4 +1,5 @@
 import { createMarkdownBlock } from "./report-view.js";
+import { LOG_FILE_ACCEPT } from "./log-upload-controller.js";
 
 const STATUS = { QUEUED: "等待回答", RUNNING: "正在回答", CANCELLING: "正在停止", COMPLETED: "已回答",
   FAILED: "回答失败", INTERRUPTED: "已中断", CANCELLED: "已停止" };
@@ -16,7 +17,7 @@ export function mountFollowupView(container, controller) {
   const form = node("form"), label = node("label", "继续询问这份报告"), input = node("textarea");
   input.rows = 4; input.setAttribute("aria-label", "追问内容"); label.append(input);
   const fileLabel = node("label", "补充日志（可选，可多选）"), files = node("input"), uploads = node("ul");
-  files.type = "file"; files.multiple = true; files.accept = ".zip,.tar,.tar.gz,.tgz,.gz"; fileLabel.append(files);
+  files.type = "file"; files.multiple = true; files.accept = LOG_FILE_ACCEPT; fileLabel.append(files);
   const retryUploads = node("button", "重试日志上传"), cancelUploads = node("button", "取消校验和上传");
   retryUploads.type = cancelUploads.type = "button";
   const submit = node("button", "发送追问"), refresh = node("button", "刷新记录"), older = node("button", "加载更早问答"), stop = node("button", "停止回答");

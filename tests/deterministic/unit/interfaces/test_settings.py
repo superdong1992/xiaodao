@@ -444,6 +444,26 @@ def test_every_required_setting_is_enforced(tmp_path: Path) -> None:
             Settings.load(environ=values)
 
 
+@pytest.mark.parametrize("empty", [False, True])
+def test_generic_only_configuration_can_omit_logparse_paths(tmp_path: Path, empty: bool) -> None:
+    values = environment(tmp_path)
+    for key in ("LOGPARSE_REPO", "LOGPARSE_CONFIG_PATH", "LOGPARSE_PYTHON"):
+        values.pop(key, None)
+    if empty:
+        values.update(LOGPARSE_REPO="", LOGPARSE_CONFIG_PATH="")
+    settings = Settings.load(environ=values)
+    assert settings.logparse_repo is settings.logparse_config_path is None
+    assert settings.logparse_python.is_absolute()
+
+
+@pytest.mark.parametrize("missing", ["LOGPARSE_REPO", "LOGPARSE_CONFIG_PATH"])
+def test_optional_logparse_paths_must_still_be_configured_together(tmp_path: Path, missing: str) -> None:
+    values = environment(tmp_path)
+    values.pop(missing)
+    with pytest.raises(SettingsError, match="必须同时配置或同时省略"):
+        Settings.load(environ=values)
+
+
 def test_explicit_missing_or_malformed_env_file_is_not_silently_ignored(
     tmp_path: Path,
 ) -> None:

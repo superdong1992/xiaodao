@@ -1,8 +1,18 @@
 # TODO
 
-更新时间：2026-10-19
+更新时间：2026-10-20
 
 本文件是仓库活跃待办的唯一清单。已完成事项由代码、当前设计与 Git 历史证明，不在这里保留关闭项。
+
+## 通用定位直接读取附件日志验收（2026-10-20）
+
+- 在基线 `96027fe` 确认：通用定位有附件时仍必须经过 Logparse `parse-only`，文本附件不在上传和通用输入合同内；空解析清单会直接结束为 `UNRESOLVED`。本次按用户确认的方向，将新 Generic Job 固定为 `direct-v1`，直接校验 UTF-8 文本或普通归档中的文本；没有可读日志时保留原因，继续根据原问题和补充文字分析。专用流程保留原 Logparse、必填输入和附件约束。此项承接 PL-FIX-072，已在原条目追加本轮实现与验证边界。
+- **专项通过，本次按用户要求跳过推送前完整验证**：此前合并代码在 Ubuntu 22.04 / Python 3.12.13 上运行 16 个相关测试文件，550 passed、0 failed、0 skipped，19.00 秒；含 Web 首轮上传到读取日志字节、纯文本兼容、分段读取、空清单文字分析、归档安全与预算、取消、追问来源保留、清理、无 Logparse 启动、旧记录与七个 MCP 扁平 schema。准确命令保存在本机 `.tmp/generic-direct-env-20261020/run-final-scoped.py`，JUnit 位于 `/home/xiaodao/quick-validation/generic-direct-20261020/final-scoped-02.xml`。首次汇总命令因测试文件路径写错而未收集用例，不记为通过。
+- 专用流程关联专项 80 passed，证据为上述 Linux 目录下 `checkout/.tmp/direct-specialized-linux-01.xml`；日志重启、继续诊断与材料选择联合 83 passed，证据为 `web-runtime-01.xml`。后续补齐空清单追问元数据后，追问故障、协议、清理和迁移关联专项 59 passed，证据为 `checkout/.tmp/direct-log-web-linux-pytest-4.xml`。这些范围与最终 550 项有交集，不累计为独立测试总数。
+- 页面原有五个套件 123 passed：`node --test --test-reporter=spec examples/website-agent/onboarding.test.mjs examples/website-agent/continuation.test.mjs examples/website-agent/followup.test.mjs examples/website-agent/unified-followup.test.mjs examples/website-agent/browser-client.test.mjs`，本机日志 `.tmp/direct-log-web-targeted.txt`；新增上传专项 `node --test examples/website-agent/log-upload-controller.test.mjs` 为 6 passed。网站适配、格式范围、处理限额和旧任务恢复边界见[直接读取日志说明](docs/generic-direct-log-input.md)。
+- Git 可见源码副本中的网站文档与上传专项最终 56 passed；首次 55 passed / 1 failed，确认浏览器 REST 指南误用了内部 Skill 术语后改为“专用定位”，未放宽检查。命令为 `node .tmp/generic-direct-env-20261020/run-docs.mjs`，本机证据 `.tmp/generic-direct-env-20261020/docs-and-upload-final-02.txt`，原失败记录保留。新增上传用例已接入既有 `server.test.mjs`，随正式网站示例 Gate 执行。
+- 上述测试使用确定性模型替身，证明实际日志字节可交给分析端，不代表真实模型已正确分析日志。用户于 2026-10-20 明确要求推送且“不用测试”，因此本次不再运行专项或完整 `dev.default`；没有对应的权威 `verdict.json`，正式验证仍未完成，不沿用历史 PASS。本次例外不修改项目长期测试规则。
+- 上线前仍须在实际 Linux 环境验证局域网通用 Skill 按清单读取文件、分段检索并引用真实线索，以及专用 Skill 的实际 Logparse 产物；真实模型活动先审阅对应入口 `--plan-only` 的身份、预算和准入条件，不能用协议握手替代日志分析验收。
 
 ## 通用定位经验纠正闭环验收（2026-10-19）
 

@@ -187,6 +187,7 @@ def _upload_descriptor(
     length: str | None = None,
     digest: str | None = None,
     url: str | None = None,
+    content_type: str = "application/zip",
 ) -> UploadDescriptor:
     return UploadDescriptor(
         attachment_id=ATTACHMENT_ID,
@@ -195,7 +196,7 @@ def _upload_descriptor(
         or f"https://service.example.test/api/v1/attachments/{ATTACHMENT_ID}/content",
         required_headers={
             "Idempotency-Key": ATTACHMENT_ID,
-            "Content-Type": "application/zip",
+            "Content-Type": content_type,
             "Content-Length": length,
             "X-Content-SHA256": digest,
         },
@@ -429,8 +430,12 @@ def test_create_case_uses_one_stable_generated_request_id() -> None:
     ]
 
 
-def test_upload_uses_safe_argv_latest_revision_and_explicit_submit(tmp_path: Path) -> None:
-    local_path = tmp_path / "日志 ;$() 'quoted'.zip"
+@pytest.mark.parametrize("suffix,content_type", [
+    (".zip", "application/zip"), (".log", "text/plain"), (".txt", "text/plain"),
+    (".json", "application/json"), (".jsonl", "application/x-ndjson"), (".ndjson", "application/x-ndjson"),
+])
+def test_upload_uses_safe_argv_latest_revision_and_explicit_submit(tmp_path: Path, suffix, content_type) -> None:
+    local_path = tmp_path / ("日志 ;$() 'quoted'" + suffix)
     payload = b"safe fixture bytes"
     local_path.write_bytes(payload)
     digest = hashlib.sha256(payload).hexdigest()
@@ -439,7 +444,7 @@ def test_upload_uses_safe_argv_latest_revision_and_explicit_submit(tmp_path: Pat
         primary_resource_id=ATTACHMENT_ID,
         revision=2,
     )
-    descriptor = _upload_descriptor()
+    descriptor = _upload_descriptor(content_type=content_type)
     submit_response = application_response(
         operation="SubmitSupplement",
         revision=4,
@@ -481,7 +486,7 @@ def test_upload_uses_safe_argv_latest_revision_and_explicit_submit(tmp_path: Pat
         "problem_locator_prepare_attachment",
         "problem_locator_submit_supplement",
     ]
-    assert mcp.calls[0][1]["content_type"] == "application/zip"
+    assert mcp.calls[0][1]["content_type"] == content_type
     submit_arguments = mcp.calls[-1][1]
     assert submit_arguments["request_id"] == REQUEST_2
     assert submit_arguments["expected_case_revision"] == 3
@@ -495,6 +500,7 @@ def test_upload_uses_safe_argv_latest_revision_and_explicit_submit(tmp_path: Pat
     assert f"Idempotency-Key: {ATTACHMENT_ID}" in argv
     assert f"Content-Length: {len(payload)}" in argv
     assert f"X-Content-SHA256: {digest}" in argv
+    assert f"Content-Type: {content_type}" in argv
     assert "--globoff" in argv
     assert argv[argv.index("--max-filesize") + 1] == str(
         client_access.MAX_CURL_JSON_BYTES

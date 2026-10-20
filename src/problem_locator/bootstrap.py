@@ -881,8 +881,8 @@ class ServiceComposition:
     resource_store: FileResourceStore
     file_sync: PlatformFileSync
     replacer: PlatformReplaceOperation
-    logparse_asset: ResolvedAsset
-    logparse_broker_factory: LogparseBrokerFactory
+    logparse_asset: ResolvedAsset | None
+    logparse_broker_factory: LogparseBrokerFactory | None
     asset_catalog: VersionedAssetCatalog
     dispatcher: LateBoundDispatcher
     application: ApplicationService
@@ -1158,12 +1158,16 @@ def _assemble(
         raise TypeError("allow_test_skills must be a boolean")
 
     try:
-        logparse_asset, broker_factory = build_logparse_runtime(
-            settings.logparse_repo,
-            settings.logparse_config_path,
-            settings.logparse_python,
-            concurrency=settings.logparse_concurrency,
-        )
+        if (settings.logparse_repo is None) != (settings.logparse_config_path is None):
+            raise ValueError("LOGPARSE_REPO 和 LOGPARSE_CONFIG_PATH 必须同时配置或同时省略")
+        logparse_asset = broker_factory = None
+        if settings.logparse_repo is not None:
+            logparse_asset, broker_factory = build_logparse_runtime(
+                settings.logparse_repo,
+                settings.logparse_config_path,
+                settings.logparse_python,
+                concurrency=settings.logparse_concurrency,
+            )
         asset_catalog = VersionedAssetCatalog(
             skill_dir=settings.skill_dir,
             logparse_tool=logparse_asset,

@@ -51,7 +51,7 @@
 | `timestamp` | `string` | 服务生成时间使用 RFC 3339，必须恰好毫秒精度，固定偏移 `+08:00`，例如 `2026-08-18T10:30:00.000+08:00`；历史记录仍可返回 `Z` 格式。 |
 | `name` | `string` | `^[a-z][a-z0-9_]{0,63}$`，用于事实、输入和 requirement 名称。 |
 | `text` | `string` | 非空、不能全为空白、最多 65,536 UTF-8 字节；前端不要自动 trim 或改写用户文本。 |
-| `content_type` | `string` | 小写规范 media type，不带参数；归档上传使用 `application/zip`、`application/x-tar` 或 `application/gzip`。 |
+| `content_type` | `string` | 小写规范 media type，不带参数；归档上传使用 `application/zip`、`application/x-tar` 或 `application/gzip`；新通用诊断还可使用 `text/plain`、`application/json`、`application/x-ndjson` 或 `application/jsonl` 文本。 |
 | `case_revision` | `integer` | 大于 `0` 的 Case 乐观并发版本。写操作只使用它。 |
 | `diagnosis_state_revision` | `integer` | 大于 `0` 的诊断内容版本，仅展示；绝不能代替 `case_revision` 提交写操作。 |
 | `wait_seconds` | `integer` | `0..30`，默认 `0`；`0` 表示不等待后台 Job。 |
@@ -362,7 +362,7 @@ GET /api/v1/cases/10000000-0000-4000-8000-000000000001?wait_for_job_id=20000000-
 | body | `declared_size` | `integer` | 是 | — | 原始文件字节数，`0..2684354560`。 |
 | body | `declared_sha256` | `sha256` | 是 | — | 原始文件字节的散列。 |
 
-后缀映射：`.zip` → `application/zip`；`.tar` → `application/x-tar`；`.tar.gz`、`.tgz`、`.gz` → `application/gzip`。归档后缀大小写必须精确。
+后缀映射：`.zip` → `application/zip`；`.tar` → `application/x-tar`；`.tar.gz`、`.tgz`、`.gz` → `application/gzip`。新通用诊断另支持 `.log/.txt` → `text/plain`、`.json` → `application/json`、`.jsonl/.ndjson` → `application/x-ndjson`，也接受显式 `application/jsonl`。文本要求 UTF-8，允许 BOM；后缀大小写必须精确。专用定位的日志归档要求不变。
 
 ```json
 {

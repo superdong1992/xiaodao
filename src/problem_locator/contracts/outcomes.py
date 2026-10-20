@@ -30,6 +30,7 @@ from .methods_reason_v2 import (
     SPECIALIST_UNRESOLVED_REASON_CODES_V2,
 )
 from .models import (
+    GENERIC_DIRECT_LOG_CONTENT_TYPES,
     AgentArtifactProposalDraft,
     AgentEvidenceProposalDraft,
     AgentJobOutcome,
@@ -434,7 +435,9 @@ def validate_outcome_for_job(
                 or requirement.fulfilled_by_refs
                 or requirement.supplement_policy is not SupplementPolicy.MISSING_ONLY
                 or requirement.constraints.model_dump(mode="python", exclude={"max_count"}) != {
-                    "allowed_content_types": ["application/gzip", "application/zip", "application/x-tar"],
+                    "allowed_content_types": (sorted(GENERIC_DIRECT_LOG_CONTENT_TYPES)
+                        if job.generic_log_preparation == "direct-v1"
+                        else ["application/gzip", "application/zip", "application/x-tar"]),
                     "min_count": 1,
                 }
                 # Completed preflight Outcomes keep their historical bytes.
