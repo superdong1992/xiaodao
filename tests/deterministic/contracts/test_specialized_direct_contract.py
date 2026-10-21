@@ -18,7 +18,9 @@ def test_direct_identity_is_frozen_in_job_spec_and_runtime_bindings() -> None:
     assert is_specialized_direct(job)
     assert specialized_direct_skill_name(job) == "rpc-timeout"
     values = job.model_dump(mode="python")
-    bindings = RuntimeBindings.model_validate({name: values[name] for name in RuntimeBindings.model_fields})
+    bindings = RuntimeBindings.model_validate({
+        name: values[name] for name in RuntimeBindings.model_fields if name in values
+    })
     assert is_specialized_direct(bindings)
     spec_values = {name: values[name] for name in JobSpec.model_fields if name in values}
     spec_values.update(target_state_revision=job.base_state_revision,
@@ -27,6 +29,9 @@ def test_direct_identity_is_frozen_in_job_spec_and_runtime_bindings() -> None:
     assert is_specialized_direct(spec)
     assert spec.diagnosis_mode is DiagnosisMode.SPECIALIZED
     assert spec.skill_ref == job.skill_ref
+    for model in (job, bindings, spec):
+        assert model.generic_log_preparation is None
+        assert "generic_log_preparation" not in model.model_dump(mode="python")
 
 
 @pytest.mark.parametrize("field,value", [

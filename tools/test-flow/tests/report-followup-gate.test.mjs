@@ -52,6 +52,61 @@ test("follow-up trace proves successful scoped searches and reads without retain
   assert.equal(validReportFollowupTraceReceipt({ ...audit, log_reads: 2 }), false);
 });
 
+function appendStructuredOutput(events, name = "StructuredOutput") {
+  events.push(
+    { type: "assistant", message: { content: [{ type: "tool_use", name, id: "output-1",
+      input: { protocol: "xiaodao.followup.v1", request_key: "test-request", action: "ANSWER", answer_markdown: "依据日志回答。" } }] } },
+    { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "output-1", content: "accepted" }] } },
+  );
+}
+
+for (const name of ["StructuredOutput", "structuredoutput"]) {
+  for (const advertised of [false, true]) test(`follow-up trace accepts ${name} with advertised=${advertised} without counting file access`, (context) => {
+    const { root, events, before } = fixture(context);
+    if (advertised) events[0].tools.push(name);
+    appendStructuredOutput(events, name);
+    const audit = auditReportFollowupTrace({ events, workspaceRoot: root, before });
+    assert.deepEqual([audit.reads, audit.searches, audit.log_reads, audit.log_searches], [1, 1, 1, 1]);
+    assert.equal(validReportFollowupTraceReceipt(audit), true);
+    assert.doesNotMatch(JSON.stringify(audit), /依据日志|answer_markdown|test-request/);
+  });
+  test(`report-only ${name} leaves all retrieval counts at zero`, (context) => {
+    const { root, events, before } = fixture(context);
+    events.splice(1);
+    appendStructuredOutput(events, name);
+    const audit = auditReportFollowupTrace({ events, workspaceRoot: root, before });
+    assert.deepEqual([audit.reads, audit.searches, audit.log_reads, audit.log_searches], [0, 0, 0, 0]);
+  });
+}
+
+for (const [name, mutate, code] of [
+  ["lookalike output tools", (events) => { events[5].message.content[0].name = "StructuredOutputExtra"; }, "FOLLOWUP_TRACE_TOOL_NOT_ALLOWED"],
+  ["case-folded output tools", (events) => { events[5].message.content[0].name = "STRUCTUREDOUTPUT"; }, "FOLLOWUP_TRACE_TOOL_NOT_ALLOWED"],
+  ["container name used as tool", (events) => { events[5].message.content[0].name = "structured_output"; }, "FOLLOWUP_TRACE_TOOL_NOT_ALLOWED"],
+  ["MCP output tools", (events) => { events[5].message.content[0].name = "mcp__remote__StructuredOutput"; }, "FOLLOWUP_TRACE_TOOL_NOT_ALLOWED"],
+  ["array output input", (events) => { events[5].message.content[0].input = []; }, "FOLLOWUP_TRACE_TOOL_INPUT_INVALID"],
+  ["string output input", (events) => { events[5].message.content[0].input = "{}"; }, "FOLLOWUP_TRACE_TOOL_INPUT_INVALID"],
+  ["null output input", (events) => { events[5].message.content[0].input = null; }, "FOLLOWUP_TRACE_TOOL_INPUT_INVALID"],
+  ["missing output result", (events) => { events.pop(); }, "FOLLOWUP_TRACE_TOOL_RESULT_MISSING"],
+  ["failed output result", (events) => { events[6].message.content[0].is_error = true; }, "FOLLOWUP_TRACE_TOOL_RESULT_INVALID"],
+  ["duplicate output result", (events) => { events.push(events[6]); }, "FOLLOWUP_TRACE_TOOL_RESULT_INVALID"],
+  ["output result before use", (events) => { [events[5], events[6]] = [events[6], events[5]]; }, "FOLLOWUP_TRACE_TOOL_RESULT_INVALID"],
+  ["duplicate output ID", (events) => { events[5].message.content[0].id = "read-1"; }, "FOLLOWUP_TRACE_TOOL_ID_INVALID"],
+  ["wrong output role", (events) => { events[5].type = "user"; }, "FOLLOWUP_TRACE_TOOL_NOT_ALLOWED"],
+  ["both output aliases advertised", (events) => { events[0].tools.push("StructuredOutput", "structuredoutput"); }, "FOLLOWUP_TRACE_INIT_INVALID"],
+  ["duplicate output inventory", (events) => { events[0].tools.push("StructuredOutput", "StructuredOutput"); }, "FOLLOWUP_TRACE_INIT_INVALID"],
+  ["missing read inventory", (events) => { events[0].tools = ["Grep", "StructuredOutput"]; }, "FOLLOWUP_TRACE_INIT_INVALID"],
+  ["non-string inventory entry", (events) => { events[0].tools = [["Grep"], "Read", "StructuredOutput"]; }, "FOLLOWUP_TRACE_INIT_INVALID"],
+  ["output with relaxed permissions", (events) => { events[0].tools.push("StructuredOutput"); events[0].permissionMode = "bypassPermissions"; }, "FOLLOWUP_TRACE_INIT_INVALID"],
+  ["output with MCP servers", (events) => { events[0].tools.push("StructuredOutput"); events[0].mcp_servers.push({ name: "ambient" }); }, "FOLLOWUP_TRACE_INIT_INVALID"],
+  ["output masking escaped reads", (events) => { events[3].message.content[0].input.file_path = "../outside.log"; }, "FOLLOWUP_TRACE_PATH_ESCAPE"],
+]) test(`follow-up structured output audit rejects ${name}`, (context) => {
+  const { root, events, before } = fixture(context);
+  appendStructuredOutput(events);
+  mutate(events);
+  assert.throws(() => auditReportFollowupTrace({ events, workspaceRoot: root, before }), (error) => error.code === code);
+});
+
 for (const [name, mutate, code] of [
   ["outside input paths", (events) => { events[3].message.content[0].input.file_path = "../outside.log"; }, "FOLLOWUP_TRACE_PATH_ESCAPE"],
   ["write tools", (events) => { events[3].message.content[0].name = "Write"; }, "FOLLOWUP_TRACE_TOOL_NOT_ALLOWED"],
@@ -111,4 +166,59 @@ test("the isolated wrapper enforces the production follow-up policy and writes i
   assert.equal(validReportFollowupTraceReceipt(receipt.tool_trace_audit), true);
   assert.equal(receipt.environment_policy.claude_process.key_names.includes("PROBLEM_LOCATOR_AGENT_PHASE"), false);
   assert.equal(receipt.environment_policy.claude_process.key_names.includes("PROBLEM_LOCATOR_FOLLOWUP_SETTINGS"), false);
+});
+
+function runStructuredFollowupWrapper(context, { name = "StructuredOutput", mutate = () => {}, exitCode = 0 } = {}) {
+  const { root, events } = fixture(context);
+  events[0].tools.push(name);
+  events[0].model = "test-model";
+  appendStructuredOutput(events, name);
+  const structured = events.at(-2).message.content[0].input;
+  events.push({ type: "result", subtype: "success", is_error: false, num_turns: 3,
+    total_cost_usd: 0.01, structured_output: structured,
+    usage: { input_tokens: 20, output_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } });
+  mutate(events);
+  const settings = path.join(root, "followup-policy.json");
+  const cli = path.join(root, "fake-cli.mjs");
+  const usageRoot = path.join(root, "usage");
+  fs.writeFileSync(settings, '{"env":{},"hooks":{"PreToolUse":[]}}\n');
+  fs.writeFileSync(cli, `for(const event of ${JSON.stringify(events)}) console.log(JSON.stringify(event));\nprocess.exitCode=${exitCode};\n`);
+  const result = spawnSync(process.execPath, [path.join(ROOT, "tools/test-flow/runtime-support/isolated-agent-wrapper.mjs"),
+    "--claude-entry", cli, "--settings", settings, "--model", "test-model", "--usage-root", usageRoot,
+    "--max-turns", "8", "--max-total-tokens", "120000", "--max-budget-usd", "1", "--hard-timeout-seconds", "30",
+    "--workflow", "report-followup"], {
+    cwd: root, input: "", encoding: "utf8",
+    env: { ...buildIsolatedAgentEnvironment({ ambient: process.env }),
+      PROBLEM_LOCATOR_AGENT_FILE_ACCESS: "read-search", PROBLEM_LOCATOR_AGENT_PHASE: "REPORT_FOLLOWUP",
+      PROBLEM_LOCATOR_FOLLOWUP_SETTINGS: settings },
+  });
+  const receipts = fs.existsSync(usageRoot)
+    ? fs.readdirSync(usageRoot).map((file) => JSON.parse(fs.readFileSync(path.join(usageRoot, file), "utf8"))) : [];
+  return { result, receipts, structured };
+}
+
+for (const name of ["StructuredOutput", "structuredoutput"]) test(`isolated follow-up wrapper preserves a successful ${name} terminal object`, (context) => {
+  const { result, receipts, structured } = runStructuredFollowupWrapper(context, { name });
+  assert.equal(result.status, 0, result.stderr);
+  const output = result.stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  assert.deepEqual(output.at(-1).structured_output, structured);
+  assert.equal(Object.hasOwn(output.at(-1), "result"), false);
+  assert.equal(receipts.length, 1);
+  assert.deepEqual(receipts[0].wrapper_outcome, { schema_version: 1, status: "PASS", code: null });
+  assert.equal(validReportFollowupTraceReceipt(receipts[0].tool_trace_audit), true);
+  assert.deepEqual([receipts[0].tool_trace_audit.reads, receipts[0].tool_trace_audit.searches], [1, 1]);
+});
+
+for (const [name, options, code] of [
+  ["failed output tool", { mutate: (events) => { events[6].message.content[0].is_error = true; } }, "WRAPPER_FOLLOWUP_TRACE_INVALID"],
+  ["missing output tool result", { mutate: (events) => { events.splice(6, 1); } }, "WRAPPER_FOLLOWUP_TRACE_INVALID"],
+  ["failed terminal", { mutate: (events) => { events.at(-1).is_error = true; } }, "WRAPPER_MODEL_TERMINAL_INVALID"],
+  ["error terminal subtype", { mutate: (events) => { events.at(-1).subtype = "error_max_turns"; } }, "WRAPPER_MODEL_TERMINAL_INVALID"],
+  ["duplicate terminal", { mutate: (events) => { events.push(events.at(-1)); } }, "WRAPPER_MODEL_STREAM_INVALID"],
+  ["events after terminal", { mutate: (events) => { events.push({ type: "assistant", message: { content: [] } }); } }, "WRAPPER_MODEL_STREAM_INVALID"],
+  ["failed process", { exitCode: 9 }, "WRAPPER_CHILD_PROCESS_FAILED"],
+]) test(`isolated follow-up wrapper rejects structured output with ${name}`, (context) => {
+  const { result } = runStructuredFollowupWrapper(context, options);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, new RegExp(code));
 });

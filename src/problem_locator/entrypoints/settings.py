@@ -11,7 +11,11 @@ from urllib.parse import urlsplit
 
 from .env_file import EnvFileError, merged_environment
 from problem_locator.interfaces.session_auth import WebsiteAuthConfig
-from problem_locator.contracts.limits import DEFAULT_HISTORY_RETENTION_DAYS
+from problem_locator.contracts.limits import (
+    DEFAULT_HISTORY_RETENTION_DAYS,
+    DEFAULT_REPORT_FOLLOWUP_TIMEOUT_SECONDS,
+    MAX_REPORT_FOLLOWUP_TIMEOUT_SECONDS,
+)
 
 
 _REQUIRED = (
@@ -114,6 +118,7 @@ class Settings:
     generic_logparse_product: str = "default"
     generic_memory_enabled: bool = False
     report_followup_enabled: bool = False
+    report_followup_timeout_seconds: int = DEFAULT_REPORT_FOLLOWUP_TIMEOUT_SECONDS
     report_followup_snapshot_bytes: int = 1024 ** 3
     report_followup_storage_bytes: int = 5 * 1024 ** 3
     database_url: str | None = field(default=None, repr=False)
@@ -292,6 +297,18 @@ class Settings:
         raw_followup_enabled = values.get("REPORT_FOLLOWUP_ENABLED", "false")
         if raw_followup_enabled not in {"true", "false"}:
             raise SettingsError("REPORT_FOLLOWUP_ENABLED 必须是 true 或 false")
+        raw_followup_timeout = values.get(
+            "REPORT_FOLLOWUP_TIMEOUT_SECONDS", str(DEFAULT_REPORT_FOLLOWUP_TIMEOUT_SECONDS)
+        )
+        if (
+            not isinstance(raw_followup_timeout, str)
+            or re.fullmatch(r"[1-9][0-9]{0,3}", raw_followup_timeout) is None
+            or int(raw_followup_timeout) > MAX_REPORT_FOLLOWUP_TIMEOUT_SECONDS
+        ):
+            raise SettingsError(
+                "REPORT_FOLLOWUP_TIMEOUT_SECONDS 必须是 "
+                f"1–{MAX_REPORT_FOLLOWUP_TIMEOUT_SECONDS} 之间的整数"
+            )
         followup_sizes = {}
         for key, default in (("REPORT_FOLLOWUP_SNAPSHOT_BYTES", 1024 ** 3),
                              ("REPORT_FOLLOWUP_STORAGE_BYTES", 5 * 1024 ** 3)):
@@ -337,6 +354,7 @@ class Settings:
             methods_evidence_validation=methods_evidence_validation,
             generic_memory_enabled=raw_memory_enabled == "true",
             report_followup_enabled=raw_followup_enabled == "true",
+            report_followup_timeout_seconds=int(raw_followup_timeout),
             route_claude_command=route_claude_command,
             diagnose_claude_command=diagnose_claude_command,
             intake_claude_command=intake_claude_command,

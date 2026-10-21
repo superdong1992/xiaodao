@@ -55,6 +55,7 @@ def _settings(
     diagnose_command: str | None = None,
     intake_command: str | None = None,
     evidence_validation: str = "advisory",
+    followup_timeout: int | None = None,
 ) -> Settings:
     environ = {
         "DATA_ROOT": str(data_root),
@@ -78,6 +79,8 @@ def _settings(
         environ["DIAGNOSE_CLAUDE_COMMAND"] = diagnose_command
     if intake_command is not None:
         environ["INTAKE_CLAUDE_COMMAND"] = intake_command
+    if followup_timeout is not None:
+        environ["REPORT_FOLLOWUP_TIMEOUT_SECONDS"] = str(followup_timeout)
     # These existing composition tests use isolated local SQLite fixtures.
     return replace(Settings.load(environ=environ), database_url=None)
 
@@ -112,6 +115,17 @@ def test_public_create_app_does_not_expose_the_test_skill_override(
             _settings(tmp_path / "data"),
             allow_test_skills=True,
         )
+
+
+@pytest.mark.parametrize("timeout_seconds", [None, 1200], ids=["default", "configured"])
+def test_production_composition_applies_report_followup_timeout(tmp_path, timeout_seconds):
+    graph = build_service(_settings(tmp_path / "data", followup_timeout=timeout_seconds))
+    try:
+        expected = 600 if timeout_seconds is None else timeout_seconds
+        assert graph.settings.report_followup_timeout_seconds == expected
+        assert graph.agent.followups.timeout_seconds == expected
+    finally:
+        graph.close()
 
 
 @pytest.mark.parametrize("enabled", [False, True])

@@ -1,9 +1,19 @@
 # 已修复问题台账
 
-更新时间：2026-10-19
+更新时间：2026-10-21
 
 本文件记录已经在当前工作区验证、修复并由专项回归测试保护的问题。活跃待办仍只写入
 [`TODO.md`](TODO.md)；同一问题再次回归时更新原条目，不另建一个缺少历史关联的条目。
+
+2026-10-21 本次推送范围为 PL-FIX-083 新增的控制字符兼容、双引号恢复、追问执行预算与定向检索、结构化输出兼容，以及完整验证发现的 PL-FIX-072 两项旧测试合同同步。专项结果与修复正文已整理，准备对最终源码统一执行 Linux `dev.default`；本次是否完整验证通过，以这五节各自最新的 verdict 引用元数据行为准，不沿用旧 PASS。使用独立 Linux 源码副本和锁定运行时、PostgreSQL 15.19 测试库，以及本任务独立的 32 GiB tmpfs 保存测试临时数据和证据；源码、运行时和数据库保存在持久盘，测试后将证据完整复制到持久盘并逐文件校验。测试范围、数据库持久化设置和 Test Flow 的 300 秒性能门槛不变，不调用真实模型。
+
+本次第二轮 `run-20261021T035959Z-23d0bcad` 的全部功能 Gate、operation 与 verification 均通过，但完整确定性阶段为 303.942 秒，超过 300 秒门槛，整体仍为 `FAIL`（performance `FAIL`）。对应源码快照为 `git-visible-worktree-v1:6da24147ccc64d7cee45e03c30514310723329c748e8041ba2e169857c8a9ae0`（1067 文件），verdict SHA-256 `cdd425312ffaf23984d11e68de5ea42956c8e9cec590d71f2e86dd4f031949bf`；101 份证据完整复制并校验，保存在本机 `.tmp/followup-push-evidence-20261021/run-20261021T035959Z-23d0bcad`。测试期间原独立 PostgreSQL 集群记录了频繁检查点，一次同步耗时 33.263 秒，随后提示检查点间隔仅 3 秒；不能将该耗时直接当作可节省时间。下一轮改用新的独立持久盘测试集群，`max_wal_size=4GB`、`checkpoint_timeout=15min`；`fsync`、`full_page_writes`、`synchronous_commit` 均保持 `on`，测试范围和门槛不变。原集群及两轮失败证据保留，先验证新库再重新审阅计划，不在同环境盲重试。
+
+新测试库的版本和设置 probe 已通过，`test_postgres_repository.py` 全文件为 12 passed、零跳过，4.05 秒，覆盖初始化、真实读写重开、回滚及并发事务；本机证据为 `.tmp/followup-push-wal-env-20261021/postgres-repository-green.xml`。原测试实例已停止以避免后台 I/O 争用，数据没有删除。此专项只确认新环境可用，不替代重新执行完整验证，也不宣称数据库生产性能提升。
+
+第三轮 `run-20261021T041524Z-2090f3bd` 的全部功能 Gate、operation 与 verification 仍通过，完整阶段为 303.715 秒，整体仍为 `FAIL`（performance `FAIL`）；检查点参数调整没有带来明显改善。源码快照为 `git-visible-worktree-v1:d03b5538771cba026df1ac87810d339a4bb6f0529a6542a3391fc4ab4fc80fa8`（1067 文件），verdict SHA-256 `ae602c255c140f59792a9578ba6d364c97719800d6a399e8eeb0017b7cdc2581`；101 份证据已完整复制并校验，位于本机 `.tmp/followup-push-evidence-20261021/run-20261021T041524Z-2090f3bd`。
+
+下一轮改用与测试运行时同机的 Linux 原生 PostgreSQL 15.19，排除 WSL 跨系统数据库访问的额外开销。官方软件包经仓库签名与 SHA-256 校验后解压到本任务独立目录，不修改系统安装；数据库仍在持久盘，`max_wal_size=4GB`、`checkpoint_timeout=15min`、`shared_buffers=128MB`，三项持久化设置保持 `on`。配置 probe 与同一文件的 12 项专项通过、零跳过，3.35 秒；证据位于 `.tmp/followup-push-linuxpg-env-20261021`。两套旧 Windows 测试实例均已停止，数据库和历次证据保留。专项耗时差异不代表完整验证或生产性能改善，完整结论仍待新的正式 verdict。
 
 本轮在已合并主线 `2245a1c` 上优化附件并发、可见历史分页与磁盘压力回收，保留逐条回答反馈、持续诊断及正文永久保存。三处问题先在 `603e5b9` 复现，修复后衔接最新主线并复验；本轮最终状态以 PL-FIX-090 至 PL-FIX-092 的最新 verdict 元数据为准。此前各条记录的 PASS 只证明其对应快照，不替代本轮完整验证。
 
@@ -140,6 +150,45 @@
 - **页面专项回归**：`node --test examples/website-agent/unified-followup.test.mjs examples/website-agent/followup.test.mjs` 为 38 passed、0 failed，164.4008 毫秒（输出 `29794d`），6 个新增用例经现有 server Gate 导入。本结果只覆盖页面终态展示及相关兼容；各轮专项范围重叠，不累计测试数。
 - **不可回归判断规则与详细说明**：同一次追问先理解用户目标，再判断材料和工具是否足够；解释、假设讨论与一般质疑不能按关键词直接重跑，明确完整重查且材料具备时不能仅复述旧报告；必须由用户提供的信息缺失时先索取，不空跑。前端只展示后端状态，不决定语义意图；普通回答不创建 Case，必要的正式诊断使用新 run / Case，旧报告与反馈保持独立。判断表、优先级、示例和失败恢复补入 `docs/website-report-followup.md`。协议校验和确定性测试不保证真实模型的判断准确率。
 - **最新 Test Flow verdict（PL-FIX-083，2026-10-17，判断复核）**：Linux `dev.default` [run-20261017T115802Z-5c9a80c8](.tmp/followup-review-evidence-20261017/run-20261017T115802Z-5c9a80c8/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。完整确定性阶段 289.842 秒，低于 300 秒门槛，全部必需 Gate 通过；模型调用、token 和费用均为 0。源码快照 `git-visible-worktree-v1:e1983578401ae61deaad59f15e85cff278c9ccd76f50fee3da2a7834eaaa7a5e`（1037 文件），verdict SHA-256 `7ed8d62a1778c6d7e7c69f74e825602508d557861347970fa9fba2f43539d251`。测试临时数据使用独立 tmpfs，真实 PostgreSQL 仍在持久盘；完整证据已复制到持久盘并逐文件核对，不代表生产磁盘性能、真实模型效果或 Release 已验收。本行是验证后回填的引用元数据，不属于所引用源码快照。
+
+### 2026-10-20：追问结果兼容字符串内未转义的控制字符
+
+- **状态与历史关联**：沿用 PL-FIX-083 的内部结果协议。实现和专项回归已完成，待推送前完整验证；2026-10-17 的历史 verdict 不覆盖本次改动。
+- **症状、受影响版本与确认**：`8.2.0 / c1a66ce` 的 `followup.context.parse_result` 拒绝 codeagent 等 Claude 兼容 CLI 在内层字符串中直接输出的换行、回车和制表符，报 `Invalid control character`，追问最终失败。当前源码最小复现确认合法转义可通过、相同字面字符失败；新增直接解析专项修复前 67 项失败。Windows worker 的平台相关失败单独保留，不计作本问题的复现。
+- **根因与修复历史**：默认 `json.loads(value)` 禁止字符串内未转义的 U+0000–U+001F。仅在追问结果解析入口改用 `strict=False`，得到与对应合法转义相同的字符串，不删改正文，也不增加模型调用。
+- **不可回归行为**：`ANSWER`、`REQUEST_INPUT` 和继续诊断的文字字段原样保留控制字符；合法反斜杠、字面 `\n` 与引号不能被再次解码。协议、当前任务、动作、字段类型及大小校验保持不变；未转义引号、非法转义、截断、多根值、BOM、代码围栏和前后说明仍拒绝。外层逐行 `stream-json` 必须合法，其他模型入口和公开 HTTP/MCP 输入不采用此兼容规则。
+- **专项回归测试**：`test_followup_result_protocol.py` 新增全部 32 个控制字符的两类回答等值用例、继续诊断三个文字字段、其他语法及结果协议错误，以及分片事件到实际 worker 的正文保存与单次执行。联合既有 `test_followup_decision.py`、`test_report_followup_faults.py` 和 `test_final_response.py::test_stream_result_is_unique_successful_and_not_in_telemetry`，Linux 当前工作区 110 passed、零失败、零跳过，3.73 秒。命令与证据位置见 TODO；模型均为确定性替身。
+- **最新 Test Flow verdict（PL-FIX-083，2026-10-20，控制字符兼容）**：Linux `dev.default` [run-20261021T042821Z-7d2d4857](.tmp/followup-push-evidence-20261021/run-20261021T042821Z-7d2d4857/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。完整确定性阶段 295.685 秒，全部必需 Gate 通过，模型调用、token 和费用均为 0。源码快照 `git-visible-worktree-v1:58f50681a3fff34bd1932fc5b9f292fbef8aba6ca19106572941429cdd6d0b0e`（1067 文件），verdict SHA-256 `3e96b0bbc6e1900344617cdba62d7b26fcc68969484daafc5fbc2c315b75543c`。本轮覆盖以上追问修复、结构化输出全流程及旧测试合同同步；首轮失败证据保留。完整证据已复制至持久盘并逐文件校验，提交与测试源码逐项核对。仅本行属于验证后回填的引用元数据，不属于所引用源码快照；不代表真实模型、生产部署或 Release 验收。
+
+### 2026-10-21：追问正文双引号恢复与重复控制字段拒绝
+
+- **症状、受影响版本与确认**：`8.2.0 / c1a66ce` 及上一节尚未提交的控制字符修复仍拒绝正文中的未转义 ASCII 双引号；普通文字与真实换行混合时同样失败。另确认默认 `json.loads` 接受重复 `action` 并采用后值。新专项修复前 22 项引号用例失败、4 项重复字段用例失败；超长测试 ID 导致的 Windows 环境变量错误不计为业务复现。
+- **根因与修复历史**：`strict=False` 只兼容控制字符，不能识别正文内未转义引号；直接转义整个对象又可能把后续字段吞入答案。本轮先按原格式解析，只有语法错误才进入局部恢复：严格核对三个唯一控制字段，动作仅限 `ANSWER` / `REQUEST_INPUT`，随后只能有最后一个 `answer_markdown` 字段。线性扫描正文，只为未转义双引号插入反斜杠；既有转义不变。正常解析同时拒绝重复字段和非有限数。提示词补充完整转义要求及正文字段顺序，不更改 v1 协议或公开接口。
+- **不可回归行为与局限**：不能修复控制字段、改成继续诊断、吞入额外字段或明显的第二对象结构；BOM、围栏、前后说明、截断、坏转义、无效 Unicode 和超限拒绝。双引号后紧接 JSON 结构符时保守拒绝，因此未转义 JSON 示例和部分英文逗号场景仍可能失败；正确转义的 JSON 不受此限制，合法字段顺序也不受限制。已合法解码的路径转义无法推断原意，不擅自改写。上一节的“未转义引号仍拒绝”由本节的受限正文规则细化，其他入口继续遵循各自合同。
+- **记录与执行**：实际 worker 交付前在私有 `runtime` 保存原始文本、采用文本和带 SHA-256、长度、UTF-8 插入位置的收据；诊断日志只含追问 ID 和元数据。记录写入失败时不交付答案，不再次调用模型。全部文件沿用现有追问工作区保留规则。
+- **专项回归测试**：新增 `test_followup_quote_recovery.py` 71 项，覆盖两类回答、控制字段排列、控制字符混合、合法转义与反斜杠奇偶、闭引号完整性、重复字段与非有限数、结构歧义、Unicode 和预算、准确插入位置、两次解析上限、实际流到 worker 的正文与记录，以及收据写入失败。联合既有协议、决策、故障和唯一 stream result 用例，Linux 当前工作区 180 passed、零跳过，3.81 秒。命令和证据路径见 TODO，不调用真实模型。
+- **推送前关闭竞态补修**：2026-10-21 在尚未提交的恢复实现中确认，记录写入期间关闭服务，原 worker 仍把任务置为 `COMPLETED` 并发布答案。现于解析及记录完成后再次检查取消状态，沿既有终态处理路径退出。新增三个文件写入点分别触发用户停止或服务关闭的 6 项专项，先复现 3 failed / 3 passed；修复后引号、预算、原追问、故障及交接五文件联合 154 passed、零跳过，14.75 秒，1 条既有 Starlette 警告，引号专项共 77 项。不得发布取消后的正文、发起诊断或重试模型；本机证据 `.tmp/followup-push-env-20261021/audit-cancel-linux-red.xml` 与 `audit-cancel-linux-green.xml`，原复现场景保留。
+- **最新 Test Flow verdict（PL-FIX-083，2026-10-21，引号恢复）**：Linux `dev.default` [run-20261021T042821Z-7d2d4857](.tmp/followup-push-evidence-20261021/run-20261021T042821Z-7d2d4857/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。完整确定性阶段 295.685 秒，全部必需 Gate 通过，模型调用、token 和费用均为 0。源码快照 `git-visible-worktree-v1:58f50681a3fff34bd1932fc5b9f292fbef8aba6ca19106572941429cdd6d0b0e`（1067 文件），verdict SHA-256 `3e96b0bbc6e1900344617cdba62d7b26fcc68969484daafc5fbc2c315b75543c`。本轮覆盖以上追问修复、结构化输出全流程及旧测试合同同步；首轮失败证据保留。完整证据已复制至持久盘并逐文件校验，提交与测试源码逐项核对。仅本行属于验证后回填的引用元数据，不属于所引用源码快照；不代表真实模型、生产部署或 Release 验收。
+
+### 2026-10-21：追问执行时间可配置与定向日志检索
+
+- **状态与历史关联**：沿用 PL-FIX-083 的统一追问入口。实现与专项回归已完成，专项通过，待推送前完整验证；本节不沿用前述历史 verdict。
+- **症状、受影响版本与确认**：`8.2.0 / c1a66ce` 的追问执行预算固定为 300 秒，启动配置不能调整；模型仍在正常工作时也会到限终止。提示词未明确要求先判断深度诊断需求、限制检索范围及避免重复读取。当前入口检查与确定性测试确认上述行为：设置专项先有 23 项失败、Linux 启动装配 2 项失败，执行与提示输入专项先有 17 项失败、1 项通过。其中六分钟耗时使用模型替身模拟，不能据此认定用户现场八轮执行的耗时分布。
+- **根因与修复历史**：原预算常量直接传给执行器。本轮新增 `REPORT_FOLLOWUP_TIMEOUT_SECONDS`，默认从 300 秒延长为 600 秒，只接受 1–1800 秒的整数；设置加载和 service 构造均校验范围，bootstrap 将配置传给追问 worker。修改配置后重启服务生效，不修改正式诊断、经验纠正或真实测试 profile 的独立预算。
+- **检索与交接规则**：已有报告和问答足够时不读取日志；有具体疑点才按文件、时间、请求 ID 或错误码缩小范围，用 Grep 定位后读取附近片段，限制返回量并避免重复读取。需要遍历大量文件、重建跨文件时间线或持续扩大范围时，材料足够就及时返回 `CONTINUE_DIAGNOSIS`；材料只能由用户提供时仍索取补充。规则由提示词约束，本次没有新增工具调用次数或返回行数的服务端硬限制，未声称真实模型已经提速。
+- **不可回归行为**：保留最终执行上限、用户停止、删除和关闭取消；超时不自动重试、不自动触发诊断，迟到答案不发布。配置不能接受 0、负数、浮点、布尔值或超过 1800 秒的值；CLI 或上游服务的更短限制仍可能先触发。截断或未命中不能作为事件不存在的证据，不能仅因耗时或检索次数增加就启动诊断。经验纠正的两条执行路径仍使用 180 秒。
+- **专项回归测试**：新增 `test_followup_execution_budget.py` 18 项、settings 23 项和 bootstrap 2 项。settings 全文件在 Windows 为 158 passed；Linux 联合相关追问、上下文、正式交接、原 JSON 兼容、配置装配、共享预算隔离及真实进程树超时清理为 271 passed、零跳过，25.00 秒。原停止、删除与重启边界随相关文件复验，经验纠正成功用例新增 180 秒断言。Linux 证据 `.tmp/followup-budget-final-20261021-01.xml`；完整命令和范围见 TODO，不调用真实模型。
+- **完整验证发现与补修**：首轮 `run-20261021T024256Z-06e02af7` 为 `FAIL`，源码快照 `git-visible-worktree-v1:40fb3d2940125da3356d7979ad22be3fbf1593ccb0ffb9eb1f37f6d322b83339`，共四项失败。新增 limits 常量后未同步合同清单，现用仓库生成器更新 `schemas/v2/contract-manifest.json` 中对应 SHA-256，`test_schema_snapshots.py` 全文件 5 passed；发布边界测试补齐新配置键及默认 600 秒断言，`test_release_boundaries.py` 全文件 3 passed。另两项旧测试失败沿 PL-FIX-072 记录。原始 verdict 及全部证据保存在本机 `.tmp/followup-push-evidence-20261021/run-20261021T024256Z-06e02af7`，完整复制并校验，不以专项代替完整重验。
+- **最新 Test Flow verdict（PL-FIX-083，2026-10-21，执行预算与定向检索）**：Linux `dev.default` [run-20261021T042821Z-7d2d4857](.tmp/followup-push-evidence-20261021/run-20261021T042821Z-7d2d4857/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。完整确定性阶段 295.685 秒，全部必需 Gate 通过，模型调用、token 和费用均为 0。源码快照 `git-visible-worktree-v1:58f50681a3fff34bd1932fc5b9f292fbef8aba6ca19106572941429cdd6d0b0e`（1067 文件），verdict SHA-256 `3e96b0bbc6e1900344617cdba62d7b26fcc68969484daafc5fbc2c315b75543c`。本轮覆盖以上追问修复、结构化输出全流程及旧测试合同同步；首轮失败证据保留。完整证据已复制至持久盘并逐文件校验，提交与测试源码逐项核对。仅本行属于验证后回填的引用元数据，不属于所引用源码快照；不代表真实模型、生产部署或 Release 验收。
+
+### 2026-10-21：结构化输出被当成越权工具，成功对象未被读取
+
+- **症状、受影响版本与确认**：`8.2.0 / c1a66ce` 及本次尚未提交的追问修复中，配置 `--json-schema` 后，`StructuredOutput` / `structuredoutput` 会被 `permits_file_access`、服务端执行前检查和正式测试的追问审计器拒绝。终态只含 `structured_output` 对象时原解析器返回 `None`，同时含说明性 `result` 时又误用说明文字。当前代码的分片事件、真实 AgentBackend 确定性子进程及 Node 启动器回放均确认问题，未调用真实模型。
+- **根因与修复历史**：原工具清单没有区分文件能力与 CLI 格式化能力，终态读取仅支持文本字段。现两层 Python 权限检查共享两个精确名称，Node 审计保持同一名单；格式化参数必须是对象，不走路径检查，也不计日志读取。唯一成功终态存在 `structured_output` 时采用对象，标准序列化后交原业务合同；仅字段不存在时使用旧 `result` 文本。保留用户配置的 schema 参数，不自动向所有阶段注入同一 schema。正式测试 wrapper 本来就原样透传事件，本轮只补测试，不修改其执行逻辑。
+- **不可回归行为**：不采用工具参数或中间文本作为答案；非法结构化容器不回退到其他文本。重复字段、重复终态、错误终态、损坏事件、非有限数、非法 Unicode、异常退出及超限仍拒绝；业务协议、任务身份、动作、证据和正文限制不变。文件读取仍限既有模式与 `inputs`，未知或带 MCP 前缀的同名工具、Shell、写入等仍拒绝。正式审计保留工具结果配对、输入哈希与权限核验，不以格式化调用充当日志验证。回答、补材料、诊断交接和反馈审核均不新增模型调用或重试。
+- **专项回归测试**：`test_structured_output.py` 覆盖传输与真实 backend；`test_report_followup_policy.py` 覆盖执行前检查及两种 schema 参数写法；`test_followup_structured_output.py` 和交接专项覆盖业务全流程。Windows 执行前专项先复现 2 failed，worker 专项 18 项在传输校验处失败；另 1 项因 Windows 文件校验未进入业务，不计复现。Linux 权限、结构化业务及交接三文件联合 70 passed、零跳过，5.24 秒。Node 审计先红后绿，最终 `report-followup-gate.test.mjs` 为 47 passed、零失败、零跳过；覆盖初始化可选格式化工具、零读取计数、启动器原样透传及各种终态拒绝。各组范围重叠，不累计。
+- **共享运行时专项**：新 `test_structured_output.py` 共 67 项，含 6 项真实 AgentBackend 确定性子进程测试；与既有 telemetry、最终响应相关用例联合为 156 passed、零跳过，4.40 秒。新增非法 Unicode 专项先复现 3 failed / 2 passed，修复后孤立代理项拒绝，合法中文、表情、换行、引号及反斜杠等值保留。证据为本机 `.tmp/followup-push-env-20261021/structured-output-linux-green-03.xml`；各轮红灯现场保留。
+- **最新 Test Flow verdict（PL-FIX-083，2026-10-21，结构化输出兼容）**：Linux `dev.default` [run-20261021T042821Z-7d2d4857](.tmp/followup-push-evidence-20261021/run-20261021T042821Z-7d2d4857/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。完整确定性阶段 295.685 秒，全部必需 Gate 通过，模型调用、token 和费用均为 0。源码快照 `git-visible-worktree-v1:58f50681a3fff34bd1932fc5b9f292fbef8aba6ca19106572941429cdd6d0b0e`（1067 文件），verdict SHA-256 `3e96b0bbc6e1900344617cdba62d7b26fcc68969484daafc5fbc2c315b75543c`。本轮覆盖以上追问修复、结构化输出全流程及旧测试合同同步；首轮失败证据保留。完整证据已复制至持久盘并逐文件校验，提交与测试源码逐项核对。仅本行属于验证后回填的引用元数据，不属于所引用源码快照；不代表真实模型、生产部署或 Release 验收。
 
 ## PL-FIX-084：草稿整理占用全局 Agent worker，阻塞其他会话
 
@@ -3349,3 +3398,11 @@
 - **专项回归测试**：新增 `test_direct_generic_logs.py`、`test_direct_generic_runtime.py`、`test_generic_direct_bindings.py`，覆盖原始字节、UTF-8 BOM、分段读取、多包来源、空清单、归档安全、预算、取消、无 Logparse 运行及旧绑定。`test_generic_web_logs.py` 覆盖真实 HTTP 上传到模型替身读取日志；`test_report_followup.py` 覆盖 v3 和空清单快照；配置、启动、replay、资源清理及合同测试覆盖关联边界。既有 `test_generic_log_messages.py`、继续诊断、材料选择、专用定位和 Logparse 测试继续回归。新增 `log-upload-controller.test.mjs` 已接入网站示例 Gate；页面、接口文档和 Skill 适配说明同步更新。
 - **已执行的有限验证**：Linux 最终相关测试 550 passed、0 failed、0 skipped；专用关联 80 passed，重启及继续诊断关联 83 passed，追问故障等关联 59 passed；页面五个套件 123 passed，文档与上传联合 56 passed。各组有交集，不累计总数。准确命令和本机证据位置见 `TODO.md`；确定性模型替身读取了实际日志字节，但不等同于真实模型验收。性能单次样本仅反映本机缓存条件，不作为生产吞吐或耗时保证。
 - **本轮最新 Test Flow verdict**：未运行；run ID、source snapshot digest 和 verdict 均无。用户于 2026-10-20 明确要求推送且“不用测试”，本次按该指令跳过新的专项与完整 `dev.default`，不修改项目长期测试规则，不沿用历史 PASS，也不登记为正式已验证。上线前实际 Linux Logparse 及局域网通用 Skill 日志分析验收尚未完成。
+
+### 2026-10-21：同步直接日志合同的旧测试
+
+- **症状、受影响版本与确认**：`8.2.0 / c1a66ce` 的专用身份测试从序列化结果强取已省略的可选字段，报 `KeyError: generic_log_preparation`；OpenAPI 测试仍只期望三种压缩包 MIME，与该版本已支持的文本日志不符。首轮正式 `dev.default` 发现两项失败，主工作区 Linux 专项再次复现 2 failed；未修改的 HEAD 副本也复现专用身份失败。
+- **根因与修复历史**：2026-10-20 的直接日志实现更新了可选字段序列化与上传合同，两项旧测试未同步。现仅修正测试：RuntimeBindings 构造过滤序列化结果中不存在的键，并分别断言 job、bindings、spec 的该字段为 `None` 且序列化时省略；OpenAPI 精确期望集合补齐四种已有文本 MIME。生产代码与接口合同不变。
+- **不可回归行为**：专用定位不能被赋予 Generic 的 `direct-v1` 策略；默认可选字段仍省略。上传类型保持精确集合，二进制请求体与校验头断言保留，不改成包含关系或跳过测试。
+- **专项回归测试**：`test_specialized_direct_contract.py` 与 `test_web_api.py` 两个完整文件在 Linux 为 39 passed、零跳过，6.36 秒；修复前后 JUnit 为本机 `.tmp/followup-push-env-20261021/contract-drift-linux-red.xml` 与 `contract-drift-linux-green.xml`。本次与 PL-FIX-083 一起重新执行最终源码的正式验证，不沿用 2026-10-20 的测试例外。
+- **最新 Test Flow verdict（PL-FIX-072，2026-10-21，旧测试合同同步）**：Linux `dev.default` [run-20261021T042821Z-7d2d4857](.tmp/followup-push-evidence-20261021/run-20261021T042821Z-7d2d4857/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。完整确定性阶段 295.685 秒，全部必需 Gate 通过，模型调用、token 和费用均为 0。源码快照 `git-visible-worktree-v1:58f50681a3fff34bd1932fc5b9f292fbef8aba6ca19106572941429cdd6d0b0e`（1067 文件），verdict SHA-256 `3e96b0bbc6e1900344617cdba62d7b26fcc68969484daafc5fbc2c315b75543c`。本轮覆盖以上追问修复、结构化输出全流程及旧测试合同同步；首轮失败证据保留。完整证据已复制至持久盘并逐文件校验，提交与测试源码逐项核对。仅本行属于验证后回填的引用元数据，不属于所引用源码快照；不代表真实模型、生产部署或 Release 验收。

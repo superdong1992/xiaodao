@@ -143,6 +143,27 @@ def test_report_followup_is_disabled_and_has_separate_snapshot_caps(tmp_path):
     assert settings.report_followup_storage_bytes == 2048
 
 
+def test_report_followup_timeout_defaults_to_ten_minutes(tmp_path):
+    settings = Settings.load(environ=environment(tmp_path))
+    assert settings.report_followup_timeout_seconds == 600
+    assert next(item for item in fields(Settings) if item.name == "report_followup_timeout_seconds").default == 600
+
+
+@pytest.mark.parametrize("seconds", [1, 600, 900, 1800])
+def test_report_followup_timeout_accepts_configured_seconds(tmp_path, seconds):
+    settings = Settings.load(environ={**environment(tmp_path), "REPORT_FOLLOWUP_TIMEOUT_SECONDS": str(seconds)})
+    assert settings.report_followup_timeout_seconds == seconds
+
+
+@pytest.mark.parametrize("value", [
+    "", "0", "-1", "600.0", "0600", "+600", " 600", "600 ", "600\n",
+    "1801", "true", "false", "６００", "600_000", "1e3", "9" * 10_000, True, 600,
+], ids=lambda value: "huge-integer" if len(str(value)) > 40 else repr(value))
+def test_report_followup_timeout_rejects_noncanonical_or_out_of_range_values(tmp_path, value):
+    with pytest.raises(SettingsError, match="REPORT_FOLLOWUP_TIMEOUT_SECONDS"):
+        Settings.load(environ={**environment(tmp_path), "REPORT_FOLLOWUP_TIMEOUT_SECONDS": value})
+
+
 @pytest.mark.parametrize("overrides", [
     {"REPORT_FOLLOWUP_ENABLED": "1"}, {"REPORT_FOLLOWUP_ENABLED": "True"},
     {"REPORT_FOLLOWUP_SNAPSHOT_BYTES": "0"}, {"REPORT_FOLLOWUP_SNAPSHOT_BYTES": "01"},

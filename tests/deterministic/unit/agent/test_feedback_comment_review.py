@@ -70,6 +70,7 @@ def test_web_analysis_review_works_without_followups_or_original_logs(system, us
     call = backend.calls[0]
     assert len(backend.calls) == 1 and system.backend.calls == []
     assert call["backend_phase"] == "MEMORY_CORRECTION"
+    assert call["resource_limits"].wall_time_seconds == 180
     assert call["file_access"] == "read-search"
     assert "管理员身份" in call["prompt"] and "没有新的追问回答" in call["prompt"]
     inputs = call["workspace_root"] / "inputs"

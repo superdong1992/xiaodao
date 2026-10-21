@@ -66,8 +66,16 @@ def test_ordinary_answer_keeps_one_model_call_and_never_creates_a_draft_or_run(s
 
 
 @pytest.mark.parametrize("mode", ["APPEND", "REPLACE"])
-def test_same_followup_call_hands_off_exact_inputs_and_link_without_intent_model(state, mode):
+@pytest.mark.parametrize("transport", ["text", "structured"])
+def test_same_followup_call_hands_off_exact_inputs_and_link_without_intent_model(state, mode, transport):
     s = state
+    if transport == "structured":
+        from tests.deterministic.unit.agent.test_followup_structured_output import structured_terminal
+        original_execute = s.backend.execute
+        def execute(**kwargs):
+            raw = original_execute(**kwargs).final_result
+            return SimpleNamespace(final_result=structured_terminal(json.loads(raw)))
+        s.backend.execute = execute
     old = upload(s, "client.zip", b"client logs")
     new = upload(s, "server.zip", b"server logs")
     duplicate = upload(s, "server-copy.zip", b"server logs")

@@ -124,6 +124,7 @@ uv lock --check
 | `GENERIC_LOGPARSE_PRODUCT` | 否 | `default` | 旧 Generic Job 继续使用其固定的 Logparse 配置；新通用诊断直接准备用户日志，不使用此项。专用诊断仍使用 Skill 声明的产品 |
 | `GENERIC_MEMORY_ENABLED` | 否 | `false` | 控制通用经验提炼和召回，不影响 V2 Markdown 报告赞踩；启用前完成实际 Skill 与脱敏验收 |
 | `REPORT_FOLLOWUP_ENABLED` | 否 | `false` | 开启报告追问和报告发布后的异步日志快照；关闭后仍可读取、停止和清理已有追问 |
+| `REPORT_FOLLOWUP_TIMEOUT_SECONDS` | 否 | `600` | 单次追问模型执行上限，单位秒；只接受 1–1800 的整数。修改后重启服务，用户仍可随时停止 |
 | `REPORT_FOLLOWUP_SNAPSHOT_BYTES` | 否 | `1073741824` | 单份日志快照字节上限，最多 1 GiB，可调低；不计入原诊断资源额度 |
 | `REPORT_FOLLOWUP_STORAGE_BYTES` | 否 | `5368709120` | 日志快照总量字节上限，默认 5 GiB，不能小于单份上限 |
 | `LOGPARSE_REPO` | 依 Skill 而定 | 无 | 仅使用通用定位且没有依赖 Logparse 的专用 Skill 时，可与 `LOGPARSE_CONFIG_PATH` 一起省略；配置后仍严格校验源码和指纹 |

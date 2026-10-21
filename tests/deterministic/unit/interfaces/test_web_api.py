@@ -499,6 +499,10 @@ def test_openapi_and_swagger_publish_the_browser_contract() -> None:
         "application/gzip",
         "application/zip",
         "application/x-tar",
+        "text/plain",
+        "application/json",
+        "application/x-ndjson",
+        "application/jsonl",
     }
     assert all(
         item["schema"] == {"type": "string", "format": "binary"}

@@ -111,3 +111,38 @@ def test_correction_memory_uses_same_strict_read_search_policy(tmp_path):
     assert "--no-session-persistence" in result.argv
     assert "--disable-slash-commands" in result.argv
     assert result.environment["PROBLEM_LOCATOR_AGENT_PHASE"] == "MEMORY_CORRECTION"
+
+
+@pytest.mark.parametrize("name", ["StructuredOutput", "structuredoutput"])
+def test_followup_hook_accepts_output_objects_without_file_access(tmp_path, name):
+    payload = {"tool_name": name, "tool_input": {"answer_markdown": '请看"日志"。\n下一行。'}}
+    assert permits_tool(tmp_path, payload)
+    result = subprocess.run([sys.executable, str(Path(followup_access.__file__)), str(tmp_path)],
+        input=json.dumps(payload), text=True, capture_output=True, check=True)
+    assert json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
+@pytest.mark.parametrize("name", ["StructuredOutput", "structuredoutput"])
+@pytest.mark.parametrize("value", [None, [], "{}", 1, True])
+def test_followup_hook_rejects_non_object_output_tool_inputs(tmp_path, name, value):
+    assert not permits_tool(tmp_path, {"tool_name": name, "tool_input": value})
+    assert not permits_tool(tmp_path, {"tool_name": name})
+
+
+@pytest.mark.parametrize("name", ["StructuredOutputWrite", "mcp__server__StructuredOutput", "structured_output", "STRUCTUREDOUTPUT"])
+def test_followup_hook_does_not_match_similar_or_external_output_tools(tmp_path, name):
+    assert not permits_tool(tmp_path, {"tool_name": name, "tool_input": {}})
+
+
+@pytest.mark.parametrize("phase", ["REPORT_FOLLOWUP", "MEMORY_CORRECTION"])
+@pytest.mark.parametrize("executable", ["claude", "codeagent"])
+@pytest.mark.parametrize("style", ["separate", "equals"])
+def test_followup_policy_preserves_configured_schema_and_file_restrictions(tmp_path, phase, executable, style):
+    schema = json.dumps({"type": "object", "properties": {"answer_markdown": {"type": "string"}}})
+    arguments = ("--json-schema", schema) if style == "separate" else ("--json-schema=" + schema,)
+    invocation = ClaudeCommand((executable, *arguments), {"CLAUDE_CONFIG_DIR": str(tmp_path / ".claude")})
+    result = apply_final_response_policy(invocation, file_access="read-search", workspace_root=tmp_path, phase=phase)
+    assert result.argv[1:1 + len(arguments)] == arguments
+    assert result.argv[result.argv.index("--tools") + 1] == "Read,Grep"
+    assert result.argv[result.argv.index("--mcp-config") + 1] == '{"mcpServers":{}}'
+    assert result.argv[result.argv.index("--permission-mode") + 1] == "dontAsk"

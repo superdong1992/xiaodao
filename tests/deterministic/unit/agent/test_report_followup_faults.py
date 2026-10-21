@@ -30,7 +30,7 @@ def test_model_failure_and_timeout_have_safe_terminal_state_without_retry(system
         assert failure.failure.code is ErrorCode.BACKEND_TIMEOUT
 
     def fail_model(invocation):
-        assert invocation["resource_limits"].wall_time_seconds == 300
+        assert invocation["resource_limits"].wall_time_seconds == 600
         assert invocation["backend_phase"] == "REPORT_FOLLOWUP"
         raise failure
 

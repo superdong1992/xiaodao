@@ -34,6 +34,7 @@ EXPECTED_ENV_KEYS = {
     "GENERIC_LOGPARSE_PRODUCT",
     "GENERIC_MEMORY_ENABLED",
     "REPORT_FOLLOWUP_ENABLED",
+    "REPORT_FOLLOWUP_TIMEOUT_SECONDS",
     "REPORT_FOLLOWUP_SNAPSHOT_BYTES",
     "REPORT_FOLLOWUP_STORAGE_BYTES",
     "DFX_LOG_DIR",
@@ -136,6 +137,7 @@ def test_env_example_contains_only_the_public_settings() -> None:
     assert assignments["RESOURCE_DISK_TARGET_FREE_PERCENT"] == "15"
     assert assignments["GENERIC_MEMORY_ENABLED"] == "false"
     assert assignments["REPORT_FOLLOWUP_ENABLED"] == "false"
+    assert assignments["REPORT_FOLLOWUP_TIMEOUT_SECONDS"] == "600"
     assert assignments["REPORT_FOLLOWUP_SNAPSHOT_BYTES"] == "1073741824"
     assert assignments["REPORT_FOLLOWUP_STORAGE_BYTES"] == "5368709120"
     forbidden_fragments = (

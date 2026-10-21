@@ -167,6 +167,7 @@ def test_correction_memory_requires_verified_log_citations_and_keeps_private_rec
     task = prepare_logged_task(system)
     backend = Backend(response())
     card, receipt = CorrectionMemoryHandler(system.service, "claude", backend=backend).extract(task, cancellation=CancellationController())
+    assert backend.calls[0]["resource_limits"].wall_time_seconds == 180
     assert json.loads(card) == CARD
     proof = json.loads(receipt)
     assert proof["answer_sha256"] == task["report_sha256"]

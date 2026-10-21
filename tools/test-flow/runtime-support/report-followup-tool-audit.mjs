@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const TOOLS = ["Grep", "Read"];
+const OUTPUT_TOOLS = ["StructuredOutput", "structuredoutput"];
 const DIGEST = /^[a-f0-9]{64}$/;
 const sha256 = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
 
@@ -52,11 +53,20 @@ export function reportFollowupPermissionArguments() {
   return ["--tools", "Read,Grep", "--permission-mode", "dontAsk"];
 }
 
+function validToolInventory(tools) {
+  if (!Array.isArray(tools) || new Set(tools).size !== tools.length) return false;
+  const fileTools = tools.filter((name) => !OUTPUT_TOOLS.includes(name));
+  const outputTools = tools.filter((name) => OUTPUT_TOOLS.includes(name));
+  // Some CLI versions register the schema formatter separately from --tools.
+  return outputTools.length <= 1 && fileTools.length === TOOLS.length
+    && fileTools.every((name) => TOOLS.includes(name));
+}
+
 export function auditReportFollowupTrace({ events, workspaceRoot, before }) {
   requireTrace(Array.isArray(events), "FOLLOWUP_TRACE_EVENTS_INVALID");
   const init = events.filter((event) => event.type === "system" && event.subtype === "init");
   requireTrace(init.length === 1 && init[0].permissionMode === "dontAsk"
-    && Array.isArray(init[0].tools) && [...init[0].tools].sort().join(",") === TOOLS.join(",")
+    && validToolInventory(init[0].tools)
     && Array.isArray(init[0].mcp_servers) && init[0].mcp_servers.length === 0
     && path.resolve(init[0].cwd ?? "") === path.resolve(workspaceRoot), "FOLLOWUP_TRACE_INIT_INVALID");
   const uses = new Map();
@@ -65,10 +75,15 @@ export function auditReportFollowupTrace({ events, workspaceRoot, before }) {
     if (!Array.isArray(event.message?.content)) continue;
     for (const block of event.message.content) {
       if (block.type === "tool_use") {
-        requireTrace(event.type === "assistant" && TOOLS.includes(block.name), "FOLLOWUP_TRACE_TOOL_NOT_ALLOWED");
+        const outputTool = OUTPUT_TOOLS.includes(block.name);
+        requireTrace(event.type === "assistant" && (TOOLS.includes(block.name) || outputTool), "FOLLOWUP_TRACE_TOOL_NOT_ALLOWED");
         requireTrace(typeof block.id === "string" && block.id.length > 0 && !uses.has(block.id), "FOLLOWUP_TRACE_TOOL_ID_INVALID");
         const input = block.input;
         requireTrace(input && typeof input === "object" && !Array.isArray(input), "FOLLOWUP_TRACE_TOOL_INPUT_INVALID");
+        if (outputTool) {
+          uses.set(block.id, false);
+          continue;
+        }
         const absolute = inspectInput(workspaceRoot, block.name === "Read" ? input.file_path : input.path);
         requireTrace(block.name !== "Grep" || (typeof input.pattern === "string" && input.pattern.length > 0), "FOLLOWUP_TRACE_TOOL_INPUT_INVALID");
         requireTrace(block.name !== "Read" || fs.lstatSync(absolute).isFile(), "FOLLOWUP_TRACE_TOOL_INPUT_INVALID");

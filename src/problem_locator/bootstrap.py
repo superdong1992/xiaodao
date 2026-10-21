@@ -1364,6 +1364,7 @@ def _assemble(
         agent.followups = ReportFollowupService(
             agent, settings.diagnose_claude_command or settings.claude_command,
             enabled=settings.report_followup_enabled,
+            timeout_seconds=settings.report_followup_timeout_seconds,
             snapshot_max_bytes=settings.report_followup_snapshot_bytes,
             snapshot_total_bytes=settings.report_followup_storage_bytes,
             retention_days=settings.web_resource_retention_days,

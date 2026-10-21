@@ -1,4 +1,4 @@
-"""Server-side Read/Grep scope for report follow-ups only.
+"""Server-side Read/Grep scope and output formatting for report follow-ups.
 
 The same file is Claude's PreToolUse hook. A failed hook command exits with
 Claude's blocking code 2, so a broken guard cannot grant a read.
@@ -13,10 +13,19 @@ import stat
 import sys
 
 
+STRUCTURED_OUTPUT_TOOLS = frozenset({"StructuredOutput", "structuredoutput"})
+
+
 def permits_tool(workspace: Path, payload: dict) -> bool:
     tool = payload.get("tool_name")
-    inputs = payload.get("tool_input", {})
-    if tool not in {"Read", "Grep"} or not isinstance(inputs, dict):
+    inputs = payload.get("tool_input")
+    if not isinstance(inputs, dict):
+        return False
+    # CLI-generated output formatting has no file capability. Do not apply path
+    # checks to answer content, or match external tools by prefix/case folding.
+    if tool in STRUCTURED_OUTPUT_TOOLS:
+        return True
+    if tool not in {"Read", "Grep"}:
         return False
     value = inputs.get("file_path" if tool == "Read" else "path")
     if not isinstance(value, str) or not value:
@@ -74,7 +83,7 @@ def main():
         pass
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
         "permissionDecision": "allow" if allowed else "deny",
-        "permissionDecisionReason": "报告追问只允许读取和搜索 inputs 目录。"}}, ensure_ascii=False))
+        "permissionDecisionReason": "报告追问只允许读取和搜索 inputs 目录，以及提交结构化结果。"}}, ensure_ascii=False))
 
 
 if __name__ == "__main__":

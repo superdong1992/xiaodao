@@ -12,6 +12,8 @@ from typing import Any
 from problem_locator.contracts.limits import JOB_STDOUT_STDERR_BYTES
 from problem_locator.contracts.ports import AppendOnlyByteSink
 
+from .followup_access import STRUCTURED_OUTPUT_TOOLS
+
 
 _DEFAULT_LINE_LIMIT_BYTES = 1024 * 1024
 _SAFE_TOOL_NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
@@ -319,12 +321,22 @@ class AgentStreamTelemetry:
 
     def _observe_result(self, payload: Mapping[str, Any], observed_ms: float) -> None:
         self._result_count += 1
-        value = payload.get("result")
-        self._final_result = (
-            value if self._result_count == 1 and isinstance(value, str)
-            and payload.get("subtype") == "success" and payload.get("is_error") is False
-            else None
-        )
+        self._final_result = None
+        if (self._result_count == 1 and payload.get("subtype") == "success"
+                and payload.get("is_error") is False):
+            if "structured_output" in payload:
+                value = payload["structured_output"]
+                if isinstance(value, dict):
+                    try:
+                        rendered = json.dumps(value, ensure_ascii=False,
+                            allow_nan=False, separators=(",", ":"))
+                        rendered.encode("utf-8")
+                        self._final_result = rendered
+                    except (TypeError, ValueError):
+                        pass
+            else:
+                value = payload.get("result")
+                self._final_result = value if isinstance(value, str) else None
         self._terminal_result = True
         self._result_observed_ms = observed_ms
         self._cli_duration_ms = _nonnegative_number(payload.get("duration_ms"))
@@ -353,7 +365,7 @@ class AgentStreamTelemetry:
         """The single successful CLI result; never included in diagnostic events."""
         self.finish()
         with self._lock:
-            return self._final_result if not (self._internal_failure or self._output_limited) else None
+            return self._final_result if not (self._internal_failure or self._output_limited or self._malformed) else None
 
     def permits_file_access(self, policy: str) -> bool:
         self.finish()
@@ -361,7 +373,7 @@ class AgentStreamTelemetry:
             if self._internal_failure or self._output_limited or self._malformed:
                 return False
             allowed = set() if policy == 'none' else {'Read', 'Grep'} if policy == 'read-search' else {'Read'}
-            return set(self._tool_counts).issubset(allowed)
+            return set(self._tool_counts).issubset(allowed | STRUCTURED_OUTPUT_TOOLS)
 
     def snapshot(
         self,

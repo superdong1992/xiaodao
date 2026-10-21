@@ -8,6 +8,9 @@ import time
 
 from problem_locator.agent.models import AgentStoreError
 from problem_locator.contracts import DiagnosisMode, JobStatus
+from problem_locator.contracts.limits import (
+    DEFAULT_REPORT_FOLLOWUP_TIMEOUT_SECONDS, MAX_REPORT_FOLLOWUP_TIMEOUT_SECONDS,
+)
 from problem_locator.contracts.models import is_specialized_direct, specialized_direct_skill_name
 from problem_locator.diagnostics import log_event
 from problem_locator.dispatch.activity import QueueIdleObservation
@@ -22,10 +25,14 @@ from .worker import FollowupWorker
 
 class ReportFollowupService:
     def __init__(self, agent, command, *, enabled=False, snapshot_max_bytes=1024**3,
-                 snapshot_total_bytes=5 * 1024**3, backend=None, retention_days=15):
+                 snapshot_total_bytes=5 * 1024**3, backend=None, retention_days=15,
+                 timeout_seconds=DEFAULT_REPORT_FOLLOWUP_TIMEOUT_SECONDS):
         if type(snapshot_max_bytes) is not int or type(snapshot_total_bytes) is not int or not 1 <= snapshot_max_bytes <= snapshot_total_bytes:
             raise ValueError("报告追问快照预算无效。")
+        if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= MAX_REPORT_FOLLOWUP_TIMEOUT_SECONDS:
+            raise ValueError(f"追问执行时间必须是 1–{MAX_REPORT_FOLLOWUP_TIMEOUT_SECONDS} 秒之间的整数。")
         self.agent, self.enabled = agent, enabled
+        self.timeout_seconds = timeout_seconds
         self.store = FollowupStore(agent.store.repository, agent.store.clock,
             retention_days=retention_days,
             memory_store=agent.memory_store if agent.memory_enabled else None)

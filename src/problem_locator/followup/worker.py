@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import threading
 from pathlib import Path
 
 from problem_locator.contracts import JOB_STDOUT_STDERR_BYTES, CancellationReason, ExecutionLogSinks, ResourceLimits
+from problem_locator.contracts.limits import DEFAULT_REPORT_FOLLOWUP_TIMEOUT_SECONDS
 from problem_locator.diagnostics import log_event
 from problem_locator.dispatch.cancellation import CancellationController
 from problem_locator.runtime.agent_backend import AgentBackend
@@ -16,8 +18,25 @@ from .context import build_prompt, history_markdown, parse_result, validate_answ
 from .models import MAX_CONTEXT_BYTES
 from .snapshots import InputChanged, _row, copy_snapshot, protect_inputs, verify_inputs, write_new
 
-FOLLOWUP_LIMITS = ResourceLimits(context_bytes=MAX_CONTEXT_BYTES, wall_time_seconds=300,
+FOLLOWUP_LIMITS = ResourceLimits(context_bytes=MAX_CONTEXT_BYTES,
+    wall_time_seconds=DEFAULT_REPORT_FOLLOWUP_TIMEOUT_SECONDS,
     stdout_stderr_bytes=262_144, workspace_bytes=1024**3 + 16 * 1024**2)
+
+
+def _record_quote_recovery(workspace, followup_id, raw, effective, offsets):
+    receipt = {"schema_version": 1, "rule": "followup_answer_quotes_v1",
+        "raw_sha256": hashlib.sha256(raw).hexdigest(), "raw_size_bytes": len(raw),
+        "effective_sha256": hashlib.sha256(effective).hexdigest(), "effective_size_bytes": len(effective),
+        "inserted_escape_offsets": list(offsets)}
+    for name, content in (
+        ("followup-response-original.txt", raw),
+        ("followup-response-effective.txt", effective),
+        ("followup-response-recovery.json", json.dumps(receipt, sort_keys=True).encode("utf-8")),
+    ):
+        write_new(workspace / "runtime" / name, content)
+    log_event("agent.followup.answer_quotes_recovered", followup_id=followup_id,
+        rule=receipt["rule"], raw_sha256=receipt["raw_sha256"],
+        effective_sha256=receipt["effective_sha256"], inserted_escape_count=len(offsets))
 
 
 class _DiscardSink:
@@ -125,7 +144,8 @@ class FollowupWorker:
                 verify_inputs(workspace, rows, cancellation)
                 if cancellation.is_cancelled():
                     raise InterruptedError()
-                limits = FOLLOWUP_LIMITS.model_copy(update={"workspace_bytes": service.snapshot_max_bytes + 16 * 1024**2})
+                limits = FOLLOWUP_LIMITS.model_copy(update={"wall_time_seconds": service.timeout_seconds,
+                    "workspace_bytes": service.snapshot_max_bytes + 16 * 1024**2})
                 invoked = True
                 result = self.backend.execute(prompt=prompt, workspace_root=workspace, cancellation=cancellation,
                     log_sinks=ExecutionLogSinks(stdout=_DiscardSink(), stderr=_DiscardSink(),
@@ -135,7 +155,11 @@ class FollowupWorker:
                 if cancellation.is_cancelled():
                     raise InterruptedError()
                 verify_inputs(workspace, rows, cancellation)
-                decision = parse_result(result.final_result, request_key=task["followup_id"])
+                decision = parse_result(result.final_result, request_key=task["followup_id"],
+                    on_recovery=lambda raw, effective, offsets: _record_quote_recovery(
+                        workspace, task["followup_id"], raw, effective, offsets))
+                if cancellation.is_cancelled():
+                    raise InterruptedError()
                 if decision.action in {"ANSWER", "REQUEST_INPUT"}:
                     answer = validate_answer(decision.answer_markdown, mode)
                     service.store.finish_task(task["followup_id"], answer=answer)

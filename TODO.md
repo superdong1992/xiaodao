@@ -1,8 +1,71 @@
 # TODO
 
-更新时间：2026-10-20
+更新时间：2026-10-21
 
 本文件是仓库活跃待办的唯一清单。已完成事项由代码、当前设计与 Git 历史证明，不在这里保留关闭项。
+
+2026-10-21 推送前完整验证：第二轮 `run-20261021T035959Z-23d0bcad` 的全部功能 Gate 已通过（单元 4696 passed / 2 项平台跳过），operation 与源码 verification 也通过；完整阶段 303.942 秒超过 300 秒门槛，正式结论为 `FAIL`，尚未推送。两轮证据均完整保留。测试库日志确认频繁检查点，下一轮使用新的独立持久盘 PostgreSQL 15.19 集群，增大 `max_wal_size` 至 4GB、检查点间隔至 15 分钟；三项持久化设置保持开启，先跑数据库专项，再查看新计划并完整重验。最终是否通过只看本次 PL-FIX-083 四节与 PL-FIX-072 合同同步的最新 verdict 元数据，不把功能通过写成完整通过。
+
+新库设置 probe 和 `test_postgres_repository.py` 全文件已通过（12 passed、零跳过，4.05 秒），本机证据 `.tmp/followup-push-wal-env-20261021/postgres-repository-green.xml`。旧实例已停止，数据和失败证据保留；没有降低持久化要求或删减测试。待正式重验后的唯一 verdict 结论，不以本轮环境专项代替完整通过。
+
+第三轮 `run-20261021T041524Z-2090f3bd` 仍为功能全部通过、性能超限，完整阶段 303.715 秒，整体 `FAIL`；证据完整保留。检查点参数调整未明显改善，下一轮使用同机 Linux 原生 PostgreSQL 15.19，验证跨系统数据库访问是否造成额外开销。官方软件包签名与哈希、数据库设置及相同 12 项专项均通过（3.35 秒、零跳过），证据 `.tmp/followup-push-linuxpg-env-20261021`；持久盘与持久化要求、完整测试范围和 300 秒门槛不变。两套旧 Windows 测试实例已停止，保留全部数据。重新捕获最终源码并审阅计划后验证，若仍超限则保留失败结论，不重复尝试；本次是否通过以修复台账的五行最新 verdict 元数据为准。
+
+## 追问结构化输出的真实环境验收（2026-10-21）
+
+- 用户在推送前补充 `--json-schema` 的失败现象，已确认当前代码三处工具权限判定误拒格式化工具，终态解析也忽略 `structured_output`。修复沿 PL-FIX-083 追加，不改公开 API、MCP schema 或客户端安装方式；旧 snapshot 02 尚未正式执行，最终源码将重新捕获。
+- 服务端兼容精确的 `StructuredOutput` / `structuredoutput`，优先采用唯一成功终态的结构化对象，保持原业务和文件权限。Node 正式审计同样区分格式化与日志读取；无效对象不回退文本，重复或错误终态不交付。配置的 schema 参数原样保留，不自动对不同阶段强加同一 schema。
+- **专项通过，待推送前完整验证**：Linux 权限、结构化 worker、交接三文件 70 passed、零跳过，5.24 秒；证据 `.tmp/followup-push-env-20261021/structured-flow-green.xml`。Node 命令 `node --test tools/test-flow/tests/report-followup-gate.test.mjs` 为 47 passed、零跳过，先红证据和最终 `.tmp/followup-structured-audit-green-final-20261021.tap` 均保留。Windows 已复现权限与容器错误，但涉及硬链接和文件保护的用例以 Linux 结果为准。
+- 共享运行时最终专项 156 passed、零跳过，4.40 秒，新结构化用例为 67 项，含真实 backend 子进程回放；非法 Unicode 先复现再补 UTF-8 校验，最终证据 `.tmp/followup-push-env-20261021/structured-output-linux-green-03.xml`。与上组重叠，不累计总数；只证明确定性兼容路径，完整结论仍待正式 verdict。
+- 待在局域网当前 codeagent 版本验证实际事件名称、schema、回答和诊断交接。真实模型验收须先审阅对应入口计划；本次推送只运行零模型的 `dev.default`，最终结论以 PL-FIX-083“结构化输出兼容”的 verdict 元数据为准。
+
+## 追问执行时间与日志检索的真实环境验收（2026-10-21）
+
+- 2026-10-21 推送前准备：实现、专项和文档已齐备，本次统一执行正式 `dev.default --plan-only` 后再运行 `dev.default --resume fresh`。以下保留专项排查记录，完整验证以 PL-FIX-083“执行预算与定向检索”的最新 verdict 元数据为准；失败时不得推送。待办为实际 Linux/codeagent 环境中的配置生效、停止响应和检索效果验收，不能用确定性替身宣称真实模型提速。
+- 首轮正式 `run-20261021T024256Z-06e02af7` 为 `FAIL`，四项失败的证据完整保留。新增限额对应的合同清单已同步，专项 5 passed；发布边界测试补齐新配置与默认值，专项 3 passed；两项主线已有的直接日志测试预期已按当前合同修正，两个相关文件 39 passed。修复沿 PL-FIX-083 与 PL-FIX-072 登记。专项通过，待推送前完整验证；重新计划与执行时记录新的 reason、hypothesis 和 expected evidence，预期四项失败消失且全部必需 Gate 通过，零真实模型调用，不修改 300 秒性能门槛。
+- 推送前审查还复现了 JSON 恢复记录写入期间关闭服务仍发布答案的窗口；现于解析完成后再检查取消。新增 6 项先红后绿，相关五文件 Linux 联合 154 passed、零跳过，14.75 秒；证据 `.tmp/followup-push-env-20261021/audit-cancel-linux-red.xml` 和 `audit-cancel-linux-green.xml`，不累计重叠用例。纳入新的最终源码快照与完整验证，实际结论以 PL-FIX-083 的引号恢复 verdict 元数据为准。
+
+- 当前 `8.2.0 / c1a66ce` 确认追问固定 300 秒、没有配置入口，日志检索提示也未约束重复与全量读取。用户没有现场日志，因此本轮修复已确认的执行预算与提示规则，不推断现场八轮执行的具体耗时原因。修复追加到 PL-FIX-083。
+- 新增 `REPORT_FOLLOWUP_TIMEOUT_SECONDS`，默认 600 秒、允许 1–1800 秒，重启服务后生效。配置加载与直接构造 service 都校验范围；停止、关闭、删除与超时失败机制保留。提示词要求先判断是否需要正式诊断，只定向检索必要片段，不因耗时直接重诊断，不把截断或未命中当成否定证据。检索规则是模型提示约束，尚未验证真实模型的轮数或速度。
+- 修复前 settings 新专项 23 failed，Linux bootstrap 2 failed；执行与提示输入专项 17 failed / 1 passed，证据 `.tmp/followup-budget-red-20261021-01.xml`。Windows bootstrap 曾被既有运行资产平台校验拦截，未将其作为业务复现证据。原始测试现场保留。
+- **专项通过，待推送前完整验证**：`.venv/Scripts/python.exe -m pytest tests/deterministic/unit/interfaces/test_settings.py -q --tb=short --basetemp=.tmp/followup-timeout-settings-green-20261021 -p no:cacheprovider`：158 passed，包含新增 23 项默认、边界与非法配置测试。
+- **Linux 相关专项通过，待推送前完整验证**：271 passed、零失败、零跳过，25.00 秒，1 条既有 Starlette 弃用警告。使用现有 Linux Python 3.12.13 运行时，不调用真实模型。覆盖新增执行预算 18 项、真实 bootstrap 装配 2 项，以及追问停止、关闭、删除、超时、正式诊断交接、上下文、既有 JSON 修复、经验纠正 180 秒隔离和真实进程树清理；前一轮 40 项是其子集，不重复累计。准确命令如下：
+
+```sh
+python -B -m pytest \
+  tests/deterministic/unit/agent/test_followup_execution_budget.py \
+  tests/deterministic/unit/agent/test_report_followup.py \
+  tests/deterministic/unit/agent/test_followup_decision.py \
+  tests/deterministic/unit/agent/test_report_followup_faults.py \
+  tests/deterministic/unit/agent/test_followup_quote_recovery.py \
+  tests/deterministic/unit/agent/test_followup_result_protocol.py \
+  tests/deterministic/unit/agent/test_followup_context_recovery.py \
+  tests/deterministic/unit/agent/test_followup_handoff.py \
+  tests/deterministic/integration/test_unified_followup.py \
+  tests/deterministic/integration/test_bootstrap_composition.py::test_production_composition_applies_report_followup_timeout \
+  tests/deterministic/unit/agent/test_followup_corrections.py::test_correction_memory_requires_verified_log_citations_and_keeps_private_receipt \
+  tests/deterministic/unit/agent/test_feedback_comment_review.py::test_web_analysis_review_works_without_followups_or_original_logs \
+  tests/deterministic/unit/runtime/test_agent_backend.py::test_timeout_cannot_be_blocked_by_agent_ignoring_stdin \
+  tests/deterministic/unit/runtime/test_agent_backend.py::test_timeout_terminates_complete_posix_child_tree \
+  tests/deterministic/contracts/test_enums_errors_limits.py \
+  -q --tb=short -p no:cacheprovider \
+  --basetemp=/tmp/followup-budget-final-20261021-01 \
+  --junitxml=/mnt/d/code/xiaodao/.tmp/followup-budget-final-20261021-01.xml
+```
+
+- README、环境样例、网站追问与测试说明已同步；真实测试 profile 的 300 秒预算独立保留。`node --test tools/test-flow/tests/docs-drift.test.mjs tools/test-flow/tests/website-agent-guide.test.mjs`：46 passed；独立代码复核未发现阻碍交付的问题。完整验证结果只看本次对应的 verdict 元数据，不沿用旧 PASS。
+
+## 追问 JSON 兼容的真实环境验收（2026-10-21）
+
+- 本次与执行预算修复统一做推送前完整验证；以下专项是此前排查记录，完整结论以 PL-FIX-083“控制字符兼容”和“引号恢复”的最新 verdict 元数据为准。待办为现场 codeagent 输出的真实验收，尤其是有歧义的引号、嵌套 JSON 示例及正常转义；真实调用仍须先审阅对应入口计划和预算。
+
+- 在 `8.2.0 / c1a66ce` 确认：`followup.context.parse_result` 用默认 `json.loads(value)` 解析 codeagent 返回的内层结果，字符串含字面换行、回车或制表符时抛出 `Invalid control character`，合法转义则通过。现仅此入口使用 `strict=False`，保留原文及后续协议校验；修复历史追加到 PL-FIX-083。
+- **专项通过，待推送前完整验证**：Linux 当前工作区共 110 passed、零失败、零跳过，覆盖全部 32 个控制字符、两类回答、继续诊断文字、其他语法及字段错误、分片 stream-json 到 worker、既有决策和故障边界。命令：`python -B -m pytest tests/deterministic/unit/agent/test_followup_result_protocol.py tests/deterministic/unit/agent/test_followup_decision.py tests/deterministic/unit/agent/test_report_followup_faults.py tests/deterministic/unit/runtime/test_final_response.py::test_stream_result_is_unique_successful_and_not_in_telemetry -q --tb=short -p no:cacheprovider --basetemp=/tmp/followup-controls-green-20261020-01 --junitxml=/mnt/d/code/xiaodao/.tmp/followup-controls-linux-green-20261020-01.xml`。使用仓库现有 Linux Python 运行时，未调用真实模型。
+- 修复前新增解析专项 67 项直接复现失败，记录保留于 `.tmp/followup-control-red-20261020.xml`；同轮 Windows worker 用例受到平台限制，不作为本问题的复现证据。专项不代表完整验证，推送前统一验证最终源码，不沿用历史 PASS。
+- Linux 运行时核对为 Python 3.12.13、pytest 9.0.2、pydantic 2.13.4。文档专项 `node --test tools/test-flow/tests/docs-drift.test.mjs` 为 4 passed。
+- 2026-10-21 在上述未提交工作区继续确认：`strict=False` 不能解析未转义双引号，默认解析还会让后面的重复 `action` 覆盖前值。新专项修复前直接复现 22 项引号恢复失败和 4 项重复键未拒绝；超长参数名另触发 Windows 环境变量长度限制，已改用短测试 ID，原记录 `.tmp/followup-quotes-red-20261021.xml` 保留。
+- 本轮只恢复已核对三个控制字段之后、最后一个 `answer_markdown` 字段中的普通双引号；结构歧义、坏转义和截断拒绝，不猜测诊断动作。补充提示词转义要求、重复字段与非有限数检查，并在工作区保存原文、采用文本和插入位置收据。详见 PL-FIX-083 及模型输出兼容说明；没有增加模型调用。
+- **专项通过，待推送前完整验证**：最终 Linux 联合 180 passed、零失败、零跳过，3.81 秒。准确命令为 `python -B -m pytest tests/deterministic/unit/agent/test_followup_quote_recovery.py tests/deterministic/unit/agent/test_followup_result_protocol.py tests/deterministic/unit/agent/test_followup_decision.py tests/deterministic/unit/agent/test_report_followup_faults.py tests/deterministic/unit/runtime/test_final_response.py::test_stream_result_is_unique_successful_and_not_in_telemetry -q --tb=short -p no:cacheprovider --basetemp=/tmp/followup-quotes-green-20261021-02 --junitxml=/mnt/d/code/xiaodao/.tmp/followup-quotes-linux-green-20261021-02.xml`。其中新增引号专项 71 项，覆盖恢复边界、线性解析次数、真实 worker 交付及收据写入失败；与前轮 110 项重叠，不累计测试总数。此处仅记录专项，不代替正式 verdict。
+- 2026-10-21 文档专项 `node --test tools/test-flow/tests/docs-drift.test.mjs tools/test-flow/tests/website-agent-guide.test.mjs` 为 46 passed；独立只读复核及 `git diff --check` 通过。现场 codeagent 的实际模型输出尚未验收。
 
 ## 通用定位直接读取附件日志验收（2026-10-20）
 
