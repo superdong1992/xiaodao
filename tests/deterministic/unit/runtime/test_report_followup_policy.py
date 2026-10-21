@@ -78,7 +78,7 @@ def test_followup_hook_allows_only_explicit_input_paths_and_denies_links(tmp_pat
     assert not permits_tool(tmp_path, {"tool_name": "Bash", "tool_input": {"command": "cat inputs/sample.log"}})
     (inputs / "linked.log").hardlink_to(outside)
     assert not permits_tool(tmp_path, read("inputs/linked.log"))
-    result = subprocess.run([sys.executable, str(Path(followup_access.__file__)), str(tmp_path)],
+    result = subprocess.run([sys.executable, str(Path(followup_access.__file__)), str(tmp_path), "read-search"],
         input=json.dumps(read("outside.log")), text=True, capture_output=True, check=True)
     assert json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
@@ -117,7 +117,7 @@ def test_correction_memory_uses_same_strict_read_search_policy(tmp_path):
 def test_followup_hook_accepts_output_objects_without_file_access(tmp_path, name):
     payload = {"tool_name": name, "tool_input": {"answer_markdown": '请看"日志"。\n下一行。'}}
     assert permits_tool(tmp_path, payload)
-    result = subprocess.run([sys.executable, str(Path(followup_access.__file__)), str(tmp_path)],
+    result = subprocess.run([sys.executable, str(Path(followup_access.__file__)), str(tmp_path), "read-search"],
         input=json.dumps(payload), text=True, capture_output=True, check=True)
     assert json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"] == "allow"
 

@@ -19,6 +19,8 @@ from pathlib import Path
 
 from problem_locator.contracts import ErrorCode
 
+from .followup_access import file_tools_for_policy
+
 
 _ENVIRONMENT_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _RAW_LOGPARSE_KEYS = frozenset(
@@ -69,7 +71,8 @@ def apply_final_response_policy(invocation: ClaudeCommand, *, file_access: str |
     """Pin native Claude's tools; custom launchers receive the same explicit policy."""
     if file_access is None:
         return invocation
-    if file_access not in {'none', 'read-only', 'read-search'}:
+    file_tools = file_tools_for_policy(file_access)
+    if file_tools is None:
         raise ClaudeCommandError('Invalid Agent file access policy.')
     environment = dict(invocation.environment)
     environment['PROBLEM_LOCATOR_AGENT_FILE_ACCESS'] = file_access
@@ -88,7 +91,7 @@ def apply_final_response_policy(invocation: ClaudeCommand, *, file_access: str |
     followup_policy = phase in {'REPORT_FOLLOWUP', 'MEMORY_CORRECTION'} and (native or _followup_wrapper(argv))
     if followup_policy:
         from .followup_access import prepare_settings
-        settings_path = prepare_settings(argv, environment, workspace_root)
+        settings_path = prepare_settings(argv, environment, workspace_root, file_access=file_access)
         if not native:
             environment['PROBLEM_LOCATOR_FOLLOWUP_SETTINGS'] = str(settings_path)
     if native:
@@ -102,7 +105,7 @@ def apply_final_response_policy(invocation: ClaudeCommand, *, file_access: str |
         while index < len(argv):
             token = argv[index]
             if followup_policy and token in {
-                    '--dangerously-skip-permissions', '--allow-dangerously-skip-permissions', '--chrome'}:
+                    '--dangerously-skip-permissions', '--allow-dangerously-skip-permissions', '--chrome', '--bare'}:
                 index += 1
                 continue
             if token.split('=', 1)[0] not in owned:
@@ -118,7 +121,7 @@ def apply_final_response_policy(invocation: ClaudeCommand, *, file_access: str |
         if '--verbose' not in rewritten:
             rewritten.append('--verbose')
         rewritten.extend(['--output-format', 'stream-json', '--permission-mode', 'dontAsk',
-            '--tools', '' if file_access == 'none' else 'Read,Grep' if file_access == 'read-search' else 'Read'])
+            '--tools', ','.join(name for name in ('Read', 'Grep') if name in file_tools)])
         if file_access == 'read-only':
             rewritten.extend(['--allowedTools', f'Read({workspace_root.as_posix()}/inputs/**)'])
         if followup_policy:

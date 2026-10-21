@@ -12,12 +12,15 @@ from typing import Any
 from problem_locator.contracts.limits import JOB_STDOUT_STDERR_BYTES
 from problem_locator.contracts.ports import AppendOnlyByteSink
 
-from .followup_access import STRUCTURED_OUTPUT_TOOLS
+from .followup_access import STRUCTURED_OUTPUT_TOOLS, file_tools_for_policy
 
 
 _DEFAULT_LINE_LIMIT_BYTES = 1024 * 1024
 _SAFE_TOOL_NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
-_STREAM_TYPES = frozenset({"system", "assistant", "user", "result", "stream_event", "content_block_start"})
+_PARTIAL_EVENT_TYPES = frozenset({
+    "message_start", "message_stop", "content_block_start", "content_block_stop", "content_block_delta",
+})
+_STREAM_TYPES = frozenset({"system", "assistant", "user", "result", "stream_event"}) | _PARTIAL_EVENT_TYPES
 
 
 def _unique_event_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -184,7 +187,11 @@ class AgentStreamTelemetry:
             if self._buffer:
                 line = bytes(self._buffer)
                 self._buffer.clear()
-                self._process_line(line)
+                try:
+                    self._process_line(line)
+                except BaseException:
+                    self._internal_failure = True
+                    self._buffer.clear()
 
     def _process_line(self, raw: bytes, *, terminated: bool = False) -> None:
         if terminated and raw.endswith(b"\r"):
@@ -219,7 +226,7 @@ class AgentStreamTelemetry:
             self._observe_result(payload, observed_ms)
         elif event_type == "stream_event":
             self._observe_partial(payload.get("event"), observed_ms)
-        elif event_type == "content_block_start":
+        elif event_type in _PARTIAL_EVENT_TYPES:
             self._observe_partial(payload, observed_ms)
 
     def _observe_partial(self, event: object, observed_ms: float) -> None:
@@ -292,6 +299,11 @@ class AgentStreamTelemetry:
             if block_type != "tool_use":
                 if block_type == "tool_result":
                     self._malformed = True
+                continue
+            # A full tool call must carry an object even when a partial event
+            # already registered its identity. Partial placeholders stay valid.
+            if not isinstance(block.get("input"), dict):
+                self._malformed = True
                 continue
             self._observe_tool_use(block, observed_ms)
 
@@ -372,7 +384,9 @@ class AgentStreamTelemetry:
         with self._lock:
             if self._internal_failure or self._output_limited or self._malformed:
                 return False
-            allowed = set() if policy == 'none' else {'Read', 'Grep'} if policy == 'read-search' else {'Read'}
+            allowed = file_tools_for_policy(policy)
+            if allowed is None:
+                return False
             return set(self._tool_counts).issubset(allowed | STRUCTURED_OUTPUT_TOOLS)
 
     def snapshot(

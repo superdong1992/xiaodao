@@ -190,6 +190,17 @@
 - **共享运行时专项**：新 `test_structured_output.py` 共 67 项，含 6 项真实 AgentBackend 确定性子进程测试；与既有 telemetry、最终响应相关用例联合为 156 passed、零跳过，4.40 秒。新增非法 Unicode 专项先复现 3 failed / 2 passed，修复后孤立代理项拒绝，合法中文、表情、换行、引号及反斜杠等值保留。证据为本机 `.tmp/followup-push-env-20261021/structured-output-linux-green-03.xml`；各轮红灯现场保留。
 - **最新 Test Flow verdict（PL-FIX-083，2026-10-21，结构化输出兼容）**：Linux `dev.default` [run-20261021T042821Z-7d2d4857](.tmp/followup-push-evidence-20261021/run-20261021T042821Z-7d2d4857/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。完整确定性阶段 295.685 秒，全部必需 Gate 通过，模型调用、token 和费用均为 0。源码快照 `git-visible-worktree-v1:58f50681a3fff34bd1932fc5b9f292fbef8aba6ca19106572941429cdd6d0b0e`（1067 文件），verdict SHA-256 `3e96b0bbc6e1900344617cdba62d7b26fcc68969484daafc5fbc2c315b75543c`。本轮覆盖以上追问修复、结构化输出全流程及旧测试合同同步；首轮失败证据保留。完整证据已复制至持久盘并逐文件校验，提交与测试源码逐项核对。仅本行属于验证后回填的引用元数据，不属于所引用源码快照；不代表真实模型、生产部署或 Release 验收。
 
+### 前后置权限与流式事件检查一致性（2026-10-21）
+
+- **状态与受影响版本**：在 8.2.0 / `acd71e3` 上再次排查确认，沿 PL-FIX-083 追加；本次实现和专项已完成，推送前对最终源码统一执行完整 Test Flow。本次是否已验证以本节最新 verdict 元数据为准，不能沿用上一节的 PASS。
+- **症状与根因**：前置 Hook 用默认 JSON 解析接受重复 `tool_name`，异常工具名触发 `TypeError`；Hook 未绑定调用的文件权限，`--bare` 也未移除。本机 Claude 2.1.251 的帮助明确说明该参数跳过 Hook。执行后检查对未知权限默认允许 `Read`，完整工具参数可被同 ID 的分片声明绕过类型检查；无换行尾帧缺少异常隔离。Node 正式审计忽略分片工具声明，Python 又只分发顶层 start，导致同一段孤立参数分片在顶层放过、嵌套时拒绝。这些现象均以当前入口和确定性输入确认，未调用模型。
+- **修复历史**：命令生成、Hook 与 telemetry 共用文件权限表，Hook 显式绑定 `none` / `read-only` / `read-search`，未知值拒绝；追问与经验纠正移除 `--bare`。Hook 拒绝重复字段及非法数值，异常输入返回正常拒绝结果。完整工具声明在去重前检查对象参数；尾帧异常与换行帧一致失效。顶层和嵌套的五类分片事件共用处理入口，正式审计补齐工具身份、完整参数和结果配对检查。
+- **不可回归行为**：`StructuredOutput` / `structuredoutput` 不获得文件能力；`none` 禁止读取，`read-only` 禁止 Grep，现有路径、软硬链接与输入不变检查保留。合法分片和完整消息只计一次；普通工具出错后得到的合法成功终态仍可使用。异常尾帧不得外抛或恢复先前答案。客户端不安装 Hook，不修改公开 MCP 输入或扩大工具集合。
+- **专项回归测试**：`test_followup_hook_boundaries.py` 覆盖歧义 JSON、权限绑定、缺失策略与两种 CLI、两种阶段的实际 Hook 子进程，先红 26 failed / 7 passed；`test_agent_telemetry_boundaries.py` 覆盖未知策略、完整参数、流式去重与异常尾帧，先红 70 failed / 20 passed，顶层分片对照再复现 4 failed。Node `report-followup-gate.test.mjs` 的新增分片与 wrapper 回放先红 9 failed，失败现场均保留。
+- **最新专项结果**：Linux 十个相关 Python 文件联合 476 passed、1 项 Windows Job Object 用例跳过，12.32 秒；包含实际 backend 子进程、前置 Hook、JSON 输出及诊断交接。Node 67 passed、零跳过。准确命令与 XML、日志、TAP 位于本机 `.tmp/followup-policy-review-20261021/run-scoped.sh` 及同目录；各组有交集，不累计。专项通过，待推送前完整验证；不证明真实 codeagent 模型效果。
+- **推送前验证准备**：本轮以 `acd71e3` 为基线，使用隔离的 Ubuntu 22.04 源码副本、锁定 Python 3.12.13 运行时及同机 PostgreSQL 15.19。源码、运行时和数据库均在持久盘，三项数据库持久化设置保持开启；独立 32 GiB tmpfs 只承载测试临时数据和现场证据。先审阅 `dev.default --plan-only`，再执行完整确定性验证，不删减用例、不修改 300 秒性能门槛、不调用真实模型；结束后将完整证据复制到持久盘并逐文件校验。准备时本次仍待完整验证，最终结论以下一行元数据为准。
+- **最新 Test Flow verdict（PL-FIX-083，2026-10-21，权限与流式检查一致性）**：Linux `dev.default` [run-20261021T072427Z-a0e75455](.tmp/followup-policy-push-evidence-20261021/run-20261021T072427Z-a0e75455/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`。完整确定性阶段 297.133 秒，全部必需 Gate 通过，模型调用、token 和费用均为 0。源码快照 `git-visible-worktree-v1:596a339fd4c16bdc7d8f906e08117d080700c4b83986e78edd29c5c214934ba9`（1069 文件），verdict SHA-256 `fb304b32266b4c90e178fe5ca31ee4dfc1140e3d38667cda8c9a1a54ae44e323`。本轮覆盖前置 Hook、命令权限、telemetry 与流式审计一致性修复，专项失败证据保留。完整证据已复制至持久盘并逐文件校验，提交与测试源码逐项核对。仅本行属于验证后回填的引用元数据，不属于所引用源码快照；不代表真实模型、生产部署或 Release 验收。
+
 ## PL-FIX-084：草稿整理占用全局 Agent worker，阻塞其他会话
 
 - **状态**：实现和专项回归已完成；专项通过，待本次统一推送前完整验证。

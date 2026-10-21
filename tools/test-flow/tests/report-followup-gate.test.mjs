@@ -60,6 +60,69 @@ function appendStructuredOutput(events, name = "StructuredOutput") {
   );
 }
 
+function partialEvent(event, wrapped = true) {
+  return wrapped ? { type: "stream_event", event } : event;
+}
+
+function partialTool(name, id, wrapped = true) {
+  return partialEvent({ type: "content_block_start", index: 0,
+    content_block: { type: "tool_use", name, id, input: {} } }, wrapped);
+}
+
+for (const wrapped of [false, true]) {
+  test(`follow-up audit rejects forbidden partial-only tools with wrapped=${wrapped}`, (context) => {
+    const { root, events, before } = fixture(context);
+    events.push(partialTool("Bash", "partial-only", wrapped));
+    assert.throws(() => auditReportFollowupTrace({ events, workspaceRoot: root, before }),
+      (error) => error.code === "FOLLOWUP_TRACE_TOOL_NOT_ALLOWED");
+  });
+  for (const name of ["Read", "Grep", "StructuredOutput", "structuredoutput"]) {
+    test(`follow-up audit counts ${name} partial and complete frames once with wrapped=${wrapped}`, (context) => {
+      const { root, events, before } = fixture(context);
+      if (name === "StructuredOutput" || name === "structuredoutput") appendStructuredOutput(events, name);
+      const offset = events.findIndex((event) => event.message?.content[0]?.name === name);
+      const id = events[offset].message.content[0].id;
+      events.splice(offset, 0, partialTool(name, id, wrapped));
+      const audit = auditReportFollowupTrace({ events, workspaceRoot: root, before });
+      assert.deepEqual([audit.reads, audit.searches, audit.log_reads, audit.log_searches], [1, 1, 1, 1]);
+      assert.equal(validReportFollowupTraceReceipt(audit), true);
+    });
+  }
+}
+
+for (const [name, append, code] of [
+  ["output without complete frame", () => [partialTool("StructuredOutput", "partial-only")], "FOLLOWUP_TRACE_TOOL_PARTIAL_INVALID"],
+  ["read without complete frame", () => [partialTool("Read", "partial-only")], "FOLLOWUP_TRACE_TOOL_PARTIAL_INVALID"],
+  ["orphan input delta", () => [partialEvent({ type: "content_block_delta", index: 0,
+    delta: { type: "input_json_delta", partial_json: "{}" } })], "FOLLOWUP_TRACE_TOOL_PARTIAL_INVALID"],
+  ["partial tool after completed use", () => [partialTool("Read", "read-1")], "FOLLOWUP_TRACE_TOOL_ID_INVALID"],
+  ["duplicate partial declaration", () => [partialTool("Read", "partial-only"), partialTool("Read", "partial-only")], "FOLLOWUP_TRACE_TOOL_ID_INVALID"],
+  ["malformed partial identity", () => [partialTool("Read", "")], "FOLLOWUP_TRACE_TOOL_ID_INVALID"],
+]) test(`follow-up audit rejects ${name}`, (context) => {
+  const { root, events, before } = fixture(context);
+  events.push(...append());
+  assert.throws(() => auditReportFollowupTrace({ events, workspaceRoot: root, before }), (error) => error.code === code);
+});
+
+test("follow-up audit rejects changed tool identity between partial and complete frames", (context) => {
+  const { root, events, before } = fixture(context);
+  events.splice(1, 0, partialTool("Read", "search-1"));
+  assert.throws(() => auditReportFollowupTrace({ events, workspaceRoot: root, before }),
+    (error) => error.code === "FOLLOWUP_TRACE_TOOL_ID_INVALID");
+});
+
+test("follow-up audit accepts known input deltas without retaining or trusting partial arguments", (context) => {
+  const { root, events, before } = fixture(context);
+  events.splice(1, 0, partialTool("Grep", "search-1"),
+    partialEvent({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"pattern":"private"}' } }),
+    partialEvent({ type: "content_block_stop", index: 0 }));
+  const audit = auditReportFollowupTrace({ events, workspaceRoot: root, before });
+  assert.deepEqual([audit.reads, audit.searches], [1, 1]);
+  assert.doesNotMatch(JSON.stringify(audit), /private|pattern/);
+  events[6].message.content[0].input.file_path = "../outside.log";
+  assert.throws(() => auditReportFollowupTrace({ events, workspaceRoot: root, before }), /FOLLOWUP_TRACE_PATH_ESCAPE/);
+});
+
 for (const name of ["StructuredOutput", "structuredoutput"]) {
   for (const advertised of [false, true]) test(`follow-up trace accepts ${name} with advertised=${advertised} without counting file access`, (context) => {
     const { root, events, before } = fixture(context);
@@ -210,6 +273,8 @@ for (const name of ["StructuredOutput", "structuredoutput"]) test(`isolated foll
 });
 
 for (const [name, options, code] of [
+  ["forbidden partial-only tool", { mutate: (events) => { events.splice(1, 0, partialTool("Bash", "partial-only")); } }, "WRAPPER_FOLLOWUP_TRACE_INVALID"],
+  ["incomplete partial output declaration", { mutate: (events) => { events.splice(1, 0, partialTool("StructuredOutput", "partial-only")); } }, "WRAPPER_FOLLOWUP_TRACE_INVALID"],
   ["failed output tool", { mutate: (events) => { events[6].message.content[0].is_error = true; } }, "WRAPPER_FOLLOWUP_TRACE_INVALID"],
   ["missing output tool result", { mutate: (events) => { events.splice(6, 1); } }, "WRAPPER_FOLLOWUP_TRACE_INVALID"],
   ["failed terminal", { mutate: (events) => { events.at(-1).is_error = true; } }, "WRAPPER_MODEL_TERMINAL_INVALID"],

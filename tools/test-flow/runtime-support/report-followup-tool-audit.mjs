@@ -70,14 +70,40 @@ export function auditReportFollowupTrace({ events, workspaceRoot, before }) {
     && Array.isArray(init[0].mcp_servers) && init[0].mcp_servers.length === 0
     && path.resolve(init[0].cwd ?? "") === path.resolve(workspaceRoot), "FOLLOWUP_TRACE_INIT_INVALID");
   const uses = new Map();
+  const partialUses = new Map();
+  const partialIndices = new Set();
   const counts = { reads: 0, searches: 0, log_reads: 0, log_searches: 0 };
+  const observePartial = (event) => {
+    requireTrace(event && typeof event === "object" && !Array.isArray(event)
+      && typeof event.type === "string", "FOLLOWUP_TRACE_TOOL_PARTIAL_INVALID");
+    if (event.type === "message_start" || event.type === "message_stop") partialIndices.clear();
+    else if (event.type === "content_block_start") {
+      const block = event.content_block;
+      requireTrace(block && typeof block === "object" && !Array.isArray(block)
+        && typeof block.type === "string", "FOLLOWUP_TRACE_TOOL_PARTIAL_INVALID");
+      partialIndices.delete(event.index);
+      if (block.type !== "tool_use") return;
+      requireTrace(TOOLS.includes(block.name) || OUTPUT_TOOLS.includes(block.name), "FOLLOWUP_TRACE_TOOL_NOT_ALLOWED");
+      requireTrace(typeof block.id === "string" && block.id.length > 0
+        && !uses.has(block.id) && !partialUses.has(block.id), "FOLLOWUP_TRACE_TOOL_ID_INVALID");
+      partialUses.set(block.id, block.name);
+      if (Number.isSafeInteger(event.index) && event.index >= 0) partialIndices.add(event.index);
+    } else if (event.type === "content_block_stop") partialIndices.delete(event.index);
+    else if (event.type === "content_block_delta" && event.delta?.type === "input_json_delta") {
+      requireTrace(Number.isSafeInteger(event.index) && partialIndices.has(event.index)
+        && typeof event.delta.partial_json === "string", "FOLLOWUP_TRACE_TOOL_PARTIAL_INVALID");
+    }
+  };
   for (const event of events) {
+    if (event.type === "stream_event") observePartial(event.event);
+    else if (["content_block_start", "content_block_delta", "content_block_stop", "message_start", "message_stop"].includes(event.type)) observePartial(event);
     if (!Array.isArray(event.message?.content)) continue;
     for (const block of event.message.content) {
       if (block.type === "tool_use") {
         const outputTool = OUTPUT_TOOLS.includes(block.name);
         requireTrace(event.type === "assistant" && (TOOLS.includes(block.name) || outputTool), "FOLLOWUP_TRACE_TOOL_NOT_ALLOWED");
         requireTrace(typeof block.id === "string" && block.id.length > 0 && !uses.has(block.id), "FOLLOWUP_TRACE_TOOL_ID_INVALID");
+        requireTrace(!partialUses.has(block.id) || partialUses.get(block.id) === block.name, "FOLLOWUP_TRACE_TOOL_ID_INVALID");
         const input = block.input;
         requireTrace(input && typeof input === "object" && !Array.isArray(input), "FOLLOWUP_TRACE_TOOL_INPUT_INVALID");
         if (outputTool) {
@@ -100,6 +126,9 @@ export function auditReportFollowupTrace({ events, workspaceRoot, before }) {
       }
     }
   }
+  // Partial frames establish tool identity, but only complete assistant frames
+  // prove file arguments. Count and pair the completed declaration exactly once.
+  requireTrace([...partialUses.keys()].every((id) => uses.has(id)), "FOLLOWUP_TRACE_TOOL_PARTIAL_INVALID");
   requireTrace([...uses.values()].every(Boolean), "FOLLOWUP_TRACE_TOOL_RESULT_MISSING");
   const after = reportFollowupInputManifest(workspaceRoot);
   requireTrace(before?.sha256 === after.sha256 && before.file_count === after.file_count, "FOLLOWUP_TRACE_INPUT_CHANGED");
