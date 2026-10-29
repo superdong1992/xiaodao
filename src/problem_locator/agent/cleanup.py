@@ -64,6 +64,7 @@ class ConversationCleanupService:
         attachment_ids = self._ids([*previous.get("attachment_ids", []), *context.get("attachment_ids", [])])
         workspace_ids = self._ids([*previous.get("workspace_ids", []), *context.get("workspace_ids", [])])
         paths = set(previous.get("paths", [])) | set(observed["paths"])
+        paths.add(f"resources/followup-sessions/{conversation_id}")
         paths.update(f"resources/conversations/{value}" for value in attachment_ids)
         paths.update(f"tmp/workspaces/{value}" for value in workspace_ids)
         for value in job_ids:
@@ -85,6 +86,8 @@ class ConversationCleanupService:
                         continue
                     raise ValueError("cleanup workspace is outside its owning conversation")
                 _ID.validate_python(parts[2])
+                if parts[:2] == ("resources", "followup-sessions") and parts[2] == conversation_id:
+                    continue
                 if parts[:2] == ("resources", "cases") and parts[2] in case_ids:
                     continue
                 if parts[:2] == ("resources", "conversations") and parts[2] in attachment_ids:

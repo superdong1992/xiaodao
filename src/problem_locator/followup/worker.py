@@ -11,6 +11,7 @@ from problem_locator.contracts.limits import DEFAULT_REPORT_FOLLOWUP_TIMEOUT_SEC
 from problem_locator.diagnostics import log_event
 from problem_locator.dispatch.cancellation import CancellationController
 from problem_locator.runtime.agent_backend import AgentBackend
+from problem_locator.runtime.native_session import NativeSession
 from problem_locator.storage.atomic import require_real_directory
 from problem_locator.storage.paths import ensure_no_symlink_ancestors
 
@@ -111,10 +112,15 @@ class FollowupWorker:
                 if mode == "REPORT_AND_LOGS" and snapshot["status"] != "READY":
                     raise InputChanged("snapshot was revoked")
                 diagnosis_context = service.decision_context(task, history, snapshot)
-                prompt, context = build_prompt(source, history, item["text"], mode,
+                session = service.store.sessions.get(task["conversation_id"])
+                session = {**(session or {}), "current_run_id": task["run_id"]}
+                prompt_history = service.store.sessions.history(task, after_order=session.get("last_order", 0))
+                prior_reports = service.store.sessions.historical_reports(task,
+                    history=None if service.read_search_supported else prompt_history)
+                prompt, context = build_prompt(source, prompt_history, item["text"], mode,
                     read_search=service.read_search_supported, correction=json.loads(task["correction_json"]),
                     snapshot_status=snapshot["status"], request_key=task["followup_id"],
-                    diagnosis_context=diagnosis_context)
+                    diagnosis_context=diagnosis_context, native_session=session, prior_reports=prior_reports)
                 root = service.layout.workspaces
                 require_real_directory(root)
                 workspace = root / task["workspace_id"]
@@ -128,8 +134,13 @@ class FollowupWorker:
                 rows = copy_snapshot(service, snapshot, workspace, cancellation) if copied_snapshot else []
                 generated = {
                     "inputs/context.json": json.dumps(context, ensure_ascii=False, sort_keys=True).encode("utf-8"),
-                    "inputs/history.md": history_markdown(history).encode("utf-8"),
+                    "inputs/history.md": history_markdown(prompt_history).encode("utf-8"),
                 }
+                if prior_reports and service.read_search_supported:
+                    (workspace / "inputs/prior-reports").mkdir(mode=0o700)
+                    for report in prior_reports:
+                        generated[f"inputs/prior-reports/{report['run_id']}.md"] = (
+                            f"# 原问题\n\n{report['original_problem']}\n\n# 报告正文\n\n{report['original_report']}").encode("utf-8")
                 attempt = context["diagnosis_context"]["latest_attempt"]
                 if attempt and attempt.get("user_messages_file"):
                     generated[attempt["user_messages_file"]] = json.dumps(
@@ -146,12 +157,16 @@ class FollowupWorker:
                     raise InterruptedError()
                 limits = FOLLOWUP_LIMITS.model_copy(update={"wall_time_seconds": service.timeout_seconds,
                     "workspace_bytes": service.snapshot_max_bytes + 16 * 1024**2})
+                config_dir = service.store.sessions.config_dir(task["conversation_id"])
+                saved = service.store.sessions.begin(task)
+                native_session = NativeSession(config_dir=config_dir, resume_id=saved["session_id"],
+                    on_session_id=lambda session_id: service.store.sessions.capture_session(task, session_id))
                 invoked = True
                 result = self.backend.execute(prompt=prompt, workspace_root=workspace, cancellation=cancellation,
                     log_sinks=ExecutionLogSinks(stdout=_DiscardSink(), stderr=_DiscardSink(),
                         combined_limit_bytes=JOB_STDOUT_STDERR_BYTES), resource_limits=limits,
                     broker_environment=None, diagnosis_mode="GENERIC", backend_phase="REPORT_FOLLOWUP",
-                    file_access="read-search" if service.read_search_supported else "none")
+                    file_access="read-search" if service.read_search_supported else "none", native_session=native_session)
                 if cancellation.is_cancelled():
                     raise InterruptedError()
                 verify_inputs(workspace, rows, cancellation)

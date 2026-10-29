@@ -47,12 +47,18 @@ class RecordingBackend(AgentBackend):
     def __init__(self, command):
         super().__init__(command)
         self.calls = []
+        self._session_id = None
 
     def execute(self, **kwargs):
         root = kwargs["workspace_root"]
         context = json.loads((root / "inputs/context.json").read_text(encoding="utf-8"))
-        self.calls.append({"context": context, "prompt": kwargs["prompt"],
-            "file_access": kwargs.get("file_access"), "backend_phase": kwargs.get("backend_phase")})
+        native = kwargs["native_session"]
+        assert native.resume_id == self._session_id
+        call = {"context": context, "prompt": kwargs["prompt"],
+            "file_access": kwargs.get("file_access"), "backend_phase": kwargs.get("backend_phase"),
+            "native_resumed": native.resume_id is not None,
+            "history_file_empty": not (root / "inputs/history.md").read_bytes()}
+        self.calls.append(call)
         # Only this synthetic fixture captures errors; production discards raw model logs.
         class Trace(io.BytesIO):
             def close(self):
@@ -60,7 +66,14 @@ class RecordingBackend(AgentBackend):
         trace = Trace()
         kwargs["log_sinks"] = kwargs["log_sinks"].model_copy(update={"stdout": trace})
         try:
-            return super().execute(**kwargs)
+            result = super().execute(**kwargs)
+            assert result.session_id is not None
+            if self._session_id is None:
+                self._session_id = result.session_id
+            else:
+                assert result.session_id == self._session_id
+            call["native_session_verified"] = True
+            return result
         except Exception:
             for line in trace.getvalue().splitlines():
                 event = json.loads(line)
@@ -168,6 +181,8 @@ def test_real_followup_reads_and_searches_the_frozen_original_log(system, first_
     call = system.backend.calls[0]
     assert call["context"]["question"] == FIRST
     assert call["context"]["prior_turns"] == []
+    assert not call["native_resumed"] and call["native_session_verified"]
+    assert not call["context"]["conversation_context"]["resumed"]
     assert call["file_access"] == "read-search" and call["backend_phase"] == "REPORT_FOLLOWUP"
     assert "RF-INC-A17F6" not in call["prompt"] and "RF-TRACE-83D29" not in call["prompt"]
     receipts = _usage(system.command)
@@ -181,9 +196,14 @@ def test_real_followup_uses_the_previous_answer_and_new_text_without_rewriting_d
     assert "FOLLOWUP_MEMORY_A17F6" in second.answer_markdown
     assert "RF-TRACE-83D29" in second.answer_markdown
     assert "queue_depth=0" in second.answer_markdown
-    context = system.backend.calls[1]["context"]
+    call = system.backend.calls[1]
+    context = call["context"]
     assert context["question"] == SECOND
-    assert context["prior_turns"] == [{"question": FIRST, "answer": first_answer.answer_markdown, "status": "COMPLETED"}]
+    assert context["prior_turns"] == [] and call["history_file_empty"]
+    assert "original_report" not in context and "original_problem" not in context
+    assert call["native_resumed"] and call["native_session_verified"]
+    assert context["conversation_context"]["resumed"]
+    assert "FOLLOWUP_MEMORY_A17F6" not in call["prompt"] and "RF-TRACE-83D29" not in call["prompt"]
     receipts = _usage(system.command)
     assert len(receipts) == 2
     assert all(item["workflow"] == "report-followup" and item["wrapper_outcome"]["status"] == "PASS" for item in receipts)
@@ -197,6 +217,8 @@ def test_real_followup_uses_the_previous_answer_and_new_text_without_rewriting_d
         "source_kind": "GENERIC", "source_report_sha256": system.source.report_sha256,
         "source_log_sha256": _sha256(LOG.encode()), "original_report_unchanged": True,
         "diagnosis_and_feedback_rows_unchanged": True, "prior_answer_preserved": True,
+        "native_session_created": True, "native_session_resumed": True, "same_native_session": True,
+        "previous_answer_not_reinjected": True,
         "new_text_used": True, "log_tool_evidence_verified": True,
         "input_manifest_sha256": [item["tool_trace_audit"]["input_manifest_sha256"] for item in receipts]}
     Path(os.environ["S08_REAL_REPORT_FOLLOWUP_AUDIT_PATH"]).write_text(

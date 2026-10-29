@@ -15,7 +15,7 @@ from problem_locator.followup.service import ReportFollowupService
 from tests.deterministic.unit.agent.test_report_continuation import (
     ARTIFACT, CASE, OWNER, confirm, create, system, upload,
 )
-from tests.deterministic.unit.agent.test_report_followup import model_reply
+from tests.deterministic.unit.agent.test_report_followup import model_reply, native_init
 
 JOB = "00000000-0000-0000-0000-000000000011"
 DECISION = dict(action="CONTINUE_DIAGNOSIS", effective_problem_text="故障时间是 10:05，客户端和服务端均超时。",
@@ -28,6 +28,7 @@ def state(system):
     backend = SimpleNamespace(answer="原报告只是待验证的假设。", decision=None, calls=[])
     def execute(**kwargs):
         backend.calls.append(kwargs)
+        native_init(kwargs)
         return SimpleNamespace(final_result=model_reply(kwargs, answer=backend.answer, decision=backend.decision))
     backend.execute = execute
     followups = ReportFollowupService(s.agent, "claude", enabled=True, backend=backend)

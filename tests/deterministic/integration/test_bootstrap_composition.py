@@ -117,6 +117,28 @@ def test_public_create_app_does_not_expose_the_test_skill_override(
         )
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_production_composition_uses_single_followup_enable_switch(tmp_path, enabled, monkeypatch):
+    from problem_locator.followup import service
+
+    observed = []
+    original = service.ReportFollowupService
+
+    def create_followups(*args, **kwargs):
+        observed.append(kwargs)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(service, "ReportFollowupService", create_followups)
+    settings = replace(_settings(tmp_path / "data"), report_followup_enabled=enabled)
+    graph = build_service(settings)
+    try:
+        assert len(observed) == 1 and observed[0]["enabled"] is enabled
+        assert "native_sessions" not in observed[0]
+        assert graph.agent.followups.enabled is enabled
+    finally:
+        graph.close()
+
+
 @pytest.mark.parametrize("timeout_seconds", [None, 1200], ids=["default", "configured"])
 def test_production_composition_applies_report_followup_timeout(tmp_path, timeout_seconds):
     graph = build_service(_settings(tmp_path / "data", followup_timeout=timeout_seconds))

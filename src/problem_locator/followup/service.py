@@ -5,6 +5,7 @@ import hashlib
 import json
 import threading
 import time
+from dataclasses import replace
 
 from problem_locator.agent.models import AgentStoreError
 from problem_locator.contracts import DiagnosisMode, JobStatus
@@ -14,9 +15,9 @@ from problem_locator.contracts.limits import (
 from problem_locator.contracts.models import is_specialized_direct, specialized_direct_skill_name
 from problem_locator.diagnostics import log_event
 from problem_locator.dispatch.activity import QueueIdleObservation
-from problem_locator.runtime.claude_command import supports_read_search
+from problem_locator.runtime.claude_command import supports_native_sessions, supports_read_search
 
-from .models import (MAX_TEXT_BYTES, MAX_TURNS, FollowupRequest, FollowupSource,
+from .models import (MAX_TEXT_BYTES, FollowupRequest, FollowupSource,
     FollowupStopRequest, FollowupView)
 from .snapshots import SnapshotWorker, InputChanged, read_small
 from .store import FollowupStore, fail, timestamp
@@ -31,6 +32,8 @@ class ReportFollowupService:
             raise ValueError("报告追问快照预算无效。")
         if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= MAX_REPORT_FOLLOWUP_TIMEOUT_SECONDS:
             raise ValueError(f"追问执行时间必须是 1–{MAX_REPORT_FOLLOWUP_TIMEOUT_SECONDS} 秒之间的整数。")
+        if enabled and not supports_native_sessions(command):
+            raise ValueError("当前模型启动器不支持原生追问会话。")
         self.agent, self.enabled = agent, enabled
         self.timeout_seconds = timeout_seconds
         self.store = FollowupStore(agent.store.repository, agent.store.clock,
@@ -64,7 +67,7 @@ class ReportFollowupService:
     def _source(self, cid, rid):
         run = self.agent.store.get_run(cid, rid)
         if run.get("resources_expired", False):
-            return None
+            return self._archived_source(cid, rid, run)
         captured = self.agent.store.read_conversation(cid, case_snapshot=True, run_id=rid)
         if captured.snapshot is None or captured.view.case_id is None:
             return None
@@ -100,6 +103,36 @@ class ReportFollowupService:
             occurred_at=timestamp(run.get("completed_at") or result.occurred_at), skill_name=result.skill_name,
             has_log_manifest=bool(generic and job.attachment_refs
                 and getattr(job, "generic_log_preparation", None) == "direct-v1"))
+
+    def _archived_source(self, cid, rid, run):
+        archived = self.agent.report_archive.read(cid, rid)
+        if archived is None or archived.result.format != "markdown":
+            return None
+        snapshot = self.store.snapshot(rid)
+        if snapshot is not None:
+            source = self.store._source(snapshot)
+            if (source.source_job_id != archived.result.source_job_id
+                    or source.report_sha256 != archived.result.artifact.sha256):
+                return None
+            return replace(source, has_logs=False, has_log_manifest=False)
+        inputs = run.get("report_inputs") or {}
+        problem = inputs.get("effective_problem_text")
+        runtime = inputs.get("runtime") or {}
+        generic_skill = runtime.get("generic_skill")
+        skill = runtime.get("skill") or {}
+        profile = runtime.get("agent_profile") or {}
+        skill_id = skill.get("id", "")
+        skill_name = generic_skill or (skill_id.removeprefix("diagnosis-skill/")
+            if profile.get("id") == "agent-profile/skill-direct" and skill_id.startswith("diagnosis-skill/") else None)
+        if (not isinstance(problem, str) or not problem.strip() or not skill_name
+                or len(problem.encode("utf-8")) > MAX_TEXT_BYTES
+                or len(archived.content) > MAX_TEXT_BYTES):
+            return None
+        return FollowupSource(case_id=archived.result.case_id, source_job_id=archived.result.source_job_id,
+            problem_text=problem, report_markdown=archived.result.markdown,
+            report_sha256=archived.result.artifact.sha256,
+            source_kind="GENERIC" if generic_skill else "SKILL_DIRECT", has_logs=False,
+            occurred_at=timestamp(run.get("completed_at") or run["updated_at"]), skill_name=skill_name)
 
     def _has_readable_logs(self, job, *, generic):
         if not job.attachment_refs:
@@ -141,11 +174,10 @@ class ReportFollowupService:
     def get(self, conversation_id, run_id, owner_key=None, cursor=None, limit=50):
         with self.agent.operation_lease(conversation_id, owner_key=owner_key):
             page = self.store.page(conversation_id, run_id, owner_key, cursor=cursor, limit=limit)
-            expired = self.agent.store.get_run(conversation_id, run_id).get("resources_expired", False)
-            source = self._source(conversation_id, run_id) if self.enabled and not expired else None
-            reason = ("DISABLED" if not self.enabled else "EXPIRED" if expired else "UNSUPPORTED" if source is None else
-                "EXPIRED" if self.store.expired(source) else "BUSY" if page["active_followup"] is not None else
-                "LIMIT_EXCEEDED" if page["count"] >= MAX_TURNS else None)
+            source = self._source(conversation_id, run_id) if self.enabled else None
+            reason = ("DISABLED" if not self.enabled else
+                "UNSUPPORTED" if source is None else
+                "BUSY" if page["active_followup"] is not None else None)
             snapshot = page["snapshot"]
             status = "DISABLED" if not self.enabled else "UNAVAILABLE" if snapshot is None else snapshot["status"]
             return FollowupView(conversation_id=conversation_id, run_id=run_id, can_ask=reason is None,
@@ -167,8 +199,6 @@ class ReportFollowupService:
             if self._stop.is_set():
                 raise AgentStoreError("AGENT_UNAVAILABLE", "追问服务暂时不可用，请稍后重试。", 503)
             self.agent._available()
-            if self.agent.store.get_run(conversation_id, run_id).get("resources_expired", False):
-                raise fail("EXPIRED", "本轮相关资料已清理，历史内容仍可查看，请发起新的诊断。")
             source = self._source(conversation_id, run_id)
             if source is None:
                 raise fail("UNSUPPORTED", "这份报告暂不支持追问，请新建对话。")
@@ -219,8 +249,10 @@ class ReportFollowupService:
                 raise
             # The question remains readable and actionable when material or the
             # latest report changes. Never claim a diagnosis was started.
+            # This server-written answer must enter the next native prompt.
             return self.store.finish_task(task["followup_id"], answer=
-                "现有上下文还不足以回答，需要进一步诊断，但这次尚未开始。\n\n" + error.message)
+                "现有上下文还不足以回答，需要进一步诊断，但这次尚未开始。\n\n" + error.message,
+                checkpoint=False)
 
     def stop(self, conversation_id, run_id, followup_id, request_id, owner_key=None):
         request = FollowupStopRequest(request_id=request_id)

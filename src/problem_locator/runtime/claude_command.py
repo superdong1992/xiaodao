@@ -20,6 +20,7 @@ from pathlib import Path
 from problem_locator.contracts import ErrorCode
 
 from .followup_access import file_tools_for_policy
+from .native_session import NativeSession
 
 
 _ENVIRONMENT_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -67,8 +68,13 @@ class ClaudeCommand:
 
 
 def apply_final_response_policy(invocation: ClaudeCommand, *, file_access: str | None,
-                                workspace_root: Path, phase: str) -> ClaudeCommand:
+                                workspace_root: Path, phase: str,
+                                native_session: NativeSession | None = None) -> ClaudeCommand:
     """Pin native Claude's tools; custom launchers receive the same explicit policy."""
+    if native_session is not None and (phase != 'REPORT_FOLLOWUP'
+            or file_access is None or not (_native_session_launcher(invocation.argv)
+                or _followup_wrapper(invocation.argv))):
+        raise ClaudeCommandError('当前启动器或执行阶段不支持原生追问会话。')
     if file_access is None:
         return invocation
     file_tools = file_tools_for_policy(file_access)
@@ -80,20 +86,21 @@ def apply_final_response_policy(invocation: ClaudeCommand, *, file_access: str |
     argv = invocation.argv
     executable = Path(argv[0]).name.lower()
     # codeagent is a Claude-compatible CLI and needs the same output/tool policy.
-    native = executable in {
-        'claude', 'claude.exe', 'claude.cmd',
-        'codeagent', 'codeagent.exe', 'codeagent.cmd',
-    }
-    native = native or (executable in {'node', 'node.exe'} and len(argv) > 1
-        and Path(argv[1]).name == 'cli.js')
+    native = _native_session_launcher(argv)
     if file_access == 'read-search' and not native and not _followup_wrapper(argv):
         raise ClaudeCommandError('The launcher cannot enforce report follow-up tool access.')
     followup_policy = phase in {'REPORT_FOLLOWUP', 'MEMORY_CORRECTION'} and (native or _followup_wrapper(argv))
     if followup_policy:
         from .followup_access import prepare_settings
         settings_path = prepare_settings(argv, environment, workspace_root, file_access=file_access)
+        if native_session is not None:
+            # Read provider settings before isolating native session storage.
+            native_session.config_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            environment['CLAUDE_CONFIG_DIR'] = str(native_session.config_dir.resolve())
         if not native:
             environment['PROBLEM_LOCATOR_FOLLOWUP_SETTINGS'] = str(settings_path)
+    if native_session is not None:
+        argv = _without_session_arguments(argv)
     if native:
         # The task owns output/tool policy. Model, endpoint, settings and budget
         # options remain configured by the operator.
@@ -127,17 +134,56 @@ def apply_final_response_policy(invocation: ClaudeCommand, *, file_access: str |
         if followup_policy:
             rewritten.extend(['--setting-sources', '', '--settings', str(settings_path),
                 '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-                '--disable-slash-commands', '--no-session-persistence'])
+                '--disable-slash-commands'])
+            if native_session is None:
+                rewritten.append('--no-session-persistence')
+            elif native_session.resume_id is not None:
+                rewritten.extend(['--resume', native_session.resume_id])
             # codeagent does not support Claude's Chrome integration flag.
             if executable not in {'codeagent', 'codeagent.exe', 'codeagent.cmd'}:
                 rewritten.append('--no-chrome')
         argv = tuple(rewritten)
+    elif native_session is not None and native_session.resume_id is not None:
+        argv = (*argv, '--resume', native_session.resume_id)
     return ClaudeCommand(argv, environment)
+
+
+def _without_session_arguments(argv):
+    result = []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        name = token.split('=', 1)[0]
+        index += 1
+        if name in {'--continue', '-c', '--no-session-persistence'}:
+            continue
+        if name in {'--resume', '-r', '--session-id'}:
+            if '=' not in token:
+                while index < len(argv) and not argv[index].startswith('-'):
+                    index += 1
+            continue
+        result.append(token)
+    return tuple(result)
 
 
 def _followup_wrapper(argv):
     return (any(Path(token).name == 'isolated-agent-wrapper.mjs' for token in argv)
         and any(argv[index:index + 2] == ('--workflow', 'report-followup') for index in range(len(argv) - 1)))
+
+
+def _native_session_launcher(argv: tuple[str, ...]) -> bool:
+    executable = Path(argv[0]).name.lower()
+    return (executable in {'claude', 'claude.exe', 'claude.cmd', 'codeagent', 'codeagent.exe', 'codeagent.cmd'}
+        or executable in {'node', 'node.exe'} and len(argv) > 1 and Path(argv[1]).name == 'cli.js')
+
+
+def supports_native_sessions(command: str) -> bool:
+    """Known CLIs and the repository-owned follow-up wrapper preserve sessions."""
+    try:
+        argv, _ = parse_command_tokens(command)
+    except ClaudeCommandError:
+        return False
+    return _native_session_launcher(argv) or _followup_wrapper(argv)
 
 
 def supports_read_search(command: str) -> bool:
@@ -146,10 +192,7 @@ def supports_read_search(command: str) -> bool:
         argv, _ = parse_command_tokens(command)
     except ClaudeCommandError:
         return False
-    executable = Path(argv[0]).name.lower()
-    return (executable in {'claude', 'claude.exe', 'claude.cmd', 'codeagent', 'codeagent.exe', 'codeagent.cmd'}
-        or executable in {'node', 'node.exe'} and len(argv) > 1 and Path(argv[1]).name == 'cli.js'
-        or _followup_wrapper(argv))
+    return _native_session_launcher(argv) or _followup_wrapper(argv)
 
 
 def _is_reserved_logparse_key(name: str) -> bool:

@@ -6,7 +6,7 @@ from problem_locator.followup.service import ReportFollowupService
 from problem_locator.runtime.agent_backend import BackendExecution
 from tests.deterministic.integration.test_website_agent import OWNER_KEY, _post, _preupload, website
 from tests.deterministic.integration.test_website_report_continuation import _get, _upload_second_archive
-from tests.deterministic.unit.agent.test_report_followup import model_reply
+from tests.deterministic.unit.agent.test_report_followup import model_reply, native_init
 
 
 def test_unified_followup_answers_then_diagnoses_new_logs_and_publishes_another_version(website, monkeypatch):
@@ -26,11 +26,28 @@ def test_unified_followup_answers_then_diagnoses_new_logs_and_publishes_another_
             elapsed_seconds=0.01, final_result="报告已保存。")
     monkeypatch.setattr(stack.runtime._generic_locator_executor, "_backend", SimpleNamespace(execute=diagnose))
     followup_calls = []
+    session_ids = []
+    native_history = {}
     decision = {}
     def respond(**kwargs):
-        followup_calls.append(json.loads((kwargs["workspace_root"] / "inputs/context.json").read_bytes()))
+        context = json.loads((kwargs["workspace_root"] / "inputs/context.json").read_bytes())
+        session_id = native_init(kwargs)
+        previous = native_history.setdefault(session_id, [])
+        session_ids.append(session_id)
+        followup_calls.append(context)
+        assert context["prior_turns"] == []
+        if previous:
+            assert kwargs["native_session"].resume_id == session_ids[0]
+            assert context["conversation_context"]["resumed"]
+            assert previous[0]["answer"] == "原报告暂未确定根因。"
+            assert "original_report" not in context and "original_problem" not in context
+        else:
+            assert len(followup_calls) == 1 and kwargs["native_session"].resume_id is None
+            assert not context["conversation_context"]["resumed"]
+        answer = None if decision else "原报告暂未确定根因。"
+        previous.append({"question": context["question"], "answer": answer})
         return SimpleNamespace(final_result=model_reply(kwargs, decision=decision) if decision else
-            model_reply(kwargs, answer="原报告暂未确定根因。"))
+            model_reply(kwargs, answer=answer), session_id=session_id)
     followups = ReportFollowupService(agent, "claude", enabled=True, backend=SimpleNamespace(execute=respond))
     agent.followups, store.followup_store = followups, followups.store
     monkeypatch.setattr(engine, "prepare_continuation", lambda **kw: (_ for _ in ()).throw(
@@ -73,6 +90,7 @@ def test_unified_followup_answers_then_diagnoses_new_logs_and_publishes_another_
     assert current["run_id"] == handoff["diagnosis_run_id"] and current["case_id"] != first["case_id"]
     assert current["result"]["report_state"] == "READY" and "本轮变化" in current["result"]["markdown"]
     assert len(followup_calls) == len(diagnoses) == 2
+    assert len(native_history) == 1 and len(native_history[session_ids[0]]) == 2
     materials = followup_calls[1]["diagnosis_context"]["materials"]
     assert any(entry["attachment_id"] == extra and entry["available"] for entry in materials)
     assert len(diagnoses[1][1]["sources"]) == 2

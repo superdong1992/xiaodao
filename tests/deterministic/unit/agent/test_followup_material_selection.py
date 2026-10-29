@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from problem_locator.agent.models import AgentStoreError
+from problem_locator.followup.service import ReportFollowupService
 from tests.deterministic.unit.agent.test_followup_handoff import DECISION, ask, counts, item, state
+from tests.deterministic.unit.agent.test_report_archive import configure, expire as expire_run, publish, setup
 from tests.deterministic.unit.agent.test_report_continuation import OWNER, system, upload
+from tests.deterministic.unit.application.test_reports import CASE_ID, generic_report
 
 
 def decision(ids):
@@ -93,6 +97,75 @@ def test_unselected_expired_history_does_not_block_explicit_fresh_selection(stat
     task = claim(s, ids=[fresh])
     assert s.followups.continue_diagnosis(task, decision([fresh]))
     assert s.store.get_conversation(s.cid).messages[0].attachment_ids == [fresh]
+
+
+@pytest.fixture
+def archived_materials(setup):
+    configure(setup)
+    aggregate, resources, _ = generic_report(2)
+    setup.resources.content = resources.content
+    setup.store.submit_message(setup.conversation_id, "initial", "请检查超时原因。")
+    publish(setup, aggregate)
+    s = SimpleNamespace(repository=setup.repository, store=setup.store, agent=setup.service,
+        service=setup.service.continuations, cid=setup.conversation_id,
+        rid=setup.store.get_run(setup.conversation_id)["run_id"], report_bytes=resources.content)
+    s.expired_attachment = upload(s, "old.zip", b"old logs")
+    with s.repository.database_transaction() as db:
+        db.execute("UPDATE agent_conversations SET owner_key=? WHERE conversation_id=?", (OWNER, s.cid))
+        body = s.store._load(db, s.cid)
+        body["report_inputs"] = {"effective_problem_text": "请检查超时原因。",
+            "attachment_ids": [s.expired_attachment], "runtime": {"generic_skill": "generic-problem-locator-smoke"}}
+        s.store._save(db, body)
+    assert s.agent.report_archive.archive_run(s.cid, s.rid)
+    expire_run(setup)
+    expire(s, s.expired_attachment)
+    s.followups = ReportFollowupService(s.agent, "codeagent", enabled=True,
+        backend=SimpleNamespace(execute=lambda **kwargs: pytest.fail("材料交接不应调用模型")))
+    s.agent.followups, s.store.followup_store = s.followups, s.followups.store
+    assert s.store.get_run(s.cid, s.rid)["resources_expired"]
+    assert CASE_ID not in s.repository.read_snapshot().cases
+    yield s
+    s.agent.shutdown(0)
+
+
+def archived_original_rows(s):
+    with s.repository.database_read() as db:
+        return {table: db.execute(f"SELECT * FROM {table} WHERE conversation_id=? AND run_id=? ORDER BY rowid",
+            (s.cid, s.rid)).fetchall() for table in
+            ("agent_conversation_runs", "agent_report_archives", "agent_messages", "agent_events")}
+
+
+@pytest.mark.parametrize("selection", ["fresh", "none", "expired"])
+def test_archived_report_handoff_checks_selected_materials_instead_of_original_run_expiry(
+        archived_materials, selection):
+    s = archived_materials
+    fresh = upload(s, "fresh.zip", b"new server logs") if selection == "fresh" else None
+    selected = [fresh] if fresh else [s.expired_attachment] if selection == "expired" else []
+    task = claim(s, ids=[fresh] if fresh else [])
+    request = decision(selected)
+    if selection == "none":
+        request.update(diagnosis_goal="按用户更正的信息重新核对配置推理。",
+            reason="本次只核对配置逻辑，不依赖日志证据。")
+    before, before_counts = archived_original_rows(s), counts(s)
+    if selection == "expired":
+        with pytest.raises(AgentStoreError, match="所选日志已不可用") as rejected:
+            s.service.handoff_followup(s.followups, task, request)
+        assert rejected.value.code == "AGENT_ATTACHMENT_NOT_READY"
+    assert s.followups.continue_diagnosis(task, request)
+    answer = item(s)
+    if selection == "expired":
+        assert counts(s) == before_counts and s.store.get_run(s.cid)["run_id"] == s.rid
+        assert answer.diagnosis_run_id is None and "所选日志已不可用" in answer.answer_markdown
+    else:
+        run = s.store.get_run(s.cid)
+        assert run["run_id"] == answer.diagnosis_run_id != s.rid
+        assert run["parent_run_id"] == run["root_run_id"] == s.rid and run["report_version"] == 2
+        assert run["continuation_context"]["parent_report_markdown"].encode() == s.report_bytes
+        assert s.store.get_conversation(s.cid).messages[0].attachment_ids == selected
+        assert counts(s) == (before_counts[0] + 1, before_counts[1], before_counts[2] + 1)
+    assert archived_original_rows(s) == before
+    assert s.agent.report_archive.read(s.cid, s.rid).content == s.report_bytes
+    assert CASE_ID not in s.repository.read_snapshot().cases
 
 
 @pytest.mark.parametrize("kind", ["unreferenced", "expired", "cancelled"])

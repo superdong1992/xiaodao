@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
@@ -26,6 +27,20 @@ CASE = "00000000-0000-0000-0000-000000000001"
 JOB = "00000000-0000-0000-0000-000000000011"
 
 
+def native_init(kwargs):
+    session = kwargs["native_session"]
+    identifier = session.resume_id or str(uuid.uuid4())
+    session.on_session_id(identifier)
+    return identifier
+
+
+def seed_historical_turn(system, request, text, answer):
+    """Create the persisted rows of a pre-session conversation, without a CLI."""
+    submit(system, request, text)
+    task = system.service.store.claim_task()
+    assert system.service.store.finish_task(task["followup_id"], answer=answer)
+
+
 def model_reply(kwargs, *, answer=None, decision=None, action="ANSWER"):
     context = json.loads((kwargs["workspace_root"] / "inputs/context.json").read_bytes())
     contract = context["response_contract"]
@@ -45,6 +60,8 @@ class Backend:
 
     def execute(self, **kwargs):
         self.calls.append(kwargs)
+        if kwargs["backend_phase"] == "REPORT_FOLLOWUP":
+            native_init(kwargs)
         if self.action is not None:
             self.action(kwargs)
         result = self.raw_result
@@ -122,7 +139,9 @@ def test_old_report_can_be_explained_without_reparsing_or_changing_any_original_
     assert system.service.worker.run_once()
     call = system.backend.calls[-1]
     context = json.loads((call["workspace_root"] / "inputs/context.json").read_text("utf-8"))
-    assert context["prior_turns"][0]["answer"] == answer.answer_markdown
+    assert context["prior_turns"] == []
+    assert call["native_session"].resume_id == system.service.store.sessions.get(system.cid)["session_id"]
+    assert view(system).items[0].answer_markdown == answer.answer_markdown
     assert context["question"].startswith("但我观察")
     assert first.followup_id != second.followup_id and len(system.backend.calls) == 2
     assert original_rows(system) == before
@@ -181,12 +200,14 @@ def test_followup_items_events_and_snapshots_use_local_offset(system):
 
 
 @pytest.mark.parametrize("occurred_at", ["2026-09-17T01:00:00.001Z", "2026-09-17T09:00:00.001+08:00"])
-def test_followup_expiry_preserves_fifteen_day_boundary_across_offsets(system, occurred_at):
+def test_log_expiry_preserves_fifteen_day_boundary_without_expiring_chat(system, occurred_at):
     system.source = replace(system.source, occurred_at=occurred_at)
     system.clock.value = "2026-10-02T09:00:00.000+08:00"
     assert view(system).can_ask
+    assert not system.service.store.expired(system.source)
     system.clock.value = "2026-10-02T09:00:00.001+08:00"
-    assert view(system).reason == "EXPIRED"
+    assert system.service.store.expired(system.source)
+    assert view(system).can_ask
 
 
 def test_snapshot_queue_orders_mixed_offsets_by_instant_without_rewriting_history(system):
@@ -533,16 +554,17 @@ def test_result_commit_failure_never_requeues_or_calls_model_again(system, monke
     assert view(system).items[0].status == "INTERRUPTED"
 
 
-def test_expired_report_rejects_new_work_but_finishes_already_accepted_followup(system):
+def test_expired_logs_allow_accepted_and_new_report_only_followups(system):
     submit(system)
     system.clock.value = "2026-10-09T01:00:00.000Z"
-    assert view(system).reason == "EXPIRED"
-    with pytest.raises(AgentStoreError) as caught:
-        submit(system, "expired")
-    assert caught.value.code == "AGENT_FOLLOWUP_EXPIRED"
+    assert view(system).reason == "BUSY"
     assert system.service.worker.run_once()
     assert len(system.backend.calls) == 1
     assert view(system).items[0].status == "COMPLETED"
+    assert view(system).can_ask
+    submit(system, "later")
+    assert system.service.worker.run_once()
+    assert view(system).items[-1].context_mode == "REPORT_ONLY"
 
 
 def test_owner_pagination_sse_cursor_and_old_retry_cannot_move_to_other_run(system):
@@ -564,11 +586,12 @@ def test_owner_pagination_sse_cursor_and_old_retry_cannot_move_to_other_run(syst
         system.service.list_events(system.cid, system.rid, after_sequence=10, owner_key=OWNER)
 
 
-def test_long_history_stays_complete_in_readable_file_instead_of_being_discarded(system):
+def test_historical_chat_is_seeded_in_full_then_resumed_without_reloading_history(system):
     system.backend.answer = "答案：" + "a" * 50_000
-    for index in range(5):
-        submit(system, str(index), f"追问{index}：" + "q" * 30_000)
-        assert system.service.worker.run_once()
+    for index in range(4):
+        seed_historical_turn(system, str(index), f"追问{index}：" + "q" * 30_000, system.backend.answer)
+    submit(system, "4", "继续讨论。")
+    assert system.service.worker.run_once()
     invocation = system.backend.calls[-1]
     context = json.loads((invocation["workspace_root"] / "inputs/context.json").read_text("utf-8"))
     assert context["history_file"] == "inputs/history.md" and context["history_total"] == 4
@@ -577,9 +600,10 @@ def test_long_history_stays_complete_in_readable_file_instead_of_being_discarded
     assert "追问3：" + "q" * 30_000 in history
     assert len(invocation["prompt"].encode()) <= 262_144
     system.service.read_search_supported = False
-    with pytest.raises(AgentStoreError) as caught:
-        submit(system, "no-tools", "不能静默舍弃旧问答")
-    assert caught.value.code == "AGENT_FOLLOWUP_CONTEXT_LIMIT"
+    submit(system, "no-tools", "继续刚才的问题。")
+    assert system.service.worker.run_once()
+    assert system.backend.calls[-1]["native_session"].resume_id is not None
+    assert "追问0" not in system.backend.calls[-1]["prompt"]
 
 
 def test_requests_enforce_utf8_budget_and_validate_attachment_ids():

@@ -68,6 +68,8 @@ def test_literal_control_compatibility_keeps_result_contract_validation(fields):
 
 def execute_raw(state, value):
     def execute(**kwargs):
+        from tests.deterministic.unit.agent.test_report_followup import native_init
+        native_init(kwargs)
         state.backend.calls.append(kwargs)
         return type("Result", (), {"final_result": value})()
     state.backend.execute = execute

@@ -19,7 +19,7 @@ from problem_locator.storage.database import (dialect_for, lock_conversation, lo
 from problem_locator.timestamps import format_timestamp, now_timestamp, parse_timestamp
 
 from .context import build_prompt
-from .models import (ACTIVE, MAX_TEXT_BYTES, MAX_TURNS, FollowupEvent, FollowupEventBatch, FollowupFailure,
+from .models import (ACTIVE, MAX_TEXT_BYTES, FollowupEvent, FollowupEventBatch, FollowupFailure,
     FollowupItem, FollowupReceipt, FollowupSource, FollowupStopReceipt)
 
 _TABLES = ("agent_followup_metadata", "agent_followup_snapshots", "agent_followup_tasks",
@@ -93,6 +93,9 @@ class FollowupStore:
                         statement = statement[:-1] + ",storage_order BIGINT GENERATED ALWAYS AS IDENTITY)"
                     db.execute(statement)
                 db.execute("INSERT INTO agent_followup_metadata(key,value) VALUES ('storage_version','2')")
+
+        from .sessions import FollowupSessions
+        self.sessions = FollowupSessions(self)
 
     def now(self):
         return timestamp(self.clock.now()) if self.clock is not None else now_timestamp()
@@ -282,20 +285,17 @@ class FollowupStore:
                 if previous["fingerprint"] != fingerprint:
                     raise AgentStoreError("AGENT_IDEMPOTENCY_CONFLICT", "同一 request_id 的内容不能更改。", 409)
                 return FollowupReceipt.model_validate_json(previous["receipt"])
-            if self.expired(source) or self.resources_expired(db, cid, rid):
-                raise fail("EXPIRED", "本轮相关资料已清理或到期，历史内容仍可查看，请发起新的诊断。")
             if self.active(db, cid) is not None:
                 raise fail("BUSY", "本会话有追问正在处理，请等待完成或先停止。")
             correction = self._correction(db, cid, rid, request, source)
             history = self._history(db, rid)
-            if len(history) >= MAX_TURNS:
-                raise fail("LIMIT_EXCEEDED", "本报告的追问次数已达到上限，请新建对话。", 429)
             self._register_source(db, cid, rid, source)
             report_ids = dialect_for(db).json_document("r.body", "$.report_inputs.attachment_ids")
             snapshot = _one(db, "SELECT s.*," + report_ids + " AS report_attachment_ids FROM agent_followup_snapshots s "
                 "JOIN agent_conversation_runs r ON r.run_id=s.run_id AND r.conversation_id=s.conversation_id "
                 "WHERE s.run_id=?", (rid,))
-            mode = "REPORT_AND_LOGS" if logs_supported and snapshot["status"] == "READY" and source.has_logs else "REPORT_ONLY"
+            mode = "REPORT_AND_LOGS" if (logs_supported and snapshot["status"] == "READY"
+                and source.has_logs and not self.expired(source)) else "REPORT_ONLY"
             fid, now = str(uuid.uuid4()), self.now()
             item = FollowupItem(followup_id=fid, run_id=rid, request_id=request.request_id,
                 ordinal=len(history) + 1, status="QUEUED", context_mode=mode, text=request.text,
@@ -305,10 +305,11 @@ class FollowupStore:
                 "status": "RUNNING", "body": _json(item)}
             decision_context = self.decision_context(db, task, history, json.loads(snapshot["report_attachment_ids"] or "[]"))
             try:
-                build_prompt(source, history, request.text, mode, read_search=logs_supported, correction=correction,
+                build_prompt(source, [], request.text, mode,
+                    read_search=logs_supported, correction=correction,
                     request_key=fid, snapshot_status=snapshot["status"], diagnosis_context=decision_context)
             except ValueError:
-                raise fail("CONTEXT_LIMIT", "追问上下文已达到上限，请新建对话。", 413) from None
+                raise fail("CONTEXT_LIMIT", "本次补充内容过多，请分开发送。", 413) from None
             sequence = self._append(db, cid, item, "followup.accepted")
             receipt = FollowupReceipt(conversation_id=cid, run_id=rid, followup_id=fid,
                 request_id=request.request_id, event_id=sequence)
@@ -417,7 +418,8 @@ class FollowupStore:
             busy = db.execute("SELECT 1 FROM agent_followup_tasks WHERE run_id=? AND status IN ('QUEUED','RUNNING','CANCELLING')", (rid,)).fetchone()
             return FollowupEventBatch(events=events, stream_closed=busy is None and (events[-1].sequence if events else after) >= last)
 
-    def _transition(self, db, row, status, *, answer=None, code=None, emit=True, diagnosis_run_id=None):
+    def _transition(self, db, row, status, *, answer=None, code=None, emit=True, diagnosis_run_id=None,
+                    checkpoint=True):
         old = FollowupItem.model_validate_json(row["body"])
         if old.status == status:
             return old
@@ -426,6 +428,8 @@ class FollowupStore:
             "answer_markdown": answer, "diagnosis_run_id": diagnosis_run_id,
             "failure": None if failure is None else failure.model_dump(), "updated_at": self.now()})
         db.execute("UPDATE agent_followup_tasks SET status=?,body=? WHERE followup_id=?", (status, _json(item), item.followup_id))
+        if status == "COMPLETED" and checkpoint:
+            self.sessions.checkpoint(db, row)
         if emit and self.alive(db, row["conversation_id"], row["run_id"]):
             self._append(db, row["conversation_id"], item, "followup.updated")
         return item
@@ -446,7 +450,7 @@ class FollowupStore:
             if not try_lock_conversation(db, row["conversation_id"]) or not self.alive(db, row["conversation_id"], row["run_id"]):
                 return None
             source = _one(db, "SELECT * FROM agent_followup_snapshots WHERE run_id=?", (row["run_id"],))
-            if source is None or self.resources_expired(db, row["conversation_id"], row["run_id"]):
+            if source is None:
                 self._transition(db, row, "CANCELLED")
                 return None
             self._transition(db, row, "RUNNING")
@@ -473,6 +477,8 @@ class FollowupStore:
                 # Old snapshots may predate capture of named facts. Keep their
                 # log bytes immutable and use the run's adopted text in context.
                 current = replace(current, problem_text=effective)
+            if self.resources_expired(db, task["conversation_id"], task["run_id"]):
+                current = replace(current, has_logs=False, has_log_manifest=False)
             source["report_attachment_ids"] = json.loads(source["report_attachment_ids"] or "[]")
             return current, self._history(db, task["run_id"], task["ordinal"]), source
 
@@ -559,7 +565,7 @@ class FollowupStore:
             row = _one(db, "SELECT * FROM agent_followup_tasks WHERE followup_id=?", (fid,))
             return row is not None and row["epoch"] == self.epoch and row["status"] == "RUNNING" and self.alive(db, row["conversation_id"], row["run_id"])
 
-    def finish_task(self, fid, *, answer=None, code=None, interrupted=False):
+    def finish_task(self, fid, *, answer=None, code=None, interrupted=False, checkpoint=True):
         with self.repository.database_transaction() as db:
             row = self._locked_row(db, "agent_followup_tasks", "followup_id", fid)
             if row is None or row["status"] not in {"RUNNING", "CANCELLING"} or row["epoch"] != self.epoch:
@@ -571,7 +577,7 @@ class FollowupStore:
             elif code is not None:
                 self._transition(db, row, "FAILED", code=code)
             else:
-                item = self._transition(db, row, "COMPLETED", answer=answer)
+                item = self._transition(db, row, "COMPLETED", answer=answer, checkpoint=checkpoint)
                 db.execute("SAVEPOINT followup_memory_enqueue")
                 try:
                     self._enqueue_correction(db, row, item)
@@ -620,7 +626,7 @@ class FollowupStore:
                 for (fid,) in tasks:
                     row = _one(db, "SELECT * FROM agent_followup_tasks WHERE followup_id=?", (fid,))
                     source = _one(db, "SELECT * FROM agent_followup_snapshots WHERE run_id=?", (row["run_id"],))
-                    fresh = source is not None and not self.resources_expired(db, cid, row["run_id"])
+                    fresh = source is not None
                     if row["status"] == "QUEUED" and enabled and fresh and self.alive(db, cid, row["run_id"]):
                         continue
                     cancelled = row["status"] != "RUNNING" or not self.alive(db, cid, row["run_id"])
@@ -649,6 +655,9 @@ class FollowupStore:
     def purge(db, cid, run_id=None):
         lock_conversation(db, cid)
         tail, args = ("", (cid,)) if run_id is None else (" AND run_id=?", (cid, run_id))
+        if run_id is None:
+            from .sessions import FollowupSessions
+            FollowupSessions.purge(db, cid)
         for table in ("agent_followup_events", "agent_followup_stops", "agent_followup_tasks", "agent_followup_snapshots"):
             db.execute(f"DELETE FROM {table} WHERE conversation_id=?" + tail, args)
 

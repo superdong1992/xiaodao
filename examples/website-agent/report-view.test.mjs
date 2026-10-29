@@ -80,10 +80,12 @@ function data(overrides = {}) {
   };
 }
 
-test("日志清理后仍展示完整报告并说明本轮只读", () => {
+test("日志清理后仍展示完整报告并说明重新核对日志需要上传", () => {
   const target = container();
   renderReport(target, data({ format: "markdown", report: null, markdown: "完整报告永久保留" }), { resourcesExpired: true });
-  assert.match(target.textContent, /相关日志已清理，本轮仅供查看/);
+  assert.match(target.textContent, /相关日志已清理，报告和历史问答仍可查看/);
+  assert.match(target.textContent, /如需重新核对日志，请重新上传/);
+  assert.doesNotMatch(target.textContent, /本轮仅供查看|新开一轮/);
   assert.match(target.textContent, /完整报告永久保留/);
 });
 

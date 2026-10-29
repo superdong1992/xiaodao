@@ -159,9 +159,15 @@ def test_completed_followup_answers_survive_resource_reclamation(stack):
     assert page["items"][0].answer_markdown == "这是已经回复的正文"
     assert page["snapshot"]["reserved_bytes"] == 0
     assert followups.request(cid, rid, "ask", "解释结论", "owner") == receipt
-    with pytest.raises(AgentStoreError) as expired:
-        followups.submit(cid, rid, FollowupRequest(request_id="new", text="再次解释"), source, "owner")
-    assert expired.value.code == "AGENT_FOLLOWUP_EXPIRED"
+    original = stack.store.get_run(cid, rid)
+    new = followups.submit(cid, rid, FollowupRequest(request_id="new", text="再次解释"), source, "owner")
+    latest = followups.page(cid, rid, "owner")
+    assert latest["items"][0] == page["items"][0]
+    assert latest["items"][1].followup_id == new.followup_id
+    assert latest["items"][1].status == "QUEUED"
+    assert latest["items"][1].context_mode == "REPORT_ONLY"
+    assert latest["snapshot"]["reserved_bytes"] == 0
+    assert stack.store.get_run(cid, rid) == original
 
 
 def test_permanent_attachment_metadata_is_loaded_only_for_current_history_page(stack):

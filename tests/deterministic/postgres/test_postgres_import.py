@@ -154,6 +154,43 @@ def test_postgres_import_preserves_source_wal_json_resources_and_rebinds_only_at
         live_copy.close()
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+def test_postgres_import_preserves_native_session_data_and_accepts_legacy_source(
+        sqlite_source, tmp_path, migration_host, postgres_database_url, monkeypatch, legacy):
+    source, _, _ = sqlite_source
+    target = tmp_path / "target"
+    session_id = "00000000-0000-0000-0000-000000000123"
+    with sqlite3.connect(source / "completed.sqlite3") as db:
+        cid = db.execute("SELECT conversation_id FROM agent_conversations").fetchone()[0]
+        if legacy:
+            db.execute("DROP TABLE agent_followup_sessions")
+            db.execute("DROP TABLE agent_followup_session_metadata")
+        else:
+            db.execute("INSERT INTO agent_followup_sessions(conversation_id,session_id) VALUES (?,?)", (cid, session_id))
+    relative = f"resources/followup-sessions/{cid}/config/projects/session.jsonl"
+    if not legacy:
+        saved = source / relative
+        saved.parent.mkdir(parents=True)
+        saved.write_bytes(b'{"type":"user","message":"saved context"}\n')
+    before = _manifest(source)
+    monkeypatch.setenv("POSTGRES_IMPORT_TEST_URL", postgres_database_url)
+    result = migration.import_data_root(source, target, execute=True, database_url_env="POSTGRES_IMPORT_TEST_URL")
+    assert _manifest(source) == before
+    repository = CaseStateRepository(target, StorageCoordinationLock(), FixedClock("2026-09-28T00:00:00.000Z"),
+        DeterministicIdGenerator(), database_url=postgres_database_url)
+    try:
+        _verify_table_proofs(repository, result)
+        with repository.database_read() as db:
+            assert db.execute("SELECT value FROM agent_followup_session_metadata WHERE key='storage_version'").fetchone() == ("1",)
+            assert db.execute("SELECT conversation_id,session_id,last_order FROM agent_followup_sessions").fetchall() == (
+                [] if legacy else [(cid, session_id, 0)])
+        if not legacy:
+            assert (target / relative).read_bytes() == (source / relative).read_bytes()
+            assert result["tables"]["agent_followup_sessions"]["source"] == result["tables"]["agent_followup_sessions"]["target"]
+    finally:
+        repository.close()
+
+
 def test_postgres_import_rejects_nonempty_database_without_changing_it(
         sqlite_source, tmp_path, migration_host, postgres_database_url, monkeypatch):
     import psycopg

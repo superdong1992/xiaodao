@@ -19,6 +19,7 @@ from problem_locator.agent.store import AgentStore
 from problem_locator.agent.report_archive import ReportArchive
 from problem_locator.contracts import canonical_json_bytes
 from problem_locator.followup.models import FollowupEvent, FollowupItem, FollowupSource
+from problem_locator.followup.sessions import _COLUMNS as _SESSION_COLUMNS, _TABLES as _FOLLOWUP_SESSIONS
 from problem_locator.followup.store import FollowupStore
 from problem_locator.memory.store import LEGACY_DEFAULTS, MemoryStore
 from problem_locator.memory.comments import COMMENT_TABLE, COMMENT_VERSION, COMMENT_VERSION_KEY
@@ -57,10 +58,10 @@ def _source_schema(db):
     objects = db.execute("SELECT type,name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").fetchall()
     _require(not any(kind in {"view", "trigger"} for kind, _ in objects), "源数据库包含不受支持的视图或触发器。")
     tables = {name for kind, name in objects if kind == "table"}
-    allowed = safety._CORE_TABLES | safety._AGENT_TABLES | safety._AGENT_V2_TABLES | _MEMORY | _FOLLOWUP | _CONTINUATION | USAGE_TABLES | {
+    allowed = safety._CORE_TABLES | safety._AGENT_TABLES | safety._AGENT_V2_TABLES | _MEMORY | _FOLLOWUP | _FOLLOWUP_SESSIONS | _CONTINUATION | USAGE_TABLES | {
         "completed_case_retention", "history_cleanup_jobs", "agent_report_archives", COMMENT_TABLE}
     _require(safety._CORE_TABLES <= tables and tables <= allowed, "源数据库的表结构不属于受支持的 V11 格式。", "VERSION_UNSUPPORTED")
-    for group in (safety._AGENT_TABLES | safety._AGENT_V2_TABLES, _MEMORY, _FOLLOWUP, _CONTINUATION):
+    for group in (safety._AGENT_TABLES | safety._AGENT_V2_TABLES, _MEMORY, _FOLLOWUP, _FOLLOWUP_SESSIONS, _CONTINUATION):
         _require(not tables.intersection(group) or group <= tables, "源数据库的业务表不完整。")
     _require(not tables.intersection(_MEMORY | _FOLLOWUP | _CONTINUATION) or safety._AGENT_TABLES <= tables,
         "源反馈、追问或继续诊断数据缺少会话表。")
@@ -93,6 +94,11 @@ def _source_schema(db):
             "源报告追问存储版本不受支持。", "VERSION_UNSUPPORTED")
         _require(("correction_json" in table_columns(db, "agent_followup_tasks")) == (followup_version == "2"),
             "源追问版本与表结构不一致。", "VERSION_UNSUPPORTED")
+    if _FOLLOWUP_SESSIONS <= tables:
+        session_version = dict(db.execute("SELECT key,value FROM agent_followup_session_metadata")).get("storage_version")
+        _require(_FOLLOWUP <= tables and session_version == "1"
+            and table_columns(db, "agent_followup_sessions") == _SESSION_COLUMNS,
+            "源追问会话存储版本与表结构不一致。", "VERSION_UNSUPPORTED")
     return tables, metadata
 
 
@@ -264,7 +270,7 @@ def _import_rows(sqlite, repository, tables, source, target, mappings):
         _require(tables <= expected_tables, "当前程序不支持源数据库中的部分表。", "VERSION_UNSUPPORTED")
         for table in sorted(expected_tables):
             db.execute(f'LOCK TABLE "{table}" IN ACCESS EXCLUSIVE MODE')
-            if table not in {"metadata", "agent_followup_metadata"}:
+            if table not in {"metadata", "agent_followup_metadata", "agent_followup_session_metadata"}:
                 _require(db.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone() is None,
                     "目标数据库在初始化期间出现业务数据，导入已停止。", "TARGET_DATABASE_NOT_EMPTY")
         for table in sorted(tables):

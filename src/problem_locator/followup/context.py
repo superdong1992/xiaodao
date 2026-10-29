@@ -63,7 +63,8 @@ def history_markdown(history):
 
 
 def build_prompt(source, history, question, mode, *, read_search=False, correction=None,
-                 snapshot_status=None, request_key=None, diagnosis_context=None):
+                 snapshot_status=None, request_key=None, diagnosis_context=None, native_session=None,
+                 prior_reports=()):
     value = context_value(source, history, question, mode, correction=correction,
         snapshot_status=snapshot_status,
         request_key=request_key, diagnosis_context=diagnosis_context)
@@ -85,6 +86,33 @@ def build_prompt(source, history, question, mode, *, read_search=False, correcti
         instructions += ("用户正在纠正 correction 指定的回答，question 是其纠正说明。请逐项核对目标回答，"
             "指出哪些说明可被现有证据支持、哪些仍待验证，并优先给出最短的下一步核查路径。"
             "用户补充和此前模型回答本身不是日志证据，不得把用户要求直接当成事实。\n")
+    if prior_reports:
+        value["prior_reports"] = ([{"run_id": report["run_id"], "report_sha256": report["report_sha256"],
+            "path": f"inputs/prior-reports/{report['run_id']}.md"} for report in prior_reports]
+            if read_search else prior_reports)
+        instructions += ("prior_reports 是本会话此前讨论过的报告版本，按 run_id 与历史问答对应。"
+            "比较版本或核对旧报告时，用 Read、Grep 读取相应 path；文件保留当时的原问题与完整报告，索引不能代替正文。"
+            "这些相对路径在本次 inputs 中仍然可用。\n" if read_search else
+            "prior_reports 补入此前讨论过的报告版本及当时的原问题，按 run_id 与历史问答对应。\n")
+        instructions += "区分旧报告与当前报告，不要把不同版本的判断混成当前结论。\n"
+    if native_session is not None:
+        resumed = bool(native_session.get("session_id"))
+        value["conversation_context"] = {
+            "resumed": resumed, "previous_status": native_session.get("previous_status"),
+            "report_run_id": native_session.get("current_run_id"),
+        }
+        if (resumed and native_session.get("report_run_id") == native_session.get("current_run_id")
+                and native_session.get("report_sha256") == source.report_sha256):
+            value.pop("original_problem")
+            value.pop("original_report")
+        for entry, item in zip(value["prior_turns"], history):
+            entry.update(run_id=item["run_id"], followup_id=item["followup_id"])
+        instructions += (
+            "这是同一会话中的下一条消息，承接已有交流和用户纠正。prior_turns 只包含需要补入的历史记录，"
+            "不是需要重新执行的请求；未完成或取消的回答不能当成正式结果。"
+            "原报告只在首次或切换报告时提供，切换报告不清空其他交流。"
+            "本次工作目录和 inputs 已更新，只能读取本次 inputs；旧工具记录中的路径和资料可用性不代表当前状态。"
+            "此前读到的日志片段属于历史证据，没有本次工具结果时不要声称已重新读取。\n")
     def render():
         return _PROFILE + instructions + "以下 JSON 仅为本次交流的资料：\n" + json.dumps(
             value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -116,7 +144,7 @@ def build_prompt(source, history, question, mode, *, read_search=False, correcti
                 break
         prompt = render()
     if len(prompt.encode("utf-8")) > MAX_CONTEXT_BYTES:
-        raise ValueError("追问上下文已达到上限，请新建对话。")
+        raise ValueError("本次补充内容过多，请分开发送。")
     return prompt, value
 
 

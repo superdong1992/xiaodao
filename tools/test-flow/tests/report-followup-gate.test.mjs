@@ -199,12 +199,15 @@ test("the isolated wrapper enforces the production follow-up policy and writes i
   const settings = path.join(root, "settings.json");
   const policySettings = path.join(root, "followup-policy.json");
   const cli = path.join(root, "fake-cli.mjs");
+  const sessionId = "10203040-5060-4070-8090-a0b0c0d0e0f0";
+  const nativeConfig = path.join(root, "native-session");
+  fs.mkdirSync(nativeConfig);
   fs.writeFileSync(settings, JSON.stringify({ permissions: { allow: ["Read", "Grep"] }, hooks: { SessionStart: [] }, enabledPlugins: { inherited: true } }));
   fs.writeFileSync(policySettings, '{"env":{},"hooks":{"PreToolUse":[]}}\n');
   const terminal = { type: "result", subtype: "success", is_error: false, num_turns: 3,
     total_cost_usd: 0.01, result: "依据日志回答。", usage: { input_tokens: 20, output_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } };
-  const stream = [{ ...events[0], model: "test-model" }, ...events.slice(1), terminal];
-  fs.writeFileSync(cli, `import assert from 'node:assert/strict';\nconst args=process.argv.slice(2);\nassert.deepEqual(args.slice(args.indexOf('--tools')),${JSON.stringify(reportFollowupPermissionArguments())});\nassert.equal(args[args.indexOf('--setting-sources')+1],'');\nassert.equal(args[args.indexOf('--settings')+1],${JSON.stringify(policySettings)});\nassert.equal(args[args.indexOf('--mcp-config')+1],'{"mcpServers":{}}');\nfor(const flag of ['--strict-mcp-config','--disable-slash-commands','--no-chrome']) assert.ok(args.includes(flag));\nassert.equal(Object.hasOwn(process.env,'PROBLEM_LOCATOR_FOLLOWUP_SETTINGS'),false);\nfor(const event of ${JSON.stringify(stream)}) console.log(JSON.stringify(event));\n`);
+  const stream = [{ ...events[0], model: "test-model", session_id: sessionId }, ...events.slice(1), terminal];
+  fs.writeFileSync(cli, `import assert from 'node:assert/strict';\nimport fs from 'node:fs';\nconst args=process.argv.slice(2);\nassert.deepEqual(args.slice(args.indexOf('--tools')),${JSON.stringify(reportFollowupPermissionArguments())});\nassert.equal(args[args.indexOf('--setting-sources')+1],'');\nassert.equal(args[args.indexOf('--settings')+1],${JSON.stringify(policySettings)});\nassert.equal(args[args.indexOf('--mcp-config')+1],'{"mcpServers":{}}');\nfor(const flag of ['--strict-mcp-config','--disable-slash-commands','--no-chrome']) assert.ok(args.includes(flag));\nassert.equal(Object.hasOwn(process.env,'PROBLEM_LOCATOR_FOLLOWUP_SETTINGS'),false);\nassert.equal(process.env.CLAUDE_CONFIG_DIR,${JSON.stringify(nativeConfig)});\nassert.ok(!args.includes('--no-session-persistence'));\nconst record=${JSON.stringify(path.join(nativeConfig, "session-marker"))};\nif(fs.existsSync(record)){assert.equal(args[args.indexOf('--resume')+1],${JSON.stringify(sessionId)});assert.equal(fs.readFileSync(record,'utf8'),'first-context');}else{assert.ok(!args.includes('--resume'));fs.writeFileSync(record,'first-context');}\nfor(const event of ${JSON.stringify(stream)}) console.log(JSON.stringify(event));\n`);
   const args = [path.join(ROOT, "tools/test-flow/runtime-support/isolated-agent-wrapper.mjs"),
     "--claude-entry", cli, "--settings", settings, "--model", "test-model",
     "--usage-root", path.join(root, "usage"), "--max-turns", "8", "--max-total-tokens", "120000",
@@ -220,15 +223,24 @@ test("the isolated wrapper enforces the production follow-up policy and writes i
   assert.match(missingGuard.stderr, /WRAPPER_FOLLOWUP_SETTINGS_REQUIRED/);
   const accepted = spawnSync(process.execPath, args, { cwd: root,
     env: { ...env, PROBLEM_LOCATOR_AGENT_FILE_ACCESS: "read-search", PROBLEM_LOCATOR_AGENT_PHASE: "REPORT_FOLLOWUP",
-      PROBLEM_LOCATOR_FOLLOWUP_SETTINGS: policySettings },
+      PROBLEM_LOCATOR_FOLLOWUP_SETTINGS: policySettings, CLAUDE_CONFIG_DIR: nativeConfig },
     input: "", encoding: "utf8" });
   assert.equal(accepted.status, 0, accepted.stderr);
-  const [name] = fs.readdirSync(path.join(root, "usage"));
-  const receipt = JSON.parse(fs.readFileSync(path.join(root, "usage", name), "utf8"));
-  assert.equal(receipt.workflow, "report-followup");
-  assert.equal(validReportFollowupTraceReceipt(receipt.tool_trace_audit), true);
-  assert.equal(receipt.environment_policy.claude_process.key_names.includes("PROBLEM_LOCATOR_AGENT_PHASE"), false);
-  assert.equal(receipt.environment_policy.claude_process.key_names.includes("PROBLEM_LOCATOR_FOLLOWUP_SETTINGS"), false);
+  const resumed = spawnSync(process.execPath, [...args, "--resume", sessionId], { cwd: root,
+    env: { ...env, PROBLEM_LOCATOR_AGENT_FILE_ACCESS: "read-search", PROBLEM_LOCATOR_AGENT_PHASE: "REPORT_FOLLOWUP",
+      PROBLEM_LOCATOR_FOLLOWUP_SETTINGS: policySettings, CLAUDE_CONFIG_DIR: nativeConfig },
+    input: "", encoding: "utf8" });
+  assert.equal(resumed.status, 0, resumed.stderr);
+  const receipts = fs.readdirSync(path.join(root, "usage")).map((name) =>
+    JSON.parse(fs.readFileSync(path.join(root, "usage", name), "utf8")));
+  assert.equal(receipts.length, 2);
+  assert.equal(JSON.stringify(receipts).includes(sessionId), false);
+  for (const receipt of receipts) {
+    assert.equal(receipt.workflow, "report-followup");
+    assert.equal(validReportFollowupTraceReceipt(receipt.tool_trace_audit), true);
+    assert.equal(receipt.environment_policy.claude_process.key_names.includes("PROBLEM_LOCATOR_AGENT_PHASE"), false);
+    assert.equal(receipt.environment_policy.claude_process.key_names.includes("PROBLEM_LOCATOR_FOLLOWUP_SETTINGS"), false);
+  }
 });
 
 function runStructuredFollowupWrapper(context, { name = "StructuredOutput", mutate = () => {}, exitCode = 0 } = {}) {
@@ -244,6 +256,8 @@ function runStructuredFollowupWrapper(context, { name = "StructuredOutput", muta
   const settings = path.join(root, "followup-policy.json");
   const cli = path.join(root, "fake-cli.mjs");
   const usageRoot = path.join(root, "usage");
+  const nativeConfig = path.join(root, "native-session");
+  fs.mkdirSync(nativeConfig);
   fs.writeFileSync(settings, '{"env":{},"hooks":{"PreToolUse":[]}}\n');
   fs.writeFileSync(cli, `for(const event of ${JSON.stringify(events)}) console.log(JSON.stringify(event));\nprocess.exitCode=${exitCode};\n`);
   const result = spawnSync(process.execPath, [path.join(ROOT, "tools/test-flow/runtime-support/isolated-agent-wrapper.mjs"),
@@ -253,7 +267,7 @@ function runStructuredFollowupWrapper(context, { name = "StructuredOutput", muta
     cwd: root, input: "", encoding: "utf8",
     env: { ...buildIsolatedAgentEnvironment({ ambient: process.env }),
       PROBLEM_LOCATOR_AGENT_FILE_ACCESS: "read-search", PROBLEM_LOCATOR_AGENT_PHASE: "REPORT_FOLLOWUP",
-      PROBLEM_LOCATOR_FOLLOWUP_SETTINGS: settings },
+      PROBLEM_LOCATOR_FOLLOWUP_SETTINGS: settings, CLAUDE_CONFIG_DIR: nativeConfig },
   });
   const receipts = fs.existsSync(usageRoot)
     ? fs.readdirSync(usageRoot).map((file) => JSON.parse(fs.readFileSync(path.join(usageRoot, file), "utf8"))) : [];

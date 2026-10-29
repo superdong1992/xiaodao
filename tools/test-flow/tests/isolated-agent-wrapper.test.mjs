@@ -46,6 +46,7 @@ console.log(JSON.stringify({type:"result",subtype:"success",is_error:false,num_t
     const option = (name) => args[args.indexOf(name) + 1];
     assert.equal(option("--output-format"), "stream-json");
     assert.equal(option("--permission-mode"), "dontAsk");
+    assert.ok(args.includes("--no-session-persistence"));
     assert.equal(option("--tools"), policy === "none" ? "" : "Read");
     assert.equal(args.includes("--dangerously-skip-permissions"), false);
     assert.equal(args.includes("--allowedTools"), policy === "read-only");

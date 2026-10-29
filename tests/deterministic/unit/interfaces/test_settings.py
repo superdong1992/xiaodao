@@ -143,6 +143,12 @@ def test_report_followup_is_disabled_and_has_separate_snapshot_caps(tmp_path):
     assert settings.report_followup_storage_bytes == 2048
 
 
+def test_report_followup_has_only_one_enable_switch(tmp_path):
+    settings = Settings.load(environ=environment(tmp_path))
+    assert settings.report_followup_enabled is False
+    assert not hasattr(settings, "report_followup_native_session_enabled")
+
+
 def test_report_followup_timeout_defaults_to_ten_minutes(tmp_path):
     settings = Settings.load(environ=environment(tmp_path))
     assert settings.report_followup_timeout_seconds == 600

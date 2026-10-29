@@ -72,6 +72,10 @@ if (workflow === "report-followup") {
   if (!policySettings || !path.isAbsolute(policySettings) || !fs.statSync(policySettings).isFile()) {
     throw new Error("WRAPPER_FOLLOWUP_SETTINGS_REQUIRED");
   }
+  if (!path.isAbsolute(process.env.CLAUDE_CONFIG_DIR ?? "")) throw new Error("WRAPPER_FOLLOWUP_SESSION_DIRECTORY_REQUIRED");
+  if (values.resume !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(values.resume)) {
+    throw new Error("WRAPPER_FOLLOWUP_SESSION_INVALID");
+  }
   // The production backend owns this restricted settings file and its
   // PreToolUse guard. Do not load ambient user/project hooks or permissions.
   configurationArguments = ["--setting-sources", "", "--settings", policySettings,
@@ -119,7 +123,7 @@ const child = spawn(process.execPath, [
   "-p",
   "--output-format", "stream-json",
   "--verbose",
-  "--no-session-persistence",
+  ...(workflow === "report-followup" ? (values.resume ? ["--resume", values.resume] : []) : ["--no-session-persistence"]),
   ...configurationArguments,
   "--model", values.model,
   "--max-turns", String(caps.max_turns),

@@ -1,8 +1,14 @@
 # TODO
 
-更新时间：2026-10-21
+更新时间：2026-10-29
 
 本文件是仓库活跃待办的唯一清单。已完成事项由代码、当前设计与 Git 历史证明，不在这里保留关闭项。
+
+## 原生会话续接验收（2026-10-29）
+
+- 追问已统一为原生 session，删除旧执行模式及其专用开关；沿 PL-FIX-083 记录。专项通过，待推送前对最终源码完成中央 `dev.default`，状态只看该节最新 verdict 引用。Linux 追问单元 384 passed、集成 5 passed、启动器 112 passed、工具权限 67 passed、配置及装配 40 passed；Node 追问 wrapper 67 passed、普通 wrapper 7 passed。各组有交集，不累计；命令范围及证据见 `docs/report-followup-testing.md`。
+- 统一模式的首轮完整回归发现共享保留策略用例仍断言日志到期后拒绝追问，SQLite/PostgreSQL 各失败一次，其余 Gate 通过。按新行为补齐明确断言后，保留策略 22 passed、对应 PostgreSQL 1 passed；待最终源码重新完整验证，不以失败轮或专项代替推送结论。
+- 公司内部 codeagent / Glm-5.2-Auto 尚未接入本机。生产验收须确认精确 `--resume`、两问间的日志证据与用户补充、跨工作目录和重启恢复、200k 窗口识别及原生压缩。先审阅真实测试计划和预算；本地确定性测试不替代真实效果。追问总开关 `REPORT_FOLLOWUP_ENABLED` 仍默认关闭，开启后只有原生续接；部署须同时持久化数据库和 `resources/followup-sessions`。
 
 ## 追问权限与流式检查一致性（2026-10-21）
 

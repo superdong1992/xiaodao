@@ -167,7 +167,7 @@ GET /api/v1/agent/conversations/{conversation_id}/files/{artifact_id}/content?ru
 
 `current_run` 始终是当前轮；`selected_run_id` 指明这次读取的状态、报告和文件属于哪一轮。省略 `run_id` 选当前轮，传历史轮 ID 即可读取旧报告，不重新诊断。`capabilities` 给出发送、停止、重新诊断、重命名和删除按钮是否可用，前端不必自行猜测状态组合。
 
-所选轮次的 `resources_expired=true` 表示日志已清理，`resources_expired_at` 为清理时间，`resource_cleanup_reason` 区分 `RETENTION_EXPIRED`（正常到期）和 `DISK_PRESSURE`（容量回收）。页面显示“相关日志已清理，本轮仅供查看”，不再发送该轮追问；可以在同一会话新开一轮。永久报告的原下载地址和字节保持不变，已清理 ZIP 不再提供链接，旧 ZIP 地址在权限检查后返回 `410 / AGENT_RESOURCE_EXPIRED`。
+所选轮次的 `resources_expired=true` 表示原日志资源已清理，`resources_expired_at` 为清理时间，`resource_cleanup_reason` 区分 `RETENTION_EXPIRED`（正常到期）和 `DISK_PRESSURE`（容量回收）。页面提示“相关日志已清理，本次回答未重新核对原日志”；报告归档完整时仍可追问，以追问接口的 `can_ask` / `reason` 为准，不能仅凭 `resources_expired` 禁用输入。继续正式诊断时只校验本次选中的附件，新上传的有效材料不受原轮清理状态限制。永久报告的原下载地址和字节保持不变，已清理 ZIP 不再提供链接，旧 ZIP 地址在权限检查后返回 `410 / AGENT_RESOURCE_EXPIRED`。
 
 `history` 是唯一聊天展示序列，仅有 `user.message`、`assistant.question`、`diagnosis.result`；结果记录只含摘要，点击后按其 `run_id` 读取正文。默认取最近 50 条，最多 100 条；将 `history_next_cursor` 原样传入 `history_before` 加载更早记录。每页按时间正序返回，前端在顶部插入并按 `id` 去重。历史跨越多轮，分页不复制报告正文；不再返回 `messages`。
 

@@ -15,7 +15,7 @@ from problem_locator.runtime.agent_backend import BackendExecution
 from tests.deterministic.integration.test_agent_reports import _finish_diagnosis, _get
 from tests.deterministic.integration.test_direct_skill_delivery import direct_website, _finish
 from tests.deterministic.integration.test_website_agent import OWNER_KEY, _post, _preupload, website
-from tests.deterministic.unit.agent.test_report_followup import model_reply
+from tests.deterministic.unit.agent.test_report_followup import model_reply, native_init
 
 
 class GenericV2Backend:
@@ -38,21 +38,35 @@ class GenericV2Backend:
 class FollowupBackend:
     def __init__(self):
         self.calls = []
+        self.sessions = {}
+        self.session_ids = []
 
     def execute(self, **kwargs):
         context = json.loads((kwargs["workspace_root"] / "inputs/context.json").read_bytes())
         logs = list((kwargs["workspace_root"] / "inputs/logs").glob("*.log"))
         assert logs and any(path.read_bytes() for path in logs)
         assert kwargs["backend_phase"] == "REPORT_FOLLOWUP" and kwargs["file_access"] == "read-search"
+        native = kwargs["native_session"]
+        session_id = native_init(kwargs)
+        previous = self.sessions.setdefault(session_id, [])
+        self.session_ids.append(session_id)
         self.calls.append(context)
+        assert context["prior_turns"] == []
         if len(self.calls) == 1:
-            assert context["prior_turns"] == []
+            assert native.resume_id is None and previous == []
+            assert not context["conversation_context"]["resumed"]
             answer = "原日志提供了排队线索，但还需核对负载。保留标记：memory-42。"
         else:
-            assert context["prior_turns"][0]["answer"].endswith("memory-42。")
+            assert native.resume_id == self.session_ids[0]
+            assert context["conversation_context"]["resumed"]
+            assert "original_report" not in context and "original_problem" not in context
+            assert previous[0]["answer"].endswith("memory-42。")
+            assert "memory-42" not in kwargs["prompt"]
             assert context["question"] == "补充：另一实例 queue_depth=0，这如何影响此前判断？"
-            answer = "queue_depth=0 提示应区分实例，不能据此排除原实例排队。memory-42。"
-        return SimpleNamespace(final_result=model_reply(kwargs, answer=answer))
+            marker = previous[0]["answer"].split("保留标记：")[1]
+            answer = "queue_depth=0 提示应区分实例，不能据此排除原实例排队。" + marker
+        previous.append({"question": context["question"], "answer": answer})
+        return SimpleNamespace(final_result=model_reply(kwargs, answer=answer), session_id=session_id)
 
 
 def _install(website):
@@ -110,7 +124,12 @@ def _exercise(website, followups, backend, cid, prefix, kind):
         item = current["items"][-1]
         assert item["followup_id"] == receipt["followup_id"] and item["status"] == "COMPLETED"
         assert item["context_mode"] == "REPORT_AND_LOGS"
+        session = followups.store.sessions.get(cid)
+        assert session["session_id"] == backend.session_ids[0]
+        assert session["last_followup_id"] == receipt["followup_id"]
     assert len(backend.calls) == 2
+    assert len(backend.sessions) == 1 and len(backend.sessions[backend.session_ids[0]]) == 2
+    assert "memory-42" in item["answer_markdown"] and "queue_depth=0" in item["answer_markdown"]
     assert backend.calls[0]["original_report"] == source.report_markdown
     assert backend.calls[0]["original_problem"] == source.problem_text
     events = client.get(path + "/events", headers={"Last-Event-ID": "3"})

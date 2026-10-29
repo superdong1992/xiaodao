@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -37,6 +37,7 @@ from problem_locator.journey import (
 from .agent_telemetry import AgentStreamTelemetry, TelemetryTeeSink
 from .claude_command import ClaudeCommandError, prepare_claude_command, apply_final_response_policy
 from .failures import RuntimeExecutionError, runtime_failure
+from .native_session import NativeSession
 from .process_tree import ManagedProcess, ProcessTreeError, spawn_managed_process
 from .secret_redactor import StreamingSecretRedactor
 
@@ -84,6 +85,7 @@ class BackendExecution:
     workspace_bytes: int
     elapsed_seconds: float
     final_result: str | None = None
+    session_id: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,12 +235,14 @@ class AgentBackend:
         diagnosis_mode: Literal["GENERIC", "SPECIALIZED"] = "SPECIALIZED",
         backend_phase: str = "UNSPECIFIED",
         file_access: str | None = None,
+        native_session: NativeSession | None = None,
     ) -> BackendExecution:
         backend_invocation_id = _next_backend_invocation_id()
         telemetry = AgentStreamTelemetry(
             monotonic=self._monotonic,
             output_limit_bytes=(test_limits.stdout_stderr_bytes if test_limits is not None
                 else resource_limits.stdout_stderr_bytes),
+            native_session=native_session,
         )
         stdout_sink = _OwnedSink(log_sinks.stdout)
         stderr_sink = (
@@ -269,6 +273,7 @@ class AgentBackend:
                 backend_phase=backend_phase,
                 backend_invocation_id=backend_invocation_id,
                 file_access=file_access,
+                native_session=native_session,
             )
         except RuntimeExecutionError as exc:
             failure = exc.failure
@@ -330,6 +335,7 @@ class AgentBackend:
         backend_phase: str,
         backend_invocation_id: str,
         file_access: str | None = None,
+        native_session: NativeSession | None = None,
     ) -> BackendExecution:
         limits = test_limits or BackendExecutionLimits.from_resource_limits(
             resource_limits
@@ -351,7 +357,7 @@ class AgentBackend:
                 broker_environment=broker_environment,
             )
             invocation = apply_final_response_policy(invocation, file_access=file_access,
-                workspace_root=workspace_root, phase=backend_phase)
+                workspace_root=workspace_root, phase=backend_phase, native_session=native_session)
         except ClaudeCommandError as exc:
             raise runtime_failure(
                 stage=ExecutionStage.BACKEND_START,
@@ -493,7 +499,8 @@ class AgentBackend:
                     ExecutionStage.BACKEND_START,
                     backend_start_observed,
                     data={
-                        "argv": invocation.argv,
+                        "argv": tuple("[SESSION_ID]" if native_session is not None
+                            and token == native_session.resume_id else token for token in invocation.argv),
                         "process_id": getattr(managed.process, "pid", None),
                         "backend_phase": backend_phase,
                         "backend_invocation_id": backend_invocation_id,
@@ -511,6 +518,9 @@ class AgentBackend:
             while primary_failure is None and managed.process.poll() is None:
                 if cancellation.is_cancelled():
                     primary_failure = _cancelled_failure(cancellation.reason)
+                    break
+                if telemetry.native_session_failed:
+                    primary_failure = _native_session_failure()
                     break
                 if input_state.failure is not None:
                     primary_failure = ExecutionFailure(
@@ -674,6 +684,8 @@ class AgentBackend:
 
         if primary_failure is not None:
             raise RuntimeExecutionError(primary_failure)
+        if native_session is not None and not telemetry.has_valid_native_session():
+            raise RuntimeExecutionError(_native_session_failure())
         if telemetry.output_limit_exceeded:
             raise runtime_failure(
                 stage=ExecutionStage.BACKEND_EXECUTE,
@@ -696,6 +708,7 @@ class AgentBackend:
             workspace_bytes=workspace_bytes,
             elapsed_seconds=max(0.0, self._monotonic() - started),
             final_result=telemetry.final_result,
+            session_id=telemetry.session_id,
         )
         assert backend_execution_observed is not None
         record_stage_completed(
@@ -727,6 +740,11 @@ class AgentBackend:
             # Observability must never change successful Agent execution.
             pass
         return result
+
+
+def _native_session_failure() -> ExecutionFailure:
+    return ExecutionFailure(stage=ExecutionStage.OUTCOME_VALIDATE, code=ErrorCode.OUTCOME_INVALID,
+        message="Agent 原生会话未能确认或保存，本次回答已停止。", retryable=False, details=[])
 
 
 def _join_threads(threads: tuple[threading.Thread, ...], timeout: float) -> None:

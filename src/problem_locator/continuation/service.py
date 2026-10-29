@@ -365,8 +365,6 @@ class ContinuationService:
         if followups._stop.is_set() or followups.agent._stop.is_set():
             store._transition(db, row, "INTERRUPTED", code="AGENT_FOLLOWUP_INTERRUPTED")
             return None, False
-        if store.resources_expired(db, row["conversation_id"], row["run_id"]):
-            raise AgentStoreError("AGENT_ATTACHMENT_NOT_READY", "本轮日志已经清理，请重新上传后继续。", 409)
         return row, False
 
     @staticmethod

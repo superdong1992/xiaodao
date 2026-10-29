@@ -13,6 +13,7 @@ from problem_locator.contracts.limits import JOB_STDOUT_STDERR_BYTES
 from problem_locator.contracts.ports import AppendOnlyByteSink
 
 from .followup_access import STRUCTURED_OUTPUT_TOOLS, file_tools_for_policy
+from .native_session import NativeSession, validated_session_id
 
 
 _DEFAULT_LINE_LIMIT_BYTES = 1024 * 1024
@@ -90,6 +91,7 @@ class AgentStreamTelemetry:
         monotonic: Callable[[], float] = time.monotonic,
         line_limit_bytes: int = _DEFAULT_LINE_LIMIT_BYTES,
         output_limit_bytes: int = JOB_STDOUT_STDERR_BYTES,
+        native_session: NativeSession | None = None,
     ) -> None:
         if line_limit_bytes <= 0:
             raise ValueError("line_limit_bytes must be positive")
@@ -110,6 +112,9 @@ class AgentStreamTelemetry:
         self._internal_failure = False
         self._terminal_result = False
         self._final_result: str | None = None
+        self._native_session = native_session
+        self._session_id: str | None = None
+        self._native_session_failed = False
         self._result_count = 0
         self._system_observed_ms: float | None = None
         self._result_observed_ms: float | None = None
@@ -210,6 +215,7 @@ class AgentStreamTelemetry:
         if not isinstance(payload, dict) or payload.get("type") not in _STREAM_TYPES:
             return
         self._recognized += 1
+        self._observe_native_session(payload)
         observed_ms = self._elapsed_ms()
         event_type = payload["type"]
         if event_type == "system":
@@ -228,6 +234,48 @@ class AgentStreamTelemetry:
             self._observe_partial(payload.get("event"), observed_ms)
         elif event_type in _PARTIAL_EVENT_TYPES:
             self._observe_partial(payload, observed_ms)
+
+    def _observe_native_session(self, payload: Mapping[str, Any]) -> None:
+        session = self._native_session
+        if session is None or self._native_session_failed:
+            return
+        is_init = payload.get("type") == "system" and payload.get("subtype") == "init"
+        if not is_init and payload.get("type") != "result":
+            return
+        try:
+            if not is_init:
+                if self._session_id is None:
+                    raise ValueError("Agent 未确认原生会话。")
+                if "session_id" not in payload:
+                    return
+            identifier = validated_session_id(payload.get("session_id"))
+            expected = self._session_id or session.resume_id
+            if expected is not None and identifier != expected:
+                raise ValueError("Agent 返回的会话与当前对话不一致。")
+            if self._session_id is None:
+                if session.on_session_id is not None:
+                    session.on_session_id(identifier)
+                self._session_id = identifier
+        except Exception:
+            # The callback persists identity before a cancellation or crash.
+            # Failure must reject the answer, without logging private values.
+            self._native_session_failed = True
+            self._malformed = True
+
+    @property
+    def session_id(self) -> str | None:
+        with self._lock:
+            return self._session_id
+
+    @property
+    def native_session_failed(self) -> bool:
+        with self._lock:
+            return self._native_session_failed
+
+    def has_valid_native_session(self) -> bool:
+        self.finish()
+        with self._lock:
+            return self._session_id is not None and not self._native_session_failed
 
     def _observe_partial(self, event: object, observed_ms: float) -> None:
         if not isinstance(event, dict) or not isinstance(event.get("type"), str):

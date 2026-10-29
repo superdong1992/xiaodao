@@ -175,9 +175,9 @@ RESOURCE_DISK_TARGET_FREE_PERCENT=15
 
 网站必须同步处理以下行为：
 
-- 按所选轮次的 `resources_expired` 显示“相关日志已清理，本轮仅供查看”；报告原地址及历史问答仍可读。隐藏已清理 ZIP 的下载入口，旧地址经权限检查后返回 `410 / AGENT_RESOURCE_EXPIRED`。附件 `EXPIRED` 不能通过旧请求重试恢复。
+- 按所选轮次的 `resources_expired` 显示“相关日志已清理，本次回答未重新核对原日志”；报告原地址及历史问答仍可读。隐藏已清理 ZIP 的下载入口，旧地址经权限检查后返回 `410 / AGENT_RESOURCE_EXPIRED`。附件 `EXPIRED` 不能通过旧请求重试恢复。
 - 清理时间在 `resources_expired_at`，原因 `resource_cleanup_reason` 区分 `RETENTION_EXPIRED` 与 `DISK_PRESSURE`；共享附件的状态不能代替轮次状态。页面提示的天数须与实际 `WEB_RESOURCE_RETENTION_DAYS` 一致。
-- 追问期限也改为 Web 资源期限；资源提前回收后 `can_ask=false`，不再提交新追问或文字纠正。已受理任务结束前，清理不会移除其使用中的资源；同一会话仍可新开一轮。
+- 追问统一使用原生 session；资源清理只影响原日志，报告归档完整时仍可继续交流。输入可用性以追问接口的 `can_ask` / `reason` 为准，不能仅凭 `resources_expired` 禁用。需要正式诊断时校验本次选中的附件，新上传的有效材料仍可使用。已受理任务结束前，清理不会移除其使用中的资源。
 - 上传收到 `503 / AGENT_STORAGE_PRESSURE` 时提示稍后重试，不反复发送或扩大额度。删除、停止和失败残留仍由原机制处理。
 - 诊断 SSE 返回 `409 / AGENT_EVENT_CURSOR_EXPIRED` 时，先重读会话快照，再以其 `last_event_id` 设置 `Last-Event-ID` 重连；使用可设置请求头的流式 fetch。追问流仍按自己的游标错误恢复，两个流不要混用。
 

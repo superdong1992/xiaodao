@@ -58,23 +58,24 @@ Generic 诊断途中补交日志有单独流程。服务先校验所选附件，
 
 服务观察新报告后，异步复制该报告实际使用的日志。副本必须与执行记录中的日志清单一致，保存到 `jobs/<source_job_id>/followup-inputs`。启用功能前的历史报告不会重新解析旧附件或假设临时日志还在，可以退化为仅报告交流。
 
-提交时固定 `REPORT_ONLY` 或 `REPORT_AND_LOGS`，并先验证上下文预算。每个会话最多一个活跃追问，每份报告最多 100 轮，问题和回答各不超过 65,536 UTF-8 字节，上下文上限 262,144 字节。报告来源达到 7 天后不再接收新追问。日志副本默认单报告预算 1 GiB、总预算 5 GiB，实际可由服务构造参数调整。
+`REPORT_FOLLOWUP_ENABLED` 默认关闭，开启后统一续接原生 CLI 会话。每个网站会话最多一个活跃追问，不设每报告 100 轮上限。提交时固定 `REPORT_ONLY` 或 `REPORT_AND_LOGS`；问题和回答各不超过 65,536 UTF-8 字节，本次新增提示上限 262,144 字节，不代表累计模型上下文窗口。日志默认保留 15 天，清理后报告归档完整仍可追问；继续正式诊断时只校验本次选中的附件。日志副本默认单报告预算 1 GiB、总预算 5 GiB，实际可由服务构造参数调整。
 
-追问 Worker 为每条任务创建独立工作区，只调用一次模型。命令支持只读检索时允许 `Read`、`Grep` 并可将完整历史保存在文件；否则不授予文件访问。模型不能运行 Skill、Logparse、命令、网络或子任务，也不能写文件。执行前后都校验输入树。`REPORT_ONLY` 回答强制带有未重新核对原始日志的说明。
+追问 Worker 为每条任务创建独立工作区，只调用一次模型。首次创建 CLI session，后续按已保存 ID 使用 `--resume`，只补入新增消息和必要报告内容；较长的待补历史与历史报告保存在只读文件中。启动器须支持原生续接及限定 `inputs` 的 `Read`、`Grep`，不回退旧追问模式。模型不能运行 Skill、Logparse、命令、网络或子任务，也不能写文件。执行前后都校验输入树。`REPORT_ONLY` 回答强制带有未重新核对原始日志的说明。
 
-追问结果写入 `agent_followup_*` 表及独立事件序列，不改变原报告与原诊断终态。重启时已运行的任务成为 `INTERRUPTED`，不会重新排队调用模型；合法且未过期的 QUEUED 任务可继续。快照复制失败只影响追问日志能力，不能撤回已经提交的正式诊断。
+追问结果写入 `agent_followup_*` 表及独立事件序列，不改变原报告与原诊断终态。重启时已运行的任务成为 `INTERRUPTED`，不会重新排队调用模型；功能启用且来源记录完整的 QUEUED 任务可继续。关闭总开关后不启动新任务，仍可查询、取消和清理，不删除 session；再次启用时继续原会话。会话记录保留到用户显式删除网站会话。快照复制失败只影响追问日志能力，不能撤回已经提交的正式诊断。
 
 ### 3.1 `followup` 逐文件设计
 
 | 文件 | 职责、关键对象与输入输出 |
 | --- | --- |
 | [followup/__init__.py](../../src/problem_locator/followup/__init__.py) | 重导出 `ReportFollowupService`，作为装配入口。 |
-| [followup/models.py](../../src/problem_locator/followup/models.py) | 定义请求、停止请求、回答条目、列表、接收回执和 v1 事件；定义 `FollowupSource` 与字节/轮次限制。校验完成状态必须有回答、失败/中断必须有错误，事件的 run 和 followup 身份必须与正文一致。 |
-| [followup/context.py](../../src/problem_locator/followup/context.py) | `context_value` 组织原问题、原报告、历史问答和当前问题；`build_prompt` 与提交阶段共用同一预算算法。支持检索时超大历史转为完整文件与索引，并尽可能保留最近问答；仍超预算则拒绝。`validate_answer` 校验非空 Markdown、字节上限，并补齐报告模式说明。 |
-| [followup/service.py](../../src/problem_locator/followup/service.py) | `ReportFollowupService` 校验来源、授权和可用性，装配 `FollowupStore`、`FollowupWorker`、`SnapshotWorker`。`schedule_observe` 只保存有界观察提示；`observe_report` 创建快照任务；`get` 是纯查询，返回禁用、不支持、过期、忙或达到次数上限等原因；`submit`、`stop` 是显式改变追问状态的入口。 |
-| [followup/store.py](../../src/problem_locator/followup/store.py) | 管理 metadata、snapshots、tasks、events、stops 五张表，严格验证 storage version 1。按会话加锁，PostgreSQL 领取任务用 `FOR UPDATE ... SKIP LOCKED`；配额使用独立 advisory lock。请求指纹绑定 `run_id + text`，事件序号按报告轮次递增。`revoke` 可参与会话删除事务；`busy`、`purge`、`workspace_ids` 和 `workspace_in_use` 为保留清理提供精确保护信息。 |
+| [followup/models.py](../../src/problem_locator/followup/models.py) | 定义请求、停止请求、回答条目、列表、接收回执和 v1 事件；定义 `FollowupSource` 与字节限制。校验完成状态必须有回答、失败/中断必须有错误，事件的 run 和 followup 身份必须与正文一致。 |
+| [followup/context.py](../../src/problem_locator/followup/context.py) | `context_value` 组织首次问题、报告及后续增量上下文；`build_prompt` 按原生会话已消费的位置补入历史，并提供历史报告的只读索引。待补历史过长时转为文件；仍超本次提示预算则拒绝。`validate_answer` 校验非空 Markdown、字节上限，并补齐报告模式说明。 |
+| [followup/service.py](../../src/problem_locator/followup/service.py) | `ReportFollowupService` 校验来源、授权、原生启动器和可用性，装配 `FollowupStore`、`FollowupWorker`、`SnapshotWorker`。`schedule_observe` 只保存有界观察提示；`observe_report` 创建快照任务；`get` 是纯查询，返回禁用、不支持或忙等原因；`submit`、`stop` 是显式改变追问状态的入口。 |
+| [followup/store.py](../../src/problem_locator/followup/store.py) | 管理 metadata、snapshots、tasks、events、stops 五张表，当前 storage version 2，支持从 version 1 增量升级。按会话加锁，PostgreSQL 领取任务用 `FOR UPDATE ... SKIP LOCKED`；配额使用独立 advisory lock。请求指纹绑定轮次、文字、纠正目标与附件，事件序号按报告轮次递增。`revoke` 可参与会话删除事务；`busy`、`purge`、`workspace_ids` 和 `workspace_in_use` 为保留清理提供精确保护信息。 |
+| [followup/sessions.py](../../src/problem_locator/followup/sessions.py) | `FollowupSessions` 使用独立 version 1 表保存会话 ID、执行归属与已消费的历史位置；跨报告读取增量问答和历史报告，校验 init 与完成回调，拒绝停止或删除后的迟到结果。CLI 记录保存在会话独立的 `CLAUDE_CONFIG_DIR`，随显式删除清理。 |
 | [followup/snapshots.py](../../src/problem_locator/followup/snapshots.py) | `build_snapshot` 校验报告哈希和 Generic/专用诊断日志清单，先预约容量，再受控复制、生成 manifest、设为只读并发布。`ordinary_path`、`read_small` 拒绝越界、链接、非普通文件和读取漂移；`verify_inputs` 同时校验文件集合、大小及哈希；`copy_snapshot` 为追问创建新的输入副本。`SnapshotWorker` 消费观察提示与快照队列，复制失败保存失败状态。 |
-| [followup/worker.py](../../src/problem_locator/followup/worker.py) | `FollowupWorker.run_once` 领取一条任务，取得会话使用租约，生成固定上下文和输入文件，执行一次模型后验证输入再发布回答。`_Cancellation` 同时检查关闭信号和数据库任务许可；`cancel` 只命中指定会话/追问。默认执行上限 300 秒，工作区预算为快照预算加 16 MiB。结果提交不确定时保留 RUNNING 供启动恢复识别，不重新执行。 |
+| [followup/worker.py](../../src/problem_locator/followup/worker.py) | `FollowupWorker.run_once` 领取一条任务，取得会话使用租约，准备增量上下文和输入文件，创建或续接原生 session；执行一次模型后验证输入与会话身份，再发布回答。`_Cancellation` 同时检查关闭信号和数据库任务许可；`cancel` 只命中指定会话/追问。默认执行上限 600 秒，由 `REPORT_FOLLOWUP_TIMEOUT_SECONDS` 配置，最大 1800 秒；工作区预算为快照预算加 16 MiB。结果提交不确定时保留 RUNNING 供启动恢复识别，不重新执行。 |
 
 ## 4. 反馈与经验记忆
 

@@ -10,7 +10,6 @@ from problem_locator.contracts.models import OpaqueId, ServiceTimestamp
 
 MAX_TEXT_BYTES = 65_536
 MAX_CONTEXT_BYTES = 262_144
-MAX_TURNS = 100
 ACTIVE = ("QUEUED", "RUNNING", "CANCELLING")
 FollowupStatus = Literal["QUEUED", "RUNNING", "CANCELLING", "COMPLETED", "FAILED", "INTERRUPTED", "CANCELLED"]
 ContextMode = Literal["REPORT_ONLY", "REPORT_AND_LOGS"]
