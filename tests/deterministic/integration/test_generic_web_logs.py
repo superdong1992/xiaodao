@@ -69,7 +69,10 @@ def test_web_upload_is_actually_read_by_generic_without_logparse(website, monkey
     uploaded = client.put(upload["url"], content=content,
         headers={key: value for key, value in upload["required_headers"].items() if value is not None})
     assert uploaded.status_code == 200, uploaded.text
-    service.send_message(cid, "problem", "服务偶发中断", [prepared["attachment"]["attachment_id"]])
+    sent = client.post(f"/api/v1/agent/conversations/{cid}/messages", json={
+        "request_id": "problem", "text": "服务偶发中断", "product_line": "数据中心交换机",
+        "attachment_ids": [prepared["attachment"]["attachment_id"]]})
+    assert sent.status_code == 200, sent.text
     assert service.run_once(cid)
     assert stack.scheduler.wait_until_idle(15)
     assert store.get_status(cid).case_status == "WAITING_ATTACHMENT"
@@ -81,6 +84,47 @@ def test_web_upload_is_actually_read_by_generic_without_logparse(website, monkey
     assert engine.calls == []
     assert "服务偶发中断" in backend.calls[0]["prompt"]
     assert "web-original-bytes" not in backend.calls[0]["prompt"]
+    prompt = backend.calls[0]["prompt"]
+    assert "<<<PRODUCT_LINE_CONTEXT>>>\n数据中心交换机\n<<<END_PRODUCT_LINE_CONTEXT>>>" in prompt
+    state = stack.repository.read_snapshot(store.get_status(cid).case_id)
+    aggregate = state.cases[store.get_status(cid).case_id]
+    assert aggregate.case.product_line == "数据中心交换机"
+    generic_jobs = [job for job in aggregate.jobs.values() if job.diagnosis_mode is DiagnosisMode.GENERIC]
+    assert generic_jobs and all(job.generic_product_line == "数据中心交换机" for job in generic_jobs)
+
+
+@pytest.mark.parametrize("product_line", [None, "园区交换机"])
+def test_web_product_line_reaches_generic_prompt_without_logs(website, monkeypatch, product_line):
+    from tests.deterministic.unit.runtime.test_diagnosis_runtime import (
+        _GenericRuntimeBackend, _generic_v2_result_bytes,
+    )
+
+    stack, store, engine, service, client = website
+    monkeypatch.setattr(stack.catalog, "_route_skill_refs", [])
+    backend = _GenericRuntimeBackend(None, v2_result_bytes=_generic_v2_result_bytes("# 定位报告\n\n需补充日志确认。"))
+    monkeypatch.setattr(stack.runtime._generic_locator_executor, "_backend", backend)
+    cid = service.create_conversation("product-line-text", owner_key=OWNER_KEY).conversation_id
+    message = {"request_id": "product-line-first", "text": "设备偶发重启\n请保留原始问题。", "attachment_ids": []}
+    if product_line is not None:
+        message["product_line"] = product_line
+    first = client.post(f"/api/v1/agent/conversations/{cid}/messages", json=message)
+    assert first.status_code == 200, first.text
+    assert service.run_once(cid)
+    assert stack.scheduler.wait_until_idle(15)
+    assert len(backend.calls) == 1 and engine.calls == []
+    aggregate = stack.repository.read_snapshot(store.get_status(cid).case_id).cases[store.get_status(cid).case_id]
+    assert aggregate.case.product_line == product_line
+    generic_jobs = [job for job in aggregate.jobs.values() if job.diagnosis_mode is DiagnosisMode.GENERIC]
+    assert len(generic_jobs) == 1 and generic_jobs[0].generic_product_line == product_line
+    prompt = backend.calls[0]["prompt"]
+    assert f"{message['text']}\n<<<END_RAW_PROBLEM_TEXT>>>" in prompt
+    assert ("<<<PRODUCT_LINE_CONTEXT>>>" in prompt) is (product_line is not None)
+    if product_line is not None:
+        assert f"<<<PRODUCT_LINE_CONTEXT>>>\n{product_line}\n<<<END_PRODUCT_LINE_CONTEXT>>>" in prompt
+        assert prompt.index("<<<PRODUCT_LINE_CONTEXT>>>") < prompt.index("Invoke the preinstalled Skill")
+    replay = client.post(f"/api/v1/agent/conversations/{cid}/messages", json=message)
+    assert replay.status_code == 200 and replay.json() == first.json()
+    assert len(backend.calls) == 1
 
 
 def test_first_web_archive_reaches_generic_job_without_time_or_process_inputs(website, monkeypatch):
@@ -115,14 +159,14 @@ def test_running_web_log_restart_cancels_and_waits_for_old_worker_before_replace
     entered, cancelled, allow_exit, jobs, all_started = _hold_generic(stack, monkeypatch)
     created = service.create_conversation("generic-restart", owner_key=OWNER_KEY)
     cid = created.conversation_id
-    service.send_message(cid, "problem", "设备偶发重启")
+    service.send_message(cid, "problem", "设备偶发重启", product_line="交换机")
     try:
         assert service.run_once(cid)
         assert entered.wait(15)
         before = store.get_status(cid)
         old_job = jobs[0]
         attachment = _preupload(client, f"/api/v1/agent/conversations/{cid}")
-        receipt = service.send_message(cid, "logs", "补充：掉电前出现异常告警", [attachment])
+        receipt = service.send_message(cid, "logs", "补充：掉电前出现异常告警", [attachment], product_line="路由器")
         assert cancelled.wait(5)
         restarted = store.get_status(cid)
         assert restarted.case_id == before.case_id and restarted.run_id == before.run_id
@@ -137,13 +181,14 @@ def test_running_web_log_restart_cancels_and_waits_for_old_worker_before_replace
         assert len(jobs) == 2 and engine.calls == []
         current = jobs[-1]
         assert current.generic_problem_text == old_job.generic_problem_text == "设备偶发重启"
+        assert current.generic_product_line == old_job.generic_product_line == "交换机"
         assert current.generic_supplement_texts == ["补充：掉电前出现异常告警"]
         assert current.attachment_refs == [store.get_attachment_import(attachment, created.run_id)]
         state = stack.repository.read_snapshot(before.case_id)
         aggregate = state.cases[before.case_id]
         assert aggregate.jobs[old_job.job_id].status.value == "CANCELLED"
         assert len([job for job in aggregate.jobs.values() if job.job_type is JobType.ROUTE]) == 1
-        assert service.send_message(cid, "logs", "补充：掉电前出现异常告警", [attachment]) == receipt
+        assert service.send_message(cid, "logs", "补充：掉电前出现异常告警", [attachment], product_line="路由器") == receipt
         assert len([event for event in store.list_events(cid, limit=500)
             if event.type == "message.accepted" and event.data["request_id"] == "logs"]) == 1
     finally:

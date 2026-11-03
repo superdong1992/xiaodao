@@ -141,6 +141,20 @@ def test_value_error_is_returned_as_a_root_validation_detail() -> None:
     assert error.details[0].actual is None
 
 
+@pytest.mark.parametrize("invalid", ["交换机\ud800", {"label": "交换机\ud800"}])
+def test_validation_error_preserves_invalid_unicode_as_readable_escape(invalid):
+    class Request(BaseModel):
+        model_config = ConfigDict(strict=True)
+        count: int
+
+    with pytest.raises(ValidationError) as captured:
+        Request.model_validate({"count": invalid})
+    error = validation_error_from(captured.value)
+    assert "交换机" in error.details[0].actual
+    assert "\\ud800" in error.details[0].actual
+    error.details[0].actual.encode("utf-8")
+
+
 def test_public_port_exception_maps_without_private_error_protocol() -> None:
     error = ApplicationError(
         code=ErrorCode.REVISION_CONFLICT,

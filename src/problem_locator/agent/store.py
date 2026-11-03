@@ -410,9 +410,10 @@ class AgentStore:
         self._append(db, body, "run.started", {"ordinal": ordinal}, "started")
         return body
 
-    def submit_message(self, conversation_id, request_id, text="", attachment_ids=None, *, target_run_id=None,
+    def submit_message(self, conversation_id, request_id, text="", attachment_ids=None, *, product_line=None, target_run_id=None,
                        routed_request_key=None):
-        request = SendMessageRequest(request_id=request_id, text=text, attachment_ids=attachment_ids or [])
+        request = SendMessageRequest(request_id=request_id, text=text, attachment_ids=attachment_ids or [],
+            product_line=product_line)
         # Preserve legacy request fingerprints when no explicit target is used.
         payload = request.model_dump()
         if target_run_id is not None:
@@ -462,7 +463,7 @@ class AgentStore:
                 raise AgentStoreError("AGENT_MESSAGE_LIMIT", "本次会话消息已达上限，请另建任务。", 409)
             message = AgentMessage(message_id=self._id("message"), request_id=request_id,
                 text=request.text, attachment_ids=request.attachment_ids, status="QUEUED", created_at=self._now(),
-                notice=_QUEUED_NOTICE, run_id=body["run_id"])
+                notice=_QUEUED_NOTICE, run_id=body["run_id"], product_line=request.product_line)
             event = self._append(db, body, "message.accepted", message.model_dump(mode="json"), "message:" + message.message_id)
             receipt = MessageReceipt(conversation_id=conversation_id, message_id=message.message_id,
                 request_id=request_id, event_id=event.sequence, run_id=body["run_id"])
@@ -537,7 +538,7 @@ class AgentStore:
                     raise AgentStoreError("AGENT_ATTACHMENT_NOT_READY", "附件不存在、未上传完成或不属于本会话。", 409)
             message = AgentMessage(message_id=self._id("message"), request_id=request.request_id,
                 text=request.text, attachment_ids=request.attachment_ids, status="QUEUED", created_at=self._now(),
-                notice=_QUEUED_NOTICE, run_id=run_id)
+                notice=_QUEUED_NOTICE, run_id=run_id, product_line=request.product_line)
             payload = {"conversation_id": conversation_id, "run_id": run_id,
                 "operation": type(command).__name__, "command": command.model_dump(mode="json"),
                 "message": message.model_dump(mode="json"),

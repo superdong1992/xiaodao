@@ -5,7 +5,7 @@ from copy import deepcopy
 from typing import Annotated, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
-from problem_locator.contracts.models import GenericResult, NonEmptyText, OpaqueId, UserResultPayloadV3, ServiceTimestamp
+from problem_locator.contracts.models import GenericResult, NonEmptyText, OpaqueId, ProductLine, UserResultPayloadV3, ServiceTimestamp
 
 PUBLIC_PROGRESS_MESSAGES = {
     "INTAKE": "正在整理问题", "ROUTE": "正在选择定位方法",
@@ -44,6 +44,7 @@ class SendMessageRequest(AgentModel):
     request_id: NonEmptyText
     text: Annotated[str, Field(max_length=65536)] = ""
     attachment_ids: Annotated[list[OpaqueId], Field(max_length=20)] = Field(default_factory=list)
+    product_line: ProductLine | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @field_validator("text", mode="before")
     @classmethod
@@ -86,6 +87,7 @@ class AgentMessage(AgentModel):
     created_at: str
     notice: str | None = None
     run_id: OpaqueId | None = None
+    product_line: ProductLine | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class AgentAttachment(AgentModel):
@@ -456,10 +458,15 @@ EVENT_PAYLOAD_MODELS: dict[str, type[AgentModel]] = {
 }
 
 
+def _required_payload_fields(model):
+    # Older accepted messages predate the optional product-line context.
+    return [name for name in model.model_fields if not (model is AgentMessage and name == "product_line")]
+
+
 def _inline_payload_schema(model):
     """Make one finite payload schema independent of an OpenAPI ref template."""
     root = deepcopy(model.model_json_schema())
-    root["required"] = list(model.model_fields)
+    root["required"] = _required_payload_fields(model)
     definitions = root.pop("$defs", {})
 
     def inline(node):
@@ -509,7 +516,7 @@ class AgentEvent(AgentModel):
     def validate_public_data(self):
         model = self.payload_models[self.type]
         expected = set(model.model_fields)
-        if set(self.data) != expected:
+        if set(self.data) - expected or not set(_required_payload_fields(model)).issubset(self.data):
             raise ValueError("公共事件包含未定义的字段。")
         model.model_validate(self.data)
         if self.type == "message.accepted" and self.data["run_id"] != self.run_id:

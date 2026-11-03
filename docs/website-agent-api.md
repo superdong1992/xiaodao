@@ -58,7 +58,7 @@ Web 会话正文、报告和历史问答永久保存，用户主动删除时再�
 | 会话 | `PATCH /api/v1/agent/conversations/{conversation_id}` | 修改标题，JSON：`title`，1 到 80 个字符 |
 | 会话 | `POST /api/v1/agent/conversations/{conversation_id}/stop` | 停止指定轮次，JSON：稳定 `request_id` 和 `run_id` |
 | 会话 | `DELETE /api/v1/agent/conversations/{conversation_id}` | 删除会话，无请求体；按会话 ID 幂等 |
-| 会话 | `POST /api/v1/agent/conversations/{conversation_id}/messages` | 发送问题、补充回答或附件引用，JSON：`request_id`、可空 `text`、`attachment_ids`、可选 `target_run_id` |
+| 会话 | `POST /api/v1/agent/conversations/{conversation_id}/messages` | 发送问题、补充回答或附件引用，JSON：`request_id`、可空 `text`、`attachment_ids`、可选 `product_line` 和 `target_run_id` |
 | 会话 | `GET /api/v1/agent/conversations/{conversation_id}` | 一次返回状态、进度、追问、失败、历史、完整报告和下载信息；`share=true` 允许已登录的非所有者只读访问 |
 | 会话 | `GET /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/feedback` | 指定报告的评价资格与当前投票，无请求体 |
 | 会话 | `PUT /api/v1/agent/conversations/{conversation_id}/runs/{run_id}/feedback` | JSON：`request_id`、`rating`（`LIKE` 或 `DISLIKE`） |
@@ -198,7 +198,7 @@ Content-Type: application/json
 POST /api/v1/agent/conversations/10000000-0000-0000-0000-000000000001/messages
 Content-Type: application/json
 
-{"request_id":"message-001","text":"付款服务调用库存服务时频繁超时，请帮我定位。","attachment_ids":[]}
+{"request_id":"message-001","text":"付款服务调用库存服务时频繁超时，请帮我定位。","attachment_ids":[],"product_line":"支付平台"}
 ```
 
 ```json
@@ -216,6 +216,16 @@ Content-Type: application/json
 ```
 
 `ACCEPTED` 只表示消息已接收并保存。后台收到首条非空问题文本就创建 Case；创建本身不调用 INTAKE，随后路由和诊断仍可能调用模型。INTAKE 只在 Case 创建后允许补充信息时整理用户输入，按 OPEN INPUT requirements 提取有原文依据的事实；展示给用户的追问始终使用 requirements 的原始 prompt。定位运行期间的新消息显示“已收到，尚未用于本次诊断”。更正已确定的事实或任务目标时，应停止当前轮，再发送完整的新问题。
+
+#### 产品线随首次问题提交
+
+前端从产品线选择器或已有业务上下文取值，将 `product_line` 放在消息 JSON 的根层。字段接受字符串或 `null`，可省略；请传可理解的产品线名称或业务标识，不传下拉选项对象。浏览器调用同源 `POST /api/agent/conversations/{conversation_id}/messages`，BFF 原样转发到上述 `/api/v1/agent/.../messages`。现有 `browser-client.js` 和 BFF 均完整转发消息 JSON，无需修改实现。
+
+产品线在创建 Case 的那条问题消息中固定，作为问题背景参与通用诊断。先发文字、后补日志时，产品线必须随第一次问题文字提交；仅在上传附件时传入不会生效。同轮后续消息可以保存自身的产品线，但不会覆盖 Case，补日志、重启和恢复都沿用最初的值。更换产品线需发起新诊断，并随新问题明确提交；新一轮不继承上一轮的产品线。
+
+提交时，将 `product_line` 与 `request_id`、`text`、`attachment_ids` 一起保存成待发送请求。网络失败或页面刷新后重试原请求，不能重新读取已变化的产品线选择器。同一 `request_id` 更换产品线会返回 `AGENT_IDEMPOTENCY_CONFLICT`。省略和 `null` 均表示未提供；空字符串或全空白不会加入诊断上下文，但重试时仍须保留原请求内容。
+
+产品线不能代替问题文字或附件，也不加入创建会话、附件预约、上传文件或报告追问 `followups` 的请求。旧请求和历史消息没有此字段时仍可正常使用，新增字段无需数据库迁移。**先上线支持该字段的 xiaodao 后端，再启用前端传参**；旧后端会把它作为未知字段拒绝。前端示例和联调清单见[接入指南](website-agent-quickstart.md#产品线接入)。
 
 ### 预约和上传日志
 
@@ -304,6 +314,7 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `SendMessageBody` | `request_id` | 此条消息的稳定请求标识。 |
 | `SendMessageBody` | `text` | 用户原话；可省略或为 `null`，不能与附件列表同时为空。 |
 | `SendMessageBody` | `attachment_ids` | 当前会话内已经上传完成的附件 UUID 数组。 |
+| `SendMessageBody` | `product_line` | 可选产品线字符串，可省略或为 `null`。创建 Case 的问题消息固定本轮产品线，作为通用诊断背景；后续消息不覆盖。 |
 | `SendMessageBody` | `target_run_id` | 协议为兼容旧客户端允许省略或为 null；新网站的诊断补充必须填写。只允许投递到仍未交付报告的当前活动轮次，否则返回 `AGENT_RUN_CHANGED`；先刷新原轮次，再把报告后的文字送到 followups。 |
 | `PrepareAgentAttachmentBody` | `conversation_id` | 已创建且归当前用户所有的会话 UUID。 |
 | `PrepareAgentAttachmentBody` | `request_id` | 本次预约的稳定请求标识。 |
@@ -323,6 +334,7 @@ Case 建立后，服务端按原附件协议导入，`case_attachment_id` 标明
 | `AgentMessage` | `request_id` | 用户提交消息时的幂等标识。 |
 | `AgentMessage` | `text` | 持久保存的用户原话。 |
 | `AgentMessage` | `attachment_ids` | 这条消息引用的会话附件 UUID 数组。 |
+| `AgentMessage` | `product_line` | 此条消息保存的产品线；未提供时省略。`history` 和 `message.accepted` 可返回该字段，后续消息中的值不代表本轮 Case 的产品线已改变。 |
 | `AgentMessage` | `status` | `QUEUED`、`PROCESSING`、`APPLIED` 或 `UNUSED`，表示消息采用状态。 |
 | `AgentMessage` | `created_at` | 接收并保存消息的时间。 |
 | `AgentMessage` | `notice` | 可空的中文采用说明；例如尚未用于本次诊断。 |

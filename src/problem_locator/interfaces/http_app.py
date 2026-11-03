@@ -848,6 +848,7 @@ _REST_MODEL_FIELD_DESCRIPTIONS = {
 }
 
 _REST_FIELD_DESCRIPTIONS.update({
+    "product_line": "这条消息携带的产品线；创建 Case 时保存为通用诊断上下文，后续消息不覆盖。未提供时可省略或为 null。",
     "diagnosis_run_id": "追问交接的新诊断轮次 UUID；未交接时为 null，原报告仍由 run_id 标识。",
     "expected_revision": "用户核对的草稿版本；与当前版本不一致时拒绝修改或确认。",
     "draft_id": "继续诊断草稿标识。",
@@ -941,7 +942,7 @@ _REQUEST_BODY_DESCRIPTIONS = {
     "rename_agent_conversation": "新的会话标题，1 到 80 个字符；赋值操作可安全重复。",
     "stop_agent_conversation": "稳定 request_id 和目标 run_id；重试不能改为停止另一轮。",
     "create_agent_conversation": "稳定 request_id；相同内容重试不创建新会话。",
-    "send_agent_message": "用户原话和已上传附件 ID 至少一项非空；新网站补充诊断时携带 target_run_id，报告已完成则返回 409，刷新后转入独立追问。旧网站可省略。",
+    "send_agent_message": "用户原话和已上传附件 ID 至少一项非空；首次问题可带 product_line，创建诊断后保持不变。新网站补充诊断时携带 target_run_id，报告已完成则返回 409，刷新后转入独立追问。旧网站可省略。",
     "prepare_agent_attachment": "声明会话归属、原始文件名、类型、字节数及 SHA-256。",
     "upload_agent_attachment": "原始归档字节；四个请求头必须与预约完全一致。",
     "create_case": "Strict JSON body defining one new Case.",
@@ -972,6 +973,7 @@ def _require_serialized_response_fields(schema: dict[str, Any]) -> None:
     conditionally_omitted = {
         "CaseFailure": frozenset({"reason_code", "diagnostic_id"}),
         "CaseView": frozenset({"methods_result"}),
+        "AgentMessage": frozenset({"product_line"}),
     }
     pending: set[str] = set()
     for path_item in schema["paths"].values():

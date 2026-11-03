@@ -91,14 +91,15 @@ def _prepare_command() -> PrepareAttachment:
     )
 
 
-def test_create_trigger_preserves_input_and_preallocated_fact_ids() -> None:
+@pytest.mark.parametrize("product_line", [None, "交换机"])
+def test_create_trigger_preserves_input_and_preallocated_fact_ids(product_line) -> None:
     fact_ids = [
         "00000000-0000-0000-0000-000000000101",
         "00000000-0000-0000-0000-000000000102",
     ]
 
     trigger = build_create_case_trigger(
-        _create_command(),
+        _create_command().model_copy(update={"product_line": product_line}),
         case_id="00000000-0000-0000-0000-000000000001",
         trigger_id="00000000-0000-0000-0000-000000000002",
         user_fact_ids=fact_ids,
@@ -110,6 +111,7 @@ def test_create_trigger_preserves_input_and_preallocated_fact_ids() -> None:
     assert trigger.expected_case_revision == 0
     assert trigger.payload.problem_spec.revision == 1
     assert trigger.payload.raw_problem_text == "RPC timeout\nrequest-id: 请求-α-7"
+    assert trigger.payload.product_line == product_line
     assert [item.item_id for item in trigger.payload.initial_user_facts] == fact_ids
     assert [item.statement for item in trigger.payload.initial_user_facts] == [
         "us-east",

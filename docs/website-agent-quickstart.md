@@ -90,7 +90,7 @@ Cookie: sessionid=<session_id>
 | 负责方 | 首版必须完成 |
 | --- | --- |
 | 网站后端 | 透传 `Cookie`；所有请求交由 xiaodao 校验身份与用户归属；转发报告、SSE 和文件；下载原始产物时校验来源、大小和 SHA-256 |
-| 网站前端 | 提供输入框、压缩日志上传、追问、消息采用状态、阶段进度、报告区和下载按钮；刷新后恢复历史；按事件序号去重 |
+| 网站前端 | 提供输入框、压缩日志上传、追问、消息采用状态、阶段进度、报告区和下载按钮；首次问题附带已选产品线；刷新后恢复历史；按事件序号去重 |
 | xiaodao 运维 | 配置 Redis 会话读取、问题整理和诊断角色、日志解析与可选审核；确认模型身份和预算；限制内部 API 可达来源；保证 SSE 不被代理缓冲 |
 
 网站前端访问网站自己的 `/api/agent/...`（示例路径）；网站后端访问 xiaodao 的 `/api/v1/agent/...`。两者不要混用。UUID 不是授权凭据；不能用前端自报的 `user_id`、`userid` 或归属键判断身份。默认 BFF 不需要 `WEBSITE_AUTH_MODULE`，只需配置 `XIAODAO_BASE_URL`。诊断、MCP 和其他内部 API 仍限制为可信内网访问，浏览器只访问同源 BFF。
@@ -136,7 +136,53 @@ xiaodao 读取 Cookie 的 `sessionid`，查询 `airobot2-session:{session_id}`�
 | 展示报告 | 收到 `result.available` 后读取会话 `GET /api/v1/agent/conversations/{conversation_id}?include=report`，正文在 `data.result`；初次完整查询已返回报告时无需再读 | `report_state=READY` 后按 `format` 展示报告；`PARTIAL` 和 `INCONCLUSIVE` 也正常展示 |
 | 提供 ZIP 下载 | 先展示 JSON 报告；`archive.updated=READY` 后允许用户确认下载 | 提示“包含原始目标日志”；没有用户请求就不下载 ZIP 或审计包 |
 
-请求只需包含 `request_id`、`text`、`attachment_ids`。每个新逻辑请求生成新 ID，网络重试时保持 ID 和内容不变。可直接使用的完整请求和响应示例，以及文件哈希、请求头说明，见 [API 参考](website-agent-api.md)。附件仅支持现有的压缩日志格式，不支持截图、PDF 或其他任意文件。
+消息请求包含 `request_id`、`text`、`attachment_ids`，首次提交问题时可加上 `product_line`；诊断中的补充请求按接口要求携带 `target_run_id`。每个新逻辑请求生成新 ID，网络重试时保持 ID 和内容不变。可直接使用的完整请求和响应示例，以及文件哈希、请求头说明，见 [API 参考](website-agent-api.md)。附件仅支持现有的压缩日志格式，不支持截图、PDF 或其他任意文件。
+
+### 产品线接入
+
+前端负责将用户选择的产品线放进首次问题消息，后端将它保存到 Case 和通用 Job，交给诊断 Skill 作为问题背景。现有浏览器客户端和 BFF 会完整转发消息 JSON，无需修改实现；需要修改的是网站的请求组装和重试记录。
+
+浏览器调用网站同源入口：
+
+```http
+POST /api/agent/conversations/{conversation_id}/messages
+Content-Type: application/json
+
+{
+  "request_id": "message-001",
+  "text": "设备偶发重启，请帮我定位。",
+  "attachment_ids": [],
+  "product_line": "交换机"
+}
+```
+
+`product_line` 为可选字符串，使用产品线名称或有业务含义的标识，不传选项对象。未选择时省略或传 `null`。BFF 将该请求原样转发到 `/api/v1/agent/conversations/{conversation_id}/messages`。
+
+在用户提交时保存完整请求，重试时读回原记录。下面的 `savePendingMessage` 和 `loadPendingMessage` 表示网站已有的待发送记录存取方法；它们应能在刷新后恢复请求：
+
+```javascript
+// 只在用户首次提交这个问题时创建记录。
+const pendingMessage = {
+  request_id: crypto.randomUUID(),
+  text: problemText,
+  attachment_ids: [...uploadedAttachmentIds],
+  product_line: selectedProductLine || null,
+};
+await savePendingMessage(conversationId, pendingMessage);
+await client.conversations.send(conversationId, pendingMessage);
+
+// 网络失败或刷新后的重试入口：复用原记录，不再读取选择器。
+const originalMessage = await loadPendingMessage(conversationId);
+await client.conversations.send(conversationId, originalMessage);
+```
+
+上面的首次发送和重试分别放在对应的事件处理函数中，不连续执行。收到成功回执后再清除待发送记录。同一 `request_id` 更换产品线会返回 `AGENT_IDEMPOTENCY_CONFLICT`，不能通过换 ID 自动重发来掩盖冲突。
+
+产品线在创建 Case 的问题消息中固定。先发文字、后补日志时，第一次文字消息就要带上产品线；不要只放在附件预约或上传请求中。同轮后续消息不会覆盖它，补日志、重启和恢复均沿用原值。需要更换产品线时发起新诊断，并随新问题提交；新一轮不继承旧值。创建会话、上传附件和报告追问 `followups` 的请求格式保持不变。历史消息没有此字段时按未提供处理。
+
+上线顺序是先部署支持 `product_line` 的 xiaodao 后端，再启用前端字段。旧后端会拒绝未知字段，新后端兼容未传产品线的旧页面；本次新增字段不需要数据库迁移。
+
+### 继续联调日志与进度
 
 首次提交建议先上传一个日志包，再将问题文本和该包的 `attachment_ids` 一起发送。也支持先发文字、后发附件，后台会先处理文字中尚未提取的参数。当前一次诊断使用一份日志归档；选择多个日志包时，请按提示合并，或发送新消息，只引用所需的一个附件。上传状态变为 `READY` 后，仍须发消息引用该附件，系统才会采用。
 
@@ -177,6 +223,8 @@ xiaodao 读取 Cookie 的 `sessionid`，查询 `airobot2-session:{session_id}`�
 
 - [ ] 从网站后端机器确认服务版本、就绪状态、Agent 创建和查询都正常。
 - [ ] 仅提供非空问题文本也能先创建 Case，未提供预期行为或范围时不会阻塞；随后按 OPEN requirements 的原文提示补充信息、上传日志并完成定位，最终显示报告。
+- [ ] 纯文字提交和携带日志提交时，浏览器首次 `messages` 请求与 BFF 上游请求均包含同一产品线；后端 Case、通用 Job 和诊断上下文保存同值。未选择产品线、旧页面不传字段时仍可提交。
+- [ ] 请求响应丢失后，即使选择器已改变，重试仍使用原产品线、正文、附件引用和 `request_id`；同轮补日志不覆盖产品线，新诊断采用新提交的值。
 - [ ] 日志上传同时核对类型、字节数和 SHA-256；同一预约、消息重试不重复创建。
 - [ ] SSE 每条业务消息只有一行 `data:` 加空行，`onmessage` 能实时收到；断线重放、手动游标续传、刷新和重复事件不丢报告、不重复消息。
 - [ ] JSON 不等待 ZIP；ZIP 仅在确认后下载，下载前完成大小和 SHA-256 校验。

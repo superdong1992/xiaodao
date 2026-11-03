@@ -468,6 +468,7 @@ class DomainCoordinator:
             or case.generic_result_v2 is not None
             or case.failure is not None
             or case.raw_problem_text != payload.raw_problem_text
+            or case.product_line != payload.product_line
             or case.initial_log_archive_expected != payload.initial_log_archive_expected
             or case.continuation_context != payload.continuation_context
         ):
@@ -544,6 +545,7 @@ class DomainCoordinator:
                 artifact_bindings=[],
                 selected_skill_ref=None,
                 generic_problem_text=snapshot.case.raw_problem_text,
+                generic_product_line=snapshot.case.product_line,
                 generic_log_archive_expected=(snapshot.case.initial_log_archive_expected
                     or bool(attachments)),
                 continuation_context=snapshot.case.continuation_context,
@@ -1555,6 +1557,7 @@ class DomainCoordinator:
                 attachment_refs=payload.ready_attachment_ids, previous_outcome_refs=[],
                 artifact_bindings=[], selected_skill_ref=None,
                 generic_problem_text=generic_source.generic_problem_text,
+                generic_product_line=generic_source.generic_product_line,
                 generic_log_archive_expected=True,
                 generic_supplement_texts=[*generic_source.generic_supplement_texts,
                     *([payload.generic_supplement_text] if payload.generic_supplement_text.strip() else [])],
@@ -1624,6 +1627,7 @@ class DomainCoordinator:
             goal=_GENERIC_DIAGNOSE_GOAL, evidence_bindings=[], attachment_refs=[],
             previous_outcome_refs=[], artifact_bindings=[], selected_skill_ref=None,
             generic_problem_text=source.generic_problem_text,
+            generic_product_line=source.generic_product_line,
             generic_log_archive_expected=True,
             generic_supplement_texts=[*source.generic_supplement_texts,
                 *([payload.supplement_text] if payload.supplement_text.strip() else [])],
@@ -1768,6 +1772,7 @@ class DomainCoordinator:
             methods_review_target=source.methods_review_target,
             replacement_for_job_id=source.job_id,
             generic_problem_text=source.generic_problem_text,
+            generic_product_line=source.generic_product_line,
             generic_log_archive_expected=source.generic_log_archive_expected,
             generic_supplement_texts=source.generic_supplement_texts,
             continuation_context=source.continuation_context,
@@ -2122,6 +2127,7 @@ class DomainCoordinator:
         methods_review_target: MethodsReviewTargetV2 | None = None,
         replacement_for_job_id: str | None = None,
         generic_problem_text: str | None = None,
+        generic_product_line: str | None = None,
         generic_log_archive_expected: bool = False,
         generic_supplement_texts: Sequence[str] = (),
         continuation_context: ReportContinuationContext | None = None,
@@ -2172,6 +2178,7 @@ class DomainCoordinator:
             generic_skill_name=bindings.generic_skill_name,
             generic_log_preparation=bindings.generic_log_preparation,
             generic_problem_text=generic_problem_text,
+            generic_product_line=generic_product_line,
             generic_log_archive_expected=generic_log_archive_expected,
             generic_supplement_texts=list(generic_supplement_texts),
             continuation_context=continuation_context,

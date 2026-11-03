@@ -117,6 +117,17 @@ def _validate_user_text(value: str) -> str:
     return _utf8_nonblank(value)
 
 
+def _validate_product_line(value: str) -> str:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("产品线包含无效的 Unicode 字符。") from exc
+    return value
+
+
+ProductLine: TypeAlias = Annotated[str, AfterValidator(_validate_product_line)]
+
+
 def _validate_description(value: str) -> str:
     return _utf8_nonblank(value, max_bytes=MAX_DESCRIPTION_UTF8_BYTES)
 
@@ -1414,6 +1425,7 @@ class Case(ContractModel):
     case_revision: PositiveInt
     archive_status: ArchiveStatus = "NOT_REQUIRED"
     raw_problem_text: NonEmptyText
+    product_line: ProductLine | None = Field(default=None, exclude_if=lambda value: value is None)
     initial_log_archive_expected: bool = Field(default=False, exclude_if=lambda value: not value)
     continuation_context: ReportContinuationContext | None = Field(
         default=None, exclude_if=lambda value: value is None,
@@ -1561,6 +1573,7 @@ class Job(ContractModel):
     generic_skill_name: SkillName | None
     generic_log_preparation: Literal["direct-v1"] | None = Field(default=None, exclude_if=lambda value: value is None)
     generic_problem_text: NonEmptyText | None
+    generic_product_line: ProductLine | None = Field(default=None, exclude_if=lambda value: value is None)
     generic_log_archive_expected: bool = Field(default=False, exclude_if=lambda value: not value)
     generic_supplement_texts: list[NonEmptyText] = Field(default_factory=list, exclude_if=lambda value: not value)
     continuation_context: ReportContinuationContext | None = Field(
@@ -1597,6 +1610,10 @@ class Job(ContractModel):
     @model_validator(mode="after")
     def validate_job(self) -> Job:
         _validate_generic_log_preparation(self)
+        if self.generic_product_line is not None and (
+            self.job_type is not JobType.DIAGNOSE or self.diagnosis_mode is not DiagnosisMode.GENERIC
+        ):
+            raise ValueError("product line context requires a GENERIC DIAGNOSE Job")
         if self.continuation_context is not None and self.job_type is not JobType.DIAGNOSE:
             raise ValueError("only DIAGNOSE jobs may carry report continuation context")
         if self.continuation_context is not None and (
@@ -4529,6 +4546,7 @@ class JobSpec(ContractModel):
     generic_skill_name: SkillName | None
     generic_log_preparation: Literal["direct-v1"] | None = Field(default=None, exclude_if=lambda value: value is None)
     generic_problem_text: NonEmptyText | None
+    generic_product_line: ProductLine | None = Field(default=None, exclude_if=lambda value: value is None)
     generic_log_archive_expected: bool = Field(default=False, exclude_if=lambda value: not value)
     generic_supplement_texts: list[NonEmptyText] = Field(default_factory=list, exclude_if=lambda value: not value)
     continuation_context: ReportContinuationContext | None = Field(
@@ -4559,6 +4577,10 @@ class JobSpec(ContractModel):
     @model_validator(mode="after")
     def validate_spec(self) -> JobSpec:
         _validate_generic_log_preparation(self)
+        if self.generic_product_line is not None and (
+            self.job_type is not JobType.DIAGNOSE or self.diagnosis_mode is not DiagnosisMode.GENERIC
+        ):
+            raise ValueError("product line context requires a GENERIC DIAGNOSE JobSpec")
         if self.continuation_context is not None and self.job_type is not JobType.DIAGNOSE:
             raise ValueError("only DIAGNOSE JobSpec may carry report continuation context")
         if self.continuation_context is not None and (
@@ -4683,6 +4705,7 @@ class JobSpec(ContractModel):
 
 class CreateCaseTriggerPayload(ContractModel):
     raw_problem_text: NonEmptyText
+    product_line: ProductLine | None = Field(default=None, exclude_if=lambda value: value is None)
     initial_log_archive_expected: bool = Field(default=False, exclude_if=lambda value: not value)
     continuation_context: ReportContinuationContext | None = Field(
         default=None, exclude_if=lambda value: value is None,
@@ -5453,6 +5476,11 @@ class CaseAggregate(ContractModel):
                 raise ValueError(
                     "GENERIC Job input must equal the Case raw_problem_text"
                 )
+            if (
+                job.diagnosis_mode is DiagnosisMode.GENERIC
+                and job.generic_product_line != self.case.product_line
+            ):
+                raise ValueError("GENERIC Job product line must equal the Case product_line")
             if any(ref not in self.evidence for ref in job.evidence_refs):
                 raise ValueError("Job contains a dangling Evidence reference")
             if (
@@ -6401,6 +6429,7 @@ class CreateCase(ContractModel):
 
     idempotency_key: NonEmptyText
     raw_problem_text: NonEmptyText
+    product_line: ProductLine | None = Field(default=None, exclude_if=lambda value: value is None)
     initial_log_archive_expected: bool = Field(default=False, exclude_if=lambda value: not value)
     continuation_context: ReportContinuationContext | None = Field(
         default=None, exclude_if=lambda value: value is None,

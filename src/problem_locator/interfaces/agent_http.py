@@ -28,7 +28,7 @@ from problem_locator.agent.models import (
 from problem_locator.memory.models import FeedbackRequest, FeedbackView, FeedbackCommentRequest, FeedbackCommentReceipt
 from problem_locator.contracts.errors import ApplicationPortError
 from problem_locator.contracts.limits import MAX_ATTACHMENT_BYTES
-from problem_locator.contracts.models import NonEmptyText, OpaqueId, Sha256
+from problem_locator.contracts.models import NonEmptyText, OpaqueId, ProductLine, Sha256
 from problem_locator.contracts.serialization import canonical_json_bytes
 
 from .error_mapping import error_envelope, http_status_for, model_json, success_envelope
@@ -76,6 +76,8 @@ class SendMessageBody(_AgentHttpModel):
     request_id: NonEmptyText = Field(description="同一条消息重试时保持不变。")
     text: NonEmptyText | None = None
     attachment_ids: list[OpaqueId] = Field(default_factory=list, max_length=20)
+    product_line: ProductLine | None = Field(default=None, exclude_if=lambda value: value is None,
+        description="首次问题所属的产品线，作为通用诊断上下文保存；后续补充不覆盖。未选择时可省略或传 null。")
     target_run_id: OpaqueId | None = Field(default=None,
         description="诊断中补充的目标轮次；该轮已结束或改变时返回 409，防止误开新诊断。旧网站可省略。")
 
@@ -443,6 +445,7 @@ def register_agent_routes(app: FastAPI, service: Any | None, public_base_url: st
         return await respond(
             "send_message", request, conversation_id=conversation_id,
             request_id=body.request_id, text=body.text or "", attachment_ids=body.attachment_ids,
+            **({"product_line": body.product_line} if body.product_line is not None else {}),
             **({"target_run_id": body.target_run_id} if body.target_run_id is not None else {}),
         )
 

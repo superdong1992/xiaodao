@@ -673,7 +673,8 @@ def test_builds_pending_job_from_final_state_and_projector() -> None:
     assert job.created_at == OCCURRED_AT
 
 
-def test_generic_job_skips_context_projection_and_freezes_only_raw_problem_text() -> None:
+@pytest.mark.parametrize("product_line", [None, "交换机"])
+def test_generic_job_skips_context_projection_and_freezes_only_raw_problem_text(product_line) -> None:
     target = _state()
     spec = JobSpec(
         job_type=JobType.DIAGNOSE,
@@ -681,6 +682,7 @@ def test_generic_job_skips_context_projection_and_freezes_only_raw_problem_text(
         review_policy=None,
         generic_skill_name="generic-problem-locator-smoke",
         generic_problem_text="原始问题第一行\n第二行逐字保留",
+        generic_product_line=product_line,
         goal="Run the configured generic problem locator.",
         target_state_revision=target.revision,
         evidence_bindings=[],
@@ -719,6 +721,7 @@ def test_generic_job_skips_context_projection_and_freezes_only_raw_problem_text(
     assert projector.seen is None
     assert job.context_snapshot is None
     assert job.generic_problem_text == "原始问题第一行\n第二行逐字保留"
+    assert job.generic_product_line == product_line
     assert job.evidence_refs == []
     assert job.attachment_refs == []
     assert job.previous_outcome_refs == []

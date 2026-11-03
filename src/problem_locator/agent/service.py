@@ -194,10 +194,11 @@ class AgentConversationService:
         with self.operation_lease(conversation_id, owner_key=None if share else owner_key):
             yield
 
-    def send_message(self, conversation_id, request_id, text="", attachment_ids=None, *, owner_key=None, target_run_id=None):
+    def send_message(self, conversation_id, request_id, text="", attachment_ids=None, *, product_line=None, owner_key=None, target_run_id=None):
         self._available()
         with self.operation_lease(conversation_id, owner_key=owner_key), self._message_lock(conversation_id):
-            request = SendMessageRequest(request_id=request_id, text=text or "", attachment_ids=attachment_ids or [])
+            request = SendMessageRequest(request_id=request_id, text=text or "", attachment_ids=attachment_ids or [],
+                product_line=product_line)
             receipt, pending = self.store.message_request(conversation_id, request, target_run_id=target_run_id)
             if receipt is not None:
                 return receipt
@@ -237,7 +238,7 @@ class AgentConversationService:
                         target_run_id=target_run_id)
                     return self._dispatch_generic_restart(pending, request)
             return self.store.submit_message(conversation_id, request_id, request.text, request.attachment_ids,
-                                             target_run_id=target_run_id)
+                                             product_line=request.product_line, target_run_id=target_run_id)
 
     def _message_lock(self, conversation_id):
         with self._message_guard:
@@ -292,7 +293,7 @@ class AgentConversationService:
                         try:
                             return self.store.submit_message(cid, message["request_id"], message["text"],
                                 message["attachment_ids"], routed_request_key=command.idempotency_key,
-                                target_run_id=pending.get("target_run_id"))
+                                product_line=message.get("product_line"), target_run_id=pending.get("target_run_id"))
                         except AgentStoreError as changed:
                             if changed.code != "AGENT_ROUTE_CHANGED":
                                 raise
@@ -310,7 +311,7 @@ class AgentConversationService:
         self._control_wake.set()
         if request is None:
             request = SendMessageRequest(request_id=pending["message"]["request_id"], text=pending["message"]["text"],
-                attachment_ids=pending["message"]["attachment_ids"])
+                attachment_ids=pending["message"]["attachment_ids"], product_line=pending["message"].get("product_line"))
         receipt, _ = self.store.message_request(cid, request, target_run_id=pending.get("target_run_id"))
         if receipt is None:
             raise AgentStoreError("AGENT_RESTART_PENDING", "日志接入尚未完成，请稍后重试同一请求。", 503, retryable=True)
@@ -923,7 +924,7 @@ class AgentConversationService:
                     self.store._save(db, body)
             self._execute_command(conversation_id, "create", CreateCase(
                 idempotency_key=create_key,
-                raw_problem_text=message.text, problem_spec=spec,
+                raw_problem_text=message.text, problem_spec=spec, product_line=message.product_line,
                 initial_log_archive_expected=bool(selected_attachment_ids),
                 initial_user_facts=[], wait_seconds=0,
                 continuation_context=self.store.get_run(conversation_id).get("continuation_context"),

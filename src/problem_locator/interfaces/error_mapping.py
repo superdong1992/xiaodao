@@ -84,19 +84,22 @@ def _field_path(location: tuple[Any, ...]) -> str:
 
 
 def _public_actual(value: Any) -> str | int | bool | None:
-    if value is None or isinstance(value, (str, int, bool)):
+    if value is None or isinstance(value, (int, bool)):
         return value
-    try:
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=repr,
-        )
-    except (TypeError, ValueError):
-        return repr(value)
+    if not isinstance(value, str):
+        try:
+            value = json.dumps(
+                value,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=repr,
+            )
+        except (TypeError, ValueError):
+            value = repr(value)
+    # Invalid Unicode must remain inspectable without breaking the JSON response.
+    return value.encode("utf-8", errors="backslashreplace").decode("utf-8")
 
 
 def validation_diagnostics(

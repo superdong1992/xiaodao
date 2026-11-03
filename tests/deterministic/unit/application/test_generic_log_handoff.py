@@ -202,9 +202,14 @@ def test_specialized_supplement_still_preserves_multiple_plain_text_attachments(
     assert not job.generic_log_archive_expected and not job.generic_supplement_texts
 
 
+@pytest.mark.parametrize("product_line", [None, "园区交换机"])
 @pytest.mark.parametrize("archive_count", [1, 2])
-def test_generic_preflight_waits_then_supplement_freezes_selected_archive_and_text(archive_count):
+def test_generic_preflight_waits_then_supplement_freezes_selected_archive_and_text(archive_count, product_line):
     state = _with_logs(_running_generic_state())
+    values = state.model_dump(mode="python")
+    values["cases"][CASE_ID]["case"]["product_line"] = product_line
+    values["cases"][CASE_ID]["jobs"][DIAGNOSE_JOB_ID]["generic_product_line"] = product_line
+    state = StateFile.model_validate(values)
     records = InMemoryExecutionRecordStore()
     job = state.cases[CASE_ID].jobs[DIAGNOSE_JOB_ID]
     outcome = _preflight(job)
@@ -239,6 +244,7 @@ def test_generic_preflight_waits_then_supplement_freezes_selected_archive_and_te
     assert continued.attachment_refs == attachment_ids
     assert continued.generic_supplement_texts == ["错误发生前刚重启。"]
     assert continued.generic_problem_text == job.generic_problem_text
+    assert continued.generic_product_line == product_line
     assert runtime_bindings_from_job(continued) == runtime_bindings_from_job(job)
     assert continued.previous_outcome_refs == continued.evidence_refs == continued.artifact_refs == []
     assert catalog.generic_calls == 0

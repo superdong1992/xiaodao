@@ -205,6 +205,38 @@ def test_null_text_with_attachment_is_valid_and_normalized():
     assert fake.calls[-1][1]["text"] == ""
 
 
+@pytest.mark.parametrize("product_line", [None, "", "  ", "交换机", "交换机🔧"])
+def test_product_line_is_forwarded_as_optional_message_context(product_line):
+    fake = FakeAgent()
+    response = run_request(fake, "POST", f"{VIEW}/messages", json={
+        "request_id": "product-line", "text": "设备偶发重启", "product_line": product_line,
+    })
+    assert response.status_code == 200
+    assert fake.calls[-1][1].get("product_line") == product_line
+
+
+@pytest.mark.parametrize("product_line", [True, 1, [], {}])
+def test_product_line_rejects_non_text_before_dispatch(product_line):
+    fake = FakeAgent()
+    response = run_request(fake, "POST", f"{VIEW}/messages", json={
+        "request_id": "product-line", "text": "设备偶发重启", "product_line": product_line,
+    })
+    assert response.status_code == 400
+    assert not fake.calls
+
+
+@pytest.mark.parametrize("product_line", ["\ud800", "\udfff", "交换\ud800机"])
+def test_product_line_rejects_escaped_invalid_unicode_before_dispatch(product_line):
+    fake = FakeAgent()
+    body = json.dumps({"request_id": "invalid-unicode", "text": "设备重启", "product_line": product_line},
+        ensure_ascii=True).encode("ascii")
+    response = run_request(fake, "POST", f"{VIEW}/messages", content=body,
+        headers={"Content-Type": "application/json"})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert not fake.calls
+
+
 @pytest.mark.parametrize("body", [
     {}, {"request_id": 1, "text": "x"}, {"request_id": "x"},
     {"request_id": "x", "text": " "}, {"request_id": "x", "text": 123},

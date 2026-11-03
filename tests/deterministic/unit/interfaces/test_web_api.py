@@ -661,6 +661,12 @@ def test_openapi_describes_every_parameter_and_reachable_model_field() -> None:
                     for field_name in expected_required
                     if field_name != "methods_result"
                 ]
+            if schema_name == "AgentMessage":
+                expected_required = [
+                    field_name
+                    for field_name in expected_required
+                    if field_name != "product_line"
+                ]
             assert component["required"] == expected_required
 
 
@@ -887,6 +893,25 @@ def test_openapi_contains_no_cross_protocol_surface() -> None:
     assert b'"/mcp"' not in document
     assert b"problem_locator_create_case" not in document
     assert b"claude" not in document
+
+
+def test_product_line_openapi_keeps_requests_history_and_events_optional() -> None:
+    from problem_locator.agent.models import AgentEvent, AgentMessage
+
+    schemas = _app().openapi()["components"]["schemas"]
+    for name in ("SendMessageBody", "AgentMessage"):
+        schema = schemas[name]
+        assert "product_line" in schema["properties"]
+        assert "product_line" not in schema["required"]
+        assert schema["properties"]["product_line"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
+    event_schema = AgentEvent.model_json_schema()
+    accepted = next(item for item in event_schema["oneOf"]
+        if item["properties"]["type"]["const"] == "message.accepted")
+    payload = accepted["properties"]["data"]
+    assert "product_line" in payload["properties"]
+    assert set(payload["required"]) == set(AgentMessage.model_fields) - {"product_line"}
+    assert "product_line" not in schemas["FollowupRequest"]["properties"]
+    assert "product_line" not in schemas["CreateCaseBody"]["properties"]
 
 
 def test_openapi_contract_matches_versioned_snapshot() -> None:

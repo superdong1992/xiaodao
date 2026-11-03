@@ -95,6 +95,25 @@ test("browser client supports a same-origin path prefix and refuses network base
   }
 });
 
+test("browser message retries preserve optional product_line and the original payload", async () => {
+  for (const productLine of [undefined, null, "交换机 / CloudEngine"]) {
+    const calls = [];
+    const client = createAgentClient({ fetchImpl: async (path, init) => {
+      calls.push({ path, body: init.body });
+      if (calls.length === 1) throw new TypeError("合成网络中断");
+      return envelope({ status: "ACCEPTED" });
+    } });
+    const message = { request_id: "product-line-original", text: "设备偶发重启", attachment_ids: [],
+      ...(productLine === undefined ? {} : { product_line: productLine }) };
+    await assert.rejects(client.conversations.send(conversationId, message));
+    assert.equal(calls.length, 1, "发送失败不能自动生成第二次请求。");
+    assert.deepEqual(await client.conversations.send(conversationId, message), { status: "ACCEPTED" });
+    assert.deepEqual(calls.map(({ path }) => path), [`${prefix}/messages`, `${prefix}/messages`]);
+    assert.equal(calls[0].body, calls[1].body);
+    assert.deepEqual(JSON.parse(calls[1].body), message);
+  }
+});
+
 test("browser get rejects malformed includes before sending a request", () => {
   const client = createAgentClient({ fetchImpl: async () => assert.fail("非法 include 不能发起请求。") });
   for (const include of [null, "report", ["report", "report"], ["none"], ["unknown"]]) {
@@ -387,7 +406,8 @@ test("browser client and real website backend complete create, prepare, upload, 
         return envelope({ ...prepared.attachment, status: "READY" });
       }
       if (pathname === `/internal/api/v1/agent/conversations/${conversationId}/messages`) {
-        assert.deepEqual(JSON.parse(init.body), { request_id: "journey-message", text: "请定位这个问题。", attachment_ids: [attachmentId] });
+        assert.deepEqual(JSON.parse(init.body), { request_id: "journey-message", text: "请定位这个问题。", attachment_ids: [attachmentId],
+          product_line: "交换机 / CloudEngine" });
         return envelope({ conversation_id: conversationId, message_id: otherId, request_id: "journey-message", event_id: 3, status: "ACCEPTED" });
       }
       if (pathname === `/internal/api/v1/agent/conversations/${conversationId}`) {
@@ -419,7 +439,7 @@ test("browser client and real website backend complete create, prepare, upload, 
     assert.equal(uploaded.status, "READY");
     token = "message-csrf";
     const receipt = await client.conversations.send(created.conversation_id, { request_id: "journey-message",
-      text: "请定位这个问题。", attachment_ids: [uploaded.attachment_id] });
+      text: "请定位这个问题。", attachment_ids: [uploaded.attachment_id], product_line: "交换机 / CloudEngine" });
     assert.equal(receipt.status, "ACCEPTED");
     token = "report-csrf";
     const detail = await client.conversations.get(created.conversation_id, { include: ["report"] });

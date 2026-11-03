@@ -49,7 +49,11 @@ from ._builders import (
 )
 
 
-def test_create_case_builds_one_empty_route_job() -> None:
+@pytest.mark.parametrize(
+    ("case_product_line", "request_product_line"),
+    [(None, None), ("园区交换机", "园区交换机"), ("园区交换机", "数据中心交换机")],
+)
+def test_create_case_builds_one_empty_route_job(case_product_line, request_product_line) -> None:
     job = route_job()
     state = state_from_job(job)
     case = Case(
@@ -57,6 +61,7 @@ def test_create_case_builds_one_empty_route_job() -> None:
         status=CaseStatus.NEW,
         case_revision=1,
         raw_problem_text=state.problem_spec.statement,
+        product_line=case_product_line,
         diagnosis_state=state,
         active_job_id=None,
         selected_skill_ref=None,
@@ -76,6 +81,7 @@ def test_create_case_builds_one_empty_route_job() -> None:
         trigger_type=TriggerType.CREATE_CASE,
         payload=CreateCaseTriggerPayload(
             raw_problem_text=state.problem_spec.statement,
+            product_line=request_product_line,
             problem_spec=state.problem_spec,
             initial_user_facts=state.user_facts,
         ),
@@ -84,12 +90,17 @@ def test_create_case_builds_one_empty_route_job() -> None:
 
     plan = DomainCoordinator().plan(snapshot, request)
 
+    if case_product_line != request_product_line:
+        assert isinstance(plan, ApplicationError)
+        assert plan.code is ErrorCode.VALIDATION_ERROR
+        return
     assert not isinstance(plan, ApplicationError)
     assert plan.target_case_status is CaseStatus.RUNNING
     assert plan.job_updates == []
     assert plan.clear_active_job is False
     assert plan.next_job_spec is not None
     assert plan.next_job_spec.job_type is JobType.ROUTE
+    assert plan.next_job_spec.generic_product_line is None
     assert plan.next_job_spec.target_state_revision == 1
     assert plan.next_job_spec.evidence_bindings == []
     assert plan.next_job_spec.attachment_refs == []
@@ -132,9 +143,11 @@ def test_route_match_sets_the_fixed_skill_and_starts_diagnosis() -> None:
     assert validate_transition_plan_for_outcome(first, outcome) is first
 
 
-def test_route_no_capability_starts_isolated_generic_diagnosis() -> None:
+@pytest.mark.parametrize("product_line", [None, "数据中心交换机"])
+def test_route_no_capability_starts_isolated_generic_diagnosis(product_line) -> None:
     source = route_job()
     snapshot = snapshot_with_active(source)
+    snapshot = rebuild(snapshot, case=rebuild(snapshot.case, product_line=product_line))
     base = route_outcome()
     reason = "No frozen Diagnosis Skill covers the target system."
     outcome = rebuild(
@@ -177,6 +190,7 @@ def test_route_no_capability_starts_isolated_generic_diagnosis() -> None:
     assert plan.next_job_spec.diagnosis_mode.value == "GENERIC"
     assert plan.next_job_spec.generic_skill_name == "generic-problem-locator-smoke"
     assert plan.next_job_spec.generic_problem_text == snapshot.case.raw_problem_text
+    assert plan.next_job_spec.generic_product_line == product_line
     assert plan.next_job_spec.skill_ref is None
     assert plan.next_job_spec.evidence_bindings == []
     assert plan.next_job_spec.attachment_refs == []
@@ -425,8 +439,9 @@ def test_generic_diagnosis_can_be_cancelled_without_specialized_side_effects() -
     assert plan.job_updates[0].target_status is JobStatus.CANCELLED
 
 
-def test_interrupted_generic_diagnosis_resumes_with_exact_frozen_input() -> None:
-    job = _generic_diagnose_job()
+@pytest.mark.parametrize("product_line", [None, "数据中心交换机"])
+def test_interrupted_generic_diagnosis_resumes_with_exact_frozen_input(product_line) -> None:
+    job = rebuild(_generic_diagnose_job(), generic_product_line=product_line)
     source = rebuild(
         running(job),
         status=JobStatus.INTERRUPTED,
@@ -439,6 +454,7 @@ def test_interrupted_generic_diagnosis_resumes_with_exact_frozen_input() -> None
             status=CaseStatus.INTERRUPTED,
             case_revision=7,
             raw_problem_text=job.generic_problem_text,
+            product_line=product_line,
             diagnosis_state=state,
             active_job_id=None,
             selected_skill_ref=None,
@@ -469,6 +485,7 @@ def test_interrupted_generic_diagnosis_resumes_with_exact_frozen_input() -> None
     assert plan.next_job_spec.diagnosis_mode is DiagnosisMode.GENERIC
     assert plan.next_job_spec.generic_skill_name == source.generic_skill_name
     assert plan.next_job_spec.generic_problem_text == source.generic_problem_text
+    assert plan.next_job_spec.generic_product_line == product_line
     assert plan.next_job_spec.replacement_for_job_id == source.job_id
     assert plan.next_job_spec.skill_ref is None
     assert plan.next_job_spec.evidence_bindings == []

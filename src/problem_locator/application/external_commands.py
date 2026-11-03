@@ -1440,6 +1440,7 @@ class ExternalCommandHandler:
             status=CaseStatus.NEW,
             case_revision=1,
             raw_problem_text=payload.raw_problem_text,
+            product_line=payload.product_line,
             initial_log_archive_expected=payload.initial_log_archive_expected,
             continuation_context=payload.continuation_context,
             diagnosis_state=diagnosis_state,

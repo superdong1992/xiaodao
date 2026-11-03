@@ -109,10 +109,15 @@ def test_direct_manifest_has_no_parse_only_plan_and_must_match_fixed_strategy():
         })
 
 
+@pytest.mark.parametrize("product_line", [None, "园区交换机"])
 @pytest.mark.parametrize("source_mode", ["direct", "legacy-text", "legacy-logparse"])
-def test_restart_fixes_preparation_and_preserves_legacy_logparse(source_mode):
+def test_restart_fixes_preparation_and_preserves_legacy_logparse(source_mode, product_line):
     state = (_direct_state() if source_mode == "direct" else
              _with_logs(_running_generic_state()) if source_mode == "legacy-logparse" else _running_generic_state())
+    values = state.model_dump(mode="python")
+    values["cases"][CASE_ID]["case"]["product_line"] = product_line
+    values["cases"][CASE_ID]["jobs"][DIAGNOSE_JOB_ID]["generic_product_line"] = product_line
+    state = StateFile.model_validate(values)
     source = state.cases[CASE_ID].jobs[DIAGNOSE_JOB_ID]
     catalog = FakeAssetCatalog(generic=_direct_bindings(),
         assets=[*assets_for_bindings(_direct_bindings()), *assets_for_bindings(runtime_bindings_from_job(source))])
@@ -125,6 +130,7 @@ def test_restart_fixes_preparation_and_preserves_legacy_logparse(source_mode):
     assert len(aggregate.jobs) == 2 and aggregate.jobs[source.job_id].status is JobStatus.CANCELLED
     assert dispatcher.cancel_calls == [source.job_id, source.job_id]
     assert successor.generic_problem_text == source.generic_problem_text
+    assert successor.generic_product_line == product_line
     assert successor.generic_log_archive_expected
     if source_mode == "legacy-logparse":
         assert successor.generic_log_preparation is None

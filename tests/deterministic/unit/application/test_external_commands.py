@@ -346,10 +346,12 @@ def _create_command(
     *,
     statement: str = "RPC timeout",
     wait_seconds: int = 0,
+    product_line: str | None = None,
 ) -> CreateCase:
     return CreateCase(
         idempotency_key="create-1",
         raw_problem_text=statement,
+        product_line=product_line,
         problem_spec={
             "statement": statement,
             "expected_behavior": "RPC succeeds",
@@ -374,14 +376,17 @@ def _expect_port_error(callback, code: ErrorCode) -> ApplicationPortError:
     raise AssertionError(f"expected ApplicationPortError({code.value})")
 
 
+@pytest.mark.parametrize("product_line", [None, "交换机"])
 def test_create_case_commits_then_notifies_dispatches_and_replays(
     journey_stream: io.StringIO,
+    product_line,
 ) -> None:
     route = _job("job-route.json")
 
     def create_plan(snapshot, trigger):
         assert snapshot.case.status is CaseStatus.NEW
         assert trigger.trigger_type is TriggerType.CREATE_CASE
+        assert trigger.payload.product_line == snapshot.case.product_line == product_line
         return _plan(
             target_status=CaseStatus.RUNNING,
             next_job_spec=_job_spec(route, target_revision=1),
@@ -406,8 +411,8 @@ def test_create_case_commits_then_notifies_dispatches_and_replays(
     )
     execution_records.guard = guard
 
-    first = handler.execute(_create_command())
-    second = handler.execute(_create_command(wait_seconds=0))
+    first = handler.execute(_create_command(product_line=product_line))
+    second = handler.execute(_create_command(wait_seconds=0, product_line=product_line))
 
     journey_events = [
         json.loads(line) for line in journey_stream.getvalue().splitlines()
@@ -428,6 +433,7 @@ def test_create_case_commits_then_notifies_dispatches_and_replays(
     assert first.business_receipt.case_revision == 1
     assert aggregate.case.status is CaseStatus.RUNNING
     assert aggregate.case.case_revision == 1
+    assert aggregate.case.product_line == product_line
     assert aggregate.case.diagnosis_state.revision == 1
     assert aggregate.case.diagnosis_state.user_facts[0].item_id == FACT_ID
     assert aggregate.case.active_job_id == NEW_JOB_ID
