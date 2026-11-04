@@ -1,6 +1,6 @@
 # 已修复问题台账
 
-更新时间：2026-11-03
+更新时间：2026-11-04
 
 本文件记录已经在当前工作区验证、修复并由专项回归测试保护的问题。活跃待办仍只写入
 [`TODO.md`](TODO.md)；同一问题再次回归时更新原条目，不另建一个缺少历史关联的条目。
@@ -20,6 +20,16 @@
 本轮在已合并主线 `2245a1c` 上优化附件并发、可见历史分页与磁盘压力回收，保留逐条回答反馈、持续诊断及正文永久保存。三处问题先在 `603e5b9` 复现，修复后衔接最新主线并复验；本轮最终状态以 PL-FIX-090 至 PL-FIX-092 的最新 verdict 元数据为准。此前各条记录的 PASS 只证明其对应快照，不替代本轮完整验证。
 
 本轮最终验收环境：Ubuntu 22.04、Python 3.12.13、锁定依赖及真实 PostgreSQL 15.19。已确认 WSL 持久盘存在同步等待及同机测试竞争，旧源码也有明显耗时波动；前轮 ext4 完整验证及专项证据保留。本轮使用正式 `--evidence-root` 指向本任务独立的 32 GiB tmpfs，承载测试临时数据、字节码缓存及现场证据；执行源码、运行时和 PostgreSQL 仍在原持久盘。32 GiB 是按需分配的挂载上限，不是物理内存；运行时记录实际占用。测试范围、fsync、重开与崩溃恢复、默认容量阈值、真实数据库及 300 秒门槛均不调整。结束后立即将完整 attempt 复制到持久盘，逐文件校验并复核证据封印。该环境只用于确定性开发验收与反馈预算，不证明生产磁盘性能、真实模型效果或 Release 通过；结果仍以最终 verdict 为准。
+
+## PL-FIX-098：codeagent 子进程延迟退出导致正常调用失败
+
+- **状态**：实现与专项回归已完成，2026-11-04 已整理本次推送的修复正文、专项用例及待办，准备统一执行 `dev.default`。准备时仍待完整验证，最终状态只看本节最新 verdict 元数据，不沿用历史 PASS。使用独立 Linux 源码副本、锁定运行时和持久盘 PostgreSQL，保留全部用例、持久化设置及 300 秒门槛，零真实模型调用。
+- **症状、受影响版本与确认**：在 `8.2.0 / b02670c` 确认，主进程退出码为 `0` 时，如果 `serve` 等子进程仍在进程组内，`close_after_exit()` 会立即启动终止流程并固定返回失败，随后诊断报 `BACKEND_EXIT_FAILED`，即使模型响应已经生成。当前源码的只读替身复现得到 `terminate_calls=1`、`close_after_exit_result=False`。另外，子进程若仍持有标准流，原有默认 5 秒管道等待会提前失败。现场报告的自然退出延迟为 2–6 秒，codeagent 精确升级版本及真实环境尚未核验。
+- **根因与修复历史（2026-11-04）**：正常退出没有独立的子进程收尾窗口，管道等待也与终止宽限共用参数。现为退出码 `0` 且没有既有失败的调用增加内部 `normal_exit_grace_seconds=10.0`，原监控循环在同一个期限内等待进程树及全部 I/O 线程结束。新增 `ManagedProcess.is_tree_empty()` 只查询、不终止、不释放归属，等待成功后仍由 `close_after_exit()` 完成释放。终止宽限及非零退出处理不变。
+- **不可回归行为**：子进程在窗口内自然退出时不得提前终止；持有和释放标准流两种情况都适用，完成后立即返回。两项完成条件不得各自重新计时。取消、总时限、输出错误、工作区限制和扫描期间的收尾超时仍须及时生效；超过收尾窗口仍清理整树并报失败，不能仅凭已有模型输出放行。保留线程先停止、sink 后关闭及清理幂等性，已关闭对象不得再查询旧进程组或把历史失败改判成功。
+- **专项回归测试**：`tests/deterministic/unit/runtime/test_agent_backend.py` 的 `test_normal_exit_waits_for_natural_tree_and_pipe_completion` 覆盖 2 秒、6 秒及无残留；`test_normal_exit_pipes_and_tree_share_one_ten_second_window`、`test_normal_exit_late_poll_does_not_accept_completion_after_deadline` 覆盖共享窗口和调度迟醒；同文件的取消、总时限、末尾 I/O 错误、工作区增长和扫描中断用例保护异常路径。`test_real_child_exits_naturally_after_successful_parent` 的两组真实子进程分别继承及释放标准流，正常退出时间超过独立的终止宽限，检查最终响应完整、子进程消失且未调用终止。`test_process_tree_state.py` 覆盖 POSIX/Windows 查询、归属缺失和查询异常、关闭结果缓存及幂等释放。夹具摘要清单同步更新。
+- **开发验证记录（2026-11-04）**：在 Linux 内存加载 `b02670c` 原版后端，新真实子进程两例均按预期失败：继承标准流报管道未关闭，释放标准流报进程树未正常退出，未回滚工作区。修复版 Linux 专项为 **96 passed / 1 skipped，6.30 秒**，包含全部后端与进程树专项，以及最终结构化响应、原生会话返回、会话拒绝和取消的关联用例；唯一跳过项是 Windows Job Object 实机断言。文档检查 4 passed，`git diff --check` 通过。准确命令及 JUnit 证据位于 `.tmp/codeagent-normal-exit-20261104/`；初次 Windows 临时目录权限错误和 Linux 复现脚本导入错误的记录均保留。零真实模型调用，不宣称内网 codeagent 实机或完整 Test Flow 已验证。
+- **最新 Test Flow verdict（PL-FIX-098）**：2026-11-04 Linux `dev.default` [run-20261104T035606Z-cef6cfb4](.tmp/codeagent-exit-push-20261104/evidence/run-20261104T035606Z-cef6cfb4/verdict.json) 为 `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为 `NOT_CALIBRATED`，仅缺少性能历史基线。源码快照 `git-visible-worktree-v1:818ee669f588f740b8fcb4bd940e8e74499acb68c93434ebe44377e3fdbb55db`（1080 文件），verdict SHA-256 `2adf167fc18b912a0ac79ac8ec9f1bac417a45ff006b867c62b5eb9d5b2169bc`。affected 按编排规则由 full 覆盖（`NOT_REQUIRED`），完整阶段 280.876 秒，低于 300 秒门槛；Core 32、合同 626、单元 5025（另 2 项平台跳过）、真实 PostgreSQL 182、集成 226、SameJob 7、MCP 旅程 2、Web API 旅程 2 及网站示例全部通过。模型调用、token 和费用均为 0。101 份完整证据已保存至 Linux 持久盘和开发工作区，逐文件校验及正式 `verifyVerdict()` 复核通过；Windows 工作区字节、Git 文件模式、Linux 源码及权威快照一致。本行仅为验证后回填的引用元数据，不宣称被其引用的源码快照覆盖；除本行外，交付字节须与该快照一致。内网 codeagent 实机及真实模型效果仍未验收。
 
 ## PL-FIX-097：Web 产品线未进入通用诊断上下文
 

@@ -201,6 +201,26 @@ class ManagedProcess:
         assert self.process.stderr is not None
         return self.process.stderr
 
+    def is_tree_empty(self) -> bool:
+        """Check for complete exit without signaling or releasing ownership."""
+
+        if self._closed:
+            return self._cleanup_result is True
+        if self.process.poll() is None:
+            return False
+        if os.name == "nt":
+            job = self._windows_job
+            if job is None:
+                raise ProcessTreeError("Windows Job Object was not established")
+            return job.active_processes() == 0
+        group_id = self._process_group_id
+        if group_id is None:
+            raise ProcessTreeError("POSIX process group was not established")
+        try:
+            return not _posix_group_exists(group_id)
+        except OSError as exc:
+            raise ProcessTreeError("failed to query the POSIX process group") from exc
+
     def terminate_tree(
         self, grace_seconds: float = PROCESS_TERMINATION_GRACE_SECONDS
     ) -> bool:

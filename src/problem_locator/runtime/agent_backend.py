@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import stat
 import threading
@@ -60,6 +61,7 @@ class BackendExecutionLimits:
     workspace_bytes: int
     poll_interval_seconds: float = 0.05
     termination_grace_seconds: float = 5.0
+    normal_exit_grace_seconds: float = 10.0
 
     @classmethod
     def from_resource_limits(cls, limits: ResourceLimits) -> BackendExecutionLimits:
@@ -76,6 +78,11 @@ class BackendExecutionLimits:
             raise ValueError("byte limits must be positive")
         if self.poll_interval_seconds <= 0 or self.termination_grace_seconds < 0:
             raise ValueError("poll/grace values are invalid")
+        if (
+            not math.isfinite(self.normal_exit_grace_seconds)
+            or self.normal_exit_grace_seconds < 0
+        ):
+            raise ValueError("normal_exit_grace_seconds 必须是有限的非负数")
 
 
 @dataclass(frozen=True, slots=True)
@@ -415,11 +422,41 @@ class AgentBackend:
         workspace_scan_count = 0
         workspace_scan_duration_ms = 0.0
         next_workspace_scan = 0.0
+        normal_exit_deadline: float | None = None
         tree_released = False
         readers: tuple[threading.Thread, ...] = ()
         lifecycle_threads: tuple[threading.Thread, ...] = ()
         io_stop = threading.Event()
         pipes = (managed.stdin, managed.stdout, managed.stderr)
+
+        def execution_failure_probe() -> ExecutionFailure | None:
+            if cancellation.is_cancelled():
+                return _cancelled_failure(cancellation.reason)
+            if telemetry.native_session_failed:
+                return _native_session_failure()
+            failure = _background_io_failure(input_state, output_state)
+            if failure is not None:
+                return failure
+            if self._monotonic() >= started + limits.wall_time_seconds:
+                return ExecutionFailure(
+                    stage=ExecutionStage.BACKEND_EXECUTE,
+                    code=ErrorCode.BACKEND_TIMEOUT,
+                    message="Agent execution exceeded the fixed wall time.",
+                    retryable=True,
+                    details=[],
+                )
+            return None
+
+        def workspace_failure_probe() -> ExecutionFailure | None:
+            # A descendant can still write while its parent has already exited.
+            # Keep a long workspace scan interruptible by the same drain budget.
+            if normal_exit_deadline is not None:
+                failure = execution_failure_probe()
+                if failure is not None:
+                    return failure
+                if self._monotonic() >= normal_exit_deadline:
+                    return _normal_exit_failure()
+            return _background_io_failure(input_state, output_state)
 
         def measure_workspace(*, allow_transient_changes: bool) -> int:
             nonlocal workspace_scan_count, workspace_scan_duration_ms
@@ -432,9 +469,10 @@ class AgentBackend:
                     cancellation=cancellation,
                     monotonic=self._monotonic,
                     identity=workspace_identity,
-                    failure_probe=lambda: _background_io_failure(
-                        input_state,
-                        output_state,
+                    failure_probe=(
+                        workspace_failure_probe
+                        if allow_transient_changes
+                        else lambda: _background_io_failure(input_state, output_state)
                     ),
                     allow_transient_changes=allow_transient_changes,
                 )
@@ -515,37 +553,38 @@ class AgentBackend:
                     },
                 )
 
-            while primary_failure is None and managed.process.poll() is None:
-                if cancellation.is_cancelled():
-                    primary_failure = _cancelled_failure(cancellation.reason)
+            while primary_failure is None:
+                returncode = managed.process.poll()
+                if returncode is not None:
+                    if returncode != 0:
+                        break
+                    if normal_exit_deadline is None:
+                        normal_exit_deadline = (
+                            self._monotonic() + limits.normal_exit_grace_seconds
+                        )
+                primary_failure = execution_failure_probe()
+                if primary_failure is not None:
                     break
-                if telemetry.native_session_failed:
-                    primary_failure = _native_session_failure()
-                    break
-                if input_state.failure is not None:
-                    primary_failure = ExecutionFailure(
-                        stage=ExecutionStage.BACKEND_EXECUTE,
-                        code=ErrorCode.BACKEND_EXIT_FAILED,
-                        message=(
-                            "Agent process closed stdin before receiving the prompt."
-                        ),
-                        retryable=False,
-                        details=[],
-                    )
-                    break
-                if output_state.failed.is_set():
-                    primary_failure = _output_failure(output_state)
-                    break
-                elapsed = self._monotonic() - started
-                if elapsed >= limits.wall_time_seconds:
-                    primary_failure = ExecutionFailure(
-                        stage=ExecutionStage.BACKEND_EXECUTE,
-                        code=ErrorCode.BACKEND_TIMEOUT,
-                        message="Agent execution exceeded the fixed wall time.",
-                        retryable=True,
-                        details=[],
-                    )
-                    break
+                if normal_exit_deadline is not None:
+                    if managed.is_tree_empty() and not any(
+                        thread.is_alive() for thread in lifecycle_threads
+                    ):
+                        # The workers may have recorded their final failure
+                        # between the first probe and is_alive() becoming false.
+                        primary_failure = execution_failure_probe()
+                        if (
+                            primary_failure is None
+                            and limits.normal_exit_grace_seconds > 0
+                            and self._monotonic() > normal_exit_deadline
+                        ):
+                            # A delayed scheduler wakeup must not turn an
+                            # expired drain into success. Zero means one
+                            # immediate check without waiting.
+                            primary_failure = _normal_exit_failure()
+                        break
+                    if self._monotonic() >= normal_exit_deadline:
+                        primary_failure = _normal_exit_failure()
+                        break
                 try:
                     if self._monotonic() >= next_workspace_scan:
                         workspace_bytes = measure_workspace(allow_transient_changes=True)
@@ -562,16 +601,21 @@ class AgentBackend:
                         details=[],
                     )
                     break
-                cancellation.wait(
-                    min(
-                        limits.poll_interval_seconds,
-                        max(0.0, limits.wall_time_seconds - elapsed),
-                    )
+                wait_seconds = min(
+                    limits.poll_interval_seconds,
+                    max(0.0, started + limits.wall_time_seconds - self._monotonic()),
                 )
+                if normal_exit_deadline is not None:
+                    wait_seconds = min(
+                        wait_seconds,
+                        max(0.0, normal_exit_deadline - self._monotonic()),
+                    )
+                cancellation.wait(wait_seconds)
 
-            if primary_failure is None:
-                # The executable has exited. Drain its final pipe bytes before
-                # deciding whether output limits or sink failures won the race.
+            if primary_failure is None and managed.process.returncode != 0:
+                # Nonzero exits retain their existing bounded pipe drain. A
+                # successful parent has already drained pipes and descendants
+                # together in the monitored loop above.
                 primary_failure = _wait_for_lifecycle_threads(
                     lifecycle_threads,
                     input_state=input_state,
@@ -974,6 +1018,16 @@ def _cancelled_failure(reason: CancellationReason | None) -> ExecutionFailure:
         code=ErrorCode.BACKEND_CANCELLED,
         message="Agent execution was cancelled.",
         retryable=reason is CancellationReason.SERVICE_SHUTDOWN,
+        details=[],
+    )
+
+
+def _normal_exit_failure() -> ExecutionFailure:
+    return ExecutionFailure(
+        stage=ExecutionStage.BACKEND_EXECUTE,
+        code=ErrorCode.BACKEND_EXIT_FAILED,
+        message="Agent 主进程退出后，进程树或输入输出管道未在收尾期限内结束。",
+        retryable=False,
         details=[],
     )
 

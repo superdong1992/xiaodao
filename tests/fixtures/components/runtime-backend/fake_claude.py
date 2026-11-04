@@ -54,6 +54,9 @@ def _publish_child_pid(marker: Path, pid: int) -> None:
 def main() -> int:
     if sys.argv[1:] == ["--child"]:
         _sleep_forever()
+    if sys.argv[1:] == ["--natural-child"]:
+        time.sleep(float(os.environ["FAKE_CHILD_EXIT_DELAY_SECONDS"]))
+        return 0
 
     mode = os.environ.get("FAKE_CLAUDE_MODE", "success")
     if mode == "ignore-stdin":
@@ -81,6 +84,23 @@ def main() -> int:
         child = subprocess.Popen([sys.executable, __file__, "--child"])
         marker = proposals / "child" / "child.pid"
         _publish_child_pid(marker, child.pid)
+        return 0
+    if mode == "child-natural-after-parent-exit":
+        child_streams = {}
+        if os.environ["FAKE_CHILD_PIPE_MODE"] == "release":
+            child_streams = {
+                "stdin": subprocess.DEVNULL,
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+            }
+        child = subprocess.Popen(
+            [sys.executable, __file__, "--natural-child"], **child_streams,
+        )
+        _publish_child_pid(proposals / "child" / "child.pid", child.pid)
+        sys.stdout.buffer.write(
+            b'{"type":"result","subtype":"success","is_error":false,"result":"complete"}\n'
+        )
+        sys.stdout.buffer.flush()
         return 0
     if mode == "emit":
         _write_repeated(sys.stdout.buffer, b"o", _integer("FAKE_STDOUT_BYTES"))

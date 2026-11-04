@@ -12,6 +12,7 @@ import threading
 import time
 from collections.abc import Callable
 from ctypes import wintypes
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -136,12 +137,137 @@ class _HeldOpenManagedProcess:
     def close_after_exit(self) -> bool:
         return False
 
+    def is_tree_empty(self) -> bool:
+        return False
+
     def close_retained(self) -> None:
         for file_descriptor in self._retained:
             try:
                 os.close(file_descriptor)
             except OSError:
                 pass
+
+
+class _ExitTimeline(_Signal):
+    """Independent logical times for parent exit, pipe EOF and tree exit."""
+
+    def __init__(
+        self,
+        *,
+        parent_exit: float = 1.0,
+        pipes_exit: float = 1.0,
+        tree_exit: float = 1.0,
+        cancel_at: float | None = None,
+        returncode: int = 0,
+    ) -> None:
+        super().__init__()
+        self.now = 0.0
+        self.parent_exit = parent_exit
+        self.pipes_exit = pipes_exit
+        self.tree_exit = tree_exit
+        self.cancel_at = cancel_at
+        self.returncode = returncode
+        self.forced = False
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def is_cancelled(self) -> bool:
+        if self.cancel_at is not None and self.now >= self.cancel_at:
+            self.cancel(CancellationReason.USER_CANCEL)
+        return super().is_cancelled()
+
+    def wait(self, timeout_seconds: float | None) -> bool:
+        assert timeout_seconds is not None
+        self.now += timeout_seconds
+        return self.is_cancelled()
+
+
+class _TimelineProcess:
+    def __init__(self, timeline: _ExitTimeline) -> None:
+        self.timeline = timeline
+        self.returncode: int | None = None
+
+    def poll(self) -> int | None:
+        if self.timeline.now >= self.timeline.parent_exit or self.timeline.forced:
+            self.returncode = self.timeline.returncode
+        return self.returncode
+
+
+class _TimelineManagedProcess(_HeldOpenManagedProcess):
+    def __init__(self, timeline: _ExitTimeline) -> None:
+        super().__init__(b"", threading.Event())
+        self.timeline = timeline
+        self.process = _TimelineProcess(timeline)
+        self.termination_calls = 0
+
+    def is_tree_empty(self) -> bool:
+        return self.timeline.forced or self.timeline.now >= self.timeline.tree_exit
+
+    def terminate_tree(self, grace_seconds: float) -> bool:
+        del grace_seconds
+        self.termination_calls += 1
+        self.timeline.forced = True
+        return True
+
+    def close_after_exit(self) -> bool:
+        if self.is_tree_empty():
+            return True
+        self.terminate_tree(0.0)
+        return False
+
+
+def _timeline_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    timeline: _ExitTimeline,
+    *,
+    payload: bytes = b'{"type":"result","subtype":"success","is_error":false,"result":"complete"}\n',
+) -> tuple[AgentBackend, _TimelineManagedProcess]:
+    managed = _TimelineManagedProcess(timeline)
+
+    class LifecycleThread:
+        def __init__(self, *, target, args, kwargs, name):
+            del target
+            self.args = args
+            self.stop = kwargs["stop"]
+            self.name = name
+            self.ident = None
+            self.emitted = False
+
+        def start(self) -> None:
+            self.ident = 1
+            if self.name.endswith("stdin"):
+                self.args[2].finished.set()
+
+        def is_alive(self) -> bool:
+            if self.ident is None or self.name.endswith("stdin"):
+                return False
+            if self.stop.is_set() or timeline.forced:
+                return False
+            if timeline.now < timeline.pipes_exit:
+                return True
+            if self.name.endswith("stdout") and not self.emitted:
+                accepted = self.args[2].reserve(len(payload))
+                try:
+                    self.args[1].write(payload[:accepted])
+                except BaseException as exc:
+                    self.args[2].record_failure(exc)
+                self.emitted = True
+            return False
+
+        def join(self, timeout=None) -> None:
+            if self.is_alive():
+                timeline.now += min(timeout or 0.0, timeline.pipes_exit - timeline.now)
+                self.is_alive()
+
+    monkeypatch.setattr(backend_module.threading, "Thread", LifecycleThread)
+    backend = AgentBackend(
+        "fake-agent",
+        parent_environment={},
+        process_factory=lambda *args, **kwargs: managed,
+        monotonic=timeline.monotonic,
+    )
+    return backend, managed
 
 
 class _WinFunctionStub:
@@ -327,6 +453,292 @@ def test_success_uses_stdin_fresh_process_and_atomic_final_name(tmp_path: Path) 
     assert result.returncode == 0
     assert (root / "output/job_outcome.json").read_bytes() == b'{"ok":true}'
     assert not (root / "output/.job_outcome.json.part").exists()
+
+
+@pytest.mark.parametrize(
+    ("pipes_delay", "tree_delay"),
+    [(0.0, 0.0), (0.0, 2.0), (0.0, 6.0), (2.0, 2.0), (6.0, 6.0)],
+)
+def test_normal_exit_waits_for_natural_tree_and_pipe_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pipes_delay: float,
+    tree_delay: float,
+) -> None:
+    timeline = _ExitTimeline(pipes_exit=1 + pipes_delay, tree_exit=1 + tree_delay)
+    backend, managed = _timeline_backend(monkeypatch, timeline)
+    try:
+        result = _execute(
+            backend, _workspace(tmp_path), cancellation=timeline,
+            limits=_limits(wall_time=30),
+        )
+    finally:
+        managed.close_retained()
+    assert result.final_result == "complete"
+    assert result.elapsed_seconds == pytest.approx(1 + max(pipes_delay, tree_delay), abs=0.03)
+    assert managed.termination_calls == 0
+
+
+def test_normal_exit_window_starts_when_parent_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timeline = _ExitTimeline(parent_exit=20, pipes_exit=20, tree_exit=26)
+    backend, managed = _timeline_backend(monkeypatch, timeline)
+    try:
+        result = _execute(
+            backend, _workspace(tmp_path), cancellation=timeline,
+            limits=_limits(wall_time=40),
+        )
+    finally:
+        managed.close_retained()
+    assert result.elapsed_seconds == pytest.approx(26, abs=0.03)
+    assert managed.termination_calls == 0
+
+
+@pytest.mark.parametrize(("pipes_exit", "tree_exit"), [(3, 13), (13, 3), (13, 13)])
+def test_normal_exit_pipes_and_tree_share_one_ten_second_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    pipes_exit: float, tree_exit: float,
+) -> None:
+    timeline = _ExitTimeline(pipes_exit=pipes_exit, tree_exit=tree_exit)
+    backend, managed = _timeline_backend(monkeypatch, timeline)
+    try:
+        with pytest.raises(RuntimeExecutionError) as caught:
+            _execute(
+                backend, _workspace(tmp_path), cancellation=timeline,
+                limits=_limits(wall_time=30),
+            )
+    finally:
+        managed.close_retained()
+    _assert_failure(caught, ErrorCode.BACKEND_EXIT_FAILED)
+    assert timeline.now == pytest.approx(11, abs=0.03)
+    assert managed.termination_calls >= 1
+
+
+@pytest.mark.parametrize(
+    ("completion_at", "wake_at", "succeeds"),
+    [(11.0, 11.0, True), (11.05, 11.1, False)],
+)
+def test_normal_exit_late_poll_does_not_accept_completion_after_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    completion_at: float, wake_at: float, succeeds: bool,
+) -> None:
+    timeline = _ExitTimeline(pipes_exit=completion_at, tree_exit=completion_at)
+    backend, managed = _timeline_backend(monkeypatch, timeline)
+    wait = timeline.wait
+
+    def late_wait(timeout_seconds):
+        if timeline.now == 10.75:
+            timeline.now = wake_at
+            return timeline.is_cancelled()
+        return wait(timeout_seconds)
+
+    monkeypatch.setattr(timeline, "wait", late_wait)
+    limits = replace(_limits(wall_time=30), poll_interval_seconds=0.25)
+    try:
+        if succeeds:
+            result = _execute(backend, _workspace(tmp_path), cancellation=timeline, limits=limits)
+            assert result.final_result == "complete"
+            assert managed.termination_calls == 0
+        else:
+            with pytest.raises(RuntimeExecutionError) as caught:
+                _execute(backend, _workspace(tmp_path), cancellation=timeline, limits=limits)
+            _assert_failure(caught, ErrorCode.BACKEND_EXIT_FAILED)
+            assert managed.termination_calls >= 1
+    finally:
+        managed.close_retained()
+    assert timeline.now == wake_at
+
+
+@pytest.mark.parametrize(
+    ("cancel_at", "wall_time", "expected"),
+    [(3.0, 30.0, ErrorCode.BACKEND_CANCELLED), (None, 3.0, ErrorCode.BACKEND_TIMEOUT)],
+)
+def test_normal_exit_wait_remains_cancellable_and_obeys_execution_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    cancel_at: float | None, wall_time: float, expected: ErrorCode,
+) -> None:
+    timeline = _ExitTimeline(pipes_exit=1, tree_exit=30, cancel_at=cancel_at)
+    backend, managed = _timeline_backend(monkeypatch, timeline)
+    try:
+        with pytest.raises(RuntimeExecutionError) as caught:
+            _execute(
+                backend, _workspace(tmp_path), cancellation=timeline,
+                limits=_limits(wall_time=wall_time),
+            )
+    finally:
+        managed.close_retained()
+    _assert_failure(caught, expected)
+    assert timeline.now == pytest.approx(3, abs=0.03)
+    assert managed.termination_calls >= 1
+
+
+def test_nonzero_exit_does_not_wait_for_normal_exit_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timeline = _ExitTimeline(pipes_exit=1, tree_exit=30, returncode=17)
+    backend, managed = _timeline_backend(monkeypatch, timeline)
+    try:
+        with pytest.raises(RuntimeExecutionError) as caught:
+            _execute(
+                backend, _workspace(tmp_path), cancellation=timeline,
+                limits=_limits(wall_time=40),
+            )
+    finally:
+        managed.close_retained()
+    _assert_failure(caught, ErrorCode.BACKEND_EXIT_FAILED)
+    assert timeline.now < 2
+    assert managed.termination_calls >= 1
+
+
+@pytest.mark.parametrize("tree_delay", [0.0, 1.0])
+def test_zero_normal_exit_window_allows_only_already_finished_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tree_delay: float,
+) -> None:
+    timeline = _ExitTimeline(tree_exit=1 + tree_delay)
+    backend, managed = _timeline_backend(monkeypatch, timeline)
+    limits = replace(_limits(wall_time=30), normal_exit_grace_seconds=0)
+    try:
+        if tree_delay:
+            with pytest.raises(RuntimeExecutionError) as caught:
+                _execute(backend, _workspace(tmp_path), cancellation=timeline, limits=limits)
+            _assert_failure(caught, ErrorCode.BACKEND_EXIT_FAILED)
+            assert managed.termination_calls >= 1
+        else:
+            result = _execute(backend, _workspace(tmp_path), cancellation=timeline, limits=limits)
+            assert result.final_result == "complete"
+            assert managed.termination_calls == 0
+    finally:
+        managed.close_retained()
+    assert timeline.now == pytest.approx(1, abs=0.03)
+
+
+@pytest.mark.parametrize("value", [-1.0, float("nan"), float("inf"), -float("inf")])
+def test_normal_exit_window_rejects_negative_and_nonfinite_limits(value: float) -> None:
+    with pytest.raises(ValueError, match="normal_exit_grace_seconds"):
+        replace(_limits(), normal_exit_grace_seconds=value)
+
+
+@pytest.mark.parametrize(
+    ("output_limit", "sink_fails", "expected"),
+    [(16, False, ErrorCode.BACKEND_OUTPUT_LIMIT), (1024, True, ErrorCode.EXECUTION_RECORD_FAILED)],
+)
+def test_normal_exit_preserves_io_failure_recorded_as_last_reader_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    output_limit: int, sink_fails: bool, expected: ErrorCode,
+) -> None:
+    timeline = _ExitTimeline(pipes_exit=3, tree_exit=3)
+    backend, managed = _timeline_backend(monkeypatch, timeline)
+    sinks = _sinks(stdout=_Sink(fail_write=sink_fails))[0]
+    try:
+        with pytest.raises(RuntimeExecutionError) as caught:
+            _execute(
+                backend, _workspace(tmp_path), cancellation=timeline, sinks=sinks,
+                limits=_limits(wall_time=30, output=output_limit),
+            )
+    finally:
+        managed.close_retained()
+    _assert_failure(caught, expected)
+    assert timeline.now == pytest.approx(3, abs=0.03)
+
+
+def test_normal_exit_wait_keeps_scanning_descendant_workspace_growth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    timeline = _ExitTimeline(pipes_exit=1, tree_exit=8)
+    backend, managed = _timeline_backend(monkeypatch, timeline)
+    measure = backend_module._temporary_workspace_bytes
+    growth_observed = []
+
+    def measure_with_growth(*args, **kwargs):
+        if timeline.now >= 2 and not growth_observed:
+            (root / "output/proposals/descendant-output.bin").write_bytes(b"x" * 2048)
+            growth_observed.append(timeline.now)
+        return measure(*args, **kwargs)
+
+    monkeypatch.setattr(backend_module, "_temporary_workspace_bytes", measure_with_growth)
+    try:
+        with pytest.raises(RuntimeExecutionError) as caught:
+            _execute(
+                backend, root, cancellation=timeline,
+                limits=_limits(wall_time=30, workspace=1024),
+            )
+    finally:
+        managed.close_retained()
+    _assert_failure(caught, ErrorCode.WORKSPACE_LIMIT)
+    assert len(growth_observed) == 1
+    assert timeline.now < timeline.tree_exit
+    assert managed.termination_calls >= 1
+
+
+def test_normal_exit_deadline_interrupts_workspace_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timeline = _ExitTimeline(pipes_exit=1, tree_exit=30)
+    backend, managed = _timeline_backend(monkeypatch, timeline)
+    measure = backend_module._temporary_workspace_bytes
+    interrupted_scan_codes = []
+
+    def slow_measure(*args, **kwargs):
+        if timeline.now >= 2:
+            timeline.now = 11.5
+        try:
+            return measure(*args, **kwargs)
+        except RuntimeExecutionError as exc:
+            interrupted_scan_codes.append(exc.failure.code)
+            raise
+
+    monkeypatch.setattr(backend_module, "_temporary_workspace_bytes", slow_measure)
+    try:
+        with pytest.raises(RuntimeExecutionError) as caught:
+            _execute(
+                backend, _workspace(tmp_path), cancellation=timeline,
+                limits=_limits(wall_time=30),
+            )
+    finally:
+        managed.close_retained()
+    _assert_failure(caught, ErrorCode.BACKEND_EXIT_FAILED)
+    assert interrupted_scan_codes == [ErrorCode.BACKEND_EXIT_FAILED]
+    assert managed.termination_calls >= 1
+
+
+@pytest.mark.parametrize("pipe_mode", ["inherit", "release"])
+def test_real_child_exits_naturally_after_successful_parent(
+    tmp_path: Path, pipe_mode: str,
+) -> None:
+    root = _workspace(tmp_path)
+    termination_calls = []
+
+    def observing_factory(*args, **kwargs):
+        managed = process_tree_module.spawn_managed_process(*args, **kwargs)
+        terminate = managed.terminate_tree
+
+        def record_termination(*args, **kwargs):
+            termination_calls.append(True)
+            return terminate(*args, **kwargs)
+
+        managed.terminate_tree = record_termination
+        return managed
+
+    backend = AgentBackend(
+        f"{shlex.quote(sys.executable)} {shlex.quote(str(FAKE_CLAUDE))}",
+        parent_environment={
+            "FAKE_CLAUDE_MODE": "child-natural-after-parent-exit",
+            "FAKE_CHILD_PIPE_MODE": pipe_mode,
+            "FAKE_CHILD_EXIT_DELAY_SECONDS": "0.15",
+        },
+        process_factory=observing_factory,
+    )
+    # Natural shutdown is allowed to outlast the separate termination budget.
+    result = _execute(
+        backend, root,
+        limits=replace(_limits(wall_time=5), termination_grace_seconds=0.02),
+    )
+    child_pid = int((root / "output/proposals/child/child.pid").read_text())
+    assert result.final_result == "complete"
+    assert not _pid_exists(child_pid)
+    assert termination_calls == []
 
 
 def test_success_logs_bounded_agent_completion_metrics(
@@ -577,6 +989,7 @@ def test_held_open_pipes_stop_before_redactor_and_sink_close(
                     workspace_bytes=1024 * 1024,
                     poll_interval_seconds=0.005,
                     termination_grace_seconds=0.05,
+                    normal_exit_grace_seconds=0.05,
                 ),
             )
         observed_threads = _agent_thread_identities()
@@ -1060,6 +1473,8 @@ def test_production_limits_come_unchanged_from_frozen_resource_limits() -> None:
     assert accelerated.wall_time_seconds == 1800
     assert accelerated.stdout_stderr_bytes == 67_108_864
     assert accelerated.workspace_bytes == 1_073_741_824
+    assert accelerated.normal_exit_grace_seconds == 10.0
+    assert accelerated.termination_grace_seconds == 5.0
 
 
 def test_backend_fixture_manifest_is_exact() -> None:

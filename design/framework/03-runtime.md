@@ -174,6 +174,8 @@ Methods 输入中的命名事实以 `request.json` 为唯一模型可见来源�
 
 执行前准备无 shell 命令、应用本阶段工具策略、记录工作区身份。stdin、stdout、stderr 使用非阻塞管道和独立线程，输出按 stdout/stderr 合计限额计数，私有 broker 字节先脱敏再写日志。主循环检查取消、写入失败、输出超限、墙钟时限和工作区大小；运行中扫描允许受控瞬态变化，结束后再次严格检查。
 
+主进程退出码为 `0` 且尚未失败时，主循环继续等待进程树清空和全部 I/O 线程结束。两者共享一个从首次观察到正常退出起算的 10 秒窗口，由内部 `normal_exit_grace_seconds` 控制；提前结束就立即返回，不分别累加等待。窗口内继续响应取消、总时限、输出错误和工作区限制，工作区扫描也可被收尾期限中断。收尾时间计入原有执行总时限；超过收尾窗口仍未结束时，清理进程树并返回 `BACKEND_EXIT_FAILED`。非零退出和既有失败保留原有处理，终止宽限 `termination_grace_seconds` 不变。
+
 任何退出路径都负责终止整个进程树、结束管道线程、关闭 sink 并恢复工作区权限。进程退出成功不等于任务输出有效：最终还要检查遥测输出限额、工具调用集合和最终工作区边界。日志无法完成写入时归为执行记录失败。遥测事件发送失败本身不能改变 Job 结论，但用于工具政策判定的遥测缺失或格式异常不能被当成已获许可。
 
 ### `claude_command.py`
@@ -190,7 +192,7 @@ Methods 输入中的命名事实以 `request.json` 为唯一模型可见来源�
 
 源码：[process_tree.py](../../src/problem_locator/runtime/process_tree.py)
 
-`spawn_managed_process()` 创建 `ManagedProcess` 并把进程放进本次执行拥有的终止边界。POSIX 使用独立进程组；Windows 使用 Job Object，先建立并确认归属再恢复运行。`terminate_tree()` 先给宽限时间，再强制停止整个组；`close_after_exit()` 确认父进程已退出且没有遗留子进程。内部 Windows 结构与句柄函数只承担平台机制，不代表 Windows 是受支持的 Server 部署平台。
+`spawn_managed_process()` 创建 `ManagedProcess` 并把进程放进本次执行拥有的终止边界。POSIX 使用独立进程组；Windows 使用 Job Object，先建立并确认归属再恢复运行。`is_tree_empty()` 只查询父进程及其进程组或 Job 是否已全部退出，不发送终止信号、不释放归属；已关闭对象直接返回缓存的清理结果，不再查询旧进程组或句柄。正常收尾由 `AgentBackend` 统一轮询，完成后调用 `close_after_exit()` 确认并释放归属。`terminate_tree()` 先给终止宽限时间，再强制停止整个组；`close_after_exit()` 发现残留进程仍会清理并返回失败。内部 Windows 结构与句柄函数只承担平台机制，不代表 Windows 是受支持的 Server 部署平台。
 
 ### `agent_telemetry.py`
 
