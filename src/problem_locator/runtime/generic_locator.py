@@ -46,7 +46,7 @@ from .context_policy import ResolvedJobAssets
 from .continuation_context import build_report_continuation_context
 from .failures import RuntimeExecutionError, runtime_failure
 from .workspace import PreparedWorkspace, WorkspaceManager
-from .generic_logs import verify_generic_logs
+from .generic_logs import verify_generic_logs, _ordinary_path, _stream_verified
 
 
 GENERIC_RESULT_FILENAME = "generic_diagnosis_result.txt"
@@ -365,6 +365,20 @@ class GenericLocatorExecutor:
         if job.attachment_refs and (prepared_workspace is None or log_manifest_bytes is None):
             raise _invalid_result()
         workspace = prepared_workspace or self._workspace_manager.prepare(job, aggregate, resource_store)
+        def verify_followup_context():
+            context = job.continuation_context
+            if context is None or context.followup_context_json is None:
+                return
+            raw = context.followup_context_json.encode("utf-8")
+            try:
+                path = _ordinary_path(workspace.root, "inputs/followup-context.json")
+                _stream_verified(path, len(raw), hashlib.sha256(raw).hexdigest(),
+                    destination=None, cancellation=cancellation)
+            except (OSError, ValueError):
+                raise runtime_failure(stage=ExecutionStage.OUTCOME_VALIDATE,
+                    code=ErrorCode.RESOURCE_HASH_MISMATCH,
+                    message="追问参考资料校验失败，本次结果未发布。") from None
+        verify_followup_context()
         record_stage_completed(
             ExecutionStage.WORKSPACE_PREPARE,
             preparing,
@@ -389,7 +403,8 @@ class GenericLocatorExecutor:
             )
         parsed_logs = None if log_manifest_bytes is None else parse_canonical_json_bytes(log_manifest_bytes)
         empty_logs = (parsed_logs is not None and not parsed_logs["logs"]
-                      and job.generic_log_preparation != "direct-v1")
+                      and job.generic_log_preparation != "direct-v1"
+                      and not (job.continuation_context and job.continuation_context.followup_context_json is not None))
         memory_recall_ms, memory_used = 0.0, False
         memory_selection = None
         # Optional memory never displaces the original problem or output contract.
@@ -444,6 +459,7 @@ class GenericLocatorExecutor:
                 diagnosis_mode="GENERIC",
                 backend_phase="GENERIC",
             )
+        verify_followup_context()
         if parsed_logs is not None:
             try:
                 verify_generic_logs(workspace, receipt=log_manifest_bytes,

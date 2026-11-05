@@ -1,4 +1,4 @@
-"""Report answers and evidence-driven handoff to an independent diagnosis."""
+"""Dispatch every report question to an independent Generic diagnosis."""
 from __future__ import annotations
 
 import hashlib
@@ -15,7 +15,7 @@ from problem_locator.contracts.limits import (
 from problem_locator.contracts.models import is_specialized_direct, specialized_direct_skill_name
 from problem_locator.diagnostics import log_event
 from problem_locator.dispatch.activity import QueueIdleObservation
-from problem_locator.runtime.claude_command import supports_native_sessions, supports_read_search
+from problem_locator.runtime.claude_command import supports_read_search
 
 from .models import (MAX_TEXT_BYTES, FollowupRequest, FollowupSource,
     FollowupStopRequest, FollowupView)
@@ -32,8 +32,6 @@ class ReportFollowupService:
             raise ValueError("报告追问快照预算无效。")
         if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= MAX_REPORT_FOLLOWUP_TIMEOUT_SECONDS:
             raise ValueError(f"追问执行时间必须是 1–{MAX_REPORT_FOLLOWUP_TIMEOUT_SECONDS} 秒之间的整数。")
-        if enabled and not supports_native_sessions(command):
-            raise ValueError("当前模型启动器不支持原生追问会话。")
         self.agent, self.enabled = agent, enabled
         self.timeout_seconds = timeout_seconds
         self.store = FollowupStore(agent.store.repository, agent.store.clock,
@@ -169,7 +167,13 @@ class ReportFollowupService:
                 # Historical reports remain available for explanation. Never
                 # reparse old uploads or guess that old temporary logs survived.
                 return False
-            return self.store.enqueue_snapshot(conversation_id, run_id, source)
+            # Diagnosis owns verified inputs; do not copy every log again for
+            # the retired read-only question-and-answer stage.
+            with self.store.repository.database_transaction() as db:
+                if not self.store.alive(db, conversation_id, run_id):
+                    return False
+                self.store._register_source(db, conversation_id, run_id, source)
+            return True
 
     def get(self, conversation_id, run_id, owner_key=None, cursor=None, limit=50):
         with self.agent.operation_lease(conversation_id, owner_key=owner_key):
@@ -178,6 +182,19 @@ class ReportFollowupService:
             reason = ("DISABLED" if not self.enabled else
                 "UNSUPPORTED" if source is None else
                 "BUSY" if page["active_followup"] is not None else None)
+            if reason is None:
+                try:
+                    with self.store.repository.database_read() as db:
+                        self.agent.continuations._head(db, conversation_id, run_id)
+                except AgentStoreError as error:
+                    if error.code == "AGENT_DIAGNOSIS_BUSY":
+                        reason = "BUSY"
+                    elif error.code == "AGENT_REPORT_CHANGED":
+                        reason = "LATEST_REPORT_REQUIRED"
+                    elif error.code == "AGENT_REPORT_REQUIRED":
+                        reason = "UNSUPPORTED"
+                    else:
+                        raise
             snapshot = page["snapshot"]
             status = "DISABLED" if not self.enabled else "UNAVAILABLE" if snapshot is None else snapshot["status"]
             return FollowupView(conversation_id=conversation_id, run_id=run_id, can_ask=reason is None,
@@ -202,6 +219,8 @@ class ReportFollowupService:
             source = self._source(conversation_id, run_id)
             if source is None:
                 raise fail("UNSUPPORTED", "这份报告暂不支持追问，请新建对话。")
+            with self.store.repository.database_read() as db:
+                self.agent.continuations._head(db, conversation_id, run_id)
             attachments = (self.agent.continuations._attachments(conversation_id, request.attachment_ids)
                 if request.attachment_ids else [])
             return self.store.submit(conversation_id, run_id, request, source, owner_key,
@@ -261,6 +280,57 @@ class ReportFollowupService:
             self.worker.cancel(conversation_id=conversation_id, followup_id=followup_id)
             return receipt
 
+    def dispatch_generic(self, task):
+        """Keep the current question intact; the Generic Skill owns analysis."""
+        source, history, snapshot = self.store.task_context(task)
+        material_context = self.decision_context(task, history, snapshot)
+        item = json.loads(task["body"])
+        prior_turns = self.store.sessions.history(task)
+        reference = {
+            "original_problem": source.problem_text,
+            "prior_turns": [{key: entry.get(key) for key in (
+                "run_id", "followup_id", "text", "answer_markdown", "status", "attachment_ids", "diagnosis_run_id")}
+                for entry in prior_turns],
+            "prior_reports": self.store.sessions.historical_reports(task),
+            "latest_attempt": material_context["latest_attempt"],
+            "materials": material_context["materials"],
+            "correction": json.loads(task["correction_json"]),
+        }
+        reference_json = json.dumps(reference, ensure_ascii=False, sort_keys=True)
+        if len(reference_json.encode("utf-8")) > 16 * 1024**2:
+            raise fail("CONTEXT_LIMIT", "本次会话资料过多，请新建对话并提供相关材料。", 413)
+        attempt = material_context["latest_attempt"]
+        after_ordinal = 0
+        if attempt is not None and attempt["effective_problem_text"] is not None:
+            # A saved empty selection is meaningful too. Do not revive logs
+            # excluded from the latest attempt when retrying its diagnosis.
+            candidates = list(attempt["initial_attachment_ids"])
+            for message in attempt["user_messages"]:
+                if message["status"] != "UNUSED":
+                    candidates.extend(message["attachment_ids"])
+            after_ordinal = self.store.latest_attempt_link(history)["ordinal"]
+        else:
+            candidates = list(snapshot.get("report_attachment_ids", []))
+        for turn in history:
+            if (turn["ordinal"] > after_ordinal and not turn.get("diagnosis_run_id")
+                    and turn["status"] not in {"CANCELLED", "CANCELLING"}):
+                candidates.extend(turn.get("attachment_ids", []))
+        candidates.extend(item.get("attachment_ids", []))
+        by_id = {entry["attachment_id"]: entry for entry in material_context["materials"]}
+        attachments, digests = [], set()
+        for attachment_id in candidates:
+            entry = by_id.get(attachment_id)
+            if entry is not None and entry["available"] and entry["sha256"] not in digests:
+                attachments.append(attachment_id)
+                digests.add(entry["sha256"])
+        decision = {"effective_problem_text": item["text"],
+            "diagnosis_goal": "围绕本次追问独立分析并回答；只在相关时参考历史问题和报告。",
+            "reason": "用户提交了新的追问，由通用 Skill 重新分析本次问题。",
+            "attachment_ids": attachments,
+            "force_generic": True, "followup_context_json": reference_json}
+        # A failed dispatch stays failed; it never falls back to report prose.
+        return self.agent.continuations.handoff_followup(self, task, decision)
+
     def list_events(self, conversation_id, run_id, after_sequence=0, limit=20, owner_key=None):
         with self.agent.operation_lease(conversation_id, owner_key=owner_key):
             return self.store.events(conversation_id, run_id, owner_key, after_sequence, limit)
@@ -276,7 +346,7 @@ class ReportFollowupService:
             self.store.recover(enabled=self.enabled)
             if not self.enabled:
                 return
-            for name, worker in (("report-followup", self.worker), ("report-followup-snapshot", self.snapshot_worker)):
+            for name, worker in (("report-followup", self.worker),):
                 thread = threading.Thread(target=self._run, args=(worker,), name=name, daemon=True)
                 self._threads.append(thread)
                 thread.start()

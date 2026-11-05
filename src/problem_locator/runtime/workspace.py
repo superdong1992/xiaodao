@@ -1754,6 +1754,13 @@ class WorkspaceManager:
         manifest_bytes = canonical_json_bytes(manifest)
         try:
             _atomic_write(root / "inputs" / "manifest.json", manifest_bytes)
+            if (workspace_phase is None and job.diagnosis_mode is DiagnosisMode.GENERIC
+                    and job.continuation_context is not None
+                    and job.continuation_context.followup_context_json is not None):
+                context_bytes = job.continuation_context.followup_context_json.encode("utf-8")
+                target = root / "inputs" / "followup-context.json"
+                with capacity_reservation(self.capacity, target, len(context_bytes)):
+                    _atomic_write(target, context_bytes)
             if methods_reviewer_input is not None:
                 _atomic_write(
                     root / "inputs" / _METHODS_REQUEST_INPUT,

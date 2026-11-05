@@ -95,7 +95,7 @@ def test_user_comment_alone_requires_available_log_evidence_before_model_call(sy
 
 def test_user_comment_can_use_existing_original_logs_with_followups_disabled(system):
     make_logs(system, content=LOG)
-    assert system.service.observe_report(system.cid, system.rid)
+    assert system.service.store.enqueue_snapshot(system.cid, system.rid, system.source)
     assert system.service.snapshot_worker.run_once()
     system.service.enabled = False
     task = feedback_task(system, analysis=None)
@@ -178,7 +178,7 @@ def test_feedback_reviewer_rejects_unknown_model_launcher_without_calling_it(sys
 
 def test_log_and_web_analysis_citations_keep_distinct_provenance(system):
     make_logs(system, content=LOG)
-    assert system.service.observe_report(system.cid, system.rid)
+    assert system.service.store.enqueue_snapshot(system.cid, system.rid, system.source)
     assert system.service.snapshot_worker.run_once()
     payload = json.loads(analysis_response())
     payload["evidence"].extend(json.loads(response())["evidence"])
@@ -191,7 +191,7 @@ def test_log_and_web_analysis_citations_keep_distinct_provenance(system):
 
 def test_mismatched_original_snapshot_cannot_be_bypassed_with_web_analysis(system):
     make_logs(system, content=LOG)
-    assert system.service.observe_report(system.cid, system.rid)
+    assert system.service.store.enqueue_snapshot(system.cid, system.rid, system.source)
     assert system.service.snapshot_worker.run_once()
     task = feedback_task(system)
     task["source_job_id"] = str(uuid.uuid4())

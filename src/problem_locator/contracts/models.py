@@ -1409,6 +1409,9 @@ class ReportContinuationContext(ContractModel):
     parent_report_version: PositiveInt = 1
     change_note: NonEmptyText
     goal: NonEmptyText
+    followup_context_json: Annotated[
+        str, StringConstraints(min_length=1, max_length=16 * 1024 * 1024, strict=True)
+    ] | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def validate_parent_report(self) -> ReportContinuationContext:
@@ -1416,6 +1419,8 @@ class ReportContinuationContext(ContractModel):
         _validate_generic_report_content(
             self.parent_report_markdown, len(report_bytes), self.parent_report_sha256,
         )
+        if self.followup_context_json is not None:
+            _utf8_nonblank(self.followup_context_json, max_bytes=16 * 1024 * 1024)
         return self
 
 
@@ -4707,6 +4712,7 @@ class CreateCaseTriggerPayload(ContractModel):
     raw_problem_text: NonEmptyText
     product_line: ProductLine | None = Field(default=None, exclude_if=lambda value: value is None)
     initial_log_archive_expected: bool = Field(default=False, exclude_if=lambda value: not value)
+    force_generic: bool = Field(default=False, exclude_if=lambda value: not value)
     continuation_context: ReportContinuationContext | None = Field(
         default=None, exclude_if=lambda value: value is None,
     )
@@ -6431,6 +6437,7 @@ class CreateCase(ContractModel):
     raw_problem_text: NonEmptyText
     product_line: ProductLine | None = Field(default=None, exclude_if=lambda value: value is None)
     initial_log_archive_expected: bool = Field(default=False, exclude_if=lambda value: not value)
+    force_generic: bool = Field(default=False, exclude_if=lambda value: not value)
     continuation_context: ReportContinuationContext | None = Field(
         default=None, exclude_if=lambda value: value is None,
     )

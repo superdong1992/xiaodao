@@ -141,7 +141,7 @@ ROUTE 响应现在必须包含 `skill_id`、`reason`、`confidence` 和 `assessm
 
 ## 4. 报告追问与网站发布
 
-先保持 `REPORT_FOLLOWUP_ENABLED=false`。支持 Generic V2 和默认 `skill-direct` 的 Markdown 报告；`strict` / `advisory` 结构化报告不支持。旧报告没有日志快照时可按 `REPORT_ONLY` 回答，页面须说明没有重新核对原日志，不重新解析旧日志。
+先保持 REPORT_FOLLOWUP_ENABLED=false。支持从 Generic V2 和默认 skill-direct 的 Markdown 报告发起追问；strict / advisory 结构化报告仍不支持。启用后每次追问直接进入通用诊断，当前问题原文决定方向。没有可读日志时仍分析文字与参考资料，证据不足则发布 UNRESOLVED，并明确未重新核对原日志。
 
 同步部署整个[网站示例模块](../examples/website-agent/README.md)：BFF 的 `server.mjs` 依赖 `followup-bff.mjs`、`followup-contract.js`、`continuation-bff.mjs`、`continuation-contract.js`、`feedback-comments-bff.mjs` 和 `feedback-comment-contract.js`；新版 `browser-client.js` 也依赖这三份合同模块。即使功能暂未开启，也不能只复制入口文件。启用界面时一并接入 `followup-controller.js`、`followup-view.js`、报告视图和 `conversation-input.js`。统一追问的日志上传还直接依赖 `log-upload-controller.js`、`file-sha256.js` 和 `file-sha256-worker.js`；报告版本对比和旧草稿兼容仍需 `continuation-controller.js`、`continuation-view.js`。哈希文件保持同一目录，网站 CSP 允许同源 Worker。
 
@@ -152,9 +152,9 @@ ROUTE 响应现在必须包含 `skill_id`、`reason`、`confidence` 和 `assessm
 - 先 GET 追问快照，再用其 `last_event_id` 订阅独立的追问 SSE。追问事件 schema 为 1，诊断事件为 2，游标不能混用。代理关闭 SSE 缓冲，保留 `Last-Event-ID`。
 - 每个会话最多一个活动追问。刷新页面不会停止模型；停止必须调用 stop。重启后排队任务可继续，运行中的任务标记 `INTERRUPTED`，不自动重跑模型。
 
-追问沿用 `DIAGNOSE_CLAUDE_COMMAND`，否则使用 `CLAUDE_COMMAND`。自定义命令须验证追问协议与工具策略；不能假设任何兼容 CLI 都支持只读 Read/Grep 和原日志访问。
+正式通用诊断沿用 `DIAGNOSE_CLAUDE_COMMAND`，否则使用 `CLAUDE_COMMAND`。自定义命令须验证 Generic Skill、正式工具权限和 V2 报告输出；不能继续给新追问套用旧只读 Read/Grep 策略或 `xiaodao.followup.v1` 输出 schema。
 
-`REPORT_FOLLOWUP_SNAPSHOT_BYTES` 默认 1 GiB，`REPORT_FOLLOWUP_STORAGE_BYTES` 默认 5 GiB，应按磁盘容量配置。失败或超限的快照不撤销原报告，可退为仅按报告回答。关闭功能后停止接收新追问，排队任务取消，历史记录仍可读取。
+REPORT_FOLLOWUP_SNAPSHOT_BYTES 默认 1 GiB，REPORT_FOLLOWUP_STORAGE_BYTES 默认 5 GiB，仅保留历史快照管理用途；新追问不复制只读回答快照。REPORT_FOLLOWUP_TIMEOUT_SECONDS 仍接受既有配置，但不控制新正式 Generic 诊断时限。关闭功能后不接收新追问，排队交接取消，历史记录仍可读取；已经启动的诊断沿用正式任务的停止和恢复规则。
 
 ## 5. 正文永久保存、资源期限与磁盘保护
 
@@ -187,9 +187,9 @@ RESOURCE_DISK_TARGET_FREE_PERCENT=15
 
 ### 持续诊断与新版报告
 
-新版网站将报告追问、更正和补日志放在同一入口，启用 `REPORT_FOLLOWUP_ENABLED` 后由同次追问模型核对材料：能回答则直接回答，需要诊断工具则交接关联 run 和 Case，缺少用户材料则在原入口索要。页面按 `diagnosis_run_id` 读取进度；新轮等待补充时展示后端问题，并向该轮提交诊断补充。旧报告保持原样，新报告发布后再更新版本。多包日志按 SHA-256 去重、逐包解析，不能继续假设每轮只支持一份日志。
+新版网站将报告追问、更正和补日志放在同一入口，启用 REPORT_FOLLOWUP_ENABLED 后直接交接关联 run 和独立 Case，由通用 Skill 分析，不调用前置问答、分类或 ROUTE。页面按 diagnosis_run_id 读取进度，只有新版报告 READY 才切换版本；旧报告保持原样。新诊断没有材料充分性前置阻断，资料不足以 UNRESOLVED 说明缺口。最新报告及忙碌资格以 can_ask / reason 为准，补充日志沿用上传配额。
 
-旧草稿 API 保留兼容，独立于 `REPORT_FOLLOWUP_ENABLED`。旧客户端可按 `can_continue` 从最新报告创建草稿，核对完整问题和日志清单后确认；旧日志已清理时选择 `REPLACE` 并重新上传。自然语言草稿可能返回 `FOLLOWUP`，此时发送原报告追问，不能调用草稿 confirm；直接编辑完整问题不增加草稿整理模型调用。完整路径、字段和幂等规则见[持续诊断与追问接入](website-report-followup.md)，前后端文件及 Worker 要求见第 4 节。自定义模型包装器须同步当前追问决策、INTAKE 输出和多日志输入，不能继续按旧单包格式自行拼装。
+旧草稿 API 保留兼容，独立于 `REPORT_FOLLOWUP_ENABLED`。旧客户端可按 `can_continue` 从最新报告创建草稿，核对完整问题和日志清单后确认；旧日志已清理时选择 `REPLACE` 并重新上传。自然语言草稿可能返回 `FOLLOWUP`，此时发送原报告追问，不能调用草稿 confirm；直接编辑完整问题不增加草稿整理模型调用。完整路径、字段和幂等规则见[持续诊断与追问接入](website-report-followup.md)，前后端文件及 Worker 要求见第 4 节。自定义模型包装器须适配正式 Generic V2 报告及多日志输入，不再为新追问注入旧只读问答结果 schema；旧草稿的 INTAKE 合同保持原规则。
 
 ### 独立回答评价与文字纠正
 

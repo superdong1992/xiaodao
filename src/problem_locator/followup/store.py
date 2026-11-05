@@ -18,7 +18,6 @@ from problem_locator.storage.database import (dialect_for, lock_conversation, lo
     table_columns, table_names, try_lock_conversation)
 from problem_locator.timestamps import format_timestamp, now_timestamp, parse_timestamp
 
-from .context import build_prompt
 from .models import (ACTIVE, MAX_TEXT_BYTES, FollowupEvent, FollowupEventBatch, FollowupFailure,
     FollowupItem, FollowupReceipt, FollowupSource, FollowupStopReceipt)
 
@@ -301,15 +300,6 @@ class FollowupStore:
                 ordinal=len(history) + 1, status="QUEUED", context_mode=mode, text=request.text,
                 attachment_ids=request.attachment_ids if attachment_ids is None else attachment_ids,
                 created_at=now, updated_at=now)
-            task = {"followup_id": fid, "conversation_id": cid, "run_id": rid, "ordinal": item.ordinal,
-                "status": "RUNNING", "body": _json(item)}
-            decision_context = self.decision_context(db, task, history, json.loads(snapshot["report_attachment_ids"] or "[]"))
-            try:
-                build_prompt(source, [], request.text, mode,
-                    read_search=logs_supported, correction=correction,
-                    request_key=fid, snapshot_status=snapshot["status"], diagnosis_context=decision_context)
-            except ValueError:
-                raise fail("CONTEXT_LIMIT", "本次补充内容过多，请分开发送。", 413) from None
             sequence = self._append(db, cid, item, "followup.accepted")
             receipt = FollowupReceipt(conversation_id=cid, run_id=rid, followup_id=fid,
                 request_id=request.request_id, event_id=sequence)
@@ -634,9 +624,11 @@ class FollowupStore:
                         code=None if cancelled else "AGENT_FOLLOWUP_INTERRUPTED")
                 db.execute("UPDATE agent_followup_snapshots SET status='FAILED',error_code='SNAPSHOT_INTERRUPTED',updated_at=? "
                     "WHERE conversation_id=? AND status='BUILDING'", (self.now(), cid))
-                if not enabled:
-                    db.execute("UPDATE agent_followup_snapshots SET status='UNAVAILABLE',error_code='DISABLED',updated_at=? "
-                        "WHERE conversation_id=? AND status='PENDING'", (self.now(), cid))
+                # New follow-ups use diagnosis inputs, never a second log copy.
+                # Retire queued legacy snapshots so they cannot pin workspaces.
+                db.execute("UPDATE agent_followup_snapshots SET status='UNAVAILABLE',error_code=?,updated_at=? "
+                    "WHERE conversation_id=? AND status='PENDING'",
+                    ("SNAPSHOT_RETIRED" if enabled else "DISABLED", self.now(), cid))
 
     def revoke(self, db, cid):
         lock_conversation(db, cid)

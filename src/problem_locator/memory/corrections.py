@@ -4,17 +4,19 @@ from __future__ import annotations
 import hashlib
 import json
 
-from problem_locator.contracts import JOB_STDOUT_STDERR_BYTES, CancellationReason, ExecutionLogSinks
+from problem_locator.contracts import JOB_STDOUT_STDERR_BYTES, CancellationReason, ExecutionLogSinks, ResourceLimits
 from problem_locator.followup.models import MAX_CONTEXT_BYTES
 from problem_locator.followup.snapshots import (_row, copy_snapshot, ordinary_path, protect_inputs,
     verify_inputs, write_new)
-from problem_locator.followup.worker import FOLLOWUP_LIMITS
 from problem_locator.runtime.agent_backend import AgentBackend
 from problem_locator.storage.atomic import require_real_directory
 from problem_locator.storage.paths import ensure_no_symlink_ancestors
 
 from .extraction import _DiscardSink, _unique_object, parse_card_json
 from .review import validate_memory_review
+
+_CORRECTION_LIMITS = ResourceLimits(context_bytes=MAX_CONTEXT_BYTES,
+    wall_time_seconds=180, stdout_stderr_bytes=262_144, workspace_bytes=1024**3 + 16 * 1024**2)
 
 _PROFILE = """你负责审核用户对定位回答的纠正，并提炼能缩短后续排查的经验。
 inputs/correction.json 中包含原问题、原报告、历史问答、被纠正的回答、用户说明和新的回答。
@@ -224,7 +226,7 @@ class CorrectionMemoryHandler:
             verify_inputs(workspace, rows, signal)
             result = self.backend.execute(prompt=_review_prompt(_PROFILE, usage), workspace_root=workspace, cancellation=signal,
                 log_sinks=ExecutionLogSinks(stdout=_DiscardSink(), stderr=_DiscardSink(), combined_limit_bytes=JOB_STDOUT_STDERR_BYTES),
-                resource_limits=FOLLOWUP_LIMITS.model_copy(update={"wall_time_seconds": 180,
+                resource_limits=_CORRECTION_LIMITS.model_copy(update={"wall_time_seconds": 180,
                     "stdout_stderr_bytes": 65_536, "workspace_bytes": service.snapshot_max_bytes + 16 * 1024**2}),
                 broker_environment=None, diagnosis_mode="GENERIC", backend_phase="MEMORY_CORRECTION", file_access="read-search")
             if signal.is_cancelled():
@@ -323,7 +325,7 @@ class CorrectionMemoryHandler:
             verify_inputs(workspace, rows, signal)
             result = self.backend.execute(prompt=_review_prompt(_FEEDBACK_PROFILE, usage), workspace_root=workspace, cancellation=signal,
                 log_sinks=ExecutionLogSinks(stdout=_DiscardSink(), stderr=_DiscardSink(), combined_limit_bytes=JOB_STDOUT_STDERR_BYTES),
-                resource_limits=FOLLOWUP_LIMITS.model_copy(update={"wall_time_seconds": 180,
+                resource_limits=_CORRECTION_LIMITS.model_copy(update={"wall_time_seconds": 180,
                     "stdout_stderr_bytes": 65_536, "workspace_bytes": service.snapshot_max_bytes + 16 * 1024**2}),
                 broker_environment=None, diagnosis_mode="GENERIC", backend_phase="MEMORY_CORRECTION", file_access="read-search")
             if signal.is_cancelled():

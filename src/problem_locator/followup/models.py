@@ -117,7 +117,7 @@ class FollowupView(FollowupModel):
     conversation_id: OpaqueId
     run_id: OpaqueId
     can_ask: bool
-    reason: Literal["DISABLED", "UNSUPPORTED", "EXPIRED", "BUSY", "LIMIT_EXCEEDED", "CONTEXT_LIMIT"] | None
+    reason: Literal["DISABLED", "UNSUPPORTED", "EXPIRED", "BUSY", "LATEST_REPORT_REQUIRED", "LIMIT_EXCEEDED", "CONTEXT_LIMIT"] | None
     snapshot_status: SnapshotStatus
     active_followup: FollowupItem | None
     items: list[FollowupItem]

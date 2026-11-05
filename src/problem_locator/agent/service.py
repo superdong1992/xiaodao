@@ -927,7 +927,8 @@ class AgentConversationService:
                 raw_problem_text=message.text, problem_spec=spec, product_line=message.product_line,
                 initial_log_archive_expected=bool(selected_attachment_ids),
                 initial_user_facts=[], wait_seconds=0,
-                continuation_context=self.store.get_run(conversation_id).get("continuation_context"),
+                continuation_context=body.get("continuation_context"),
+                force_generic=body.get("force_generic", False),
             ), message_id=message.message_id)
             return True
         self._phase = "INTAKE"

@@ -11,7 +11,7 @@ from problem_locator.contracts.limits import MAX_CASE_RESOURCE_BYTES
 from problem_locator.diagnostics import log_event
 from problem_locator.dispatch.cancellation import CancellationController
 from problem_locator.dispatch.activity import QueueIdleObservation
-from problem_locator.storage.database import lock_conversation
+from problem_locator.storage.database import dialect_for, lock_conversation
 
 from .models import (
     ConfirmDraftRequest, ContinuationDraft, ContinuationReceipt, CreateDraftRequest,
@@ -134,13 +134,22 @@ class ContinuationService:
     def _head(self, db, cid, parent_id, *, parent=None, runs=None):
         current = self.store._load(db, cid)
         if parent is None:
-            parent = self.store._load(db, cid, run_id=parent_id)
+            parent = current if current["run_id"] == parent_id else self.store._load(db, cid, run_id=parent_id)
         if not parent.get("report_available"):
             raise AgentStoreError("AGENT_REPORT_REQUIRED", "请先等待正式报告生成。", 409)
         root = parent.get("root_run_id", parent_id)
         if runs is None:
-            runs = (json.loads(raw) for (raw,) in db.execute(
-                "SELECT body FROM agent_conversation_runs WHERE conversation_id=?", (cid,)))
+            d = dialect_for(db)
+            # Missing legacy roots fall back to run_id; an explicit null keeps
+            # the same meaning as dict.get instead of becoming a new root.
+            has_root = ("jsonb_exists(body::jsonb,'root_run_id')" if d.postgres
+                else "json_type(body,'$.root_run_id') IS NOT NULL")
+            root_value = f"CASE WHEN {has_root} THEN {d.json_text('body', '$.root_run_id')} ELSE run_id END"
+            runs = ({"run_id": rid, "root_run_id": root_id, "report_available": published, "ordinal": ordinal}
+                for rid, root_id, published, ordinal in db.execute(
+                    f"SELECT run_id,{root_value},{d.json_int('body', '$.report_available')},ordinal "
+                    "FROM agent_conversation_runs WHERE conversation_id=? AND ordinal>?",
+                    (cid, parent["ordinal"])))
         for other in runs:
             if (other.get("root_run_id", other["run_id"]) == root and other.get("report_available")
                     and other["ordinal"] > parent["ordinal"]):
@@ -326,6 +335,7 @@ class ContinuationService:
             parent_case_id=value["_parent_case_id"], parent_report_artifact_id=value["_parent_artifact_id"],
             parent_report_sha256=value["_parent_sha256"], parent_report_markdown=value["_parent_markdown"],
             parent_report_version=value["_parent_version"],
+            followup_context_json=value.get("followup_context_json"),
             change_note=value["change_note"].strip() or "本轮信息和日志清单已经用户确认，请结合当前材料重新核对。",
             goal=value["diagnosis_goal"].strip() or "重新诊断并说明相较上一版的结论变化。")
         body = self.store._new_run(db, current)
@@ -336,6 +346,8 @@ class ContinuationService:
             input_changes=value["input_changes"], source_runtime=value["_source_runtime"],
             model_configuration_fingerprint=self.agent.model_configuration_fingerprint,
             continuation_context=context.model_dump(mode="json"), intake_pending=True)
+        if value.get("force_generic"):
+            body["force_generic"] = True
         cid, mid = current["conversation_id"], self.store._id("message")
         message = AgentMessage(message_id=mid, request_id=request_key,
             text=value["effective_problem_text"], attachment_ids=value["attachment_ids"],
@@ -431,7 +443,9 @@ class ContinuationService:
                 _source_attachments=old, _source_runtime=inputs.get("runtime", {}),
                 _parent_case_id=report.case_id, _parent_artifact_id=report.artifact.artifact_id,
                 _parent_markdown=report.markdown, _parent_sha256=report.artifact.sha256,
-                _parent_version=run.get("report_version", 1), _root_run_id=run.get("root_run_id", rid))
+                _parent_version=run.get("report_version", 1), _root_run_id=run.get("root_run_id", rid),
+                force_generic=decision.get("force_generic", False),
+                followup_context_json=decision.get("followup_context_json"))
             with self.repository.database_transaction() as db:
                 row, replayed = self._handoff_state(db, followups, task)
                 if row is None:
@@ -452,10 +466,14 @@ class ContinuationService:
                     if (actual is None or not actual["available"]
                             or (actual["sha256"], actual["size"]) != (expected["sha256"], expected["size"])):
                         raise AgentStoreError("AGENT_ATTACHMENT_NOT_READY", "日志已经变化或被清理，请重新上传后继续。", 409)
+                generic = bool(value.get("force_generic"))
                 body = self._open_run(db, current, parent, value, request_key=request.request_id,
-                    fingerprint=_hash(["followup-diagnosis", fid]), notice="现有资料需要进一步核查，正在继续诊断。")
+                    fingerprint=_hash(["followup-diagnosis", fid]),
+                    notice="已提交通用诊断，正在分析本次追问。" if generic else "现有资料需要进一步核查，正在继续诊断。")
                 followups.store._transition(db, row, "COMPLETED", diagnosis_run_id=body["run_id"],
-                    answer="现有上下文还不足以可靠回答，已开始继续诊断。\n\n" + request.change_note)
+                    answer=("已提交通用诊断，将围绕本次追问重新分析。" if generic else
+                        "现有上下文还不足以可靠回答，已开始继续诊断。\n\n" + request.change_note),
+                    checkpoint=not generic)
             self.store._notify(cid)
             followups.store.notify()
             return True

@@ -13,37 +13,32 @@ from problem_locator.contracts.enums import ErrorCode, ExecutionStage
 from problem_locator.followup import snapshots as snapshot_module
 from problem_locator.followup import worker as worker_module
 from problem_locator.followup.service import ReportFollowupService
+from problem_locator.followup.models import FollowupRequest
 from problem_locator.runtime.failures import RuntimeExecutionError, runtime_failure
 from tests.deterministic.unit.agent.test_report_followup import (
-    OWNER, make_logs, original_rows, submit, system, view,
+    OWNER, complete_historical_task, diagnostic_system, make_logs, original_rows, submit, system, view,
 )
 
 
 @pytest.mark.parametrize("failure_kind", ["model_failure", "backend_timeout"])
-def test_model_failure_and_timeout_have_safe_terminal_state_without_retry(system, failure_kind):
+def test_dispatch_failure_and_timeout_have_safe_terminal_state_without_retry(system, failure_kind, monkeypatch):
     before = original_rows(system)
-    failure = (RuntimeError("model stderr /private/token") if failure_kind == "model_failure" else
-        runtime_failure(stage=ExecutionStage.BACKEND_EXECUTE, code=ErrorCode.BACKEND_TIMEOUT,
-            message="timeout stderr /private/token", retryable=True))
-    if failure_kind == "backend_timeout":
-        assert isinstance(failure, RuntimeExecutionError)
-        assert failure.failure.code is ErrorCode.BACKEND_TIMEOUT
-
-    def fail_model(invocation):
-        assert invocation["resource_limits"].wall_time_seconds == 600
-        assert invocation["backend_phase"] == "REPORT_FOLLOWUP"
+    failure = (RuntimeError("dispatch stderr /private/token") if failure_kind == "model_failure" else
+        TimeoutError("dispatch timeout stderr /private/token"))
+    attempts = []
+    def fail_dispatch(task):
+        attempts.append(task["followup_id"])
         raise failure
-
-    system.backend.action = fail_model
+    monkeypatch.setattr(system.service, "dispatch_generic", fail_dispatch)
     receipt = submit(system)
     assert not system.service.worker.run_once()
-    answer = view(system).items[0]
-    assert answer.status == "FAILED" and answer.answer_markdown is None
-    assert answer.failure.code == "AGENT_FOLLOWUP_FAILED"
-    assert "/private" not in answer.failure.message and "stderr" not in answer.failure.message
+    item = view(system).items[0]
+    assert item.status == "FAILED" and item.answer_markdown is None
+    assert item.failure.code == "AGENT_FOLLOWUP_FAILED"
+    assert "/private" not in item.failure.message and "stderr" not in item.failure.message
     assert submit(system) == receipt
     assert not system.service.worker.run_once()
-    assert len(system.backend.calls) == 1
+    assert len(attempts) == 1 and not system.backend.calls
     assert system.service.list_events(system.cid, system.rid, owner_key=OWNER).stream_closed
     assert original_rows(system) == before
 
@@ -60,7 +55,7 @@ def test_snapshot_copy_enospc_preserves_report_and_allows_report_only_answer(sys
         assert destination is not None
         raise OSError(errno.ENOSPC, "no space /private/log-copy")
 
-    assert system.service.observe_report(system.cid, system.rid)
+    assert system.service.store.enqueue_snapshot(system.cid, system.rid, system.source)
     with monkeypatch.context() as patch:
         patch.setattr(snapshot_module, "_stream_verified", disk_full)
         assert not system.service.snapshot_worker.run_once()
@@ -71,32 +66,33 @@ def test_snapshot_copy_enospc_preserves_report_and_allows_report_only_answer(sys
     assert system.source.report_markdown == report
     assert original_rows(system) == before and not system.backend.calls
     submit(system)
-    assert system.service.worker.run_once()
+    assert complete_historical_task(system, "历史回答：未重新核对原始日志。")
     answer = view(system).items[0]
     assert answer.status == "COMPLETED" and answer.context_mode == "REPORT_ONLY"
     assert "未重新核对原始日志" in answer.answer_markdown
-    assert len(system.backend.calls) == 1 and original_rows(system) == before
+    assert not system.backend.calls and original_rows(system) == before
 
 
-def test_worker_input_enospc_fails_before_model_and_keeps_original_tables(system, monkeypatch):
-    before = original_rows(system)
-    receipt = submit(system)
+def test_handoff_storage_enospc_fails_without_a_model_or_orphan_run(diagnostic_system, monkeypatch):
+    s = diagnostic_system
+    before = original_rows(s)
+    receipt = submit(s)
     writes = []
-
-    def disk_full(path, raw):
-        writes.append(path)
-        raise OSError(errno.ENOSPC, "no space /private/followup-inputs")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(worker_module, "write_new", disk_full)
-        assert not system.service.worker.run_once()
+    original_save = s.store._save
+    def disk_full(db, body):
+        if body["run_id"] != s.rid:
+            writes.append(body["run_id"])
+            raise OSError(errno.ENOSPC, "no space /private/continuation")
+        return original_save(db, body)
+    monkeypatch.setattr(s.store, "_save", disk_full)
+    assert not s.service.worker.run_once()
     assert len(writes) == 1
-    answer = view(system).items[0]
-    assert answer.status == "FAILED" and answer.failure.code == "AGENT_FOLLOWUP_FAILED"
-    assert answer.answer_markdown is None and "/private" not in answer.failure.message
-    assert submit(system) == receipt
-    assert not system.service.worker.run_once() and not system.backend.calls
-    assert original_rows(system) == before
+    item = view(s).items[0]
+    assert item.status == "FAILED" and item.failure.code == "AGENT_FOLLOWUP_FAILED"
+    assert item.answer_markdown is None and item.diagnosis_run_id is None
+    assert "/private" not in item.failure.message
+    assert submit(s) == receipt and not s.service.worker.run_once()
+    assert not s.backend.calls and original_rows(s) == before
 
 
 def test_two_runs_share_total_snapshot_quota_before_second_copy(system):
@@ -117,11 +113,11 @@ def test_two_runs_share_total_snapshot_quota_before_second_copy(system):
     system.service.snapshot_max_bytes = 20_000
     system.service.snapshot_total_bytes = 20_000
     before = original_rows(system)
-    assert system.service.observe_report(system.cid, system.rid)
+    assert system.service.store.enqueue_snapshot(system.cid, system.rid, system.source)
     assert system.service.snapshot_worker.run_once()
     first = system.service.store.snapshot(system.rid)
     assert 12_000 < first["reserved_bytes"] < 20_000
-    assert system.service.observe_report(second.conversation_id, second.run_id)
+    assert system.service.store.enqueue_snapshot(second.conversation_id, second.run_id, second_source)
     assert not system.service.snapshot_worker.run_once()
     rejected = system.service.store.snapshot(second.run_id)
     assert rejected["status"] == "FAILED" and rejected["reserved_bytes"] == 0
@@ -129,64 +125,49 @@ def test_two_runs_share_total_snapshot_quota_before_second_copy(system):
     assert not (second_job / "followup-inputs").exists()
     assert system.service.store.snapshot(system.rid) == first
     assert (first_job / "followup-inputs/inputs/logs/log-000001.log").read_bytes() == b"x" * 12_000
-    system.service.submit(second.conversation_id, second.run_id, "second-question", "解释这份报告", owner_key=OWNER)
-    assert system.service.worker.run_once()
+    system.service.store.submit(second.conversation_id, second.run_id,
+        FollowupRequest(request_id="second-question", text="解释这份报告"), second_source, OWNER)
+    assert complete_historical_task(system, "历史回答：未重新核对原始日志。")
     answer = system.service.get(second.conversation_id, second.run_id, owner_key=OWNER).items[0]
     assert answer.status == "COMPLETED" and answer.context_mode == "REPORT_ONLY"
     assert original_rows(system) == before
 
 
-def test_service_disable_and_reenable_preserves_history_and_never_restarts_old_work(system, monkeypatch):
+def test_service_disable_and_reenable_preserves_history_and_never_restarts_old_work(system):
     before = original_rows(system)
-    completed_receipt = submit(system)
-    assert system.service.worker.run_once()
-    completed_answer = view(system).items[0]
-    queued_receipt = submit(system, "queued-before-disable")
-    assert system.service.shutdown(0)
-
+    completed = submit(system)
+    assert complete_historical_task(system, "升级前的历史回答。")
+    saved = view(system).items[0]
+    queued = submit(system, "queued-before-disable")
+    system.service.shutdown(0)
     disabled = ReportFollowupService(system.agent, "claude", enabled=False, backend=system.backend)
-    disabled._source = lambda cid, rid: system.source
+    disabled._source = lambda *args: system.source
     try:
         disabled.start()
         state = disabled.get(system.cid, system.rid, owner_key=OWNER)
         assert not state.can_ask and state.reason == "DISABLED"
-        assert state.items[0] == completed_answer
-        assert state.items[1].status == "CANCELLED" and state.active_followup is None
-        assert disabled.submit(system.cid, system.rid, "question-1", "为什么得出这个结论？", owner_key=OWNER) == completed_receipt
-        with pytest.raises(AgentStoreError) as caught:
-            disabled.submit(system.cid, system.rid, "while-disabled", "新的追问", owner_key=OWNER)
-        assert caught.value.code == "AGENT_FOLLOWUP_DISABLED"
-        assert disabled.stop(system.cid, system.rid, queued_receipt.followup_id, "stop-while-disabled", owner_key=OWNER).status == "CANCELLED"
-        assert disabled.list_events(system.cid, system.rid, owner_key=OWNER).stream_closed
-        assert not disabled.worker.run_once() and not disabled.snapshot_worker.run_once()
-        assert len(system.backend.calls) == 1
+        assert state.items[0] == saved and state.items[1].status == "CANCELLED"
+        assert disabled.submit(system.cid, system.rid, "question-1", "为什么得出这个结论？", owner_key=OWNER) == completed
+        with pytest.raises(AgentStoreError) as error:
+            disabled.submit(system.cid, system.rid, "disabled", "新追问", owner_key=OWNER)
+        assert error.value.code == "AGENT_FOLLOWUP_DISABLED"
+        assert not disabled.worker.run_once()
     finally:
-        assert disabled.shutdown(0)
-
+        disabled.shutdown(0)
     reenabled = ReportFollowupService(system.agent, "claude", enabled=True, backend=system.backend)
-    reenabled._source = lambda cid, rid: system.source
-    finished = threading.Event()
-    finish_task = reenabled.store.finish_task
-
-    def record_finish(*args, **kwargs):
-        result = finish_task(*args, **kwargs)
-        finished.set()
-        return result
-
-    monkeypatch.setattr(reenabled.store, "finish_task", record_finish)
+    reenabled._source = lambda *args: system.source
     try:
-        reenabled.start()
         state = reenabled.get(system.cid, system.rid, owner_key=OWNER)
-        assert state.can_ask and state.items[0] == completed_answer and state.items[1].status == "CANCELLED"
-        assert reenabled.submit(system.cid, system.rid, "queued-before-disable", "为什么得出这个结论？", owner_key=OWNER) == queued_receipt
-        reenabled.submit(system.cid, system.rid, "after-reenable", "重新启用后的新追问", owner_key=OWNER)
-        assert finished.wait(5)
-        state = reenabled.get(system.cid, system.rid, owner_key=OWNER)
-        assert [item.status for item in state.items] == ["COMPLETED", "CANCELLED", "COMPLETED"]
-        assert state.items[0] == completed_answer and len(system.backend.calls) == 2
-        assert original_rows(system) == before
+        assert state.can_ask and state.items[0] == saved and state.items[1].status == "CANCELLED"
+        assert reenabled.submit(system.cid, system.rid, "queued-before-disable", "为什么得出这个结论？", owner_key=OWNER) == queued
+        assert not reenabled.worker.run_once()
+        receipt = reenabled.submit(system.cid, system.rid, "after-reenable", "新追问", owner_key=OWNER)
+        assert receipt.status == "ACCEPTED"
+        reenabled.stop(system.cid, system.rid, receipt.followup_id, "stop-new", owner_key=OWNER)
+        assert not reenabled.worker.run_once()
+        assert original_rows(system) == before and not system.backend.calls
     finally:
-        assert reenabled.shutdown(5)
+        reenabled.shutdown(0)
 
 
 def test_submit_failure_after_event_write_rolls_back_request_event_and_source(system, monkeypatch):
@@ -213,7 +194,7 @@ def test_submit_failure_after_event_write_rolls_back_request_event_and_source(sy
     assert original_rows(system) == before
     receipt = submit(system)
     assert receipt.event_id == 1 and submit(system) == receipt
-    assert system.service.worker.run_once() and len(system.backend.calls) == 1
+    assert complete_historical_task(system, "历史回答：未重新核对原始日志。") and not system.backend.calls
     events = system.service.list_events(system.cid, system.rid, owner_key=OWNER)
     assert [event.sequence for event in events.events] == [1, 2, 3]
     assert original_rows(system) == before
@@ -223,14 +204,14 @@ def test_missing_original_log_degrades_to_report_only_without_reparsing(system):
     original, job = make_logs(system)
     (original / "inputs/logs/source.log").unlink()
     before = original_rows(system)
-    assert system.service.observe_report(system.cid, system.rid)
+    assert system.service.store.enqueue_snapshot(system.cid, system.rid, system.source)
     assert not system.service.snapshot_worker.run_once()
     assert view(system).snapshot_status == "FAILED" and view(system).can_ask
     assert not (job / "followup-inputs").exists()
     assert not system.backend.calls
     submit(system)
-    assert system.service.worker.run_once()
+    assert complete_historical_task(system, "历史回答：未重新核对原始日志。")
     answer = view(system).items[0]
     assert answer.context_mode == "REPORT_ONLY" and answer.status == "COMPLETED"
     assert "未重新核对原始日志" in answer.answer_markdown
-    assert len(system.backend.calls) == 1 and original_rows(system) == before
+    assert not system.backend.calls and original_rows(system) == before

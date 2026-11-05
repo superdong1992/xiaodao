@@ -477,14 +477,20 @@ class DomainCoordinator:
             )
         next_job = self._job_spec(
             trigger,
-            JobType.ROUTE,
+            JobType.DIAGNOSE if payload.force_generic else JobType.ROUTE,
             target_state_revision=1,
-            goal=_ROUTE_GOAL,
+            goal=_GENERIC_DIAGNOSE_GOAL if payload.force_generic else _ROUTE_GOAL,
             evidence_bindings=[],
             attachment_refs=[],
             previous_outcome_refs=[],
             artifact_bindings=[],
             selected_skill_ref=None,
+            generic_problem_text=case.raw_problem_text if payload.force_generic else None,
+            generic_product_line=case.product_line if payload.force_generic else None,
+            generic_log_archive_expected=(
+                payload.force_generic and case.initial_log_archive_expected
+            ),
+            continuation_context=case.continuation_context if payload.force_generic else None,
         )
         if isinstance(next_job, ApplicationError):
             return next_job
@@ -502,7 +508,8 @@ class DomainCoordinator:
             next_job_spec=next_job,
             final_result_target=None,
             clear_active_job=False,
-            reason="Create the Case and its initial ROUTE Job.",
+            reason=("Create the Case and its initial GENERIC DIAGNOSE Job."
+                    if payload.force_generic else "Create the Case and its initial ROUTE Job."),
         )
 
     def _route_outcome(

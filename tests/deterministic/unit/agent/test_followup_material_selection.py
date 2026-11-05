@@ -272,18 +272,20 @@ def test_latest_attempt_keeps_its_selected_input_without_reviving_older_unused_m
     assert {entry["attachment_id"] for entry in value["materials"]} == {retained}
 
 
-def test_worker_receives_failed_attempt_correction_and_selects_its_uploaded_material(state):
+def test_worker_passes_failed_attempt_correction_and_material_to_generic(state):
     s = state
     fresh = upload(s, "server.zip", b"fresh server logs")
     run_id = fail_attempt_with_messages(s, claim(s, key="first"), [
         ("time", "确认故障时间10:05，服务端也超时。", fresh, "APPLIED"),
     ])
     s.followups.submit(s.cid, s.rid, "resume", "按刚才补充的内容继续。", owner_key=OWNER)
-    s.backend.decision = decision([fresh])
     assert s.followups.worker.run_once()
-    assert len(s.backend.calls) == 1 and s.engine.calls == []
-    prompt = s.backend.calls[0]["prompt"]
-    assert run_id in prompt and "确认故障时间10:05，服务端也超时。" in prompt
+    assert s.backend.calls == [] and s.engine.calls == []
+    run = s.store.get_run(s.cid)
+    reference = json.loads(run["continuation_context"]["followup_context_json"])
+    assert reference["latest_attempt"]["run_id"] == run_id
+    assert reference["latest_attempt"]["user_messages"][0]["text"] == "确认故障时间10:05，服务端也超时。"
+    assert run["force_generic"] is True
     assert item(s).diagnosis_run_id == s.store.get_run(s.cid)["run_id"]
     assert s.store.get_conversation(s.cid).messages[0].attachment_ids == [fresh]
 
@@ -305,15 +307,16 @@ def test_repeated_failure_keeps_correction_in_last_adopted_problem_text(state):
     assert attempt["user_messages"] == [], "整理后的初始输入不能冒充这轮新收到的用户补充"
 
 
-def test_none_launcher_rejects_full_attempt_context_limit_before_acceptance(state):
+def test_long_attempt_context_is_complete_without_retired_launcher_tool_requirements(state):
     s = state
+    texts = ["detail-" + str(index) + ":" + "x" * 65000 for index in range(4)]
     fail_attempt_with_messages(s, claim(s, key="first"), [
-        ("detail-" + str(index), "x" * 65536, None, "APPLIED") for index in range(4)
+        ("detail-" + str(index), text, None, "APPLIED") for index, text in enumerate(texts)
     ])
     s.followups.read_search_supported = False
-    before = len(s.followups.get(s.cid, s.rid, owner_key=OWNER).items)
-    with pytest.raises(AgentStoreError) as rejected:
-        s.followups.submit(s.cid, s.rid, "long-retry", "根据我刚才补充的信息继续。", owner_key=OWNER)
-    assert rejected.value.code == "AGENT_FOLLOWUP_CONTEXT_LIMIT" and rejected.value.status_code == 413
-    assert len(s.followups.get(s.cid, s.rid, owner_key=OWNER).items) == before
-    assert not s.followups.worker.run_once() and s.backend.calls == []
+    s.followups.submit(s.cid, s.rid, "long-retry", "根据我刚才补充的信息继续。", owner_key=OWNER)
+    assert s.followups.worker.run_once()
+    reference = json.loads(s.store.get_run(s.cid)["continuation_context"]["followup_context_json"])
+    assert [entry["text"] for entry in reference["latest_attempt"]["user_messages"]] == texts
+    assert item(s).diagnosis_run_id == s.store.get_run(s.cid)["run_id"]
+    assert s.backend.calls == []

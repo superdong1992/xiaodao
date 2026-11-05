@@ -16,7 +16,7 @@
 
 部署后先看[网站 Agent 快速接入与联调清单](docs/website-agent-quickstart.md)，再查[完整 API 参考](docs/website-agent-api.md)和[TypeScript 后端示例](examples/website-agent/README.md)。服务的 `/docs` 提供在线接口说明，`/openapi.json` 提供接口定义文件。
 
-报告完成后的提问、更正和补日志统一使用[报告追问入口](docs/website-report-followup.md)。xiaodao 核对上下文后直接回答，或在材料足够但需要诊断工具时建立关联轮次；缺少用户材料时先在同一问答中索要。功能默认关闭，使用独立接口、数据表和可回放事件流。新报告发布前保留旧报告，原下载和赞踩不被覆盖。
+报告完成后的提问、更正和补日志统一使用[报告追问入口](docs/website-report-followup.md)。每次追问直接创建关联 run 和独立 Case，由通用 Skill 按当前问题分析并发布新版完整报告，不先做只读问答、充分性分类或 ROUTE。历史报告和问答仅作参考，不限制本次方向。功能默认关闭，入口、回执和事件流保持兼容；新版发布前保留旧报告，原下载和评价不被覆盖。
 
 网站负责用户登录，BFF 默认透传 Cookie，由 Problem Locator 从 Redis 的 `user.userid` 计算稳定的 `owner_key` 并检查会话归属；显式使用 `trusted_header` 时才由原 BFF 登录模块计算身份。部署方须限制哪些来源可以访问 xiaodao，浏览器不得直接指定会话所属用户。会话详情格式已升级为 v3，事件格式已升级为 v2，网站与服务端需一起升级。底层独立 Case 和七个 MCP 工具继续保留。
 
@@ -70,7 +70,7 @@ Logparse 产品可以省略，此时运行时将实际使用的产品记录为 `
 
 模型执行前的 Logparse 预处理、日志内容固定、marker 扫描和方法卡加载保持不变；路径、文件归属、权限、字节数、SHA-256 和执行协议检查也继续生效。默认报告沿用现有 Markdown 文件格式，不生成证据核验 JSON 或 `result.zip`，`archive_status=NOT_REQUIRED`。设置 `advisory` 或 `strict` 可恢复原交付策略。详情见[诊断交付策略](docs/diagnosis-advisory.md)。
 
-除报告追问外，要求模型输出 JSON 的阶段允许开头带 BOM、外层包裹完整 Markdown 代码块，以及使用 CRLF 换行。报告追问必须返回绑定当前任务的完整结果包，不接受 BOM、代码围栏或前后说明，详见[追问决策规则](docs/website-report-followup.md#内部决策与网页展示分开)。这些兼容规则不适用于 Skill 直接输出的正文，七个 MCP 工具的输入格式要求也保持不变。网站快照新增可安全展示的 `failure` 字段，用于查看失败阶段并关联服务端日志。调度或持久化异常会使服务停止接收新任务。结果提交可在现有 30 秒窗口内重试；窗口到期不会强行中断单次阻塞 I/O，也不会重新调用模型。
+要求输出 JSON 的 ROUTE、Intake、Specialist 和 Reviewer 阶段按[模型输出兼容规则](docs/model-output-compatibility.md)解析。新版报告追问直接进入 Generic，使用正式 V2 报告合同，不再要求旧追问控制包；旧格式兼容记录保留供排查历史任务。七个 MCP 工具的输入格式要求不变。网站快照的 failure 字段用于展示安全失败原因并关联服务端日志；调度或持久化异常会使服务停止接收新任务。结果提交可在现有 30 秒窗口内重试，窗口到期不强行中断单次阻塞 I/O，也不重新调用模型。
 
 专用 Skill 必须声明明确的适用范围。ROUTE 一次性逐项审核，只有唯一候选明确适用、其余候选均可排除、原文引用有效且置信度不低于 0.95 时才放行。低置信、依据不足或歧义转通用定位；已明确适用但缺诊断材料，仍进入专用流程补齐。旧注册未补齐范围声明时不能自动选用。详见[路由准入与注册升级](docs/route-admission.md)。
 
@@ -123,10 +123,10 @@ uv lock --check
 | `GENERIC_SKILL_NAME` | 是 | 无 | Agent 环境中预装的通用定位 Skill 名称；仅允许标准的小写字母和连字符命名格式。启动时不调用 Skill 检查是否已安装 |
 | `GENERIC_LOGPARSE_PRODUCT` | 否 | `default` | 旧 Generic Job 继续使用其固定的 Logparse 配置；新通用诊断直接准备用户日志，不使用此项。专用诊断仍使用 Skill 声明的产品 |
 | `GENERIC_MEMORY_ENABLED` | 否 | `false` | 控制通用经验提炼和召回，不影响 V2 Markdown 报告赞踩；启用前完成实际 Skill 与脱敏验收 |
-| `REPORT_FOLLOWUP_ENABLED` | 否 | `false` | 开启报告追问和报告发布后的异步日志快照；关闭后仍可读取、停止和清理已有追问 |
-| `REPORT_FOLLOWUP_TIMEOUT_SECONDS` | 否 | `600` | 单次追问模型执行上限，单位秒；只接受 1–1800 的整数。修改后重启服务，用户仍可随时停止 |
-| `REPORT_FOLLOWUP_SNAPSHOT_BYTES` | 否 | `1073741824` | 单份日志快照字节上限，最多 1 GiB，可调低；不计入原诊断资源额度 |
-| `REPORT_FOLLOWUP_STORAGE_BYTES` | 否 | `5368709120` | 日志快照总量字节上限，默认 5 GiB，不能小于单份上限 |
+| `REPORT_FOLLOWUP_ENABLED` | 否 | `false` | 开启报告追问直接转通用诊断；关闭后仍可读取、停止和清理已有任务 |
+| `REPORT_FOLLOWUP_TIMEOUT_SECONDS` | 否 | `600` | 旧只读追问时限配置，仍校验 1–1800 的整数；新追问使用正式 Generic 预算，此值不调整其时限 |
+| `REPORT_FOLLOWUP_SNAPSHOT_BYTES` | 否 | `1073741824` | 历史追问日志快照的单份字节上限，最多 1 GiB；新追问不复制只读回答快照 |
+| `REPORT_FOLLOWUP_STORAGE_BYTES` | 否 | `5368709120` | 历史追问日志快照总量字节上限，默认 5 GiB，不能小于单份上限 |
 | `LOGPARSE_REPO` | 依 Skill 而定 | 无 | 仅使用通用定位且没有依赖 Logparse 的专用 Skill 时，可与 `LOGPARSE_CONFIG_PATH` 一起省略；配置后仍严格校验源码和指纹 |
 | `LOGPARSE_CONFIG_PATH` | 依 Skill 而定 | 无 | Logparse 工作区内的配置文件，须与 `LOGPARSE_REPO` 成对配置；存在依赖 Logparse 的专用 Skill 时必填 |
 | `BIND_HOST` | 否 | `127.0.0.1` | Uvicorn 监听地址 |

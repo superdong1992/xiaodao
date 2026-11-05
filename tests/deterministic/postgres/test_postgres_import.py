@@ -23,7 +23,7 @@ from problem_locator.storage.state_repository import CaseStateRepository
 from tests.deterministic.unit.storage.fakes import DeterministicIdGenerator, FixedClock
 from tests.deterministic.unit.storage.test_state_repository import _open
 from tests.deterministic.integration.test_async_archive import create_pending_archive
-from tests.deterministic.integration.test_report_followups import GenericV2Backend, _exercise, _install
+from tests.deterministic.integration.test_report_followups import GenericV2Backend, _install
 from tests.deterministic.integration.test_website_agent import OWNER_KEY, _post, _preupload, website
 from tests.postgres_helpers import postgres_database_url
 
@@ -293,6 +293,9 @@ def test_postgres_import_retains_completed_case_bytea_archive_payload_and_resour
 
 def test_postgres_import_retains_valid_followup_snapshot_answers_and_memory_history(
         website, tmp_path, migration_host, postgres_database_url, monkeypatch):
+    from problem_locator.followup.models import FollowupRequest
+    from problem_locator.memory.models import FeedbackSource
+
     stack, store, _, agent, client = website
     followups, backend = _install(website)
     monkeypatch.setattr(stack.catalog, "_route_skill_refs", [])
@@ -308,8 +311,30 @@ def test_postgres_import_retains_valid_followup_snapshot_answers_and_memory_hist
     assert agent.run_once(cid)
     assert stack.scheduler.wait_until_idle(20)
     assert store.get_status(cid).report_state == "READY"
-    _exercise(website, followups, backend, cid, prefix, "GENERIC")
+    rid = store.get_run(cid)["run_id"]
+    report_source = followups._source(cid, rid)
+    assert report_source.source_kind == "GENERIC" and report_source.has_logs
+    # Build an offline pre-upgrade source explicitly. The current worker always
+    # creates a diagnosis run and must not be used to simulate old answer rows.
+    assert followups.store.enqueue_snapshot(cid, rid, report_source)
+    assert followups.snapshot_worker.run_once()
+    expected_answers = {}
+    for ordinal, (question, answer) in enumerate((
+        ("请解释报告的依据。", "原日志提供了排队线索，但仍需核对负载。\n保留标记：memory-42。"),
+        ("另一实例 queue_depth=0，会影响判断吗？", "应区分实例，不能据此排除原实例排队。\n保留标记：memory-42。"),
+    ), 1):
+        request = FollowupRequest(request_id=f"historical-followup-{ordinal}", text=question)
+        receipt = followups.store.submit(cid, rid, request, report_source, OWNER_KEY)
+        claimed = followups.store.claim_task()
+        assert claimed["followup_id"] == receipt.followup_id
+        assert followups.store.finish_task(receipt.followup_id, answer=answer)
+        expected_answers[receipt.followup_id] = answer
+    assert backend.calls == 0 and store.get_run(cid)["run_id"] == rid
     memory = MemoryStore(stack.repository, stack.clock)
+    memory.put_feedback(cid, rid, owner_key=OWNER_KEY, request_id="like-source", rating="LIKE",
+        source=FeedbackSource(case_id=report_source.case_id, source_job_id=report_source.source_job_id,
+            skill_name=report_source.skill_name, problem_text=report_source.problem_text,
+            report_markdown=report_source.report_markdown, report_sha256=report_source.report_sha256))
     task = memory.claim_task()
     assert task is not None
     assert memory.finish_task(task["task_id"], json.dumps({
@@ -317,7 +342,6 @@ def test_postgres_import_retains_valid_followup_snapshot_answers_and_memory_hist
         "steps": ["核对连接池容量与等待指标"], "limitations": ["仍需当前日志证据"]}, ensure_ascii=False))
     cards = memory.active_cards(task["skill_name"])
     assert len(cards) == 1
-    rid = store.get_run(cid)["run_id"]
     snapshot = followups.store.snapshot(rid)
     assert snapshot["status"] == "READY"
     manifest = json.loads(snapshot["manifest_json"])
@@ -336,6 +360,11 @@ def test_postgres_import_retains_valid_followup_snapshot_answers_and_memory_hist
             expected_rows[table] = (columns, migration._digest(db.execute(f'SELECT * FROM "{table}"')))
             assert expected_rows[table][1]["rows"] > 0
         assert db.execute("SELECT COUNT(*) FROM agent_followup_tasks WHERE status='COMPLETED'").fetchone()[0] == 2
+        answers = [json.loads(row[0]) for row in db.execute("SELECT body FROM agent_followup_tasks")]
+        assert {item["followup_id"]: item["answer_markdown"] for item in answers} == expected_answers
+        assert all(item["run_id"] == rid and item["diagnosis_run_id"] is None
+            and item["context_mode"] == "REPORT_AND_LOGS" for item in answers)
+        assert db.execute("SELECT COUNT(*) FROM agent_conversation_runs WHERE conversation_id=?", (cid,)).fetchone()[0] == 1
     assert agent.shutdown(2)
     stack.shutdown()
     (source / ".instance.lock").write_bytes(b"offline followup source\n")
@@ -353,6 +382,10 @@ def test_postgres_import_retains_valid_followup_snapshot_answers_and_memory_hist
             for table, (columns, expected) in expected_rows.items():
                 selected = ",".join('"' + column + '"' for column in columns)
                 assert migration._digest(db.execute(f'SELECT {selected} FROM "{table}"')) == expected
+            answers = [json.loads(row[0]) for row in db.execute("SELECT body FROM agent_followup_tasks")]
+            assert {item["followup_id"]: item["answer_markdown"] for item in answers} == expected_answers
+            assert all(item["run_id"] == rid and item["diagnosis_run_id"] is None
+                and item["context_mode"] == "REPORT_AND_LOGS" for item in answers)
         imported_followups = FollowupStore(repository, stack.clock)
         assert imported_followups.snapshot(rid) == snapshot
         assert MemoryStore(repository, stack.clock).active_cards(task["skill_name"]) == cards

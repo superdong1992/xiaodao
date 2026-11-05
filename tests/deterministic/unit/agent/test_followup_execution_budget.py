@@ -1,4 +1,4 @@
-"""Follow-up budgets reach execution without disabling cancellation or handoff."""
+"""Legacy followup settings never add a model gate or weaken handoff cancellation."""
 import threading
 
 import pytest
@@ -8,7 +8,7 @@ from problem_locator.followup.context import build_prompt
 from problem_locator.followup.service import ReportFollowupService
 from problem_locator.runtime.failures import runtime_failure
 from tests.deterministic.unit.agent.test_report_followup import (
-    OWNER, original_rows, submit, system, view,
+    OWNER, diagnostic_system, original_rows, submit, system, view,
 )
 
 
@@ -19,27 +19,25 @@ def configure(system, **options):
     system.service._source = lambda *_: system.source
 
 
-def test_default_budget_allows_a_six_minute_model_invocation(system):
-    def model(invocation):
-        # Deterministic model duration; this test does not wait six minutes.
-        if invocation["resource_limits"].wall_time_seconds <= 360:
-            raise runtime_failure(stage=ExecutionStage.BACKEND_EXECUTE,
-                code=ErrorCode.BACKEND_TIMEOUT, message="simulated elapsed time: 360s", retryable=True)
-    system.backend.action = model
-    submit(system)
-    assert system.service.worker.run_once()
-    assert view(system).items[0].status == "COMPLETED"
-    assert len(system.backend.calls) == 1
-    assert system.backend.calls[0]["resource_limits"].wall_time_seconds == 600
+def test_default_budget_does_not_create_an_extra_followup_model_invocation(diagnostic_system):
+    s = diagnostic_system
+    assert s.service.timeout_seconds == 600
+    s.backend.execute = lambda **kwargs: pytest.fail("diagnosis owns model work")
+    submit(s)
+    assert s.service.worker.run_once()
+    assert view(s).items[0].diagnosis_run_id is not None
+    assert not s.backend.calls
 
 
 @pytest.mark.parametrize("seconds", [1, 300, 900, 1800])
-def test_configured_budget_reaches_the_followup_invocation(system, seconds):
-    configure(system, timeout_seconds=seconds)
-    submit(system)
-    assert system.service.worker.run_once()
-    assert system.backend.calls[0]["resource_limits"].wall_time_seconds == seconds
-    assert system.backend.calls[0]["backend_phase"] == "REPORT_FOLLOWUP"
+def test_legacy_timeout_setting_does_not_add_a_followup_model_gate(diagnostic_system, seconds):
+    s = diagnostic_system
+    s.service.timeout_seconds = seconds
+    s.backend.execute = lambda **kwargs: pytest.fail("no budget spent on classification")
+    submit(s)
+    assert s.service.worker.run_once()
+    assert view(s).items[0].diagnosis_run_id is not None
+    assert not s.backend.calls
 
 
 @pytest.mark.parametrize("seconds", [0, -1, 1801, True, False, 1.5, None, "600"])
@@ -48,54 +46,52 @@ def test_direct_service_cannot_bypass_the_timeout_range(system, seconds):
         ReportFollowupService(system.agent, "claude", timeout_seconds=seconds)
 
 
-def test_custom_budget_timeout_still_fails_without_retry_or_handoff(system):
-    configure(system, timeout_seconds=900)
+def test_dispatch_timeout_fails_safely_without_retry_or_model(system, monkeypatch):
     before = original_rows(system)
-    def timeout(invocation):
-        assert invocation["resource_limits"].wall_time_seconds == 900
-        raise runtime_failure(stage=ExecutionStage.BACKEND_EXECUTE,
-            code=ErrorCode.BACKEND_TIMEOUT, message="simulated elapsed time: 900s", retryable=True)
-    system.backend.action = timeout
-    system.service.continue_diagnosis = lambda *_: pytest.fail("timeout is not a diagnosis decision")
+    attempts = []
+    def timeout(task):
+        attempts.append(task["followup_id"])
+        raise TimeoutError("private dispatch timeout")
+    monkeypatch.setattr(system.service, "dispatch_generic", timeout)
     submit(system)
     assert not system.service.worker.run_once()
-    answer = view(system).items[0]
-    assert answer.status == "FAILED" and answer.answer_markdown is None
+    item = view(system).items[0]
+    assert item.status == "FAILED" and item.answer_markdown is None
     assert not system.service.worker.run_once()
-    assert len(system.backend.calls) == 1 and original_rows(system) == before
+    assert len(attempts) == 1 and not system.backend.calls
+    assert original_rows(system) == before
 
 
 @pytest.mark.parametrize("stop_kind", ["user", "shutdown"])
-def test_maximum_budget_keeps_prompt_cancellation_and_discards_late_answers(system, stop_kind):
-    configure(system, timeout_seconds=1800)
-    entered, cancelled = threading.Event(), threading.Event()
-    def model(invocation):
+def test_stop_during_dispatch_preparation_cannot_commit_a_late_handoff(diagnostic_system, stop_kind, monkeypatch):
+    s = diagnostic_system
+    s.service.timeout_seconds = 1800
+    entered, release = threading.Event(), threading.Event()
+    baseline = s.agent.continuations._baseline
+    def pause(*args, **kwargs):
+        result = baseline(*args, **kwargs)
         entered.set()
-        signal = invocation["cancellation"]
-        for _ in range(500):
-            if signal.wait(0.01):
-                cancelled.set()
-                return
-        pytest.fail("extended execution budget prevented cancellation")
-    system.backend.action = model
-    receipt = submit(system)
-    thread = threading.Thread(target=system.service.worker.run_once)
+        assert release.wait(5)
+        return result
+    monkeypatch.setattr(s.agent.continuations, "_baseline", pause)
+    receipt = submit(s)
+    thread = threading.Thread(target=s.service.worker.run_once)
     thread.start()
     try:
         assert entered.wait(5)
         if stop_kind == "user":
-            system.service.stop(system.cid, system.rid, receipt.followup_id, "stop", owner_key=OWNER)
+            s.service.stop(s.cid, s.rid, receipt.followup_id, "stop", owner_key=OWNER)
         else:
-            system.service.shutdown(0)
-        assert cancelled.wait(2)
+            s.service.shutdown(0)
     finally:
-        system.service.worker.cancel(shutdown=True)
+        release.set()
         thread.join(5)
     assert not thread.is_alive()
-    answer = view(system).items[0]
-    assert answer.status == ("CANCELLED" if stop_kind == "user" else "INTERRUPTED")
-    assert answer.answer_markdown is None
-    assert len(system.backend.calls) == 1
+    item = view(s).items[0]
+    assert item.status == ("CANCELLED" if stop_kind == "user" else "INTERRUPTED")
+    assert item.diagnosis_run_id is None and item.answer_markdown is None
+    assert s.store.get_conversation(s.cid).run_id == s.rid
+    assert not s.backend.calls
 
 
 def test_log_prompt_requires_targeted_reading_and_early_diagnosis_handoff(system):

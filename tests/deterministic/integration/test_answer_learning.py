@@ -1,4 +1,4 @@
-"""Real service/store/worker composition; only model execution is replaced."""
+"""Historical answers still support feedback, evidence review, and learning."""
 from __future__ import annotations
 
 from problem_locator.memory.corrections import CorrectionMemoryHandler
@@ -7,7 +7,7 @@ from problem_locator.memory.models import FeedbackSource
 from problem_locator.memory.retrieval import ExperienceRetriever
 from problem_locator.memory.service import FeedbackService
 from tests.deterministic.unit.agent.test_followup_corrections import (
-    LOG, correct, enable_memory, response,
+    LOG, correct, enable_memory, response, finish,
 )
 from tests.deterministic.unit.agent.test_report_followup import (
     Backend, OWNER, make_logs, system, view,
@@ -21,7 +21,7 @@ def test_disliked_report_to_checked_correction_to_recall_with_independent_feedba
     state.agent.followups = state.service
     feedback = FeedbackService(state.agent, memory, memory_enabled=True)
     make_logs(state, content=LOG)
-    assert state.service.observe_report(state.cid, state.rid)
+    assert state.service.store.enqueue_snapshot(state.cid, state.rid, state.source)
     assert state.service.snapshot_worker.run_once()
     original = state.source.report_markdown
     source = FeedbackSource(case_id=state.source.case_id, source_job_id=state.source.source_job_id,
@@ -30,9 +30,9 @@ def test_disliked_report_to_checked_correction_to_recall_with_independent_feedba
     memory.put_feedback(state.cid, state.rid, owner_key=OWNER, request_id="report-down",
         rating="DISLIKE", source=source)
     submitted = correct(state)
-    assert state.service.worker.run_once()
+    finish(state, submitted)
     answer = view(state).items[-1]
-    assert answer.status == "COMPLETED" and len(state.backend.calls) == 1
+    assert answer.status == "COMPLETED" and state.backend.calls == []
     reviewer = Backend(response())
     handler = CorrectionMemoryHandler(state.service, "claude", backend=reviewer)
     consumer = MemoryExtractionWorker(memory, "unused", workspace_root=state.service.layout.workspaces,
@@ -62,10 +62,9 @@ def test_delete_during_correction_model_cannot_publish_or_repeat(system):
     memory = enable_memory(state)
     state.agent.store.memory_store = memory
     make_logs(state, content=LOG)
-    assert state.service.observe_report(state.cid, state.rid)
+    assert state.service.store.enqueue_snapshot(state.cid, state.rid, state.source)
     assert state.service.snapshot_worker.run_once()
-    correct(state)
-    assert state.service.worker.run_once()
+    finish(state, correct(state))
     reviewer = Backend(response(), action=lambda _: state.agent.store.request_delete(state.cid, owner_key=OWNER))
     consumer = MemoryExtractionWorker(memory, "unused", workspace_root=state.service.layout.workspaces,
         backend=Backend(), correction_handler=CorrectionMemoryHandler(state.service, "claude", backend=reviewer))

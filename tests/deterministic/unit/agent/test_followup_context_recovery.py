@@ -1,10 +1,6 @@
-"""Long user supplements remain readable without a summarization model."""
+"""Full failed-attempt supplements reach Generic without a summarization model."""
 import json
-
 import pytest
-
-from problem_locator.agent.models import AgentStoreError
-from problem_locator.followup.models import MAX_CONTEXT_BYTES
 from tests.deterministic.unit.agent.test_followup_handoff import state, item, counts
 from tests.deterministic.unit.agent.test_followup_material_selection import claim, fail_attempt_with_messages
 from tests.deterministic.unit.agent.test_report_continuation import OWNER, system
@@ -17,32 +13,24 @@ def long_attempt(s):
     return texts
 
 
-def test_long_failed_attempt_supplements_use_readonly_file_without_extra_model(state):
+@pytest.mark.parametrize("read_search", [True, False])
+def test_long_failed_attempt_reaches_generic_in_full_without_a_preliminary_model(state, read_search):
     s = state
     texts = long_attempt(s)
+    s.followups.read_search_supported = read_search
     before = counts(s)
-    s.followups.submit(s.cid, s.rid, "again", "解释刚才补充的内容。", owner_key=OWNER)
+    question = "解释刚才补充的内容。"
+    receipt = s.followups.submit(s.cid, s.rid, "again", question, owner_key=OWNER)
     assert s.followups.worker.run_once()
-    assert len(s.backend.calls) == 1 and counts(s) == before and item(s).status == "COMPLETED"
-    call = s.backend.calls[0]
-    context = json.loads((call["workspace_root"] / "inputs/context.json").read_bytes())
-    attempt = context["diagnosis_context"]["latest_attempt"]
-    assert attempt["user_messages"] == [] and len(attempt["user_messages_index"]) == 4
-    path = call["workspace_root"] / attempt["user_messages_file"]
-    messages = json.loads(path.read_bytes())
+    run = s.store.get_run(s.cid)
+    assert s.backend.calls == [] and item(s).status == "COMPLETED"
+    assert counts(s) == (before[0] + 1, before[1], before[2] + 1)
+    assert run["force_generic"] is True and run["run_id"] == item(s).diagnosis_run_id
+    reference = json.loads(run["continuation_context"]["followup_context_json"])
+    messages = reference["latest_attempt"]["user_messages"]
     assert [entry["text"] for entry in messages] == texts
     assert all(entry["status"] == "APPLIED" for entry in messages)
-    assert path.stat().st_mode & 0o222 == 0
-    assert call["file_access"] == "read-search" and len(call["prompt"].encode()) <= MAX_CONTEXT_BYTES
-
-
-def test_launcher_without_read_search_rejects_oversized_supplements_at_admission(state):
-    s = state
-    long_attempt(s)
-    s.followups.read_search_supported = False
-    before = counts(s)
-    with pytest.raises(AgentStoreError) as error:
-        s.followups.submit(s.cid, s.rid, "again", "解释刚才补充的内容。", owner_key=OWNER)
-    assert error.value.code == "AGENT_FOLLOWUP_CONTEXT_LIMIT"
-    assert s.backend.calls == [] and counts(s) == before
-    assert s.followups.store.request(s.cid, s.rid, "again", "解释刚才补充的内容。", OWNER) is None
+    assert s.store.get_conversation(s.cid).messages[0].text == question
+    assert s.followups.submit(s.cid, s.rid, "again", question, owner_key=OWNER) == receipt
+    assert not s.followups.worker.run_once()
+    assert counts(s) == (before[0] + 1, before[1], before[2] + 1)

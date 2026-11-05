@@ -18,7 +18,7 @@ export function mountReportVersionsView(container, { client, conversationId, run
   for (const [title, select] of [["查看版本", version], ["左侧报告", left], ["右侧报告", right]]) {
     const label = make("label", title); label.append(select); root.append(label);
   }
-  root.append(open, compare, refresh, make("p", "新报告开头的“本轮变化”说明判断的变化。输入变化对照右侧报告的直接上一版。"), delta, comparison);
+  root.append(open, compare, refresh, make("p", "新报告先回答本次问题；同主题时说明判断变化，换主题时说明本轮范围。输入变化对照右侧报告的直接上一版。"), delta, comparison);
   container.replaceChildren(root);
   let disposed = false, versions, sequence = 0;
   const abort = new AbortController();
@@ -127,7 +127,7 @@ export function mountContinuationView(container, controller, { client, conversat
   const dirtyNotice = make("p"); editor.append(save, dirtyNotice, inputDelta, confirm);
   const followupArea = make("section"), followupText = make("pre"), sendFollowup = make("button", "发送报告追问");
   sendFollowup.type = "button";
-  followupArea.append(make("h3", "这是对当前报告的追问，无需新建诊断"), followupText, sendFollowup);
+  followupArea.append(make("h3", "发送到报告追问入口"), followupText, sendFollowup);
   const versionsArea = make("section"); versionsArea.className = "xiaodao-continuation__versions";
   versionsArea.append(make("h3", "报告版本"));
   const versionSelect = field(versionsArea, "查看版本", "select"), viewVersion = make("button", "查看所选版本"); viewVersion.type = "button";

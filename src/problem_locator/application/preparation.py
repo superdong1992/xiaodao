@@ -86,13 +86,18 @@ def build_create_case_trigger(
     case_id: str,
     trigger_id: str,
     user_fact_ids: Sequence[str],
-    route_bindings: RuntimeBindings,
+    route_bindings: RuntimeBindings | None = None,
+    generic_bindings: RuntimeBindings | None = None,
     occurred_at: str,
 ) -> ValidatedTrigger:
     """Build CREATE_CASE from IDs/time allocated once by the service."""
 
     if len(user_fact_ids) != len(command.initial_user_facts):
         raise ValueError("user_fact_ids must match initial_user_facts one-for-one")
+    initial_job_type = JobType.DIAGNOSE if command.force_generic else JobType.ROUTE
+    initial_bindings = generic_bindings if command.force_generic else route_bindings
+    if initial_bindings is None:
+        raise ValueError("CreateCase requires the runtime bindings for its initial Job")
     facts = [
         make_user_fact(
             value,
@@ -116,12 +121,13 @@ def build_create_case_trigger(
             raw_problem_text=command.raw_problem_text,
             product_line=command.product_line,
             initial_log_archive_expected=command.initial_log_archive_expected,
+            force_generic=command.force_generic,
             continuation_context=command.continuation_context,
             problem_spec=problem_spec_at_revision_one(command),
             initial_user_facts=facts,
         ),
         continuation_resources=empty_continuation_resources(),
-        runtime_bindings_by_job_type={JobType.ROUTE: route_bindings},
+        runtime_bindings_by_job_type={initial_job_type: initial_bindings},
         occurred_at=occurred_at,
     )
 

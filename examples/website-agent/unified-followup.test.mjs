@@ -35,6 +35,12 @@ test("原追问接口接收附件并保持旧请求字节，交接结果兼容�
   assert.throws(() => validateFollowupItem(item({ diagnosis_run_id: "wrong" }), rid));
 });
 
+test("真实SDK读取非最新版资格，保留旧追问和关联诊断状态", async () => {
+  const expected = { ...view([item({ diagnosis_run_id: next })]), can_ask: false, reason: "LATEST_REPORT_REQUIRED" };
+  const client = createAgentClient({ fetchImpl: async () => new Response(JSON.stringify({ ok: true, data: expected, error: null })) });
+  assert.deepEqual(await client.followups.list(cid, rid), expected);
+});
+
 test("统一追问上传后只提交一次入口，丢失回执跨刷新保留原日志集合", async () => {
   const storage = memory(), calls = [];
   const client = { attachments: { prepare: async () => ({ attachment: { attachment_id: aid } }), upload: async () => {} },
@@ -131,6 +137,60 @@ class DomNode {
 }
 const root = () => { const doc = { createElement: (tag) => new DomNode(doc, tag), createDocumentFragment: () => new DomNode(doc, "fragment") }; return doc.createElement("main"); };
 const all = (node) => [node, ...node.children.flatMap(all)];
+test("追问入口明确每次执行通用诊断，排队状态不宣称已核对原日志", () => {
+  const container = root(), controller = { subscribe(listener) {
+    listener({ ...view([item({ status: "QUEUED", answer_markdown: null })]), snapshot_status: "READY", draft: "", uploads: [] });
+    return () => {};
+  }, destroy() {} };
+  const dispose = mountFollowupView(container, controller);
+  try {
+    assert.match(container.textContent, /每次追问都会启动通用诊断/);
+    assert.match(container.textContent, /等待处理/);
+    assert.doesNotMatch(container.textContent, /必要时继续诊断|回答依据：|可结合报告和原日志回答/);
+  } finally { dispose(); }
+});
+
+test("已交接的追问只展示诊断状态，不用旧快照宣称新版报告证据", () => {
+  const container = root(), controller = { subscribe(listener) {
+    listener({ ...view([item({ diagnosis_run_id: next, context_mode: "REPORT_ONLY" })]), draft: "", uploads: [],
+      diagnoses: { [next]: { detail: { status: "RUNNING", report_state: "PENDING", progress: { message: "正在通用分析。" } } } } });
+    return () => {};
+  }, destroy() {} };
+  const dispose = mountFollowupView(container, controller);
+  try {
+    assert.match(container.textContent, /已提交诊断/);
+    assert.match(container.textContent, /正在通用分析/);
+    assert.doesNotMatch(container.textContent, /回答依据：|已回答|新版报告已生成/);
+  } finally { dispose(); }
+});
+
+test("旧只读回答仍展示原正文与证据范围，不伪装成新诊断", () => {
+  const container = root(), controller = { subscribe(listener) {
+    listener({ ...view([item({ diagnosis_run_id: null, answer_markdown: "这是保留的历史回答。", context_mode: "REPORT_ONLY" })]), draft: "", uploads: [] });
+    return () => {};
+  }, destroy() {} };
+  const dispose = mountFollowupView(container, controller);
+  try {
+    assert.match(container.textContent, /这是保留的历史回答/);
+    assert.match(container.textContent, /回答依据：仅报告和已有问答，未重新核对原日志/);
+    assert.doesNotMatch(container.textContent, /已提交诊断/);
+  } finally { dispose(); }
+});
+
+for (const [reason, expected] of [["LATEST_REPORT_REQUIRED", "已有新版报告，请切换到最新版继续追问。"],
+  ["BUSY", "本会话仍有任务正在处理，请等待完成或先停止后再发送。"]]) {
+  test(`追问资格提示覆盖关联诊断忙碌和非最新版：${reason}`, () => {
+    const container = root(), controller = { subscribe(listener) {
+      listener({ ...view(), can_ask: false, reason, draft: "继续看另一个方向", uploads: [] }); return () => {};
+    }, destroy() {} };
+    const dispose = mountFollowupView(container, controller);
+    try {
+      assert.ok(container.textContent.includes(expected));
+      assert.equal(all(container).find((node) => node.tagName === "textarea").disabled, true);
+    } finally { dispose(); }
+  });
+}
+
 test("原追问框提供多日志和后端补充问题，版本区域只有查看与对比", async () => {
   const container = root(); let sent = 0;
   const controller = { subscribe: (listener) => { listener({ items: [item({ diagnosis_run_id: next })], diagnoses: {
@@ -145,7 +205,9 @@ test("原追问框提供多日志和后端补充问题，版本区域只有查�
   const versionsRoot = root();
   const close = mountReportVersionsView(versionsRoot, { conversationId: cid, runId: rid, client: { continuations: {
     versions: async () => ({ versions: [{ run_id: rid, parent_run_id: null, version: 1 }], root_run_id: rid }) } } });
-  await tick(); assert.equal(all(versionsRoot).some((node) => ["form", "textarea"].includes(node.tagName)), false); close();
+  await tick(); assert.equal(all(versionsRoot).some((node) => ["form", "textarea"].includes(node.tagName)), false);
+  assert.match(versionsRoot.textContent, /新报告先回答本次问题/);
+  assert.match(versionsRoot.textContent, /换主题时说明本轮范围/); close();
 });
 
 for (const [status, failure, expected] of [

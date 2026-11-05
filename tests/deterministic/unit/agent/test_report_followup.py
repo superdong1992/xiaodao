@@ -1,4 +1,4 @@
-"""Report follow-ups never reopen a Case or rewrite the existing Agent history."""
+"""Historical followup storage and snapshots remain readable after Generic handoff."""
 from __future__ import annotations
 
 import hashlib
@@ -80,6 +80,10 @@ def system(tmp_path):
     MemoryStore(repository, clock)
     agent = AgentConversationService(agent_store, SimpleNamespace(), None, repository.layout)
     created = agent_store.create_conversation("create", owner_key=OWNER)
+    with repository.database_transaction() as db:
+        body = agent_store._load(db, created.conversation_id)
+        body.update(status="COMPLETED", report_available=True, case_id=CASE, case_status="RESOLVED")
+        agent_store._save(db, body)
     backend = Backend()
     service = ReportFollowupService(agent, "claude", enabled=True, backend=backend)
     report = "# 定位报告\n连接池可能存在排队，请结合日志核实。\n"
@@ -91,6 +95,28 @@ def system(tmp_path):
     yield state
     service.shutdown(0)
     repository.close()
+
+
+@pytest.fixture
+def diagnostic_system(tmp_path):
+    """Use a published report and real continuation transactions for worker tests."""
+    from tests.deterministic.unit.agent.test_report_continuation import system as continuation_system
+    from tests.deterministic.unit.agent.test_followup_handoff import state
+    generator = continuation_system.__wrapped__(tmp_path)
+    value = state.__wrapped__(next(generator))
+    value.service = value.followups
+    try:
+        yield value
+    finally:
+        with pytest.raises(StopIteration):
+            next(generator)
+
+
+def complete_historical_task(system, answer="历史报告解释。"):
+    """Persist a pre-upgrade answer without invoking the retired model worker."""
+    task = system.service.store.claim_task()
+    assert task is not None
+    return system.service.store.finish_task(task["followup_id"], answer=answer)
 
 
 def submit(system, request="question-1", text="为什么得出这个结论？"):
@@ -125,28 +151,23 @@ def make_logs(system, *, kind="GENERIC", content=b"incident_code=QUEUE_OVERFLOW\
     return original, job
 
 
-def test_old_report_can_be_explained_without_reparsing_or_changing_any_original_table(system):
+def test_historical_answers_remain_readable_without_reparsing_or_changing_original_tables(system):
     before = original_rows(system)
-    assert view(system).can_ask and view(system).snapshot_status == "UNAVAILABLE"
-    assert original_rows(system) == before
     first = submit(system)
     assert submit(system) == first
-    assert system.service.worker.run_once()
+    assert complete_historical_task(system, "历史回答：连接池有待核实。")
     answer = view(system).items[0]
-    assert answer.status == "COMPLETED" and answer.context_mode == "REPORT_ONLY"
-    assert "未重新核对原始日志" in answer.answer_markdown
-    second = submit(system, "question-2", "但我观察到队列深度为零，这会影响结论吗？")
-    assert system.service.worker.run_once()
-    call = system.backend.calls[-1]
-    context = json.loads((call["workspace_root"] / "inputs/context.json").read_text("utf-8"))
-    assert context["prior_turns"] == []
-    assert call["native_session"].resume_id == system.service.store.sessions.get(system.cid)["session_id"]
-    assert view(system).items[0].answer_markdown == answer.answer_markdown
-    assert context["question"].startswith("但我观察")
-    assert first.followup_id != second.followup_id and len(system.backend.calls) == 2
-    assert original_rows(system) == before
+    assert answer.status == "COMPLETED" and answer.diagnosis_run_id is None
+    second = submit(system, "question-2", "但队列深度为零。")
+    task = system.service.store.claim_task()
+    source, history, snapshot = system.service.store.task_context(task)
+    assert source.report_markdown == system.source.report_markdown
+    assert history[0]["answer_markdown"] == answer.answer_markdown
+    assert system.service.store.finish_task(task["followup_id"], answer="历史补充解释。")
+    assert first.followup_id != second.followup_id
+    assert original_rows(system) == before and not system.backend.calls
     events = system.service.list_events(system.cid, system.rid, owner_key=OWNER)
-    assert events.stream_closed and [item.sequence for item in events.events] == list(range(1, 7))
+    assert events.stream_closed and [event.sequence for event in events.events] == list(range(1, 7))
     assert system.agent.store.list_events(system.cid) == []
 
 
@@ -159,8 +180,8 @@ def test_old_report_submit_does_not_make_surviving_logs_eligible_for_a_new_snaps
     assert not system.service.observe_report(system.cid, system.rid)
     assert not system.service.snapshot_worker.run_once()
     assert not (job / "followup-inputs").exists()
-    assert system.service.worker.run_once()
-    assert view(system).items[0].context_mode == "REPORT_ONLY"
+    assert complete_historical_task(system)
+    assert not system.backend.calls
 
 
 @pytest.mark.parametrize("occurred_at,expected", [
@@ -176,7 +197,7 @@ def test_snapshot_admission_uses_same_enable_instant_for_utc_and_local_reports(s
     snapshot = system.service.store.snapshot(system.rid)
     assert (snapshot is not None) is expected
     if snapshot is not None:
-        assert snapshot["status"] == "PENDING"
+        assert snapshot["status"] == "UNAVAILABLE"
 
 
 def test_followup_items_events_and_snapshots_use_local_offset(system):
@@ -202,6 +223,10 @@ def test_followup_items_events_and_snapshots_use_local_offset(system):
 @pytest.mark.parametrize("occurred_at", ["2026-09-17T01:00:00.001Z", "2026-09-17T09:00:00.001+08:00"])
 def test_log_expiry_preserves_fifteen_day_boundary_without_expiring_chat(system, occurred_at):
     system.source = replace(system.source, occurred_at=occurred_at)
+    with system.repository.database_transaction() as db:
+        body = system.agent.store._load(db, system.cid)
+        body["completed_at"] = occurred_at
+        system.agent.store._save(db, body)
     system.clock.value = "2026-10-02T09:00:00.000+08:00"
     assert view(system).can_ask
     assert not system.service.store.expired(system.source)
@@ -225,10 +250,12 @@ def test_snapshot_queue_orders_mixed_offsets_by_instant_without_rewriting_histor
 
 
 @pytest.mark.parametrize("kind", ["GENERIC", "SKILL_DIRECT"])
-def test_snapshot_is_async_verified_and_model_only_reads_the_copied_inputs(system, kind):
+def test_historical_snapshot_is_async_verified_and_copies_only_declared_inputs(system, kind):
+    from problem_locator.dispatch.cancellation import CancellationController
+    from problem_locator.followup.snapshots import copy_snapshot, verify_inputs
     original, job = make_logs(system, kind=kind)
     before = original_rows(system)
-    assert system.service.observe_report(system.cid, system.rid)
+    assert system.service.store.enqueue_snapshot(system.cid, system.rid, system.source)
     assert system.service.store.workspace_in_use(JOB)
     assert view(system).snapshot_status == "PENDING"
     assert system.service.snapshot_worker.run_once()
@@ -236,15 +263,12 @@ def test_snapshot_is_async_verified_and_model_only_reads_the_copied_inputs(syste
     assert not system.service.store.workspace_in_use(JOB)
     snapshot_log = job / "followup-inputs/inputs/logs/log-000001.log"
     assert snapshot_log.read_bytes() == (original / "inputs/logs/source.log").read_bytes()
-    submit(system)
-    assert system.service.worker.run_once()
-    invocation = system.backend.calls[0]
-    assert invocation["backend_phase"] == "REPORT_FOLLOWUP"
-    assert invocation["file_access"] == "read-search" and invocation["broker_environment"] is None
-    assert invocation["workspace_root"] != original
-    assert (invocation["workspace_root"] / "inputs/logs/log-000001.log").read_bytes() == snapshot_log.read_bytes()
-    assert view(system).items[0].context_mode == "REPORT_AND_LOGS"
-    assert original_rows(system) == before
+    target = system.repository.layout.workspaces / "historical-copy"
+    target.mkdir()
+    rows = copy_snapshot(system.service, system.service.store.snapshot(system.rid), target, CancellationController())
+    verify_inputs(target, rows, CancellationController())
+    assert (target / "inputs/logs/log-000001.log").read_bytes() == snapshot_log.read_bytes()
+    assert original_rows(system) == before and not system.backend.calls
 
 
 @pytest.mark.parametrize("kind", ["GENERIC", "SKILL_DIRECT"])
@@ -279,7 +303,7 @@ def test_multi_archive_snapshot_preserves_sources_for_same_named_logs(system, ki
     (original / "inputs" / name).write_bytes(raw)
     (job / audit).write_bytes(raw)
 
-    assert system.service.observe_report(system.cid, system.rid)
+    assert system.service.store.enqueue_snapshot(system.cid, system.rid, system.source)
     assert system.service.snapshot_worker.run_once()
     snapshot = json.loads((job / "followup-inputs/inputs/logs.json").read_bytes())
     assert len(snapshot["logs"]) == 2
@@ -296,9 +320,8 @@ def test_multi_archive_snapshot_preserves_sources_for_same_named_logs(system, ki
             original / original_row["log_path"]).read_bytes()
     if sources:
         assert snapshot["sources"] == sources
-    submit(system)
-    assert system.service.worker.run_once()
-    assert json.loads((system.backend.calls[0]["workspace_root"] / "inputs/logs.json").read_bytes()) == snapshot
+    assert not system.backend.calls
+    assert system.service.store.snapshot(system.rid)["status"] == "READY"
 
 
 def test_direct_input_snapshot_keeps_original_sources_and_skipped_coverage(system):
@@ -315,7 +338,7 @@ def test_direct_input_snapshot_keeps_original_sources_and_skipped_coverage(syste
     raw = json.dumps(payload, sort_keys=True).encode()
     (original / "inputs/generic_logs.json").write_bytes(raw)
     (job / "generic_logs.json").write_bytes(raw)
-    assert system.service.observe_report(system.cid, system.rid)
+    assert system.service.store.enqueue_snapshot(system.cid, system.rid, system.source)
     assert system.service.snapshot_worker.run_once()
     actual = json.loads((job / "followup-inputs/inputs/logs.json").read_bytes())
     for key in ("preparation", "sources", "skipped", "coverage"):
@@ -341,20 +364,18 @@ def test_direct_empty_log_snapshot_preserves_preparation_but_followup_stays_repo
     raw = json.dumps(payload, sort_keys=True).encode()
     (original / "inputs/generic_logs.json").write_bytes(raw)
     (job / "generic_logs.json").write_bytes(raw)
-    assert system.service.observe_report(system.cid, system.rid)
+    assert system.service.store.enqueue_snapshot(system.cid, system.rid, system.source)
     assert system.service.snapshot_worker.run_once()
     snapshot = json.loads((job / "followup-inputs/inputs/logs.json").read_bytes())
     assert snapshot["logs"] == []
     for key in ("preparation", "sources", "skipped", "coverage"):
         assert snapshot[key] == payload[key]
     submit(system, text="为什么没有使用我上传的日志？")
-    assert system.service.worker.run_once()
-    assert view(system).items[0].context_mode == "REPORT_ONLY"
-    assert view(system).items[0].answer_markdown.startswith("本次回答依据原问题、报告和补充说明，未重新核对原始日志。")
-    invocation = system.backend.calls[0]
-    assert json.loads((invocation["workspace_root"] / "inputs/logs.json").read_bytes()) == snapshot
-    assert not (invocation["workspace_root"] / "inputs/logs").exists()
-    assert "只保存原附件来源、跳过原因和准备范围" in invocation["prompt"]
+    task = system.service.store.claim_task()
+    assert json.loads(task["body"])["context_mode"] == "REPORT_ONLY"
+    assert system.service.store.finish_task(task["followup_id"], answer="历史解释：包内没有可读日志。")
+    assert not list((job / "followup-inputs/inputs/logs").iterdir())
+    assert not system.backend.calls
 
 
 def test_direct_empty_log_snapshot_still_checks_original_receipt_against_audit(system):
@@ -363,7 +384,7 @@ def test_direct_empty_log_snapshot_still_checks_original_receipt_against_audit(s
     (original / "inputs/generic_logs.json").write_text(
         json.dumps({"schema_version": 3, "preparation": "direct-v1", "logs": [], "coverage": {"empty_reason": "NO_FILES"}}),
         encoding="utf-8")
-    assert system.service.observe_report(system.cid, system.rid)
+    assert system.service.store.enqueue_snapshot(system.cid, system.rid, system.source)
     assert not system.service.snapshot_worker.run_once()
     assert view(system).snapshot_status == "FAILED"
     assert not (job / "followup-inputs").exists()
@@ -390,11 +411,11 @@ def test_direct_input_missing_receipt_never_claims_log_evidence(system):
 def test_changed_log_manifest_quota_and_missing_logs_degrade_without_touching_report(system):
     original, _ = make_logs(system)
     (original / "inputs/generic_logs.json").write_text('{"logs": []}', encoding="utf-8")
-    assert system.service.observe_report(system.cid, system.rid)
+    assert system.service.store.enqueue_snapshot(system.cid, system.rid, system.source)
     assert not system.service.snapshot_worker.run_once()
     assert view(system).snapshot_status == "FAILED" and view(system).can_ask
     submit(system)
-    assert system.service.worker.run_once()
+    assert complete_historical_task(system)
     assert view(system).items[0].context_mode == "REPORT_ONLY"
 
 
@@ -402,19 +423,14 @@ def test_snapshot_quota_is_reserved_before_copying_any_logs(system):
     _, job = make_logs(system, content=b"x" * 8192)
     system.service.snapshot_max_bytes = 4096
     system.service.snapshot_total_bytes = 4096
-    assert system.service.observe_report(system.cid, system.rid)
+    assert system.service.store.enqueue_snapshot(system.cid, system.rid, system.source)
     assert not system.service.snapshot_worker.run_once()
     assert not (job / "followup-inputs.pending").exists()
     assert view(system).snapshot_status == "FAILED"
 
 
-def test_deferred_report_notification_keeps_the_completed_run_after_legacy_client_opens_next(system):
+def test_deferred_report_notification_registers_completed_run_without_copying_logs(system):
     _, job = make_logs(system)
-    original_run = system.agent.store.get_run(system.cid, system.rid)
-    original_run["report_available"] = True
-    with system.repository.database_transaction() as db:
-        db.execute("UPDATE agent_conversation_runs SET body=? WHERE run_id=?",
-            (json.dumps(original_run), system.rid))
     system.service.schedule_observe(system.cid)
     next_message = system.agent.store.submit_message(system.cid, "legacy-next", "另一个问题")
     assert next_message.run_id != system.rid
@@ -425,36 +441,42 @@ def test_deferred_report_notification_keeps_the_completed_run_after_legacy_clien
     system.service._source = source
     assert system.service.snapshot_worker.run_once()
     assert observed == [(system.cid, system.rid)]
-    assert system.service.store.snapshot(system.rid)["status"] == "READY"
+    assert system.service.store.snapshot(system.rid)["status"] == "UNAVAILABLE"
     assert system.service.store.snapshot(next_message.run_id) is None
-    assert (job / "followup-inputs/manifest.json").is_file()
+    assert not (job / "followup-inputs").exists()
 
 
-def test_model_input_drift_discards_the_answer_without_retry(system):
-    def mutate(kwargs):
-        path = kwargs["workspace_root"] / "inputs/report.md"
-        path.chmod(0o644)
-        path.write_text("被模型改变的报告", encoding="utf-8")
-    system.backend.action = mutate
-    submit(system)
-    assert not system.service.worker.run_once()
-    item = view(system).items[0]
-    assert item.failure.code == "AGENT_FOLLOWUP_INPUT_CHANGED" and item.answer_markdown is None
-    assert not system.service.worker.run_once() and len(system.backend.calls) == 1
-
-
-def test_snapshot_drift_blocks_answer_and_never_retries_the_model(system):
-    _, job = make_logs(system)
-    system.service.observe_report(system.cid, system.rid)
-    system.service.snapshot_worker.run_once()
-    file = job / "followup-inputs/inputs/logs/log-000001.log"
-    file.chmod(0o644)
-    file.write_bytes(b"changed")
-    submit(system)
-    assert not system.service.worker.run_once()
-    assert not system.service.worker.run_once()
+def test_historical_input_verification_rejects_changed_report_bytes(system):
+    from problem_locator.dispatch.cancellation import CancellationController
+    from problem_locator.followup.snapshots import InputChanged, copy_snapshot, verify_inputs
+    make_logs(system)
+    assert system.service.store.enqueue_snapshot(system.cid, system.rid, system.source)
+    assert system.service.snapshot_worker.run_once()
+    target = system.repository.layout.workspaces / "historical-copy"
+    target.mkdir()
+    rows = copy_snapshot(system.service, system.service.store.snapshot(system.rid), target, CancellationController())
+    path = target / "inputs/report.md"
+    path.chmod(0o644)
+    path.write_text("改变的报告", encoding="utf-8")
+    with pytest.raises(InputChanged):
+        verify_inputs(target, rows, CancellationController())
     assert not system.backend.calls
-    assert view(system).items[0].status == "FAILED"
+
+
+def test_historical_snapshot_drift_blocks_copy_without_model_invocation(system):
+    from problem_locator.dispatch.cancellation import CancellationController
+    from problem_locator.followup.snapshots import InputChanged, copy_snapshot
+    _, job = make_logs(system)
+    assert system.service.store.enqueue_snapshot(system.cid, system.rid, system.source)
+    assert system.service.snapshot_worker.run_once()
+    path = job / "followup-inputs/inputs/logs/log-000001.log"
+    path.chmod(0o644)
+    path.write_bytes(b"changed")
+    target = system.repository.layout.workspaces / "drift-copy"
+    target.mkdir()
+    with pytest.raises(ValueError, match="frozen ordinary file"):
+        copy_snapshot(system.service, system.service.store.snapshot(system.rid), target, CancellationController())
+    assert not system.backend.calls
 
 
 def test_concurrent_retries_claim_one_task_and_different_requests_are_rejected_while_busy(system):
@@ -468,8 +490,11 @@ def test_concurrent_retries_claim_one_task_and_different_requests_are_rejected_w
         submit(system, text="同一ID改变内容")
     assert caught.value.code == "AGENT_IDEMPOTENCY_CONFLICT"
     with ThreadPoolExecutor(max_workers=4) as pool:
-        list(pool.map(lambda _: system.service.worker.run_once(), range(4)))
-    assert len(system.backend.calls) == 1
+        claims = list(pool.map(lambda _: system.service.store.claim_task(), range(4)))
+    claimed = [task for task in claims if task is not None]
+    assert len(claimed) == 1
+    assert system.service.store.finish_task(claimed[0]["followup_id"], answer="历史回答。")
+    assert not system.backend.calls
 
 
 def test_stop_queued_is_idempotent_and_stop_after_completion_keeps_answer(system):
@@ -480,32 +505,22 @@ def test_stop_queued_is_idempotent_and_stop_after_completion_keeps_answer(system
     assert not system.service.worker.run_once()
     assert not system.backend.calls
     next_receipt = submit(system, "next")
-    system.service.worker.run_once()
+    complete_historical_task(system)
     assert system.service.stop(system.cid, system.rid, next_receipt.followup_id, "done", owner_key=OWNER).status == "ALREADY_FINISHED"
     with pytest.raises(AgentStoreError) as caught:
         system.service.stop(system.cid, system.rid, next_receipt.followup_id, "stop", owner_key=OWNER)
     assert caught.value.code == "AGENT_IDEMPOTENCY_CONFLICT"
 
 
-def test_cancelling_running_task_waits_for_exit_and_discards_late_answer(system):
-    entered, release = threading.Event(), threading.Event()
-    def action(_):
-        entered.set()
-        assert release.wait(5)
-    system.backend.action = action
+def test_cancelling_running_historical_task_discards_late_answer(system):
     receipt = submit(system)
-    thread = threading.Thread(target=system.service.worker.run_once)
-    thread.start()
-    assert entered.wait(5)
-    try:
-        assert system.service.stop(system.cid, system.rid, receipt.followup_id, "stop", owner_key=OWNER).status == "CANCELLING"
-        assert view(system).active_followup.status == "CANCELLING"
-    finally:
-        release.set()
-        thread.join(5)
-    assert not thread.is_alive()
+    task = system.service.store.claim_task()
+    assert system.service.stop(system.cid, system.rid, receipt.followup_id, "stop", owner_key=OWNER).status == "CANCELLING"
+    assert view(system).active_followup.status == "CANCELLING"
+    system.service.store.finish_task(task["followup_id"], answer="迟到的回答。")
     assert view(system).items[0].status == "CANCELLED"
     assert view(system).items[0].answer_markdown is None
+    assert not system.backend.calls
 
 
 def test_revocation_is_transactional_and_cleanup_receipts_include_owned_workspaces(system):
@@ -543,34 +558,38 @@ def test_restart_marks_claimed_work_interrupted_and_disabled_start_cancels_queue
 
 def test_result_commit_failure_never_requeues_or_calls_model_again(system, monkeypatch):
     submit(system)
-    def outage(*_args, **_kwargs):
+    attempts = []
+    def dispatch(task):
+        attempts.append(task["followup_id"])
+        return system.service.store.finish_task(task["followup_id"], answer="历史回答。")
+    def outage(*args, **kwargs):
         raise OSError("simulated database outage")
+    monkeypatch.setattr(system.service, "dispatch_generic", dispatch)
     monkeypatch.setattr(system.service.store, "finish_task", outage)
     assert not system.service.worker.run_once()
     assert not system.service.worker.run_once()
-    assert len(system.backend.calls) == 1
+    assert len(attempts) == 1 and not system.backend.calls
     reopened = FollowupStore(system.repository, system.clock)
     reopened.recover()
     assert view(system).items[0].status == "INTERRUPTED"
 
 
-def test_expired_logs_allow_accepted_and_new_report_only_followups(system):
+def test_expired_logs_preserve_historical_answers_and_accept_new_requests(system):
     submit(system)
     system.clock.value = "2026-10-09T01:00:00.000Z"
-    assert view(system).reason == "BUSY"
-    assert system.service.worker.run_once()
-    assert len(system.backend.calls) == 1
-    assert view(system).items[0].status == "COMPLETED"
-    assert view(system).can_ask
+    assert not view(system).can_ask and view(system).reason == "BUSY"
+    assert complete_historical_task(system)
+    assert view(system).can_ask and view(system).reason is None
     submit(system, "later")
-    assert system.service.worker.run_once()
-    assert view(system).items[-1].context_mode == "REPORT_ONLY"
+    assert complete_historical_task(system)
+    assert all(item.status == "COMPLETED" for item in view(system).items)
+    assert not system.backend.calls
 
 
 def test_owner_pagination_sse_cursor_and_old_retry_cannot_move_to_other_run(system):
     for index in range(3):
         submit(system, str(index))
-        system.service.worker.run_once()
+        complete_historical_task(system)
     page = system.service.get(system.cid, system.rid, owner_key=OWNER, limit=2)
     assert [item.ordinal for item in page.items] == [2, 3]
     earlier = system.service.get(system.cid, system.rid, owner_key=OWNER, cursor=page.next_cursor, limit=2)
@@ -586,24 +605,19 @@ def test_owner_pagination_sse_cursor_and_old_retry_cannot_move_to_other_run(syst
         system.service.list_events(system.cid, system.rid, after_sequence=10, owner_key=OWNER)
 
 
-def test_historical_chat_is_seeded_in_full_then_resumed_without_reloading_history(system):
-    system.backend.answer = "答案：" + "a" * 50_000
+def test_historical_chat_is_loaded_without_truncating_answers_or_native_session_work(system):
+    answer = "答案：" + "a" * 50_000
     for index in range(4):
-        seed_historical_turn(system, str(index), f"追问{index}：" + "q" * 30_000, system.backend.answer)
+        seed_historical_turn(system, str(index), f"追问{index}：" + "q" * 30_000, answer)
     submit(system, "4", "继续讨论。")
-    assert system.service.worker.run_once()
-    invocation = system.backend.calls[-1]
-    context = json.loads((invocation["workspace_root"] / "inputs/context.json").read_text("utf-8"))
-    assert context["history_file"] == "inputs/history.md" and context["history_total"] == 4
-    history = (invocation["workspace_root"] / "inputs/history.md").read_text("utf-8")
-    assert "追问0：" + "q" * 30_000 in history
-    assert "追问3：" + "q" * 30_000 in history
-    assert len(invocation["prompt"].encode()) <= 262_144
-    system.service.read_search_supported = False
-    submit(system, "no-tools", "继续刚才的问题。")
-    assert system.service.worker.run_once()
-    assert system.backend.calls[-1]["native_session"].resume_id is not None
-    assert "追问0" not in system.backend.calls[-1]["prompt"]
+    task = system.service.store.claim_task()
+    source, history, snapshot = system.service.store.task_context(task)
+    assert len(history) == 4
+    assert history[0]["text"] == "追问0：" + "q" * 30_000
+    assert history[-1]["answer_markdown"] == answer
+    assert system.service.store.finish_task(task["followup_id"], answer="历史补充。")
+    assert not system.backend.calls
+    assert system.service.store.sessions.get(system.cid) is None
 
 
 def test_requests_enforce_utf8_budget_and_validate_attachment_ids():

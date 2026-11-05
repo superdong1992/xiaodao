@@ -56,7 +56,7 @@ export function validateFollowupItem(value, runId) {
 export function validateFollowupView(value, conversationId, runId) {
   requireValid(exact(value, ["schema_version", "conversation_id", "run_id", "can_ask", "reason", "snapshot_status", "active_followup", "items", "next_cursor", "last_event_id"]) &&
     value.schema_version === 1 && value.conversation_id === conversationId && value.run_id === runId &&
-    typeof value.can_ask === "boolean" && [null, "DISABLED", "UNSUPPORTED", "EXPIRED", "BUSY", "LIMIT_EXCEEDED", "CONTEXT_LIMIT"].includes(value.reason) &&
+    typeof value.can_ask === "boolean" && [null, "DISABLED", "UNSUPPORTED", "EXPIRED", "BUSY", "LATEST_REPORT_REQUIRED", "LIMIT_EXCEEDED", "CONTEXT_LIMIT"].includes(value.reason) &&
     ["DISABLED", "UNAVAILABLE", "PENDING", "BUILDING", "READY", "FAILED"].includes(value.snapshot_status) &&
     Array.isArray(value.items) && value.items.length <= 100 && integer(value.last_event_id) &&
     (value.next_cursor === null || typeof value.next_cursor === "string"));

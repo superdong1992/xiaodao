@@ -14,9 +14,9 @@
 
 通用报告赞踩接口及经验复用规则见[经验库接入说明](../../docs/generic-feedback-memory.md)。按钮由网站实现，本示例提供调用封装和后端转发。
 
-报告后连续解释、质疑和文字补充见[报告追问接入说明](../../docs/website-report-followup.md)。本示例提供真实请求 controller、独立问答视图和离线模拟；功能默认关闭，服务端启用后才可提交。追问使用独立接口，不改正式报告和赞踩；独立定位请新建对话。
+报告后连续提问、更正和补日志见[报告追问接入说明](../../docs/website-report-followup.md)。示例提供真实请求 controller、追问视图和离线模拟；功能默认关闭。每次新追问都交给通用 Skill 形成独立诊断和新版报告，历史答案、正式报告与各自评价保留。
 
-报告页只保留原追问入口。用户直接提问、更正信息或上传补充日志；后台根据现有信息是否足够，决定回答或继续诊断，页面不判断意图、不要求再选模式或确认草稿。`followup-controller.js` 保存同一请求及附件集合，`log-upload-controller.js` 复用分块上传；后台返回 `diagnosis_run_id` 后，在原问题下显示进度和停止操作。需要补充时展示 `current_questions`，同一输入框把回答固定发到该诊断轮次；新报告 READY 后调用 `onDiagnosisReady`，原报告一直保留。
+报告页只保留原追问入口。用户提交当前问题和可选日志，后台直接创建关联通用诊断，不先判断资料够不够，也不按旧报告直接作答。followup-controller.js 保存原请求和附件；收到 diagnosis_run_id 后显示进度和停止操作，report_state=READY 后调用 onDiagnosisReady 查看新报告。BUSY 同时包含诊断执行中，LATEST_REPORT_REQUIRED 提示切换最新版。旧 WAITING_INPUT 状态仍按 current_questions 固定向该诊断轮次补充。
 
 部署统一追问页面时，一并复制 `followup-controller.js`、`followup-view.js`、`followup-contract.js`、`log-upload-controller.js`、`file-sha256.js`、`file-sha256-worker.js`、`continuation-view.js`、`report-view.js` 和 `report-view.css`，SDK 与 BFF 的依赖仍按下表部署。版本切换与并排查看使用 `continuation-view.js` 的 `mountReportVersionsView`。旧 `createContinuationController` / `mountContinuationView` 及草稿接口只用于兼容既有客户端，新页面不挂载独立草稿面板。完整协议见[报告追问接入](../../docs/website-report-followup.md)。
 
@@ -205,7 +205,7 @@ async function submitLogs() {
 
 上传预约的元数据、原文件、消息 ID 和已收到的回执，也应保存在按钮回调及重试函数之外。同一次上传失败后，沿用这些数据调用 `submitLogs()`，不能更换文件或重新生成 ID。
 
-新网站始终使用原追问输入区，文字和补充日志一起发送给追问接口，由后端决定直接回答还是继续诊断。如果关联诊断返回 `WAITING_INPUT` 和 `current_questions`，同一输入区展示待补充问题，并将回答和附件发给 `conversations.send`，固定携带该轮的 `target_run_id`。这次补充重试必须保留原请求、附件和目标轮次；收到 `409 / AGENT_RUN_CHANGED` 后刷新该轮状态，不自动改发追问。`conversation-input.js` 仅按后端报告状态投递普通会话消息，不判断用户意图，调用方式见[报告追问指南](../../docs/website-report-followup.md)。
+新网站始终使用原追问输入区，文字和补充日志一起发送给 followups，每次都进入正式 Generic 诊断。前端不根据文字意图选择回答或诊断，也不把旧 context_mode 当成新报告的证据。兼容轮次若返回 WAITING_INPUT 和 current_questions，同一输入区仍通过 conversations.send 固定 target_run_id 补充；重试保留原请求、附件和目标，遇到 409 / AGENT_RUN_CHANGED 只刷新原目标。详见[报告追问指南](../../docs/website-report-followup.md)。
 
 ### 目录、历史与重新诊断
 

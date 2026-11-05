@@ -172,7 +172,7 @@ def test_quote_recovery_does_not_reparse_each_quote(monkeypatch):
 
 
 @pytest.mark.parametrize("action", ["ANSWER", "REQUEST_INPUT"])
-def test_stream_to_worker_preserves_recovered_answer_and_private_receipts(system, action, monkeypatch):
+def test_stream_parser_preserves_recovered_historical_answer_and_recovery_receipt(system, action):
     before = original_rows(system)
     receipt = submit(system)
     answer = '先核对"超时"。\n字段\t值\r\n下一行。'
@@ -182,68 +182,24 @@ def test_stream_to_worker_preserves_recovered_answer_and_private_receipts(system
     stream = AgentStreamTelemetry()
     for offset in range(0, len(event), 7):
         stream.write(event[offset:offset + 7])
-    execute_raw(system, stream.final_result)
-    events = []
-    monkeypatch.setattr(worker, "log_event", lambda event, **fields: events.append((event, fields)))
-    system.service.continue_diagnosis = lambda *args: pytest.fail("recovery cannot start diagnosis")
-    assert system.service.worker.run_once()
-    result = view(system).items[0]
-    assert result.status == "COMPLETED" and result.diagnosis_run_id is None
-    assert result.answer_markdown.endswith(answer)
-    assert len(system.backend.calls) == 1 and original_rows(system) == before
-    runtime = system.backend.calls[0]["workspace_root"] / "runtime"
-    original = (runtime / "followup-response-original.txt").read_bytes()
-    effective = (runtime / "followup-response-effective.txt").read_bytes()
-    recorded = json.loads((runtime / "followup-response-recovery.json").read_bytes())
+    records = []
+    result = parse_result(stream.final_result, request_key=receipt.followup_id,
+        on_recovery=lambda *args: records.append(args))
+    original, effective, offsets = records[0]
     assert original == raw.encode("utf-8")
     assert json.loads(effective, strict=False)["answer_markdown"] == answer
-    assert recorded["raw_sha256"] == hashlib.sha256(original).hexdigest()
-    assert recorded["effective_sha256"] == hashlib.sha256(effective).hexdigest()
-    assert recorded["effective_size_bytes"] == recorded["raw_size_bytes"] + len(recorded["inserted_escape_offsets"])
-    assert events[0][0] == "agent.followup.answer_quotes_recovered"
-    assert events[0][1]["followup_id"] == receipt.followup_id
-    assert "超时" not in json.dumps(events, ensure_ascii=False)
+    assert len(effective) == len(original) + len(offsets)
+    task = system.service.store.claim_task()
+    assert system.service.store.finish_task(task["followup_id"], answer=result.answer_markdown)
+    assert view(system).items[0].answer_markdown == answer
+    assert original_rows(system) == before and not system.backend.calls
 
 
-def test_recovery_receipt_write_failure_cannot_publish_answer_or_retry_model(system, monkeypatch):
-    receipt = submit(system)
-    execute_raw(system, raw_answer('请看"日志"。', request_key=receipt.followup_id))
-    original_write = worker.write_new
-    def write(path, data):
-        if path.name == "followup-response-recovery.json":
-            raise OSError("receipt write failed")
-        return original_write(path, data)
-    monkeypatch.setattr(worker, "write_new", write)
-    assert not system.service.worker.run_once()
-    result = view(system).items[0]
-    assert result.status == "FAILED" and result.answer_markdown is None
-    assert len(system.backend.calls) == 1
-
-
-@pytest.mark.parametrize("record_name", [
-    "followup-response-original.txt", "followup-response-effective.txt", "followup-response-recovery.json",
-], ids=["original", "effective", "receipt"])
-@pytest.mark.parametrize("stop_kind", ["user", "shutdown"])
-def test_cancel_during_recovery_record_write_discards_answer(system, monkeypatch, record_name, stop_kind):
-    receipt = submit(system)
-    execute_raw(system, raw_answer('请看"日志"。', request_key=receipt.followup_id))
-    original_write = worker.write_new
-    stopped = []
-    def write_then_stop(path, data):
-        original_write(path, data)
-        if path.name == record_name:
-            if stop_kind == "user":
-                system.service.stop(system.cid, system.rid, receipt.followup_id,
-                    "stop-during-recovery", owner_key=OWNER)
-            else:
-                system.service.shutdown(0)
-            stopped.append(True)
-    monkeypatch.setattr(worker, "write_new", write_then_stop)
-    system.service.continue_diagnosis = lambda *args: pytest.fail("cancelled recovery cannot start diagnosis")
-    system.service.worker.run_once()
-    result = view(system).items[0]
-    assert stopped == [True]
-    assert result.status == ("CANCELLED" if stop_kind == "user" else "INTERRUPTED")
-    assert result.answer_markdown is None and result.diagnosis_run_id is None
-    assert not system.service.worker.run_once()
-    assert len(system.backend.calls) == 1
+def test_recovery_callback_failure_propagates_without_returning_an_answer():
+    calls = []
+    def fail(*record):
+        calls.append(record)
+        raise OSError("receipt write failed")
+    with pytest.raises(OSError, match="receipt write failed"):
+        parse_result(raw_answer('请看"日志"。'), request_key=REQUEST_KEY, on_recovery=fail)
+    assert len(calls) == 1

@@ -1,4 +1,4 @@
-"""One report question either answers or atomically starts an independent run."""
+"""Every new report question dispatches Generic; legacy explicit handoffs stay atomic."""
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
@@ -15,7 +15,6 @@ from problem_locator.followup.service import ReportFollowupService
 from tests.deterministic.unit.agent.test_report_continuation import (
     ARTIFACT, CASE, OWNER, confirm, create, system, upload,
 )
-from tests.deterministic.unit.agent.test_report_followup import model_reply, native_init
 
 JOB = "00000000-0000-0000-0000-000000000011"
 DECISION = dict(action="CONTINUE_DIAGNOSIS", effective_problem_text="故障时间是 10:05，客户端和服务端均超时。",
@@ -28,8 +27,7 @@ def state(system):
     backend = SimpleNamespace(answer="原报告只是待验证的假设。", decision=None, calls=[])
     def execute(**kwargs):
         backend.calls.append(kwargs)
-        native_init(kwargs)
-        return SimpleNamespace(final_result=model_reply(kwargs, answer=backend.answer, decision=backend.decision))
+        pytest.fail("追问不能先调用 REPORT_FOLLOWUP 模型")
     backend.execute = execute
     followups = ReportFollowupService(s.agent, "claude", enabled=True, backend=backend)
     source = FollowupSource(CASE, JOB, "故障时间是 10:00，仅客户端超时。", s.report.markdown,
@@ -56,27 +54,21 @@ def counts(s):
             for table in ("agent_conversation_runs", "agent_continuation_drafts", "agent_messages"))
 
 
-def test_ordinary_answer_keeps_one_model_call_and_never_creates_a_draft_or_run(state):
+def test_ordinary_question_creates_generic_run_without_a_preliminary_model_or_draft(state):
     s = state
-    before = counts(s)
     ask(s)
     assert s.followups.worker.run_once()
-    assert item(s).status == "COMPLETED" and item(s).diagnosis_run_id is None
-    assert counts(s) == before
-    assert len(s.backend.calls) == 1 and s.engine.calls == []
+    run = s.store.get_run(s.cid)
+    assert item(s).status == "COMPLETED" and item(s).diagnosis_run_id == run["run_id"] != s.rid
+    assert run["force_generic"] is True and run["parent_run_id"] == s.rid
+    assert counts(s) == (2, 0, 1)
+    assert s.backend.calls == [] and s.engine.calls == []
+    assert s.store.get_conversation(s.cid).messages[0].text == "时间是 10:05，服务端排队会不会导致超时？"
 
 
 @pytest.mark.parametrize("mode", ["APPEND", "REPLACE"])
-@pytest.mark.parametrize("transport", ["text", "structured"])
-def test_same_followup_call_hands_off_exact_inputs_and_link_without_intent_model(state, mode, transport):
+def test_explicit_legacy_handoff_keeps_selected_inputs_and_report_link(state, mode):
     s = state
-    if transport == "structured":
-        from tests.deterministic.unit.agent.test_followup_structured_output import structured_terminal
-        original_execute = s.backend.execute
-        def execute(**kwargs):
-            raw = original_execute(**kwargs).final_result
-            return SimpleNamespace(final_result=structured_terminal(json.loads(raw)))
-        s.backend.execute = execute
     old = upload(s, "client.zip", b"client logs")
     new = upload(s, "server.zip", b"server logs")
     duplicate = upload(s, "server-copy.zip", b"server logs")
@@ -86,16 +78,17 @@ def test_same_followup_call_hands_off_exact_inputs_and_link_without_intent_model
         s.store._save(db, body)
     receipt = ask(s, attachments=[new, duplicate])
     expected = [old, new] if mode == "APPEND" else [new]
-    s.backend.decision = {**{key: value for key, value in DECISION.items() if key != "log_mode"},
+    selected = {**{key: value for key, value in DECISION.items() if key != "log_mode"},
         "attachment_ids": expected}
-    assert s.followups.worker.run_once()
+    task = s.followups.store.claim_task()
+    assert s.followups.continue_diagnosis(task, selected)
     answer = item(s)
     run = s.store.get_run(s.cid)
     assert answer.diagnosis_run_id == run["run_id"] != s.rid
     assert answer.status == "COMPLETED" and "已开始继续诊断" in answer.answer_markdown
     assert answer.attachment_ids == [new]
     assert counts(s) == (2, 0, 1)
-    assert len(s.backend.calls) == 1 and s.engine.calls == []
+    assert s.backend.calls == [] and s.engine.calls == []
     assert run["parent_run_id"] == run["root_run_id"] == s.rid
     assert run["report_version"] == 2
     assert run["continuation_context"]["parent_report_markdown"] == s.report.markdown
@@ -134,10 +127,13 @@ def test_material_uploaded_before_clarification_remains_available_to_the_next_qu
     latest_task = s.followups.store.claim_task()
     assert s.followups.store.finish_task(latest_task["followup_id"], answer="还需要服务端首次超时的时间。")
     receipt = ask(s, request_id="clarification")
-    s.backend.decision = {**{key: value for key, value in DECISION.items() if key != "log_mode"},
+    selected = {**{key: value for key, value in DECISION.items() if key != "log_mode"},
         "attachment_ids": [first, latest] if mode == "APPEND" else [latest]}
-    assert s.followups.worker.run_once()
-    assert first in s.backend.calls[0]["prompt"] and latest in s.backend.calls[0]["prompt"]
+    task = s.followups.store.claim_task()
+    _, history, snapshot = s.followups.store.task_context(task)
+    materials = s.followups.decision_context(task, history, snapshot)["materials"]
+    assert {entry["attachment_id"] for entry in materials} == {first, latest}
+    assert s.followups.continue_diagnosis(task, selected)
     message = s.store.get_conversation(s.cid).messages[0]
     assert message.request_id == "followup-diagnosis-" + receipt.followup_id
     assert message.attachment_ids == ([first, latest] if mode == "APPEND" else [latest])
@@ -282,7 +278,7 @@ def test_followup_source_uses_confirmed_effective_problem_without_an_extra_run_r
     assert len(reads) == 1
 
 
-def test_existing_snapshot_does_not_hide_confirmed_facts_from_the_followup_model(state):
+def test_existing_snapshot_does_not_hide_confirmed_facts_from_generic_reference(state):
     s = state
     ask(s)
     with s.repository.database_transaction() as db:
@@ -290,4 +286,6 @@ def test_existing_snapshot_does_not_hide_confirmed_facts_from_the_followup_model
         body["report_inputs"]["effective_problem_text"] += "\n已确认：服务端也超时，timeout_seconds=10。"
         s.store._save(db, body)
     assert s.followups.worker.run_once()
-    assert "已确认：服务端也超时，timeout_seconds=10。" in s.backend.calls[0]["prompt"]
+    reference = json.loads(s.store.get_run(s.cid)["continuation_context"]["followup_context_json"])
+    assert "已确认：服务端也超时，timeout_seconds=10。" in reference["original_problem"]
+    assert s.backend.calls == []

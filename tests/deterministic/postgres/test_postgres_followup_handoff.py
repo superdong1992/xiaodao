@@ -9,6 +9,7 @@ from tests.deterministic.unit.agent import test_followup_material_selection as m
 from tests.postgres_helpers import postgres_database_url, postgres_repository
 from tests.deterministic.unit.agent import test_report_continuation as continuation_tests
 from tests.deterministic.unit.agent import test_followup_handoff as handoff_tests
+from tests.deterministic.unit.agent import test_followup_generic_dispatch as generic_tests
 
 
 @pytest.fixture
@@ -56,7 +57,7 @@ def test_postgres_duplicate_handoff_creates_only_one_run(state):
 
 
 def test_postgres_existing_snapshot_context_uses_confirmed_facts(state):
-    handoff_tests.test_existing_snapshot_does_not_hide_confirmed_facts_from_the_followup_model(state)
+    handoff_tests.test_existing_snapshot_does_not_hide_confirmed_facts_from_generic_reference(state)
 
 
 def test_postgres_explicit_selection_can_keep_only_one_original_archive(state):
@@ -75,5 +76,22 @@ def test_postgres_repeated_failure_retains_last_effective_problem(state):
     material_tests.test_repeated_failure_keeps_correction_in_last_adopted_problem_text(state)
 
 
-def test_postgres_none_launcher_rejects_large_attempt_before_accepting(state):
-    material_tests.test_none_launcher_rejects_full_attempt_context_limit_before_acceptance(state)
+def test_postgres_long_attempt_survives_without_retired_launcher_requirements(state):
+    material_tests.test_long_attempt_context_is_complete_without_retired_launcher_tool_requirements(state)
+
+
+def test_postgres_every_question_dispatches_generic_without_a_preliminary_model(state):
+    generic_tests.test_question_starts_generic_without_running_a_followup_classifier(state, "另一个服务为什么磁盘抖动？")
+
+
+def test_postgres_active_generic_diagnosis_blocks_new_question_but_replays_receipt(state):
+    generic_tests.test_active_diagnosis_blocks_new_questions_but_replays_original_receipt(state)
+
+
+def test_postgres_newer_report_requires_latest_entry_and_keeps_original_receipt(state):
+    generic_tests.test_newer_report_requires_latest_entry_but_keeps_history_and_receipt(state)
+
+
+@pytest.mark.parametrize("retain_second", [False, True])
+def test_postgres_retry_preserves_saved_material_selection(state, retain_second):
+    generic_tests.test_retry_uses_saved_material_selection_without_reviving_excluded_logs(state, retain_second)

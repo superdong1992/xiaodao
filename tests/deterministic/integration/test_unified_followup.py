@@ -1,102 +1,50 @@
-"""The same HTTP entry answers first, then drives the existing diagnosis pipeline."""
+"""One HTTP entry always creates a Generic report, with existing and new logs."""
 import json
-from types import SimpleNamespace
-
-from problem_locator.followup.service import ReportFollowupService
-from problem_locator.runtime.agent_backend import BackendExecution
-from tests.deterministic.integration.test_website_agent import OWNER_KEY, _post, _preupload, website
+from tests.deterministic.integration.test_followup_generic_round import (
+    generic_round, _seed, _handoff, _assert_generic_case, _assert_published,
+)
+from tests.deterministic.integration.test_website_agent import _post, website
 from tests.deterministic.integration.test_website_report_continuation import _get, _upload_second_archive
-from tests.deterministic.unit.agent.test_report_followup import model_reply, native_init
 
 
-def test_unified_followup_answers_then_diagnoses_new_logs_and_publishes_another_version(website, monkeypatch):
-    stack, store, engine, agent, client = website
-    monkeypatch.setattr(stack.catalog, "_route_skill_refs", [])
-    monkeypatch.setattr(stack.catalog, "_generic_logparse_product", "compact")
-    diagnoses = []
-    def diagnose(**kwargs):
-        root = kwargs["workspace_root"]
-        logs = json.loads((root / "inputs/generic_logs.json").read_bytes())
-        diagnoses.append((kwargs["prompt"], logs))
-        report = ("# 原报告\n连接池等待仍待核实。" if len(diagnoses) == 1 else
-            "## 本轮变化\n新增服务端日志支持连接池等待的判断。\n\n# 完整报告\n建议核对连接池容量。")
-        (root / "output/generic_diagnosis_result.md").write_text(
-            "<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n" + report, encoding="utf-8")
-        return BackendExecution(returncode=0, stdout_stderr_bytes=0, workspace_bytes=0,
-            elapsed_seconds=0.01, final_result="报告已保存。")
-    monkeypatch.setattr(stack.runtime._generic_locator_executor, "_backend", SimpleNamespace(execute=diagnose))
-    followup_calls = []
-    session_ids = []
-    native_history = {}
-    decision = {}
-    def respond(**kwargs):
-        context = json.loads((kwargs["workspace_root"] / "inputs/context.json").read_bytes())
-        session_id = native_init(kwargs)
-        previous = native_history.setdefault(session_id, [])
-        session_ids.append(session_id)
-        followup_calls.append(context)
-        assert context["prior_turns"] == []
-        if previous:
-            assert kwargs["native_session"].resume_id == session_ids[0]
-            assert context["conversation_context"]["resumed"]
-            assert previous[0]["answer"] == "原报告暂未确定根因。"
-            assert "original_report" not in context and "original_problem" not in context
-        else:
-            assert len(followup_calls) == 1 and kwargs["native_session"].resume_id is None
-            assert not context["conversation_context"]["resumed"]
-        answer = None if decision else "原报告暂未确定根因。"
-        previous.append({"question": context["question"], "answer": answer})
-        return SimpleNamespace(final_result=model_reply(kwargs, decision=decision) if decision else
-            model_reply(kwargs, answer=answer), session_id=session_id)
-    followups = ReportFollowupService(agent, "claude", enabled=True, backend=SimpleNamespace(execute=respond))
-    agent.followups, store.followup_store = followups, followups.store
-    monkeypatch.setattr(engine, "prepare_continuation", lambda **kw: (_ for _ in ()).throw(
-        AssertionError("unified followup must not run an intent classifier")), raising=False)
-    cid = agent.create_conversation("unified-followup", owner_key=OWNER_KEY).conversation_id
-    prefix = f"/api/v1/agent/conversations/{cid}"
-    attachment = _preupload(client, prefix)
-    _post(client, prefix + "/messages", {"request_id": "problem", "text": "设备为何反复重启？", "attachment_ids": [attachment]})
-    for _ in range(4):
-        agent.run_once(cid)
-        assert stack.scheduler.wait_until_idle(20)
-        if store.get_status(cid).report_state == "READY":
-            break
-    first = _get(client, prefix + "?include=report")
-    assert first["result"]["report_state"] == "READY"
-    parent = first["run_id"]
-    original = stack.repository.read_case(first["case_id"]).model_dump_json()
-    path = prefix + f"/runs/{parent}/followups"
-    _post(client, path, {"request_id": "explain", "text": "这份报告确定根因了吗？"})
-    assert followups.worker.run_once()
-    assert _get(client, path)["items"][0]["diagnosis_run_id"] is None
-    assert store.get_run(cid)["run_id"] == parent and len(diagnoses) == 1
-    extra, _ = _upload_second_archive(client, cid)
-    decision.update(action="CONTINUE_DIAGNOSIS",
-        effective_problem_text=store.get_run(cid)["report_inputs"]["effective_problem_text"],
-        diagnosis_goal="核对新增服务端日志能否确认根因。", reason="需解析新增日志并核对连接池等待。",
-        attachment_ids=[attachment, extra])
-    request = {"request_id": "new-evidence", "text": "结合这些日志，现在能确定原因吗？", "attachment_ids": [extra]}
-    receipt = _post(client, path, request)
-    assert followups.worker.run_once()
-    assert _post(client, path, request) == receipt
-    handoff = _get(client, path)["items"][-1]
-    assert handoff["status"] == "COMPLETED" and handoff["diagnosis_run_id"] != parent
-    for _ in range(4):
-        agent.run_once(cid)
-        assert stack.scheduler.wait_until_idle(20)
-        if store.get_status(cid).report_state == "READY":
-            break
-    current = _get(client, prefix + "?include=report")
-    assert current["run_id"] == handoff["diagnosis_run_id"] and current["case_id"] != first["case_id"]
-    assert current["result"]["report_state"] == "READY" and "本轮变化" in current["result"]["markdown"]
-    assert len(followup_calls) == len(diagnoses) == 2
-    assert len(native_history) == 1 and len(native_history[session_ids[0]]) == 2
-    materials = followup_calls[1]["diagnosis_context"]["materials"]
-    assert any(entry["attachment_id"] == extra and entry["available"] for entry in materials)
-    assert len(diagnoses[1][1]["sources"]) == 2
-    assert "连接池等待仍待核实" in diagnoses[1][0]
-    assert stack.repository.read_case(first["case_id"]).model_dump_json() == original
-    versions = _get(client, prefix + f"/runs/{current['run_id']}/report-versions")
-    assert [version["version"] for version in versions["versions"]] == [1, 2]
-    with stack.repository.database_read() as db:
+def test_unified_followup_reanalyses_every_question_and_keeps_full_history_and_logs(generic_round):
+    s = generic_round
+    attachment = _seed(s, logs=True)
+    question = "这份报告确定根因了吗？"
+    first_handoff = _handoff(s, question)
+    second = _assert_generic_case(s, question)
+    _assert_published(s, second, question)
+    second_run, second_case = second["run_id"], second["case_id"]
+    second_bytes = s.stack.repository.read_case(second_case).model_dump_json()
+    assert first_handoff["diagnosis_run_id"] == second_run
+    extra, digest = _upload_second_archive(s.client, s.cid)
+    path = s.prefix + f"/runs/{second_run}/followups"
+    text = "结合这些日志，现在能确定原因吗？"
+    payload = {"request_id": "new-evidence", "text": text, "attachment_ids": [extra]}
+    receipt = _post(s.client, path, payload)
+    assert s.followups.worker.run_once()
+    assert _post(s.client, path, payload) == receipt
+    handoff = _get(s.client, path)["items"][0]
+    assert handoff["status"] == "COMPLETED" and handoff["diagnosis_run_id"] not in {None, second_run, s.parent}
+    s.child = handoff["diagnosis_run_id"]
+    s.backend.report = "## 本轮变化\n本轮新增服务端日志。\n# 定位报告\n仍需核对连接池容量。"
+    third = _assert_generic_case(s, text)
+    assert third["run_id"] == s.child and third["case_id"] not in {s.first["case_id"], second_case}
+    assert third["result"]["markdown"] == s.backend.report
+    assert s.preliminary.calls == 0 and len(s.backend.calls) == 3
+    reference = json.loads(s.backend.calls[-1]["followup_context_bytes"])
+    assert reference["prior_turns"][0]["text"] == question
+    assert reference["prior_turns"][0]["diagnosis_run_id"] == second_run
+    assert reference["prior_reports"][0]["run_id"] == s.parent
+    manifest = s.backend.calls[-1]["logs"]
+    assert len(manifest["sources"]) == 2
+    assert {entry["source_attachment_sha256"] for entry in manifest["sources"]} == {
+        s.store.get_attachment(attachment).sha256, digest}
+    assert s.store.get_run(s.cid)["report_inputs"]["attachment_ids"] == [attachment, extra]
+    assert s.stack.repository.read_case(s.first["case_id"]).model_dump_json() == s.original_case
+    assert s.stack.repository.read_case(second_case).model_dump_json() == second_bytes
+    versions = _get(s.client, s.prefix + f"/runs/{s.child}/report-versions")
+    assert [(v["version"], v["parent_run_id"]) for v in versions["versions"]] == [
+        (1, None), (2, s.parent), (3, second_run)]
+    with s.stack.repository.database_read() as db:
         assert db.execute("SELECT count(*) FROM agent_continuation_drafts").fetchone()[0] == 0

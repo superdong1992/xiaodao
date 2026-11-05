@@ -307,7 +307,8 @@ test("FOLLOWUP 面板只展示安全文字和追问操作，不显示诊断确�
   const controller = { subscribe: (work) => { emit = work; work(viewState({ draft: answerDraft })); return () => {}; }, destroy() {},
     sendFollowup: async () => { sent++; }, newDraft: () => { reopened++; }, confirm: () => assert.fail("不能确认报告追问") };
   const dispose = mountContinuationView(root, controller, { conversationId: cid, runId: rid });
-  assert.ok(root.textContent.includes("这是对当前报告的追问，无需新建诊断"));
+  assert.ok(root.textContent.includes("发送到报告追问入口"));
+  assert.ok(!root.textContent.includes("无需新建诊断"));
   const send = find(root, "button", "发送报告追问"), reopen = find(root, "button", "重新准备继续诊断");
   assert.equal(nodes(root).filter((item) => item.tagName === "form").every((item) => item.hidden), true);
   assert.equal(find(root, "button", "确认并继续诊断").disabled, true);

@@ -15,7 +15,7 @@ from problem_locator.runtime.agent_backend import BackendExecution
 from tests.deterministic.integration.test_agent_reports import _finish_diagnosis, _get
 from tests.deterministic.integration.test_direct_skill_delivery import direct_website, _finish
 from tests.deterministic.integration.test_website_agent import OWNER_KEY, _post, _preupload, website
-from tests.deterministic.unit.agent.test_report_followup import model_reply, native_init
+from tests.deterministic.integration.test_followup_generic_round import _GenericBackend, _NoFollowupModel, _publish
 
 
 class GenericV2Backend:
@@ -35,43 +35,9 @@ class GenericV2Backend:
             elapsed_seconds=0.01, final_result="报告已保存。")
 
 
-class FollowupBackend:
-    def __init__(self):
-        self.calls = []
-        self.sessions = {}
-        self.session_ids = []
-
-    def execute(self, **kwargs):
-        context = json.loads((kwargs["workspace_root"] / "inputs/context.json").read_bytes())
-        logs = list((kwargs["workspace_root"] / "inputs/logs").glob("*.log"))
-        assert logs and any(path.read_bytes() for path in logs)
-        assert kwargs["backend_phase"] == "REPORT_FOLLOWUP" and kwargs["file_access"] == "read-search"
-        native = kwargs["native_session"]
-        session_id = native_init(kwargs)
-        previous = self.sessions.setdefault(session_id, [])
-        self.session_ids.append(session_id)
-        self.calls.append(context)
-        assert context["prior_turns"] == []
-        if len(self.calls) == 1:
-            assert native.resume_id is None and previous == []
-            assert not context["conversation_context"]["resumed"]
-            answer = "原日志提供了排队线索，但还需核对负载。保留标记：memory-42。"
-        else:
-            assert native.resume_id == self.session_ids[0]
-            assert context["conversation_context"]["resumed"]
-            assert "original_report" not in context and "original_problem" not in context
-            assert previous[0]["answer"].endswith("memory-42。")
-            assert "memory-42" not in kwargs["prompt"]
-            assert context["question"] == "补充：另一实例 queue_depth=0，这如何影响此前判断？"
-            marker = previous[0]["answer"].split("保留标记：")[1]
-            answer = "queue_depth=0 提示应区分实例，不能据此排除原实例排队。" + marker
-        previous.append({"question": context["question"], "answer": answer})
-        return SimpleNamespace(final_result=model_reply(kwargs, answer=answer), session_id=session_id)
-
-
 def _install(website):
     stack, store, _, agent, _ = website
-    backend = FollowupBackend()
+    backend = _NoFollowupModel()
     followups = ReportFollowupService(agent, "claude", enabled=True, backend=backend)
     agent.followups, store.followup_store = followups, followups.store
     return followups, backend
@@ -103,48 +69,68 @@ def _exercise(website, followups, backend, cid, prefix, kind):
     report_url = f"/api/v1/artifacts/{result['artifact']['artifact_id']}/content?case_id={source.case_id}"
     original_report = client.get(report_url).content
     original_case = aggregate.model_dump_json()
-    original_events = client.get(prefix + "/events").content
-    original_rows = _old_rows(stack.repository)
+    original_events = client.get(prefix + f"/events?run_id={run_id}").content
     original_workspace = stack.layout.workspaces / source.source_job_id
     name = "generic_logs.json" if kind == "GENERIC" else "target_logs.json"
     original_manifest = (original_workspace / "inputs" / name).read_bytes()
     assert followups.observe_report(cid, run_id)
+    while followups.snapshot_worker.run_once():
+        pass
+    assert followups.store.snapshot(run_id)["status"] == "UNAVAILABLE"
+    assert followups.store.enqueue_snapshot(cid, run_id, source)
     assert followups.snapshot_worker.run_once()
     path = prefix + f"/runs/{run_id}/followups"
     available = _get(client, path)
     assert available["can_ask"] and available["snapshot_status"] == "READY"
     questions = ["请解释报告的依据，以及当前还不能确定的地方。", "补充：另一实例 queue_depth=0，这如何影响此前判断？"]
+    generic = _GenericBackend()
+    stack.runtime._generic_locator_executor._backend = generic
+    current_rid = run_id
+    s = SimpleNamespace(stack=stack, store=store, agent=agent, client=client, cid=cid, prefix=prefix)
     for ordinal, question in enumerate(questions, 1):
+        path = prefix + f"/runs/{current_rid}/followups"
         payload = {"request_id": f"followup-{ordinal}", "text": question}
         receipt = _post(client, path, payload)
         assert _post(client, path, payload) == receipt
         assert followups.worker.run_once()
         current = _get(client, path)
-        assert len(current["items"]) == ordinal and current["active_followup"] is None
-        item = current["items"][-1]
+        assert len(current["items"]) == 1 and current["active_followup"] is None
+        item = current["items"][0]
         assert item["followup_id"] == receipt["followup_id"] and item["status"] == "COMPLETED"
-        assert item["context_mode"] == "REPORT_AND_LOGS"
-        session = followups.store.sessions.get(cid)
-        assert session["session_id"] == backend.session_ids[0]
-        assert session["last_followup_id"] == receipt["followup_id"]
-    assert len(backend.calls) == 2
-    assert len(backend.sessions) == 1 and len(backend.sessions[backend.session_ids[0]]) == 2
-    assert "memory-42" in item["answer_markdown"] and "queue_depth=0" in item["answer_markdown"]
-    assert backend.calls[0]["original_report"] == source.report_markdown
-    assert backend.calls[0]["original_problem"] == source.problem_text
-    events = client.get(path + "/events", headers={"Last-Event-ID": "3"})
-    frames = [json.loads(frame[6:]) for frame in events.content.split(b"\n\n") if frame.startswith(b"data: ")]
-    assert [frame["sequence"] for frame in frames] == [4, 5, 6]
+        assert item["run_id"] == current_rid and item["diagnosis_run_id"] != current_rid
+        assert _post(client, path, payload) == receipt
+        generic.report = f"## 本轮变化\n第 {ordinal} 次追问已重新核查。\n# 定位报告\n" + question
+        detail = _publish(s)
+        assert detail["run_id"] == item["diagnosis_run_id"]
+        case = stack.repository.read_case(detail["case_id"])
+        assert case.case.raw_problem_text == question
+        assert all(job.diagnosis_mode.value == "GENERIC" and job.job_type.value == "DIAGNOSE"
+            for job in case.jobs.values())
+        assert store.get_run(cid)["force_generic"] is True
+        reference = json.loads(generic.calls[-1]["followup_context_bytes"])
+        if ordinal == 1:
+            assert reference["original_problem"] == source.problem_text
+        else:
+            assert reference["prior_turns"][0]["text"] == questions[0]
+            assert reference["prior_turns"][0]["diagnosis_run_id"] == current_rid
+            assert reference["prior_reports"][0]["original_report"] == source.report_markdown
+        events = client.get(path + "/events", headers={"Last-Event-ID": "1"})
+        frames = [json.loads(frame[6:]) for frame in events.content.split(b"\n\n") if frame.startswith(b"data: ")]
+        assert [frame["sequence"] for frame in frames] == [2, 3]
+        current_rid = detail["run_id"]
+    assert backend.calls == 0 and len(generic.calls) == 2
+    assert followups.store.sessions.get(cid) is None
     assert client.get(report_url).content == original_report
     assert hashlib.sha256(original_report).hexdigest() == source.report_sha256
     assert stack.repository.read_case(source.case_id).model_dump_json() == original_case
-    assert client.get(prefix + "/events").content == original_events
-    assert _old_rows(stack.repository) == original_rows
+    assert client.get(prefix + f"/events?run_id={run_id}").content == original_events
     assert (original_workspace / "inputs" / name).read_bytes() == original_manifest
-    assert store.get_run(cid)["run_id"] == run_id
+    assert store.get_run(cid)["run_id"] != run_id
+    versions = _get(client, prefix + f"/runs/{current_rid}/report-versions")
+    assert [entry["version"] for entry in versions["versions"]] == [1, 2, 3]
 
 
-def test_generic_v2_publication_http_snapshot_and_two_followups_preserve_the_original_diagnosis(website, monkeypatch):
+def test_generic_source_two_generic_rounds_preserve_original_report_and_legacy_snapshot(website, monkeypatch):
     stack, store, _, agent, client = website
     followups, backend = _install(website)
     monkeypatch.setattr(stack.catalog, "_route_skill_refs", [])
@@ -164,7 +150,7 @@ def test_generic_v2_publication_http_snapshot_and_two_followups_preserve_the_ori
     _exercise(website, followups, backend, cid, prefix, "GENERIC")
 
 
-def test_default_skill_direct_publication_http_snapshot_and_two_followups_preserve_the_original_diagnosis(direct_website):
+def test_skill_direct_source_two_generic_rounds_preserve_original_report_and_legacy_snapshot(direct_website):
     followups, backend = _install(direct_website.website)
     _, prefix = _finish(direct_website)
     cid = prefix.rsplit("/", 1)[-1]
@@ -188,5 +174,5 @@ def test_published_structured_methods_reports_remain_unsupported_without_model_w
     assert followups._source(cid, run_id) is None
     rejected = client.post(path, json={"request_id": "unsupported", "text": "解释这个报告"})
     assert rejected.status_code == 409 and rejected.json()["error"]["code"] == "AGENT_FOLLOWUP_UNSUPPORTED"
-    assert not followups.worker.run_once() and backend.calls == []
+    assert not followups.worker.run_once() and backend.calls == 0
     assert _old_rows(stack.repository) == before

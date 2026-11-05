@@ -287,7 +287,8 @@ class ExternalCommandHandler:
         trigger_id: str | None = None
         job_id: str | None = None
         user_fact_ids: list[str] | None = None
-        route_bindings = None
+        initial_job_type = JobType.DIAGNOSE if command.force_generic else JobType.ROUTE
+        initial_bindings = None
 
         for attempt in range(3):
             snapshot = self._repository.read_snapshot(request_key=f"CreateCase:{command.idempotency_key}")
@@ -304,11 +305,13 @@ class ExternalCommandHandler:
                     self._ids.new("diagnosis_item")
                     for _ in command.initial_user_facts
                 ]
-                route_bindings = _validated_catalog_bindings(
-                    JobType.ROUTE,
-                    self._asset_catalog.route_bindings(
+                initial_bindings = _validated_catalog_bindings(
+                    initial_job_type,
+                    (self._asset_catalog.generic_diagnose_bindings(
+                        with_logs=command.initial_log_archive_expected,
+                    ) if command.force_generic else self._asset_catalog.route_bindings(
                         [fact.name for fact in command.initial_user_facts]
-                    ),
+                    )),
                 )
 
             assert case_id is not None
@@ -316,7 +319,7 @@ class ExternalCommandHandler:
             assert job_id is not None
             assert user_fact_ids is not None
             assert occurred_at is not None
-            assert route_bindings is not None
+            assert initial_bindings is not None
             if case_id in snapshot.cases:
                 _raise_port_error(
                     ErrorCode.REVISION_CONFLICT,
@@ -329,7 +332,8 @@ class ExternalCommandHandler:
                 case_id=case_id,
                 trigger_id=trigger_id,
                 user_fact_ids=user_fact_ids,
-                route_bindings=route_bindings,
+                route_bindings=None if command.force_generic else initial_bindings,
+                generic_bindings=initial_bindings if command.force_generic else None,
                 occurred_at=occurred_at,
             )
             provisional_case = self._provisional_case(trigger, occurred_at)
@@ -346,7 +350,7 @@ class ExternalCommandHandler:
             )
             if (
                 plan.next_job_spec is None
-                or plan.next_job_spec.job_type is not JobType.ROUTE
+                or plan.next_job_spec.job_type is not initial_job_type
                 or plan.job_updates
                 or plan.target_case_status is not CaseStatus.RUNNING
                 or plan.clear_active_job

@@ -76,7 +76,7 @@ def execute_raw(state, value):
 
 
 @pytest.mark.parametrize("action", ["ANSWER", "REQUEST_INPUT"])
-def test_stream_result_with_literal_controls_completes_followup_without_changing_text(system, action):
+def test_stream_result_with_literal_controls_preserves_historical_answer_text(system, action):
     before = original_rows(system)
     receipt = submit(system)
     answer = "第一行。\n字段\t值\r\n下一行。"
@@ -88,14 +88,14 @@ def test_stream_result_with_literal_controls_completes_followup_without_changing
         "result": raw}, ensure_ascii=False).encode("utf-8") + b"\n"
     for offset in range(0, len(event), 7):
         stream.write(event[offset:offset + 7])
-    assert stream.final_result == raw
-    execute_raw(system, stream.final_result)
-    system.service.continue_diagnosis = lambda *args: pytest.fail("an answer cannot start diagnosis")
-    assert system.service.worker.run_once()
+    parsed = parse_result(stream.final_result, request_key=receipt.followup_id)
+    assert parsed.answer_markdown == answer
+    task = system.service.store.claim_task()
+    assert system.service.store.finish_task(task["followup_id"], answer=parsed.answer_markdown)
     result = view(system).items[0]
     assert result.status == "COMPLETED" and result.diagnosis_run_id is None
-    assert result.answer_markdown.endswith(answer)
-    assert len(system.backend.calls) == 1 and original_rows(system) == before
+    assert result.answer_markdown == answer
+    assert not system.backend.calls and original_rows(system) == before
 
 
 @pytest.mark.parametrize("action,answer", [
@@ -103,42 +103,28 @@ def test_stream_result_with_literal_controls_completes_followup_without_changing
     ("ANSWER", json.dumps(DIAGNOSIS, ensure_ascii=False)),
     ("REQUEST_INPUT", "请补充故障时间，当前日志无法确定对应时段。"),
 ])
-def test_only_answer_field_is_shown_even_when_it_contains_a_control_example(system, action, answer):
-    before = original_rows(system)
-    receipt = submit(system, text="请解释这个配置，并给出 JSON 示例。")
+def test_historical_protocol_keeps_control_examples_inside_the_answer(system, action, answer):
+    receipt = submit(system, text="请解释配置并给 JSON 示例。")
     value = {"protocol": PROTOCOL, "request_key": receipt.followup_id, "action": action, "answer_markdown": answer}
-    execute_raw(system, json.dumps(value, ensure_ascii=False))
-    system.service.continue_diagnosis = lambda *args: pytest.fail("an answer cannot start diagnosis")
-    assert system.service.worker.run_once()
+    parsed = parse_result(json.dumps(value, ensure_ascii=False), request_key=receipt.followup_id)
+    assert parsed.answer_markdown == answer
+    task = system.service.store.claim_task()
+    assert system.service.store.finish_task(task["followup_id"], answer=parsed.answer_markdown)
     result = view(system).items[0]
-    assert result.status == "COMPLETED" and result.diagnosis_run_id is None
-    assert result.answer_markdown.endswith(answer) and PROTOCOL not in result.answer_markdown
-    assert len(system.backend.calls) == 1 and original_rows(system) == before
+    assert result.answer_markdown == answer and result.diagnosis_run_id is None
+    assert not system.backend.calls
 
 
 @pytest.mark.parametrize("wrap", [lambda value: value, lambda value: "```json\n" + value + "\n```",
     lambda value: "我将继续诊断：\n" + value])
-def test_unframed_control_objects_cannot_execute_or_leak_into_the_answer(system, wrap):
-    submit(system)
-    # The previous interface accepted this bare object as executable control.
+def test_legacy_protocol_rejects_unframed_control_objects(wrap):
     legacy = {key: value for key, value in DIAGNOSIS.items() if key != "attachment_ids"}
     legacy["log_mode"] = "APPEND"
-    execute_raw(system, wrap(json.dumps(legacy, ensure_ascii=False)))
-    handoffs = []
-    system.service.continue_diagnosis = lambda *args: handoffs.append(args)
-    assert not system.service.worker.run_once()
-    result = view(system).items[0]
-    assert result.status == "FAILED" and result.answer_markdown is None
-    assert result.diagnosis_run_id is None and handoffs == []
-    assert len(system.backend.calls) == 1
+    with pytest.raises(ValueError):
+        parse_result(wrap(json.dumps(legacy, ensure_ascii=False)), request_key=REQUEST_KEY)
 
 
-def test_a_valid_result_for_another_question_cannot_start_diagnosis(system):
-    submit(system)
-    execute_raw(system, json.dumps({"protocol": PROTOCOL,
-        "request_key": "00000000-0000-0000-0000-000000000001", **DIAGNOSIS}))
-    handoffs = []
-    system.service.continue_diagnosis = lambda *args: handoffs.append(args)
-    assert not system.service.worker.run_once()
-    assert view(system).items[0].status == "FAILED" and handoffs == []
-    assert len(system.backend.calls) == 1
+def test_legacy_protocol_rejects_a_valid_result_for_another_question():
+    raw = json.dumps({"protocol": PROTOCOL, "request_key": REQUEST_KEY, **DIAGNOSIS})
+    with pytest.raises(ValueError):
+        parse_result(raw, request_key="00000000-0000-0000-0000-000000000002")

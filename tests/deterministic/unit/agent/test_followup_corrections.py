@@ -72,24 +72,28 @@ def test_correction_target_must_belong_to_completed_answer_of_exact_run(system):
         correct(system, target="00000000-0000-0000-0000-000000000099")
     assert missing.value.code == "AGENT_FOLLOWUP_NOT_FOUND"
     other = system.agent.store.create_conversation("another", owner_key=OWNER)
+    with system.repository.database_transaction() as db:
+        run = system.agent.store._load(db, other.conversation_id)
+        run.update(status="COMPLETED", report_available=True)
+        system.agent.store._save(db, run)
     with pytest.raises(AgentStoreError) as wrong_run:
         system.service.submit(other.conversation_id, other.run_id, "correction-other", "这个解释有误。",
             owner_key=OWNER, intent="CORRECTION", target_followup_id=ordinary.followup_id)
     assert wrong_run.value.code == "AGENT_FOLLOWUP_NOT_FOUND"
 
 
-def test_correction_keeps_original_history_and_binds_precise_target_in_prompt(system):
+def test_historical_correction_keeps_original_history_and_binds_precise_target(system):
     ordinary = submit(system)
     finish(system, ordinary, "原解释认为没有队列问题。")
     before = view(system).items[0].model_dump()
     correction = correct(system, target=ordinary.followup_id)
-    assert system.service.worker.run_once()
-    call = system.backend.calls[-1]
-    context = json.loads((call["workspace_root"] / "inputs/context.json").read_text("utf-8"))
-    assert context["correction"]["target_answer_markdown"] == before["answer_markdown"]
-    assert context["original_report"] == system.source.report_markdown
-    assert context["question"] == view(system).items[-1].text
-    assert "不是日志证据" in call["prompt"]
+    task = system.service.store.claim_task()
+    source, history, _ = system.service.store.task_context(task)
+    assert json.loads(task["correction_json"])["target_answer_markdown"] == before["answer_markdown"]
+    assert source.report_markdown == system.source.report_markdown
+    assert history[0]["text"] == before["text"]
+    assert system.service.store.finish_task(task["followup_id"], answer="保存的旧版纠正解释。")
+    assert system.backend.calls == []
     assert view(system).items[0].model_dump() == before
     assert view(system).items[-1].followup_id == correction.followup_id
 
@@ -157,7 +161,7 @@ def response(*, quote="incident_code=QUEUE_OVERFLOW", path="inputs/logs/log-0000
 def prepare_logged_task(system):
     memory = enable_memory(system)
     make_logs(system, content=LOG)
-    assert system.service.observe_report(system.cid, system.rid)
+    assert system.service.store.enqueue_snapshot(system.cid, system.rid, system.source)
     assert system.service.snapshot_worker.run_once()
     finish(system, correct(system))
     return memory.claim_task()

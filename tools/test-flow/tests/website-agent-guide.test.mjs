@@ -551,6 +551,12 @@ test("report followup guide preserves the old contracts and documents recovery b
     assert.ok(followup.includes(token), `missing followup guidance: ${token}`);
   assert.match(followup, /默认关闭/); assert.match(followup, /提交追问会调用真实模型/);
   assert.match(followup, /不会自动重试模型提交/); assert.match(followup, /未重新核对原日志/);
+  for (const token of ["LATEST_REPORT_REQUIRED", "inputs/followup-context.json", "UNRESOLVED", "Generic V2"])
+    assert.ok(followup.includes(token), `missing direct Generic followup guidance: ${token}`);
+  assert.match(followup, /每次追问都会直接创建关联 run 和独立 Case/);
+  assert.match(followup, /没有前置的只读问答、充分性分类或 ROUTE 调用/);
+  assert.match(followup, /不等于整体更快或更便宜/);
+  assert.doesNotMatch(followup, /已有材料足以直接回答时，返回 `ANSWER`/);
   assert.match(followup, /旧页|较早页/); assert.match(followup, /回执可能比完成事件更晚/);
   assert.ok(guide.includes("](website-report-followup.md)"));
   assert.ok(example.includes("](../../docs/website-report-followup.md)"));
