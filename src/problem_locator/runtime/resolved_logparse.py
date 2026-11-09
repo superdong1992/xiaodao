@@ -15,7 +15,7 @@ from problem_locator.contracts import (
 from problem_locator.integrations.logparse.requests import Anchor, ResolvedLogparsePlan
 
 from .context_policy import ResolvedJobAssets
-from .methods_skill import load_specialized_skill_registration
+from .specialized_skill import load_specialized_skill_registration
 
 
 class ResolvedLogparsePlanNotReady(ValueError):

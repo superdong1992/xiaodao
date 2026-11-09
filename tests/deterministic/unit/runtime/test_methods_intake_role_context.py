@@ -47,9 +47,10 @@ def _intake(projection, *, with_questions=False):
     view = SimpleNamespace(conversation_id="role-context", attachments=[],
         current_questions=[item.prompt for item in requirements] if with_questions else [])
     case = SimpleNamespace(problem_spec=build_initial_problem_spec(message.text), user_facts=[],
-                           pending_requirements=requirements)
-    # This projection method has no I/O or mutable service dependencies.
+                           pending_requirements=requirements, selected_skill_ref=None)
+    # This focused legacy projection has no additional catalog input policy.
     service = object.__new__(AgentConversationService)
+    service.application = SimpleNamespace()
     request = service._intake_input(view, [message], {}, case, [])
     prompt = build_intake_prompt(request)
     return requirements, request, prompt

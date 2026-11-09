@@ -13,6 +13,7 @@ import {
   methodsPrompt,
   parseArguments,
   safeMethodsRunnerError,
+  selectMethodsOutputContract,
   validateGeneratedRegistration,
 } from "../runtime/claude-deepseek-methods-runner.mjs";
 
@@ -39,6 +40,7 @@ test("Methods workspace installs only the production generator and closed Wiki i
   assert.equal(prepared.sourceWikiIdentity.log_templates.length, 6);
   assert.equal(prepared.sourceWikiIdentity.log_template_extraction_version, 2);
   assert.ok(fs.existsSync(path.join(configRoot, "skills", "wiki-to-logparse-diagnosis-skill", "SKILL.md")));
+  assert.equal(selectMethodsOutputContract(prepared.installedSkill), path.join(prepared.installedSkill, "references", "methods-v1-output-contract.md"));
   assert.equal(fs.existsSync(path.join(workspaceRoot, "oracle.json")), false);
   assert.equal(fs.existsSync(path.join(workspaceRoot, "registration-template.json")), false);
 });
@@ -54,6 +56,9 @@ test("generation prompt requires the meta Skill first and a complete registratio
   assert.match(prompt, /Bare or shortened event names/);
   assert.match(prompt, /activation_markers/);
   assert.match(prompt, /must not activate a method/);
+  assert.match(prompt, /references\/methods-v1-output-contract\.md/);
+  assert.match(prompt, /does not test the default v3 document package/);
+  assert.equal(prompt.includes("references/output-contract.md"), false);
   assert.equal(prompt.toLowerCase().includes("oracle.json"), false);
 });
 

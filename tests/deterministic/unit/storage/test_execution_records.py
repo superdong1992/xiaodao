@@ -578,6 +578,11 @@ def test_rejected_agent_output_replace_failure_leaves_no_partial_file(
     "filename",
     (
         "method-diagnosis.draft.json",
+        "document-preflight.json",
+        "document-request.json",
+        "document-evidence-manifest.json",
+        "document-prompt.txt",
+        "document-diagnosis.raw.txt",
         "skill-direct-delivery.json",
         "method-review.draft.json",
         "logparse_broker_audit.json",

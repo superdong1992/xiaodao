@@ -61,7 +61,7 @@ def generic_web(tmp_path, monkeypatch):
     store.finish_intake(cid, [initial.message_id])
     store.bind_case(cid, CASE_ID)
     case = SimpleNamespace(case_id=CASE_ID, active_job_id=JOB_ID, case_revision=1,
-        status=CaseStatus.RUNNING, archive_status="NOT_REQUIRED")
+        status=CaseStatus.RUNNING, archive_status="NOT_REQUIRED", selected_skill_ref=None)
     aggregate = SimpleNamespace(case=case, jobs={JOB_ID: SimpleNamespace(job_id=JOB_ID,
         diagnosis_mode=DiagnosisMode.GENERIC, attachment_refs=[], generic_supplement_texts=[], status="RUNNING")},
         attachments={})

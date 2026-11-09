@@ -362,7 +362,7 @@ GET /api/v1/cases/10000000-0000-4000-8000-000000000001?wait_for_job_id=20000000-
 | body | `declared_size` | `integer` | 是 | — | 原始文件字节数，`0..2684354560`。 |
 | body | `declared_sha256` | `sha256` | 是 | — | 原始文件字节的散列。 |
 
-后缀映射：`.zip` → `application/zip`；`.tar` → `application/x-tar`；`.tar.gz`、`.tgz`、`.gz` → `application/gzip`。新通用诊断另支持 `.log/.txt` → `text/plain`、`.json` → `application/json`、`.jsonl/.ndjson` → `application/x-ndjson`，也接受显式 `application/jsonl`。文本要求 UTF-8，允许 BOM；后缀大小写必须精确。专用定位的日志归档要求不变。
+后缀映射：`.zip` → `application/zip`；`.tar` → `application/x-tar`；`.tar.gz`、`.tgz`、`.gz` → `application/gzip`。平台另支持 `.log/.txt` → `text/plain`、`.json` → `application/json`、`.jsonl/.ndjson` → `application/x-ndjson`，也接受显式 `application/jsonl`。文本要求 UTF-8，允许 BOM；后缀大小写必须精确。通用定位可直接读取这些材料；专用定位在选定方法后按具体要求再次检查格式和数量，不统一要求归档。方法无需附件时，已上传材料不用于诊断，消息的 `notice` 会说明原因。
 
 ```json
 {

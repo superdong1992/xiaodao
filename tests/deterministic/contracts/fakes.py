@@ -79,6 +79,7 @@ from problem_locator.contracts.models import (
     ResourceRef,
     RuntimeBindings,
     RuntimeExecutionReceipt,
+    SpecializedInputPolicy,
     StagedResourceRef,
     StateExportObjectCounts,
     StateFile,
@@ -1996,6 +1997,9 @@ class FakeAssetCatalog:
                 "The pinned diagnosis runtime bindings are unavailable.",
             )
         return _clone(value)
+
+    def specialized_input_policy(self, skill_ref: VersionedRef) -> SpecializedInputPolicy | None:
+        return None
 
     def generic_diagnose_bindings(self, *, with_logs: bool = False) -> RuntimeBindings:
         self._maybe_fail("generic_diagnose_bindings")

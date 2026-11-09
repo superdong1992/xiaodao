@@ -17,7 +17,7 @@ export function mountFollowupView(container, controller) {
   error.setAttribute("role", "alert"); notice.setAttribute("aria-live", "polite");
   const form = node("form"), label = node("label", "本次要分析的问题"), input = node("textarea");
   input.rows = 4; input.setAttribute("aria-label", "追问内容"); label.append(input);
-  const fileLabel = node("label", "补充日志（可选，可多选）"), files = node("input"), uploads = node("ul");
+  const fileLabel = node("label", "补充材料（可选，可多选）"), files = node("input"), uploads = node("ul");
   files.type = "file"; files.multiple = true; files.accept = LOG_FILE_ACCEPT; fileLabel.append(files);
   const retryUploads = node("button", "重试日志上传"), cancelUploads = node("button", "取消校验和上传");
   retryUploads.type = cancelUploads.type = "button";
@@ -29,8 +29,8 @@ export function mountFollowupView(container, controller) {
   files.onchange = () => { const selected = [...files.files]; files.value = ""; run(() => controller.uploadFiles(selected)); };
   retryUploads.onclick = () => run(() => controller.retryUploads()); cancelUploads.onclick = () => controller.cancelUploads();
   refresh.onclick = () => run(() => controller.refresh()); older.onclick = () => run(() => controller.loadOlder()); stop.onclick = () => run(() => controller.stop());
-  form.append(questions, label, fileLabel, node("p", "每次追问都会启动通用诊断，按本次问题分析并生成新版报告；可补充多个日志包。"), uploads, retryUploads, cancelUploads, submit);
-  root.append(node("h2", "报告追问"), node("p", "直接提问、更正信息或补充日志。处理结果会记录在这条追问下，原报告保留。"),
+  form.append(questions, label, fileLabel, node("p", "每次追问都会启动通用诊断，按本次问题分析并生成新版报告；可补充多份材料，具体格式和数量以当前定位要求为准。"), uploads, retryUploads, cancelUploads, submit);
+  root.append(node("h2", "报告追问"), node("p", "直接提问、更正信息或补充材料。处理结果会记录在这条追问下，原报告保留。"),
     context, notice, error, warning, older, list, form, refresh, stop);
   container.replaceChildren(root);
   const unsubscribe = controller.subscribe((state) => {
@@ -72,7 +72,7 @@ export function mountFollowupView(container, controller) {
         row.append(node("p", item.context_mode === "REPORT_AND_LOGS" ? "回答依据：报告和原日志" : "回答依据：仅报告和已有问答，未重新核对原日志"));
       if (item.answer_markdown !== null) row.append(createMarkdownBlock(doc, item.answer_markdown));
       if (item.failure) row.append(node("p", item.failure.message));
-      if (item.attachment_ids?.length) row.append(node("p", `本次补充了 ${item.attachment_ids.length} 个日志包。`));
+      if (item.attachment_ids?.length) row.append(node("p", `本次补充了 ${item.attachment_ids.length} 份材料。`));
       if (item.diagnosis_run_id) {
         const diagnosis = state.diagnoses?.[item.diagnosis_run_id], detail = diagnosis?.detail;
         const terminal = ["COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED"].includes(detail?.status);

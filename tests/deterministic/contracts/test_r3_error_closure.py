@@ -38,6 +38,7 @@ from problem_locator.contracts.models import (
     ReadinessReport,
     RecoveryReceipt,
     SubmitSupplementTriggerPayload,
+    SpecializedInputPolicy,
     ValidatedTrigger,
     VersionedRef,
 )
@@ -212,10 +213,11 @@ def test_asset_catalog_is_part_of_typed_port_conformance() -> None:
         "diagnose_bindings": getattr(__import__("problem_locator.contracts.models", fromlist=["RuntimeBindings"]), "RuntimeBindings"),
         "generic_diagnose_bindings": getattr(__import__("problem_locator.contracts.models", fromlist=["RuntimeBindings"]), "RuntimeBindings"),
         "review_bindings": getattr(__import__("problem_locator.contracts.models", fromlist=["RuntimeBindings"]), "RuntimeBindings"),
+        "specialized_input_policy": SpecializedInputPolicy | None,
     }
     for method_name, expected in expected_returns.items():
         method = getattr(ports.AssetCatalogPort, method_name)
-        assert get_type_hints(method)["return"] is expected
+        assert get_type_hints(method)["return"] == expected
         assert f"AssetCatalogPort.{method_name}" in errors.PORT_ERROR_CODES
 
 

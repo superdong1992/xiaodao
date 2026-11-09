@@ -2,7 +2,7 @@
 
 [返回框架设计目录](README.md)
 
-本章说明 `src/problem_locator/runtime/` 的模块边界、执行流程和逐文件设计。内容以 2026-09-28 当前工作区源码为准，包含尚未提交的 `followup_access.py` 及 Agent 命令、遥测改动。覆盖 44 个 Python 文件和 `assets/` 下 40 个文件；此目录当前没有 `__init__.py`。本章记录实现，不代表已完成运行验证。
+本章说明 `src/problem_locator/runtime/` 的模块边界、执行流程和逐文件设计。原有流程以 2026-09-28 源码为基础，2026-11-05 补充文档型 Skill 的注册与执行。本章记录实现，不代表已完成完整 Test Flow 验证。
 
 ## 1. 模块职责与依赖
 
@@ -30,6 +30,16 @@ Runtime 接收应用层已认领、状态为 `RUNNING` 的不可变 `Job`，解�
 `off` 关闭的是框架对 Skill 结论的证据一致性后处理。资产身份、输入准备、Logparse 受控执行、进程限制和交付格式仍然有效。
 
 ## 2. 主要执行流程
+
+### v3 文档型专用定位
+
+`specialized_skill.py` 按注册版本分派加载器：v1/v2 使用原 `methods_skill.py`，v3 使用 `document_skill.py`。v3 校验来源摘要、三类输入、单个材料集合、准备方式和 Markdown 引用完整性；只接受平台支持的材料格式和普通文档包。目录注册后保存内容快照，后续执行与可选参数策略都使用任务固定的 `skill_ref`，不读取被部署方替换的新版本。
+
+`catalog.py` 为 v3 固定 `skill-direct` 运行配置和 `ReviewPolicy.NONE`。`diagnosis_runtime.py` 在 Methods 预检前转入 `document_runtime.py`，后者按 `none/direct_files/logparse` 准备材料。直接读取复用 `direct_generic_logs.py` 的文件校验、安全解压和容量限制；Logparse 复用 broker、回执和结果校验，再转换为统一清单。没有调用解析器的分支不生成解析回执。
+
+三种模式都保存只读 `inputs/request.json`、`inputs/evidence-manifest.json` 和 `inputs/skill/` 文档。请求保留原始问题和已接受参数，清单记录文件来源、大小、SHA-256、跳过项和限制。入口文档进入提示词，参考资料按需读取，不受 marker 命中限制。上下文预算包含必读的请求和清单，准备耗时计入 Job 总时限；执行后重新核对请求、清单、材料和 Skill 文档的内容与文件身份，再发布状态标记和 Markdown 报告。
+
+必填参数生成现有 `PendingRequirement`，可选参数不生成待办。`SpecializedInputPolicy` 只在应用层、Intake 和领域补充流程中临时传递，不写入 Job 或 State V11。v3 不使用通用定位专属的 `generic_log_preparation`，也不进入 Methods 的证据核验和 Reviewer。
 
 ### 2.1 ROUTE：模型审核，服务端决定是否准入
 

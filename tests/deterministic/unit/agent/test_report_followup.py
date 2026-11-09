@@ -408,6 +408,114 @@ def test_direct_input_missing_receipt_never_claims_log_evidence(system):
     assert system.service._has_readable_logs(job, generic=True) is False
 
 
+def _document_materials(system, mode, *, with_file=True):
+    original = system.repository.layout.workspaces / JOB
+    (original / "inputs/evidence").mkdir(parents=True)
+    (original / "inputs/skill/references").mkdir(parents=True)
+    (original / "inputs/skill/references/method.md").write_text("业务说明，不是日志。", encoding="utf-8")
+    content = b"incident_code=QUEUE_OVERFLOW\ntrace_key=one\n"
+    files = []
+    if with_file:
+        (original / "inputs/evidence/request.log").write_bytes(content)
+        files = [{"path": "inputs/evidence/request.log", "source_id": "file-000001",
+                  "size": len(content), "sha256": hashlib.sha256(content).hexdigest(),
+                  "relative_path": "service/request.log"}]
+    payload = {"schema_version": 1, "preparation": mode, "sources": [], "files": files,
+               "skipped": [], "limitations": ["保留原诊断中的覆盖限制。"],
+               "coverage": {"scope": "INPUT_PREPARATION", "complete": True}}
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    (original / "inputs/evidence-manifest.json").write_bytes(raw)
+    job_root = system.repository.layout.jobs / JOB
+    job_root.mkdir()
+    (job_root / "document-evidence-manifest.json").write_bytes(raw)
+    (job_root / "document-diagnosis.raw.txt").write_bytes(b"PRIVATE_RAW_RESPONSE")
+    (job_root / "document-prompt.txt").write_bytes(b"PRIVATE_PROMPT")
+    system.source = replace(system.source, source_kind="SKILL_DIRECT", has_logs=with_file,
+                            has_log_manifest=True)
+    return original, job_root, payload
+
+
+@pytest.mark.parametrize("mode,with_file", [("none", False), ("direct_files", False),
+                                            ("direct_files", True), ("logparse", True)])
+def test_historical_document_snapshot_copies_only_prepared_evidence_and_preserves_coverage(system, mode, with_file):
+    original, job_root, payload = _document_materials(system, mode, with_file=with_file)
+    job = SimpleNamespace(job_id=JOB, attachment_refs=[CASE] if mode != "none" else [])
+    assert system.service._has_readable_logs(job, generic=False) is with_file
+    assert system.service._document_log_manifest(job) == payload
+    assert system.service.store.enqueue_snapshot(system.cid, system.rid, system.source)
+    assert system.service.snapshot_worker.run_once()
+    snapshot_root = job_root / "followup-inputs"
+    snapshot = json.loads((snapshot_root / "inputs/logs.json").read_bytes())
+    for key in ("preparation", "skipped", "limitations", "coverage"):
+        assert snapshot[key] == payload[key]
+    assert len(snapshot["logs"]) == int(with_file)
+    if with_file:
+        assert (snapshot_root / snapshot["logs"][0]["log_path"]).read_bytes() == (original / payload["files"][0]["path"]).read_bytes()
+        assert snapshot["logs"][0]["source_id"] == "file-000001"
+    assert not (snapshot_root / "inputs/skill").exists()
+    assert all(b"PRIVATE_" not in file.read_bytes() for file in snapshot_root.rglob("*") if file.is_file())
+    submit(system)
+    assert complete_historical_task(system)
+    assert view(system).items[0].context_mode == ("REPORT_AND_LOGS" if with_file else "REPORT_ONLY")
+    assert not system.backend.calls
+
+
+@pytest.mark.parametrize("drift", ["receipt", "bytes", "skill-as-log"])
+def test_historical_document_snapshot_rejects_changed_or_unlisted_materials(system, drift):
+    original, job_root, payload = _document_materials(system, "direct_files")
+    if drift == "receipt":
+        (job_root / "document-evidence-manifest.json").write_bytes(b"{}")
+    elif drift == "bytes":
+        (original / payload["files"][0]["path"]).write_bytes(b"changed evidence")
+    else:
+        payload["files"][0]["path"] = "inputs/skill/references/method.md"
+        raw = json.dumps(payload).encode()
+        (original / "inputs/evidence-manifest.json").write_bytes(raw)
+        (job_root / "document-evidence-manifest.json").write_bytes(raw)
+    assert system.service.store.enqueue_snapshot(system.cid, system.rid, system.source)
+    assert not system.service.snapshot_worker.run_once()
+    assert view(system).snapshot_status == "FAILED"
+    assert not (job_root / "followup-inputs").exists()
+
+
+@pytest.mark.parametrize("mode", ["none", "direct_files", "logparse"])
+def test_document_report_question_hands_original_materials_to_generic_without_snapshot(diagnostic_system, mode):
+    from tests.deterministic.unit.agent.test_report_continuation import upload
+
+    s = diagnostic_system
+    s.source = replace(s.service._source(s.cid, s.rid), skill_name="document-triage")
+    _, job_root, _ = _document_materials(s, mode, with_file=mode != "none")
+    s.service._source = lambda cid, rid: s.source
+    selected = [] if mode == "none" else [upload(s, "original.zip", b"original uploaded material")]
+    with s.repository.database_transaction() as db:
+        parent = s.store._load(db, s.cid, run_id=s.rid)
+        parent["report_inputs"]["attachment_ids"] = selected
+        s.store._save(db, parent)
+
+    assert s.service.observe_report(s.cid, s.rid)
+    assert s.service.store.snapshot(s.rid)["status"] == "UNAVAILABLE"
+    # Upload notifications may still need observation, without scheduling copies.
+    s.service.snapshot_worker.run_once()
+    assert s.service.store.snapshot(s.rid)["status"] == "UNAVAILABLE"
+    assert not (job_root / "followup-inputs").exists()
+    question = "请结合现有材料重新核对故障原因。"
+    receipt = s.service.submit(s.cid, s.rid, "document-question", question, owner_key=OWNER)
+
+    assert s.service.worker.run_once()
+    current = s.store.get_run(s.cid)
+    answer = view(s).items[0]
+    assert current["force_generic"] is True and current["parent_run_id"] == s.rid
+    assert answer.diagnosis_run_id == current["run_id"] != s.rid
+    assert s.store.get_conversation(s.cid).messages[0].attachment_ids == selected
+    assert current["effective_problem_text"] == question
+    assert current["continuation_context"]["parent_report_markdown"] == s.report.markdown
+    assert "PRIVATE_" not in json.dumps(current["continuation_context"])
+    assert not s.backend.calls and not s.engine.calls
+    assert not (job_root / "followup-inputs").exists()
+    assert s.service.submit(s.cid, s.rid, "document-question", question, owner_key=OWNER) == receipt
+    assert not s.service.worker.run_once()
+
+
 def test_changed_log_manifest_quota_and_missing_logs_degrade_without_touching_report(system):
     original, _ = make_logs(system)
     (original / "inputs/generic_logs.json").write_text('{"logs": []}', encoding="utf-8")

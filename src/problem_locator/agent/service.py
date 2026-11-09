@@ -16,6 +16,7 @@ from problem_locator.contracts import (
 from problem_locator.contracts.models import ProblemSpecInput, derive_attachment_filename_suffix
 from problem_locator.diagnostics import log_event
 from problem_locator.application.reports import result_source_job_id
+from problem_locator.application.projection import build_case_snapshot
 from problem_locator.dispatch.cancellation import CancellationController
 from problem_locator.dispatch.activity import QueueIdleObservation
 
@@ -29,6 +30,7 @@ from .models import (AgentPublicFailure, AgentStoreError, ConversationReportView
 from .failures import exception_code, exception_details
 from .uploads import ConversationUploads
 from .usage import ConversationUsageGuard
+from .store import _DEFERRED_ATTACHMENTS_NOTICE
 from .attachment_worker import AttachmentTask, AttachmentWorkRequired, AttachmentWorkers
 
 _CLOSED = {"COMPLETED", "FAILED", "INTERRUPTED", "CANCELLED"}
@@ -50,6 +52,7 @@ class AgentConversationService:
                 or any(char not in "0123456789abcdef" for char in model_configuration_fingerprint)):
             raise ValueError("模型执行配置指纹必须是 64 位小写 SHA-256 摘要。")
         self.store, self.application, self.intake_engine = store, application, intake_engine
+        store.specialized_input_policy = self._specialized_input_policy
         self.model_configuration_fingerprint = model_configuration_fingerprint
         from problem_locator.memory.service import FeedbackService
         self.memory_store = memory_store
@@ -85,6 +88,11 @@ class AgentConversationService:
         self._intake_activity = QueueIdleObservation()
         self._phase = "AGENT"
         store.on_change = self._changed
+
+    def _specialized_input_policy(self, skill_ref):
+        handler = getattr(self.application, "external_commands", None)
+        resolver = getattr(handler, "specialized_input_policy", None)
+        return None if resolver is None else resolver(skill_ref)
 
     @property
     def _phase(self):
@@ -902,6 +910,26 @@ class AgentConversationService:
                     selected_attachment_ids = item.attachment_ids
             if item.message_id == message.message_id:
                 break
+        if (case_view is not None and selected_attachment_ids
+                and not any(item.kind.value == "ATTACHMENT" for item in case_view.pending_requirements)):
+            policy = self._specialized_input_policy(case_view.selected_skill_ref)
+            if policy is not None and policy.attachment_mode in {"direct_files", "logparse"}:
+                snapshot = self.store.repository.read_snapshot(case_view.case_id)
+                aggregate = snapshot.cases[case_view.case_id]
+                source = build_case_snapshot(snapshot, case_view.case_id).waiting_source_job
+                if not aggregate.case.initial_log_archive_expected and source is not None and not source.attachment_refs:
+                    # Record the persisted selection before accepting parameters.
+                    # This also covers a ROUTE marker that lost to specialized preflight.
+                    try:
+                        self.application.execute(MarkInitialLogArchiveExpected(
+                            idempotency_key="agent-materials-" + str(uuid.uuid5(uuid.UUID(run_id), message.message_id)),
+                            case_id=case_view.case_id, expected_case_revision=aggregate.case.case_revision,
+                            source_job_id=source.job_id))
+                    except ApplicationPortError as error:
+                        if error.error.code.value in {"REVISION_CONFLICT", "INVALID_CASE_STATE"}:
+                            return True
+                        raise
+                    case_view = self.application.get_case(case_view.case_id).case_view
         if message.status != "APPLIED":
             self.store.set_message_status(conversation_id, message.message_id, "PROCESSING")
         draft = self.store.get_draft(conversation_id)
@@ -1001,8 +1029,15 @@ class AgentConversationService:
                 return True
 
             try:
+                label = "message-" + message.message_id
+                if attachment_ids and self.store.get_dispatch(conversation_id, run_id + ":" + label) is not None:
+                    # A single message can supply parameters first and materials
+                    # after the next preflight. Keep both commits independently replayable.
+                    requirement = next(item for item in case_view.pending_requirements
+                        if item.status.value == "OPEN" and item.kind.value == "ATTACHMENT")
+                    label += "-materials-" + requirement.requirement_id
                 submitted = self._supplement(conversation_id, case_view, inputs, attachment_ids,
-                    "message-" + message.message_id, message_id=message.message_id,
+                    label, message_id=message.message_id,
                     selected_attachment_ids=selected_attachment_ids)
             except AttachmentWorkRequired as pending:
                 # Resume only the prepared supplement. A worker must never
@@ -1013,7 +1048,12 @@ class AgentConversationService:
         elif decision.action == "SUBMIT_SUPPLEMENT" and attachment_notice is None:
             raise AgentStoreError("AGENT_NO_MATCHING_INPUT", "本次内容不符合当前补充要求。", 409)
         elif message.status != "APPLIED":
-            self.store.set_message_status(conversation_id, message.message_id, "APPLIED")
+            policy = self._specialized_input_policy(case_view.selected_skill_ref)
+            notice = (_DEFERRED_ATTACHMENTS_NOTICE
+                if selected_attachment_ids and policy is not None and policy.attachment_mode != "none"
+                and not any(item.kind.value == "ATTACHMENT" for item in case_view.pending_requirements)
+                else None)
+            self.store.set_message_status(conversation_id, message.message_id, "APPLIED", notice)
         self.store.finish_intake(conversation_id, [item.message_id for item in prefix],
             attachment_notice=attachment_notice)
         return True
@@ -1079,7 +1119,7 @@ class AgentConversationService:
         if view.current_questions:
             sources.insert(len(sources) - 1, IntakeMessage(message_id="question-" + messages[-1].message_id,
                 role="ASSISTANT", text="\n".join(view.current_questions)))
-        requirements, frozen_requirements, spec, frozen_facts = [], [], None, {}
+        requirements, optional_inputs, frozen_requirements, spec, frozen_facts = [], [], [], None, {}
         if case_view is not None:
             spec = ProblemSpecInput.model_validate(case_view.problem_spec.model_dump(exclude={"revision"}))
             frozen_facts = {item.provenance.input_name: item.statement for item in case_view.user_facts
@@ -1093,10 +1133,22 @@ class AgentConversationService:
                 description=item.prompt, kind="INPUT", constraints=item.constraints)
                 for item in case_view.pending_requirements if item.status.value == "FULFILLED"
                 and item.kind.value == "INPUT" and item.supplement_policy.value == "MISSING_ONLY"]
+            policy = self._specialized_input_policy(case_view.selected_skill_ref)
+            if policy is not None:
+                declared_names = {item.name for item in requirements + frozen_requirements}
+                for item in policy.optional_inputs:
+                    if item.name in declared_names:
+                        continue
+                    definition = IntakeRequirement(requirement_id="optional-" + item.name,
+                        name=item.name, description=item.prompt, constraints=item.constraints)
+                    if item.name in frozen_facts:
+                        frozen_requirements.append(definition)
+                    else:
+                        optional_inputs.append(definition)
         return IntakeInput(conversation_id=view.conversation_id, messages=sources,
             draft=[IntakeValue.model_validate(item) for item in draft.get("problem_fields", [])],
             draft_user_facts=[IntakeValue.model_validate(item) for item in draft.get("user_facts", [])],
-            requirements=requirements, attachments=attachments,
+            requirements=requirements, optional_inputs=optional_inputs, attachments=attachments,
             frozen_problem_spec=spec, frozen_user_facts=frozen_facts,
             frozen_input_requirements=frozen_requirements)
 
@@ -1116,13 +1168,14 @@ class AgentConversationService:
         attachments = [IntakeAttachment(attachment_id=item.attachment_id, file_name=item.name,
             media_type=item.content_type, size_bytes=item.size, sha256=item.sha256) for item in records]
         notice = None
+        count = (str(constraints.min_count) if constraints.min_count == constraints.max_count
+                 else f"{constraints.min_count}～{constraints.max_count}")
         if len(records) > constraints.max_count:
-            notice = ("当前仅支持一份日志归档，请合并后上传，或重新选择一个附件。"
-                if constraints.max_count == 1 else "所选日志附件数量超出当前要求，请重新选择附件。")
+            notice = f"当前需要 {count} 份材料，请重新选择附件。"
         elif any(item.content_type not in constraints.allowed_content_types for item in records):
-            notice = "所选附件格式不符合要求，请重新上传支持的日志归档。"
+            notice = "所选材料格式不符合要求。" + requirement.prompt
         elif records and len(records) < constraints.min_count:
-            notice = "日志附件数量不足，请按要求补充后重新选择附件。"
+            notice = f"材料数量不足，当前需要 {count} 份，请补充后重新选择附件。"
         if notice is not None:
             return attachments, [], {"requirement_id": requirement.requirement_id, "message": notice}
         return attachments, [item.attachment_id for item in records], None

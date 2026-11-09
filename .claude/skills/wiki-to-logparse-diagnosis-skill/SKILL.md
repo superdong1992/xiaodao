@@ -1,86 +1,63 @@
 ---
 name: wiki-to-logparse-diagnosis-skill
-description: Convert an authored troubleshooting Wiki into one production Problem Locator registration with a closed, evidence-driven Methods V1 Skill package. Do not use it to diagnose an incident directly.
+description: 将定位 Wiki 或已有文档型 Skill 适配为 xiaodao 专用定位注册目录，声明各自的参数、附件和输入准备方式。用于创建或更新服务端定位能力，不用于直接诊断故障。
 ---
 
-# Wiki 转 Problem Locator registration
+# 创建专用定位 Skill
 
-把一份已经评审的定位 Wiki 转成可部署到 Linux Problem Locator Server `SKILL_DIR` 的完整
-registration root。生成物只包含产品 registration 和闭合 Methods package；客户端仍使用
-`problem-locator-client` 经 HTTP MCP 提交 Case，生成的业务 Skill 不负责 Logparse 预处理或结果打包。
+根据作者提供的 Wiki 或已有文档型 Skill，生成可部署到 Linux Server `SKILL_DIR` 的完整注册目录。
+默认使用 registration v3 和普通文档包。保留作者的分析方法、阈值、限制和报告要求；参数与日志准备由
+注册配置声明，客户端继续使用现有网站或 HTTP MCP 流程。
 
-## 开始前
+## 选择生成协议
 
-必须取得以下输入：
+- 新建或适配定位能力：阅读 [v3 输出合同](references/output-contract.md)，生成普通文档型 Skill。
+- 调用方明确要求 `registration schema_version=2` 或 Methods V1：阅读
+  [Methods V1 输出合同](references/methods-v1-output-contract.md)，保留旧验收使用的 Methods 生成分支。
+  该分支仍要求 Wiki、作者明确提供的固定 module 和双端日志；不能把它当作 v3 支持情况的验证。
+- 不修改 `.agents/skills/wiki-to-diagnosis-skill`，不自动改写已有 v1/v2 注册目录。
 
-- 原始 Wiki；
-- 以 `diagnose-` 开头的目标 Skill 名称；
-- registration 输出目录；该目录名就是 `registration_id`；
-- client 与 server 共用的固定 Logparse `module`。
+## 先确定输入与适用范围
 
-`module` 必须由用户明确提供，且为 1–128 字节的非空单行 ASCII。缺失或不合法时停止并询问，
-不得从 Wiki、日志模板、示例或历史产物猜测。
+1. 完整阅读来源。Wiki 使用原文件字节；已有 Skill 读取 `SKILL.md` 和它引用的全部 Markdown 资料。
+   来源包含脚本、外部工具调用、其他 Skill 调用或不能在当前服务端执行的步骤时，指出具体依赖和影响，
+   不删除必要步骤后声称已经适配。第一版只接受文档型 Skill。
+2. 确认目标 Skill 名、注册目录、版本和路由范围。适用条件只描述领域、场景和症状；缺少参数或附件
+   属于后续补充材料，不能成为排除专用路由的理由。不能补写来源没有声明的业务限制。
+3. 分清三类数据：用户提供的参数、作者给定的固定值、从材料中提取的字段。逐项保留名称和含义，
+   只对用户参数声明提示、必填性和取值约束。可选参数缺失时不追问；派生字段不能改成用户必填项。
+4. 列出附件用途、允许格式和数量。当前每个注册只支持一个附件集合，可以包含多个文件；不同用途
+   需要分别上传、分别补齐的多个集合暂不支持，不能默默合并。没有附件需求时不生成上传要求。
+5. 会改变定位结论、适用范围或执行方式的缺失信息，列成作者待确认项；不要从历史示例猜测。
 
-完整阅读 Wiki。调用方提供 source identity v2 时，先核对其绑定的 Wiki SHA-256、提取版本和
-`log_templates`，再逐字使用其中的 digest 与模板清单；未提供时只能用确定性哈希工具从原始字节
-计算。不要修改或规范化 Wiki 字节。
+## 选择输入准备方式
 
-生成前完整阅读 [输出合同](references/output-contract.md)。
+| 方式 | 使用条件 | 作者需要声明的内容 |
+| --- | --- | --- |
+| `none` | 根据问题描述和标量事实定位，不读取附件 | 用户参数、固定值及分析方法；附件设为 `null` |
+| `direct_files` | 直接分析文本日志或归档中的文本文件 | 附件用途、格式、数量；不要求 module、slot、进程名或问题时间 |
+| `logparse` | 必须先由服务端 Logparse 提取目标日志 | 日志归档、角色、锚点绑定及 Logparse 所需参数 |
 
-## 转换原则
+`logparse` 的角色数量和名称来自来源，不固定为 client/server。固定 module 必须由作者明确提供；
+需要用户补充的锚点才声明为用户参数。PID 可按实际需要声明为可选参数。业务 Skill 只分析服务端
+已经准备的材料，不调用解析器、不解包文件、不创建最终报告文件。
 
-1. 生成目录根层只放 `registration-template.json` 和 `package/`；`package/` 内只有一个目标
-   Methods Skill。
-2. `required_user_inputs` 无条件先放
-   `problem_time, client_slot, client_process_name, server_slot, server_process_name`，再放可选绑定
-   `client_pid, server_pid`，随后按 Wiki 源顺序追加其他用户参数。PID 可缺省，不得因列入索引而
-   把它变成本次 Case 的必填补充项。
-3. `log_archive` 是唯一受支持的附件。Wiki 明确要求其他附件时停止并报告当前 Server 不支持，
-   不得生成无法运行的 registration。Wiki 的其他标量参数按源顺序保留；同义的时间、slot、
-   进程、服务或 API 信息映射到合同中的稳定名称，不生成别名。
-4. registration 使用 `schema_version=2`，固定为 `version=1.0.0`、`deployment_scope=PRODUCTION`，内部
-   `logparse_product=default`。client/server 的 `module` 使用相同 `SKILL_FIXED` 值；slot、
-   process name 和可选 PID 使用各自的 `USER_FACT` 绑定。diagnose/review 使用产品固定绑定。
-   必须从 Wiki 写出 `routing.applicability` 和 `routing.exclusions`，明确领域、场景、症状及排除边界。
-   不把日志、附件或参数是否齐全写成路由条件；明确适用但缺少材料的 Case 仍由专用流程补充材料。
-   不编造 Wiki 未给出的适用限制；没有明确排除条件时使用空数组。旧版注册可加载，但不能自动进入专用路由。
-5. 按 Wiki 明确列出的原因拆分方法。保留字段含义、计算、单位、阈值、观测限制和安全提醒，
-   不增加经验规则。
-6. source identity 提取版本 2 同时识别 `text` fence 和无语言标记的裸 fence。按清单顺序逐字
-   保存全部机械日志模板，并严格按输出合同提取 canonical stable marker；不得截短、改写、重排、
-   去重或丢失模板。事件名本身不是 marker；例如 `API_COMPLETE service={service}` 对应
-   `API_COMPLETE service=`，只写 `API_COMPLETE` 必须判为错误。
-   每个方法的 marker 还必须覆盖该方法确认、排除、计算和关联目标请求时实际需要读取的全部日志；
-   共同日志的解释可以共享，但不能只留在共享引用而不进入适用方法的索引。每个适用方法都要在
-   “所需证据”段逐字列出完整模板；其他段落中的 marker 字样不算模板归属。
-   完成 `evidence_markers` 后，再从中选择非空、唯一且保持原顺序的 `activation_markers`，作为包格式
-   的辅助索引。Methods V1 仍会扫描全部权威目标日志；activation 命中不是确认结论，也不能缩减
-   evidence marker 范围。
-7. Server 完成 Logparse 预处理并冻结 `request.json`、`target_logs.json`、全部目标日志和
-   `logparse-receipt.json`。业务 `SKILL.md` 指导 Specialist 扫描每个方法 marker，为 confirmed method
-   输出具体 summary、`identity_tokens` 和逐字准确的 source ID、一基行号、marker、完整日志原文。
-   必须要求提交前逐条自查：`source.marker` 原样取自当前方法的 `evidence_markers`，且忽略大小写后
-   是当前引用行的连续子串。不得跨行拼接、跳过中间字段或套用另一种日志模板的 marker；具体示例见
-   输出合同中的“逐条引用自查”。
-8. 输出根 JSON object 的固定七个字段：`schema_version`、`status`、`confirmed_methods`、
-   `candidate_methods`、`evidence`、`limitations`、`safety_notes`。证据不足时使用 `PARTIAL` 或
-   `INSUFFICIENT`。必要日志没有合法 marker 时，把缺口写入 `limitations`，不能删掉必要证据后仍
-   确认该方法。Agent 不创建 Candidate、Outcome、USER_RESULT、ZIP 或权威结论；Server 重新核对
-   方法、marker、行号、日志原文和哈希后生成。
+## 生成与校验
 
-## 校验
-
-生成完成后必须由调用方运行 validator：
+1. 使用确定性工具计算来源 SHA-256，不修改、归一化或重建原始来源。Wiki 计算原文件字节摘要；
+   已有 Skill 按输出合同计算文件清单摘要。调用方提供摘要时仍须核对其绑定的原始来源。
+2. 按选定合同生成注册目录。v3 包只包含 `SKILL.md` 和 `references/` 下的 Markdown 参考资料，
+   不生成 `methods.json`、marker 索引或虚构的 Wiki 日志模板。
+3. 业务入口从冻结请求和材料清单读取输入。保留原有分析步骤、限制和建议，最终输出状态包络及
+   Markdown 正文。不要同时保留“只输出 Methods JSON”的旧要求。
+4. 在新目录中完成校验，再交付给调用方部署；不要修改正在使用的注册目录。v3 校验命令：
 
 ```text
 python3 <本元-Skill目录>/scripts/validate_generated_skill.py \
-  --registration-dir <生成的-registration目录> \
-  --wiki <原始-Wiki路径> \
-  --module <用户确认的固定-module> \
-  [--source-identity <source-identity-v2.json>] \
+  --registration-dir <生成的注册目录> \
+  --source <原始Wiki文件或原始Skill目录> \
   --json
 ```
 
-只有 validator 返回成功才结束。调用环境已经明确授权执行命令时，生成 Agent 可以代调用方运行；
-restricted Test Flow 中，生成 Agent 不得尝试 Bash 或其他未授权命令，只完成文件写入，由 runner 在
-生成结束后执行 validator。校验失败时只修正报告的合同问题，不改变 Wiki 业务语义。
+只有校验成功才报告生成完成。受限环境只授权读写文件时，由调用方运行校验；不得绕过工具权限。
+校验检查结构、声明与来源摘要，不证明业务判断正确。校验失败时修正报告的问题，不借机改写业务语义。

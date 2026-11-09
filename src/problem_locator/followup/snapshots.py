@@ -160,13 +160,20 @@ def build_snapshot(service, task, cancellation):
     if hashlib.sha256(generated["inputs/report.md"]).hexdigest() != source.report_sha256:
         raise InputChanged("published report hash differs")
     if source.has_logs or source.has_log_manifest:
-        name, audit_name, key, hash_key = (("generic_logs.json", "generic_logs.json", "logs", "sha256")
-            if source.source_kind == "GENERIC" else ("target_logs.json", "methods_target_logs.json", "target_logs", "content_sha256"))
+        document = source.source_kind == "SKILL_DIRECT" and source.has_log_manifest
+        name, audit_name, key, hash_key = (("evidence-manifest.json", "document-evidence-manifest.json", "files", "sha256")
+            if document else (("generic_logs.json", "generic_logs.json", "logs", "sha256")
+            if source.source_kind == "GENERIC" else ("target_logs.json", "methods_target_logs.json", "target_logs", "content_sha256")))
         raw = read_small(original, "inputs/" + name)
         if raw != read_small(job_root, audit_name):
             raise InputChanged("log receipt differs from the published execution record")
         payload = json.loads(raw)
-        if source.has_log_manifest and (source.source_kind != "GENERIC"
+        if document:
+            if (not isinstance(payload, dict) or payload.get("schema_version") != 1
+                    or payload.get("preparation") not in ("none", "direct_files", "logparse")):
+                raise InputChanged("文档型 Skill 的材料准备身份发生变化。")
+            preparation = {key: payload[key] for key in ("preparation", "skipped", "coverage", "limitations") if key in payload}
+        elif source.has_log_manifest and (source.source_kind != "GENERIC"
                 or payload.get("preparation") != "direct-v1"):
             raise InputChanged("direct input preparation identity changed")
         if source.source_kind == "GENERIC" and payload.get("preparation") == "direct-v1":
@@ -181,8 +188,8 @@ def build_snapshot(service, task, cancellation):
             raise InputChanged("text-only source unexpectedly contains readable logs")
         seen = set()
         for ordinal, entry in enumerate(entries, 1):
-            path, size, digest = entry.get("log_path"), entry.get("size"), entry.get(hash_key)
-            if (not isinstance(path, str) or not path.startswith("inputs/") or path in seen
+            path, size, digest = entry.get("path" if document else "log_path"), entry.get("size"), entry.get(hash_key)
+            if (not isinstance(path, str) or not path.startswith("inputs/evidence/" if document else "inputs/") or path in seen
                     or type(size) is not int or size < 0 or not isinstance(digest, str) or _HASH.fullmatch(digest) is None):
                 raise InputChanged("invalid log identity")
             seen.add(path)

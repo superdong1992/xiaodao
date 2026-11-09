@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
 import stat
@@ -1220,27 +1221,61 @@ def validate(
     }
 
 
+def _document_validator():
+    path = Path(__file__).with_name("registration_v3.py")
+    spec = importlib.util.spec_from_file_location("_standalone_registration_v3", path)
+    if spec is None or spec.loader is None:
+        raise ValueError("无法加载 v3 注册校验器。")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def validate_document(registration_dir: Path, source: Path) -> dict[str, object]:
+    """Validate the new document package without requiring an installed Server."""
+    return _document_validator().validate_document(registration_dir, source)
+
+
+def document_source_identity(source: Path) -> dict[str, str]:
+    return _document_validator().source_identity(source)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--registration-dir", type=Path, required=True)
-    parser.add_argument("--wiki", type=Path, required=True)
-    parser.add_argument("--module", required=True)
+    parser.add_argument("--registration-dir", type=Path)
+    sources = parser.add_mutually_exclusive_group(required=True)
+    sources.add_argument("--source", type=Path, help="v3 原始 Wiki 文件或文档型 Skill 目录")
+    sources.add_argument("--wiki", type=Path, help="显式 Methods V1 分支使用的原始 Wiki")
+    parser.add_argument("--module")
     parser.add_argument("--source-identity", type=Path)
+    parser.add_argument("--print-source-identity", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
-    result = validate(
-        args.registration_dir,
-        args.wiki,
-        args.module,
-        args.source_identity,
-    )
+    if args.print_source_identity:
+        if args.source is None or args.registration_dir is not None or args.module is not None or args.source_identity is not None:
+            parser.error("--print-source-identity 只能与 --source 及 --json 一起使用。")
+        try:
+            result = {"ok": True, "source": document_source_identity(args.source), "errors": []}
+        except (OSError, UnicodeError, ValueError) as exc:
+            result = {"ok": False, "errors": [str(exc)]}
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
+        return 0 if result["ok"] else 1
+    if args.registration_dir is None:
+        parser.error("校验生成物时必须提供 --registration-dir。")
+    if args.source is not None:
+        if args.module is not None or args.source_identity is not None:
+            parser.error("v3 从注册声明读取准备方式与绑定，不接受旧 Methods 参数 --module 或 --source-identity。")
+        result = validate_document(args.registration_dir, args.source)
+    else:
+        if args.module is None:
+            parser.error("显式 Methods V1 校验必须提供 --module。")
+        result = validate(args.registration_dir, args.wiki, args.module, args.source_identity)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
     elif result["ok"]:
-        print(
-            f"PASS: {result['registration_id']} / {result['skill_name']} "
-            f"({result['method_count']} methods, {result['marker_count']} markers)"
-        )
+        detail = (f"准备方式：{result['preparation_mode']}" if result.get("schema_version") == 3
+                  else f"{result['method_count']} methods, {result['marker_count']} markers")
+        print(f"PASS: {result['registration_id']} / {result['skill_name']} ({detail})")
     else:
         for error in result["errors"]:
             print(f"ERROR: {error}", file=sys.stderr)

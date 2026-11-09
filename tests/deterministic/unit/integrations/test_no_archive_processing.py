@@ -16,7 +16,7 @@ SKILL_DIRS = (
 LOGPARSE_ROOT = SRC_ROOT / "integrations" / "logparse"
 
 # Archive APIs are confined to result/audit serialization and the controlled
-# Generic input reader. It streams members into generated names; extraction
+# shared Generic/document input reader. It streams members into generated names; extraction
 # into caller-supplied paths remains forbidden everywhere.
 CONTROLLED_ARCHIVE_ALLOWLIST = {
     ("src/problem_locator/runtime/direct_generic_logs.py", "<module>"):
@@ -25,7 +25,7 @@ CONTROLLED_ARCHIVE_ALLOWLIST = {
         frozenset({"call:zipfile.ZipFile", "call:archive.infolist", "call:archive.open"}),
     ("src/problem_locator/runtime/direct_generic_logs.py", "tar_members"):
         frozenset({"call:tarfile.open", "call:archive.extractfile"}),
-    ("src/problem_locator/runtime/direct_generic_logs.py", "prepare_direct_generic_sources"):
+    ("src/problem_locator/runtime/direct_generic_logs.py", "prepare_direct_sources"):
         frozenset({"call:gzip.GzipFile"}),
     (
         "src/problem_locator/integrations/result_archive.py",

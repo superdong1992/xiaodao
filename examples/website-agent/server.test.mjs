@@ -82,7 +82,7 @@ function nativeDetail(included = allIncludes, overrides = {}) {
   return { schema_version: 3, conversation_id: conversation, title: "RPC 超时", selected_run_id: runId,
     current_run: { run_id: runId }, capabilities: { can_send: false, can_stop: false, can_rediagnose: true, can_rename: true, can_delete: true }, history_next_cursor: null, status: "RUNNING", case_id: caseId,
     case_revision: 5, job_id: null, source_job_id: jobId, case_status: "RESOLVED", archive_status: "PENDING",
-    progress: { stage: "ARCHIVE", message: "正在整理目标日志" }, report_state: "READY", included,
+    progress: { stage: "ARCHIVE", message: "正在整理诊断材料" }, report_state: "READY", included,
     current_questions: [], failure: null, last_event_id: 7,
     created_at: "2026-09-17T00:00:00.000Z", updated_at: "2026-09-17T00:01:00.000Z",
     history: included.includes("history") ? [{ id: jobId, run_id: runId, type: "user.message", created_at: "2026-09-17T00:00:00.000Z",

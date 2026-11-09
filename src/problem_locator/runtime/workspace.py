@@ -1477,10 +1477,45 @@ class WorkspaceManager:
         if (job.diagnosis_mode is not DiagnosisMode.GENERIC
                 or job.generic_log_preparation != "direct-v1" or not job.attachment_refs):
             raise ValueError("direct log preparation requires fixed Generic attachments")
+        return self._prepare_direct_source_workspace(
+            job, aggregate, resource_store, check_abort=check_abort,
+            workspace_phase="generic-preprocess",
+        )
+
+    def prepare_document_main_metadata_only(
+        self, job: Job, aggregate: CaseAggregate, *,
+        resolved_logparse_plan: ResolvedLogparsePlanInput | None = None,
+    ) -> PreparedWorkspace:
+        """Keep original uploads outside the document Skill's input tree."""
+        if job.job_type is not JobType.DIAGNOSE or job.diagnosis_mode is not DiagnosisMode.SPECIALIZED:
+            raise ValueError("文档型工作区只能用于专用诊断任务。")
+        return self._prepare(
+            job, aggregate, None, resolved_logparse_plan=resolved_logparse_plan,
+            review_subject=None, methods_evaluation_plan=None, workspace_phase=None,
+            materialize_payloads=False,
+        )
+
+    def prepare_document_source_workspace(
+        self, job: Job, aggregate: CaseAggregate, resource_store: ResourceStore, *,
+        check_abort: Callable[[], None],
+    ) -> PreparedWorkspace:
+        if (job.job_type is not JobType.DIAGNOSE
+                or job.diagnosis_mode is not DiagnosisMode.SPECIALIZED or not job.attachment_refs):
+            raise ValueError("文档型材料准备要求已固定的专用诊断附件。")
+        return self._prepare_direct_source_workspace(
+            job, aggregate, resource_store, check_abort=check_abort,
+            workspace_phase="document-preprocess",
+        )
+
+    def _prepare_direct_source_workspace(
+        self, job: Job, aggregate: CaseAggregate, resource_store: ResourceStore, *,
+        check_abort: Callable[[], None],
+        workspace_phase: Literal["generic-preprocess", "document-preprocess"],
+    ) -> PreparedWorkspace:
         check_abort()
         workspace = self._prepare(
             job, aggregate, None, resolved_logparse_plan=None, review_subject=None,
-            methods_evaluation_plan=None, workspace_phase="generic-preprocess",
+            methods_evaluation_plan=None, workspace_phase=workspace_phase,
             materialize_payloads=False,
         )
         inputs = workspace.root / "inputs"
@@ -1539,7 +1574,7 @@ class WorkspaceManager:
         resolved_logparse_plan: ResolvedLogparsePlanInput | ResolvedLogparseParseOnlyPlanInput | None,
         review_subject: ReviewSubjectV2 | None,
         methods_evaluation_plan: MethodEvaluationPlanV2 | None,
-        workspace_phase: Literal["logparse-preprocess", "generic-preprocess"] | None,
+        workspace_phase: Literal["logparse-preprocess", "generic-preprocess", "document-preprocess"] | None,
         materialize_payloads: bool,
         preprocessing_attachment_id: str | None = None,
     ) -> PreparedWorkspace:

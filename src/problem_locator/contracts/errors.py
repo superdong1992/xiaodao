@@ -449,6 +449,9 @@ PORT_ERROR_CODES: Mapping[str, frozenset[ErrorCode]] = MappingProxyType(
         "AssetCatalogPort.route_bindings": frozenset(
             {ErrorCode.CONFIG_INVALID}
         ),
+        "AssetCatalogPort.specialized_input_policy": frozenset(
+            {ErrorCode.ASSET_VERSION_UNAVAILABLE, ErrorCode.CONFIG_INVALID}
+        ),
         "AssetCatalogPort.diagnose_bindings": frozenset(
             {ErrorCode.ASSET_VERSION_UNAVAILABLE, ErrorCode.CONFIG_INVALID}
         ),

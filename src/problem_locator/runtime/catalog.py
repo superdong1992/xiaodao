@@ -29,6 +29,7 @@ from problem_locator.contracts import (
     ReviewPolicy,
     SPECIALIZED_DIRECT_AGENT_PROFILE_ID,
     SPECIALIZED_DIRECT_OUTPUT_CONTRACT_ID,
+    SpecializedInputPolicy,
     VersionedRef,
     default_resource_limits,
 )
@@ -37,8 +38,9 @@ from problem_locator.storage.paths import ensure_no_symlink_ancestors
 
 from .catalog_hash import hash_product_directory
 from .asset_snapshot import register_snapshot, release_snapshots
-from .methods_skill import (
-    ResolvedSpecializedSkillV1,
+from .specialized_skill import (
+    ResolvedSpecializedSkill,
+    is_document_skill,
     load_specialized_skill_registration,
 )
 
@@ -68,7 +70,7 @@ class _BuiltinSpec:
 @dataclass(frozen=True, slots=True)
 class _SkillDescriptor:
     resolved_asset: ResolvedAsset
-    specialized: ResolvedSpecializedSkillV1
+    specialized: ResolvedSpecializedSkill
 
     @property
     def capability(self) -> str:
@@ -460,7 +462,7 @@ class VersionedAssetCatalog:
             ) from None
         return _clone(resolved)
 
-    def resolved_specialized_skill(self, ref: VersionedRef) -> ResolvedSpecializedSkillV1:
+    def resolved_specialized_skill(self, ref: VersionedRef) -> ResolvedSpecializedSkill:
         """Return the current registration/package resolution for Test Flow and runtime."""
 
         descriptor = self._skills.get(_ref_key(ref))
@@ -526,7 +528,7 @@ class VersionedAssetCatalog:
     def diagnose_bindings(self, skill_ref: VersionedRef) -> RuntimeBindings:
         descriptor = self._descriptor(skill_ref, "diagnose_bindings")
         registration = descriptor.specialized.registration
-        direct = self._methods_evidence_validation == "off"
+        direct = is_document_skill(descriptor.specialized) or self._methods_evidence_validation == "off"
         preprocessing = registration.preprocessing
         if preprocessing.requires_logparse and (
             self._logparse_tool_ref is None or not self._ref_is_current(self._logparse_tool_ref)
@@ -588,6 +590,11 @@ class VersionedAssetCatalog:
 
     def review_bindings(self, skill_ref: VersionedRef) -> RuntimeBindings:
         descriptor = self._descriptor(skill_ref, "review_bindings")
+        if is_document_skill(descriptor.specialized):
+            raise _catalog_port_error(
+                "review_bindings", ErrorCode.CONFIG_INVALID,
+                "文档型 Skill 固定使用报告直出，不支持独立审核。",
+            )
         registration = descriptor.specialized.registration
         try:
             bindings = RuntimeBindings(
@@ -611,6 +618,20 @@ class VersionedAssetCatalog:
                 "The review runtime binding configuration is invalid.",
             ) from None
         return _clone(bindings)
+
+    def specialized_input_policy(self, skill_ref: VersionedRef) -> SpecializedInputPolicy | None:
+        """Derive optional fields only from the exact registered Skill snapshot."""
+        skill = self.resolved_specialized_skill(skill_ref)
+        if not is_document_skill(skill):
+            return None
+        return SpecializedInputPolicy(
+            skill_ref=_clone(skill_ref),
+            optional_inputs=[
+                {"name": item.name, "prompt": item.prompt, "constraints": item.constraints}
+                for item in skill.registration.inputs.user if not item.required
+            ],
+            attachment_mode=skill.registration.preprocessing.mode,
+        )
 
 
 AssetCatalog = VersionedAssetCatalog

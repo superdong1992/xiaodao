@@ -298,7 +298,7 @@ function ordinaryMarkdownLinks(document) {
   return links;
 }
 
-export function discoverLinkedSkillReferences(skillRoot) {
+export function discoverLinkedSkillReferences(skillRoot, { requiredReferences = [REQUIRED_REFERENCE_PATH] } = {}) {
   inspectRoot(skillRoot, "Skill root");
   const skillDocumentPath = inspectRegularFile(skillRoot, "SKILL.md");
   let document;
@@ -323,7 +323,9 @@ export function discoverLinkedSkillReferences(skillRoot) {
     references.add(normalized);
   }
   const discovered = [...references].sort();
-  requireAudit(discovered.length === 1 && discovered[0] === REQUIRED_REFERENCE_PATH, SKILL_GENERATION_TRACE_CODES.REQUIRED_REFERENCE_INVALID, "The meta Skill must link exactly references/output-contract.md");
+  requireAudit(Array.isArray(requiredReferences) && requiredReferences.length > 0 && new Set(requiredReferences).size === requiredReferences.length, SKILL_GENERATION_TRACE_CODES.REQUIRED_REFERENCE_INVALID, "The required meta Skill references must be a non-empty unique list");
+  const expected = requiredReferences.map((item) => portableRelativePath(item)).sort();
+  requireAudit(discovered.join("\0") === expected.join("\0"), SKILL_GENERATION_TRACE_CODES.REQUIRED_REFERENCE_INVALID, "The meta Skill links must exactly match the selected generation contracts");
   return discovered;
 }
 

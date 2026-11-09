@@ -49,6 +49,7 @@ from .models import (
     ResolvedAsset,
     ResourceRef,
     RuntimeBindings,
+    SpecializedInputPolicy,
     RuntimeExecutionReceipt,
     Sha256,
     StagedResourceRef,
@@ -283,6 +284,8 @@ class AssetCatalogPort(Protocol):
     ) -> RuntimeBindings: ...
 
     def diagnose_bindings(self, skill_ref: VersionedRef) -> RuntimeBindings: ...
+
+    def specialized_input_policy(self, skill_ref: VersionedRef) -> SpecializedInputPolicy | None: ...
 
     def generic_diagnose_bindings(self, *, with_logs: bool = False) -> RuntimeBindings: ...
 

@@ -61,6 +61,7 @@ from problem_locator.contracts import (
     RestartGenericDiagnosisTriggerPayload,
     ResumeInterruptedTriggerPayload,
     RuntimeBindings,
+    SpecializedInputPolicy,
     StateChangeNotifier,
     StateFile,
     StateMutation,
@@ -253,6 +254,18 @@ class ExternalCommandHandler:
         )
         self._monotonic = monotonic
         self._operational = operational_state
+
+    def specialized_input_policy(self, skill_ref: VersionedRef | None) -> SpecializedInputPolicy | None:
+        """Resolve optional inputs only from the Case's exact frozen Skill ref."""
+        resolver = getattr(self._asset_catalog, "specialized_input_policy", None)
+        if skill_ref is None or resolver is None:
+            return None
+        policy = resolver(skill_ref)
+        if policy is not None and (
+            not isinstance(policy, SpecializedInputPolicy) or policy.skill_ref != skill_ref
+        ):
+            _raise_port_error(ErrorCode.CONFIG_INVALID, "专用 Skill 的输入配置与本次固定版本不一致。")
+        return policy
 
     def execute(self, command: ExternalNonUploadCommand) -> ApplicationResponse:
         if self._operational is not None and isinstance(command, (CreateCase, SubmitSupplement, ResumeCase, RestartGenericDiagnosis, MarkInitialLogArchiveExpected)):
@@ -630,7 +643,8 @@ class ExternalCommandHandler:
                         )
                     ],
                 )
-            self._validate_supplement_inputs(aggregate.case, command.inputs)
+            input_policy = self.specialized_input_policy(aggregate.case.selected_skill_ref)
+            self._validate_supplement_inputs(aggregate.case, command.inputs, input_policy)
             self._validate_supplement_attachments(
                 snapshot,
                 aggregate.case,
@@ -693,6 +707,7 @@ class ExternalCommandHandler:
                     user_facts=user_facts,
                     ready_attachment_ids=list(command.attachment_ids),
                     generic_supplement_text=command.generic_supplement_text,
+                    optional_input_policy=input_policy,
                     stable_target_changed=self._stable_target_detector(
                         aggregate.case,
                         command.inputs,
@@ -721,6 +736,7 @@ class ExternalCommandHandler:
                     plan,
                     occurred_at=occurred_at,
                     next_job_id=job_id,
+                    optional_input_policy=input_policy,
                 )
             except ApplicationPortError as error:
                 if self._retry_revision_conflict(error, attempt):
@@ -913,12 +929,25 @@ class ExternalCommandHandler:
                 return self._respond(snapshot, replay, 0)
             aggregate = self._require_case(snapshot, command.case_id)
             source = aggregate.jobs.get(command.source_job_id)
-            if (aggregate.case.status is not CaseStatus.RUNNING
-                or aggregate.case.active_job_id != command.source_job_id
-                or source is None or source.job_type is not JobType.ROUTE
-                or source.status not in {JobStatus.PENDING, JobStatus.RUNNING}
-                or command.expected_case_revision > aggregate.case.case_revision):
-                _raise_port_error(ErrorCode.INVALID_CASE_STATE, "路由已结束或发生变化，请刷新后重新提交日志。")
+            routing = (aggregate.case.status is CaseStatus.RUNNING
+                and aggregate.case.active_job_id == command.source_job_id
+                and source is not None and source.job_type is JobType.ROUTE
+                and source.status in {JobStatus.PENDING, JobStatus.RUNNING})
+            waiting = False
+            if (aggregate.case.status in {CaseStatus.WAITING_INPUT, CaseStatus.WAITING_ATTACHMENT}
+                    and source is not None and source.job_type is JobType.DIAGNOSE
+                    and aggregate.case.selected_skill_ref is not None
+                    and source.skill_ref == aggregate.case.selected_skill_ref
+                    and not source.attachment_refs
+                    and not any(item.kind is RequirementKind.ATTACHMENT
+                        for item in aggregate.case.diagnosis_state.pending_requirements)):
+                waiting_source = build_case_snapshot(snapshot, command.case_id).waiting_source_job
+                policy = self.specialized_input_policy(aggregate.case.selected_skill_ref)
+                waiting = (waiting_source is not None and waiting_source.job_id == source.job_id
+                    and policy is not None and policy.attachment_mode in {"direct_files", "logparse"})
+            if (not (routing or waiting)
+                    or command.expected_case_revision > aggregate.case.case_revision):
+                _raise_port_error(ErrorCode.INVALID_CASE_STATE, "当前定位状态已变化，请刷新后重新提交材料。")
             if occurred_at is None:
                 occurred_at = self._clock.now()
             target_case = Case.model_validate({**aggregate.case.model_dump(mode="python"),
@@ -1080,6 +1109,7 @@ class ExternalCommandHandler:
         occurred_at: str,
         next_job_id: str | None,
         cancel_job_id: str | None = None,
+        optional_input_policy: SpecializedInputPolicy | None = None,
     ) -> _CommittedCommand:
         aggregate = snapshot.cases[command.case_id]
         target_state = apply_diagnosis_state_delta(
@@ -1128,6 +1158,7 @@ class ExternalCommandHandler:
                 target_case,
                 plan.accepted_state_delta.add_user_facts,
                 command.attachment_ids,
+                optional_input_policy,
             )
         receipt = BusinessReceipt(
             operation=type(command).__name__,
@@ -1505,6 +1536,7 @@ class ExternalCommandHandler:
     def _validate_supplement_inputs(
         case: Case,
         inputs: Mapping[str, str],
+        policy: SpecializedInputPolicy | None = None,
     ) -> None:
         open_inputs = {
             requirement.name: requirement
@@ -1512,15 +1544,23 @@ class ExternalCommandHandler:
             if requirement.status is RequirementStatus.OPEN
             and requirement.kind is RequirementKind.INPUT
         }
+        optional_inputs = {} if policy is None else {item.name: item for item in policy.optional_inputs}
+        fixed_names = {item.provenance.input_name for item in case.diagnosis_state.user_facts}
+        if policy is not None and policy.skill_ref != case.selected_skill_ref:
+            _raise_port_error(ErrorCode.CONFIG_INVALID, "可选参数配置与本次固定的 Skill 不一致。")
         for name, value in inputs.items():
+            if name in fixed_names:
+                _raise_port_error(ErrorCode.NEW_CASE_REQUIRED, "本次任务已采用该参数；如需更正，请新建任务。",
+                    [_detail(field=f"inputs.{name}")])
             requirement = open_inputs.get(name)
-            if requirement is None:
+            definition = requirement or optional_inputs.get(name)
+            if definition is None:
                 _raise_port_error(
                     ErrorCode.VALIDATION_ERROR,
-                    "A supplement input does not match an OPEN requirement.",
-                    [_detail(field=f"inputs.{name}", expected="OPEN requirement")],
+                    "补充参数未匹配当前要求或声明的可选参数。",
+                    [_detail(field=f"inputs.{name}", expected="OPEN requirement or declared optional input")],
                 )
-            constraints = requirement.constraints
+            constraints = definition.constraints
             if not isinstance(constraints, InputRequirementConstraints):
                 _raise_port_error(
                     ErrorCode.VALIDATION_ERROR,
@@ -1671,6 +1711,7 @@ class ExternalCommandHandler:
         target_case: Case,
         user_facts: Sequence[DiagnosisItem],
         attachment_ids: Sequence[str],
+        policy: SpecializedInputPolicy | None = None,
     ) -> None:
         fact_id_set = {item.item_id for item in user_facts}
         facts = {
@@ -1693,9 +1734,14 @@ class ExternalCommandHandler:
             for requirement in target_case.diagnosis_state.pending_requirements
         }
         expected_requirement_by_fact: dict[str, str] = {}
+        optional_names = set() if policy is None else {item.name for item in policy.optional_inputs}
         for fact in user_facts:
             source_requirement = open_inputs.get(fact.provenance.input_name)
             if source_requirement is None:
+                if fact.provenance.input_name in optional_names:
+                    if any(fact.item_id in item.fulfilled_by_refs for item in target_requirements.values()):
+                        _raise_port_error(ErrorCode.VALIDATION_ERROR, "可选参数不能满足其他补充要求。")
+                    continue
                 _raise_port_error(
                     ErrorCode.VALIDATION_ERROR,
                     "A supplied input did not originate from an OPEN input requirement.",

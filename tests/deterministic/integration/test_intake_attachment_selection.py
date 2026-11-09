@@ -13,7 +13,7 @@ from tests.deterministic.integration.test_website_agent import _post, _preupload
 from tests.deterministic.journey.test_rpc_timeout import ARCHIVE, PARAMETER_GROUP_A
 
 
-_SELECT_ONE = "当前仅支持一份日志归档，请合并后上传，或重新选择一个附件。"
+_SELECT_ONE = "当前需要 1 份材料，请重新选择附件。"
 
 
 def _upload_another(client, prefix):

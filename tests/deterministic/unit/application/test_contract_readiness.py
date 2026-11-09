@@ -145,11 +145,13 @@ def test_contract_exposes_one_typed_application_port_failure() -> None:
 
 def test_submit_supplement_trigger_carries_stable_target_decision() -> None:
     assert "stable_target_changed" not in SubmitSupplement.model_fields
+    assert "optional_input_policy" not in SubmitSupplement.model_fields
     assert list(SubmitSupplementTriggerPayload.model_fields) == [
         "user_facts",
         "ready_attachment_ids",
         "stable_target_changed",
         "generic_supplement_text",
+        "optional_input_policy",
     ]
     payload = SubmitSupplementTriggerPayload(
         user_facts=[],
@@ -157,6 +159,8 @@ def test_submit_supplement_trigger_carries_stable_target_decision() -> None:
         stable_target_changed=False,
     )
     assert payload.stable_target_changed is False
+    assert payload.optional_input_policy is None
+    assert "optional_input_policy" not in payload.model_dump()
 
 
 def test_upload_command_carries_content_type_for_pre_read_validation() -> None:

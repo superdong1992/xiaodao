@@ -435,12 +435,18 @@ def assemble_unresolved_audit_bundle(
             )
         )
         if _is_methods_preflight(job, outcome):
+            # Document Skills use the same supplement outcome, but retain their
+            # own server-authored input request. Model prompts/raw output remain
+            # private execution records and are never added to this public ZIP.
+            preflight_name = "document-preflight.json"
+            preflight_bytes = execution_records.read_audit_bytes(job_id, preflight_name)
+            if preflight_bytes is None:
+                preflight_name = "methods_preflight.json"
+                preflight_bytes = _required_execution_bytes(execution_records, job_id, preflight_name)
             sources.append(
                 AuditBundleSource(
-                    f"{prefix}/methods_preflight.json",
-                    _required_execution_bytes(
-                        execution_records, job_id, "methods_preflight.json"
-                    ),
+                    f"{prefix}/{preflight_name}",
+                    preflight_bytes,
                     required=True,
                 )
             )

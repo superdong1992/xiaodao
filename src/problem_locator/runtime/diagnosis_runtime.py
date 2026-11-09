@@ -196,8 +196,9 @@ from .methods_grounding import (
 )
 from .methods_skill import (
     ResolvedSpecializedSkillV1,
-    load_specialized_skill_registration,
 )
+from .specialized_skill import ResolvedSpecializedSkill, is_document_skill, load_specialized_skill_registration
+from .document_runtime import execute_document_skill
 from .server_outcome_finalizer import finalize_server_outcome
 from .workspace import (
     FrozenMethodsWorkspaceInputs,
@@ -1297,6 +1298,10 @@ class DiagnosisRuntime:
                     job, reason="已注册的专用 Skill 均未声明路由适用范围，转入通用定位。",
                 )
         aggregate = self._read_case(job)
+        if job.job_type is JobType.DIAGNOSE and job.diagnosis_mode is DiagnosisMode.SPECIALIZED:
+            specialized = self._resolved_registered_skill(assets)
+            if is_document_skill(specialized):
+                return execute_document_skill(self, job, aggregate, assets, cancellation, specialized)
         prior_methods_diagnosis: VerifiedMethodDiagnosisV1 | None = None
         prior_methods_diagnosis_bytes: bytes | None = None
         prior_methods_audit_bytes: bytes | None = None
@@ -4540,14 +4545,21 @@ class DiagnosisRuntime:
                     ) from exc
 
     @staticmethod
-    def _resolved_methods_skill(
+    def _resolved_registered_skill(
         assets: ResolvedJobAssets,
-    ) -> ResolvedSpecializedSkillV1:
+    ) -> ResolvedSpecializedSkill:
         if assets.skill is None:
-            raise ValueError("Methods execution requires a pinned Skill")
+            raise ValueError("专用诊断必须使用固定版本的 Skill。")
         skill = load_specialized_skill_registration(Path(assets.skill.root_path))
         if skill.combined_sha256 != assets.skill.ref.content_hash:
-            raise ValueError("registered Methods Skill differs from the pinned ref")
+            raise ValueError("专用 Skill 内容与任务固定版本不一致。")
+        return skill
+
+    @staticmethod
+    def _resolved_methods_skill(assets: ResolvedJobAssets) -> ResolvedSpecializedSkillV1:
+        skill = DiagnosisRuntime._resolved_registered_skill(assets)
+        if is_document_skill(skill):
+            raise ValueError("文档型 Skill 不能进入 Methods 执行分支。")
         return skill
 
     @staticmethod
@@ -4693,7 +4705,7 @@ class DiagnosisRuntime:
             }) for plan in compile_resolved_logparse_plans(job, aggregate, assets))
         limits = self._backend_test_limits or BackendExecutionLimits.from_resource_limits(job.resource_limits)
         deadline = time.monotonic() + limits.wall_time_seconds
-        sources = tuple(self._read_methods_preprocessing_source(
+        sources = tuple(self._read_logparse_source(
             job=job, aggregate=aggregate, plan=plan, assets=assets,
             cancellation=cancellation, batch=batch, deadline=deadline,
         ) for plan in plans)
@@ -4742,7 +4754,7 @@ class DiagnosisRuntime:
         return MethodsPreprocessingExecution(validated=first.validated, frozen=frozen,
             claim=first.claim if not batch else None, secrets=(), sources=sources)
 
-    def _read_methods_preprocessing_source(
+    def _read_logparse_source(
         self, *, job: Job, aggregate: CaseAggregate, plan: ResolvedLogparsePlanInput,
         assets: ResolvedJobAssets, cancellation: CancellationSignal,
         batch: bool, deadline: float,
@@ -4753,7 +4765,7 @@ class DiagnosisRuntime:
                 code=ErrorCode.ASSET_VERSION_UNAVAILABLE,
                 message="The fixed logparse broker asset is unavailable.",
             )
-        skill = self._resolved_methods_skill(assets)
+        skill = self._resolved_registered_skill(assets)
         preprocessing_workspace_started = time.perf_counter()
         try:
             preprocessing_workspace = self._workspace_manager.prepare(

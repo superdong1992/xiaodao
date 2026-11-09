@@ -8,7 +8,7 @@ ROUTE 只调用一次模型，逐项审核各 Skill 声明的适用条件和排�
 
 ## 注册与升级
 
-新注册使用 `registration-template.json` 的 `schema_version: 2`，新增必填 `routing`：
+Methods 注册使用 `registration-template.json` 的 `schema_version: 2`，文档型注册使用 `schema_version: 3`；两者都必须声明 `routing`：
 
 ```json
 "routing": {
@@ -23,7 +23,9 @@ ROUTE 只调用一次模型，逐项审核各 Skill 声明的适用条件和排�
 
 旧 `schema_version: 1` 注册仍可加载和读取历史记录，索引中的 `routing` 为 null，不能自动选入专用流程。所有生产候选仍在索引中，不按初始事实名预过滤。全部候选都缺少范围声明时，服务端直接转通用，零模型调用。新声明纳入注册内容哈希；更新后按既有部署流程重启服务，已冻结的 Job 不使用运行中被替换的声明。
 
-完整注册生成器和发布模板已更新；只生成 Methods 包的元 Skill 仍只生成包。MCP 的七个公开输入、Case REST 输入和持久化 `RouteDecision` 格式不变。
+第二个创建器 `wiki-to-logparse-diagnosis-skill` 默认生成 v3 注册，支持 Wiki 和已有文档型 Skill；第一个 `wiki-to-diagnosis-skill` 继续只生成 Methods 包。v3 的材料要求和 `logparse/direct_files/none` 准备方式不改变路由判断，参数与材料缺失在选定 Skill 后处理。MCP 的七个公开输入、Case REST 输入和持久化 `RouteDecision` 格式不变。
+
+更新时先在 `SKILL_DIR` 外生成并校验独立目录。结束运行中的任务后替换原注册并重启，不让同一能力的新旧版本同时参与路由。回退时恢复原注册；不改写已有任务的 `skill_ref` 或历史报告。
 
 ## 审核与排查
 

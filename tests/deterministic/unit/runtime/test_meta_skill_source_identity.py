@@ -51,7 +51,7 @@ def _load_module(path: Path, name: str) -> ModuleType:
     return module
 
 
-def test_two_generators_share_the_methods_v1_agent_surface() -> None:
+def test_explicit_legacy_generators_share_the_methods_v1_agent_surface() -> None:
     package_validator = _load_validator()
     registration_validator = _load_module(
         LAN_VALIDATOR,
@@ -70,7 +70,7 @@ def test_two_generators_share_the_methods_v1_agent_surface() -> None:
         ROOT
         / ".agents/skills/wiki-to-diagnosis-skill/references/output-contract.md",
         ROOT
-        / ".claude/skills/wiki-to-logparse-diagnosis-skill/references/output-contract.md",
+        / ".claude/skills/wiki-to-logparse-diagnosis-skill/references/methods-v1-output-contract.md",
     ):
         text = contract.read_text(encoding="utf-8")
         for phrase in package_validator.REQUIRED_SKILL_PHRASES:

@@ -22,7 +22,7 @@
 
 已交付的 V2 Markdown 正式报告默认支持赞踩，包括通用定位和专用定位默认 `direct` 模式的报告。网站按反馈接口返回的 `can_rate` 显示按钮。通用定位可选的“点赞 → 经验卡 → 后续诊断参考”功能默认关闭，不影响评价的读取和提交；专用报告只保存评价，不生成或召回通用经验。接入、保留策略与验收要求见[通用定位经验库](docs/generic-feedback-memory.md)。
 
-## Methods V1 专用定位报告
+## 专用定位 Skill 与报告
 
 本次预览版使用以下固定版本：
 
@@ -33,7 +33,8 @@
 | S00 合同修订版 | `v11-contract-r3` |
 | Agent 会话详情 / 存储 / 事件 | `3` / `2` / `2` |
 | Methods 包 | `SKILL.md` + `methods.json@1` + `references/*.md` |
-| 产品注册格式 | `registration-template.json@2`；V1 仅兼容加载，不参与自动专用路由 |
+| 文档型包 | `skill-document-v1`：`SKILL.md` + Markdown 参考资料 |
+| 产品注册格式 | `registration-template.json@3` 用于文档型包，V2 用于 Methods 包；V1 仅兼容加载，不参与自动专用路由 |
 | Methods 评估协议 | `Methods V1` |
 | ROUTE / DIAGNOSE / REVIEW 输出格式 | `6.0.0` / `11.0.0` / `10.0.0` |
 | GENERIC 输出格式 / 运行配置 | `2.0.0` / `3.0.0` |
@@ -47,10 +48,10 @@ State、Job 和服务端确认的 Outcome 使用 V11。当前服务使用 Postgr
 
 本仓库将故障定位能力分为四层：
 
-- 产品注册只声明路由、必需的用户输入和附件、Logparse 产品与锚点（anchor），以及 DIAGNOSE/REVIEW 所用的内置运行配置。
-- `.agents` 下的 Wiki 元 Skill 只生成包含全部所需文件的 Methods 包；`.claude` 下的局域网部署元 Skill 生成可用于生产环境的完整注册目录，并将同一 Methods 包放入其中的 `package/`。两者都不生成 GenerationSpec、`diagnosis-skill.json` 或验证合同。
-- 产品提供的 Logparse 在独立工作区中预处理日志，每个 Job 只调用一次 broker，解析日志或复用已有结果。此过程不再启动只负责转发固定命令的 Agent。关闭 broker 并撤销调用权限后，服务端才读取已固定的目标日志、扫描方法并启动 Specialist。
-- Specialist 根据已固定的请求、目标日志、Logparse 执行回执和命中的方法卡执行 Skill。默认提交 `RESOLVED` 或 `UNRESOLVED` 及 Markdown 正文，由服务端原样交付。显式恢复 `advisory` 或 `strict` 后，才使用 `MethodDiagnosisDraftV1`、Candidate 和结构化用户报告；独立 Reviewer 也只在这两种策略下按开关启用。
+- 产品注册声明路由、用户参数、材料集合和准备方式。v3 将用户参数、作者固定值和材料中提取的字段分开声明，按 Skill 的实际需要收集输入。
+- `.agents` 下的 Wiki 元 Skill 仍生成 Methods 包；`.claude` 下的创建器默认生成 v3 注册及普通文档包，也保留显式请求的旧 Methods 分支。
+- 服务端按注册选择 `logparse`、`direct_files` 或 `none`，校验输入并准备只读材料。只有 `logparse` 调用 broker；多份归档分别解析，关闭 broker 后再开始诊断。
+- Specialist 执行固定版本的 Skill。v3 始终提交状态标记和 Markdown 正文；v1/v2 Methods 保留 marker 扫描，并继续受 `off/advisory/strict` 配置控制。
 
 `.agents/skills/wiki-to-diagnosis-skill` 根据一份已评审的 Wiki 生成 `SKILL.md`、`methods.json` 和可独立加载的 `references/*.md` 方法卡。每张方法卡记录一个诊断方法的适用条件、日志线索和判断步骤。
 
@@ -58,17 +59,23 @@ State、Job 和服务端确认的 Outcome 使用 V11。当前服务使用 Postgr
 
 本次模型输入格式升级不兼容旧版。仍要求 `evaluation_input`、Evidence Graph/Plan 或 `supporting_event_refs` 的旧 Evidence V2 包将无法加载。部署新版本前，必须用当前元 Skill 从原 Wiki 重新生成包，在新目录中完成校验后再切换 `SKILL_DIR`，不要在原目录中混用新旧包。
 
-仓库另提供 [`.claude/skills/wiki-to-logparse-diagnosis-skill`](.claude/skills/wiki-to-logparse-diagnosis-skill)，可在局域网 Claude Code 中根据 Wiki 生成完整注册目录，直接部署到 Linux 服务端的 `SKILL_DIR`。生成内容包括 `registration-template.json` 和文件齐全的 Methods 包。必填字段固定为 `client_slot`、`client_process_name`、`server_slot`、`server_process_name`；双端共用作者确认的 module，PID 仅在用户主动提供时使用。
+仓库另提供 [`.claude/skills/wiki-to-logparse-diagnosis-skill`](.claude/skills/wiki-to-logparse-diagnosis-skill)，可从 Wiki 创建定位能力，或适配已有文档型 Skill。默认生成 `registration-template.json@3` 及 `package/<skill-name>/`，部署到 Linux 服务端的 `SKILL_DIR`。首期只接收文档，不接入自带脚本、额外工具或其他 Skill 调用；发现未满足的依赖必须明确报告。生成格式和校验命令见 [v3 输出合同](.claude/skills/wiki-to-logparse-diagnosis-skill/references/output-contract.md)。
 
-客户端只使用 `$problem-locator-client` 经 HTTP MCP 提交 Case，不加载这个业务 Skill，也不在本地调用 Logparse。服务端负责 ROUTE、直接执行 Logparse 预处理、Methods 诊断、可选 Review，以及确认并打包最终结果。
+v3 每个 Skill 声明一个可含多份文件的材料集合，以及各自的必填、可选参数。`direct_files` 直接读取文本、JSON 和安全展开后的文本，不索要无关的时间、槽位、进程或 module；`none` 只使用原始问题和已接受事实，不采用预上传附件。`logparse` 按声明绑定时间与角色，支持单端、多端、可选角色及不同 module，不再固定要求 client/server。必填参数复用聊天追问；可选参数缺失不追问，用户主动提供时按声明校验。
 
-Logparse 产品可以省略，此时运行时将实际使用的产品记录为 `default`，Broker 不向上游传入 `--product`；只有非默认产品才显式传参。生成定位 Skill 时，作者只需在 Logparse 归档要求（requirement）中声明数量限制，无需填写 Content-Type。上传时用户也只需选择归档文件。平台按文件后缀确定内部 Content-Type：`.gz/.tar.gz/.tgz` 为 `application/gzip`，`.zip` 为 `application/zip`，`.tar` 为 `application/x-tar`。
+三种方式都生成只读 `inputs/request.json` 和 `inputs/evidence-manifest.json`。请求保留原始问题、已接受参数与 Skill 文档清单；材料清单记录来源、大小、摘要、跳过项和准备限制。文档保存到 `inputs/skill/`，参考资料可按需读取，不依赖 marker 命中。准备失败不会切换到其他方式；材料清单也不代表已经完成分析。
 
-最终 Outcome 和可公开下载的文件由服务端创建。默认 SPECIALIZED DIAGNOSE 在首行提交 `<<<SKILL_DIAGNOSIS_RESULT_V1:RESOLVED>>>` 或 `<<<SKILL_DIAGNOSIS_RESULT_V1:UNRESOLVED>>>`，换行后提交 Markdown 正文；服务端负责保存和交付。显式恢复 `advisory` 或 `strict` 时，DIAGNOSE 使用 `MethodDiagnosisDraftV1`，REVIEW 使用 `MethodReviewV1`。
+旧注册不自动改写。新版本应在 `SKILL_DIR` 外的独立目录生成并校验；结束运行中的任务后替换对应注册并重启。同一能力的新旧注册不要同时参与路由；回退时恢复旧目录。此改动不新增 Job 字段，不迁移 State V11，也不改变七个公开 MCP 输入。
+
+客户端只使用 `$problem-locator-client` 经 HTTP MCP 提交 Case，不加载业务 Skill，也不在本地调用 Logparse。服务端负责路由、按注册准备材料、执行诊断和交付报告；旧 Methods 可按配置启用 Review。
+
+选择 `logparse` 时，v3 注册须明确填写 `logparse_product`，使用默认产品可填 `default`；旧 Methods 保留省略产品的规则。实际产品为 `default` 时，Broker 不向上游传入 `--product`。v3 同时声明材料格式和数量。上传时用户只需选择文件，平台按后缀确定内部 Content-Type：`.gz/.tar.gz/.tgz` 为 `application/gzip`，`.zip` 为 `application/zip`，`.tar` 为 `application/x-tar`。
+
+最终 Outcome 和可公开下载的文件由服务端创建。默认 SPECIALIZED DIAGNOSE 在首行提交 `<<<SKILL_DIAGNOSIS_RESULT_V1:RESOLVED>>>` 或 `<<<SKILL_DIAGNOSIS_RESULT_V1:UNRESOLVED>>>`，换行后提交 Markdown 正文；服务端负责保存和交付。旧 Methods 显式恢复 `advisory` 或 `strict` 时，DIAGNOSE 使用 `MethodDiagnosisDraftV1`，REVIEW 使用 `MethodReviewV1`。v3 始终采用 Markdown，不进入这两种 Methods 核验流程。
 
 当前生产环境默认使用 `METHODS_EVIDENCE_VALIDATION=off`：直接交付 Skill 的 Markdown 原文，并采用 Skill 选择的 `RESOLVED` 或 `UNRESOLVED`。此时框架不再核对输出是否有原始证据支持（grounding），也不执行证据一致性复核、Candidate 语义判定或独立 Reviewer，不自动生成 `PARTIAL`、清空根因或补写“证据不足”。即使旧配置仍有 `SPECIALIZED_REVIEWER_ENABLED=true`，`off` 也会关闭审核。Skill 写明的限制或未解决结论仍按原文保留。
 
-模型执行前的 Logparse 预处理、日志内容固定、marker 扫描和方法卡加载保持不变；路径、文件归属、权限、字节数、SHA-256 和执行协议检查也继续生效。默认报告沿用现有 Markdown 文件格式，不生成证据核验 JSON 或 `result.zip`，`archive_status=NOT_REQUIRED`。设置 `advisory` 或 `strict` 可恢复原交付策略。详情见[诊断交付策略](docs/diagnosis-advisory.md)。
+旧 Methods 的 Logparse 预处理、日志内容固定、marker 扫描和方法卡加载保持不变；两类 Skill 都保留路径、文件归属、权限、字节数、SHA-256 和执行协议检查。默认报告沿用现有 Markdown 文件格式，不生成证据核验 JSON 或 `result.zip`，`archive_status=NOT_REQUIRED`。旧 Methods 设置 `advisory` 或 `strict` 可恢复原交付策略。详情见[诊断交付策略](docs/diagnosis-advisory.md)。
 
 要求输出 JSON 的 ROUTE、Intake、Specialist 和 Reviewer 阶段按[模型输出兼容规则](docs/model-output-compatibility.md)解析。新版报告追问直接进入 Generic，使用正式 V2 报告合同，不再要求旧追问控制包；旧格式兼容记录保留供排查历史任务。七个 MCP 工具的输入格式要求不变。网站快照的 failure 字段用于展示安全失败原因并关联服务端日志；调度或持久化异常会使服务停止接收新任务。结果提交可在现有 30 秒窗口内重试，窗口到期不强行中断单次阻塞 I/O，也不重新调用模型。
 
@@ -86,7 +93,7 @@ Release 制订计划时，会将 Git 可见的工作区文件保存为不可变�
 
 真实模型认证必须在不调用模型的 Core 测试通过后单独执行。默认 P1/P2 只认证 Specialist；盲评认证须显式选择。Provider 认证必须绑定同一份源码快照、Methods V1 合同摘要和 Core 验证结论摘要。旧 Evidence V2 Fast E2E 或缓存结果不能用作当前版本的认证证据。独立运行生成的 verdict 只证明它声明的短流程，不代表完整 Test Flow、Release 或实际局域网部署已通过验收。
 
-Problem Locator 是一个单实例故障诊断服务。它接收结构化问题，收集事实与附件，执行固定版本的路由和诊断任务。专用定位默认直接交付 Skill 的 Markdown 原文；Generic V2 继续使用原有 Markdown 交付方式。只有显式恢复 `advisory` 或 `strict` 时，专用定位才生成 `diagnosis-result.json` 并按原有格式要求归档。
+Problem Locator 是一个单实例故障诊断服务。它接收结构化问题，收集事实与附件，执行固定版本的路由和诊断任务。专用定位默认直接交付 Skill 的 Markdown 原文；Generic V2 继续使用原有 Markdown 交付方式。只有旧 Methods 显式恢复 `advisory` 或 `strict` 时，才生成 `diagnosis-result.json` 并按原有格式要求归档。
 
 Problem Locator 8.2 将活动 Case、Job 和核心命令的幂等记录保存在内存中，每个 Case 有独立锁和修订版本（revision）。会话、轮次、消息、派发记录和公共事件存入 PostgreSQL，独立事务从连接池获取连接，让不同会话的数据库操作并行执行。最终结果与报告可用事件在同一事务中提交，归档状态与归档事件也在同一事务中提交，成功后才通知客户端。阶段事件不会增加 Case revision。历史 Case 按需读取，不在每次写操作中复制全库或重新读取历史附件。报告、日志和附件文件仍保存在 `DATA_ROOT`。
 
@@ -119,7 +126,7 @@ uv lock --check
 | `DATABASE_URL` | 是 | 无 | `postgresql://` 或 `postgres://` 连接地址，须包含服务器地址与数据库名；凭据保存在私有配置中，跨主机连接按部署要求设置 `sslmode`。缺少或无法连接时拒绝启动，不回退到 SQLite |
 | `DATABASE_POOL_SIZE` | 否 | `8` | 每个服务进程的连接池上限，只接受 2–32 的整数；结合 PostgreSQL 连接总量配置 |
 | `PUBLIC_BASE_URL` | 是 | 无 | 对外提供服务的 HTTP(S) 根地址，不得包含查询参数或片段 |
-| `SKILL_DIR` | 是 | 无 | 由部署方维护的产品注册目录；每个子目录包含一个 `registration-template.json` 及对应的 Methods 包。须填写实际存在的目录的绝对路径；只使用通用定位时，目录可以为空。生产环境不接受 `TEST_ONLY` 注册，也不得使用 Agent 的个人 Skill 目录 |
+| `SKILL_DIR` | 是 | 无 | 由部署方维护的产品注册目录；每个子目录包含一个 `registration-template.json` 及对应的文档型包或 Methods 包。须填写实际存在的目录的绝对路径；只使用通用定位时，目录可以为空。生产环境不接受 `TEST_ONLY` 注册，也不得使用 Agent 的个人 Skill 目录 |
 | `GENERIC_SKILL_NAME` | 是 | 无 | Agent 环境中预装的通用定位 Skill 名称；仅允许标准的小写字母和连字符命名格式。启动时不调用 Skill 检查是否已安装 |
 | `GENERIC_LOGPARSE_PRODUCT` | 否 | `default` | 旧 Generic Job 继续使用其固定的 Logparse 配置；新通用诊断直接准备用户日志，不使用此项。专用诊断仍使用 Skill 声明的产品 |
 | `GENERIC_MEMORY_ENABLED` | 否 | `false` | 控制通用经验提炼和召回，不影响 V2 Markdown 报告赞踩；启用前完成实际 Skill 与脱敏验收 |
@@ -164,13 +171,13 @@ MCP 写操作和默认查询返回简要进度及 `artifact_views`；完整事�
 不要配置或持久化 `PROBLEM_LOCATOR_LOGPARSE_ENDPOINT` 和 `PROBLEM_LOCATOR_LOGPARSE_TOKEN`。
 当前专用定位主流程不会把这些变量交给 Agent。只有为兼容保留的委托流程显式请求 Agent broker 环境时，运行时才会为该任务临时创建，并在会话结束时撤销。
 
-专用定位主流程不再要求在 Agent 配置目录下安装 `.claude/skills/logparse-diagnose`。运行时会先创建独立的预处理工作区，写入全部所需文件并完成校验，再执行一次固定的 broker 请求。执行过程仍受 Job 总时长上限（wall time）、工作区大小上限（Workspace byte limit）和取消信号约束，并校验已接受的请求（accepted request）、唯一的成功审计记录（audit）、claim、目标日志哈希，以及已固定的执行回执。
+选择 Logparse 的专用定位不要求在 Agent 配置目录下安装 `.claude/skills/logparse-diagnose`。运行时先创建独立的预处理工作区，写入所需文件并校验，再按每份归档的固定计划调用 broker。执行过程受 Job 总时长、工作区大小和取消信号约束，并校验已接受的请求、唯一的成功审计记录、claim、目标日志哈希及执行回执。
 
 运行期间的安全扫描允许正常文件写入，退出后再严格复核。每个 Logparse 子进程启动前，仍会重新核对固定版本的运行文件。运行时在启动 Specialist 前关闭 broker，并撤销该任务的调用权限。仓库保留这个 Helper，供旧环境核对使用；当前专用流程不会调用它。
 
 ### 局域网通用定位 Skill
 
-`GENERIC_SKILL_NAME` 指向 Linux 服务端 Agent 中预装的普通黑盒 Skill。该 Agent 由 `DIAGNOSE_CLAUDE_COMMAND` 启动，未设置时使用 `CLAUDE_COMMAND`。它不属于 `SKILL_DIR` 中带产品注册和 Methods 包的专用定位 Skill。
+`GENERIC_SKILL_NAME` 指向 Linux 服务端 Agent 中预装的普通黑盒 Skill。该 Agent 由 `DIAGNOSE_CLAUDE_COMMAND` 启动，未设置时使用 `CLAUDE_COMMAND`。它不属于 `SKILL_DIR` 中带产品注册的专用定位 Skill。
 
 Windows、macOS 和显式启用的 Linux 客户端都只经 HTTP 调用服务端，不安装或执行这个通用 Skill。服务进程启动时只校验名称格式，不检查 Skill 是否存在或能否正确输出结果。只部署通用定位 Skill 时，`SKILL_DIR` 仍须填写实际存在的目录的绝对路径，但目录可以为空。此时 ROUTE 没有专用候选，会直接转入 GENERIC DIAGNOSE，不调用路由 Agent。
 
@@ -396,7 +403,7 @@ uv run python -m problem_locator serve --env-file /absolute/path/to/service.env 
 
 ## Methods V1、可选审核与报告
 
-默认 `METHODS_EVIDENCE_VALIDATION=off` 时，SPECIALIZED 定位直接交付 Skill 结果：
+以下说明旧 v1/v2 Methods 包的流程；v3 文档型包始终直接交付 Markdown，并按注册选择材料准备方式。默认 `METHODS_EVIDENCE_VALIDATION=off` 时，Methods 定位直接交付 Skill 结果：
 
 1. 创建 Case 后，服务端根据已安装的 Methods 包返回尚缺的输入和附件要求（requirements）。客户端不在创建 Case 前猜测需要什么输入。
 2. 输入齐备后，Logparse 预处理并固定目标日志，服务端扫描 marker，再加载命中的方法卡。Specialist 读取已固定的请求、目标日志、执行回执（receipt）和这些方法卡。

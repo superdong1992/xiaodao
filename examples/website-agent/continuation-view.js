@@ -92,7 +92,7 @@ export function renderInputChanges(container, changes, runtimeChanges = []) {
 export function mountContinuationView(container, controller, { client, conversationId, runId, onSelectRun = () => {} } = {}) {
   const doc = container.ownerDocument, make = (tag, text) => node(doc, tag, text);
   const root = make("section"); root.className = "xiaodao-continuation"; root.setAttribute("aria-label", "继续诊断与报告版本");
-  root.append(make("h2", "继续诊断"), make("p", "补充日志、更正问题或指定下一步目标，核对后生成新一版报告。旧报告和追问记录会保留。"));
+  root.append(make("h2", "继续诊断"), make("p", "补充材料、更正问题或指定下一步目标，核对后生成新一版报告。旧报告和追问记录会保留。"));
   const notice = make("p"), error = make("p"), storageNotice = make("p"); error.setAttribute("role", "alert"); notice.setAttribute("role", "status");
   const refresh = make("button", "刷新状态"), retry = make("button", "重试上次请求"); refresh.type = retry.type = "button";
   const newDraft = make("button", "重新准备继续诊断"); newDraft.type = "button";
@@ -112,8 +112,8 @@ export function mountContinuationView(container, controller, { client, conversat
     const option = make("option", title); option.value = value; logMode.append(option);
   }
   logMode.value = "APPEND";
-  const files = field(initial, "选择新日志文件或归档（可多选）", "input"); files.type = "file"; files.multiple = true; files.accept = LOG_FILE_ACCEPT;
-  const uploadHint = make("p", "支持 zip、tar、tar.gz、tgz、gz。最多 20 个包，单包不超过 2.5 GiB，总计不超过 5 GiB。");
+  const files = field(initial, "选择补充材料（可多选）", "input"); files.type = "file"; files.multiple = true; files.accept = LOG_FILE_ACCEPT;
+  const uploadHint = make("p", "支持 log、txt、json、jsonl、ndjson 和 zip、tar、tar.gz、tgz、gz 归档。最多 20 份，单份不超过 2.5 GiB，总计不超过 5 GiB；具体格式和数量以当前定位要求为准。");
   const prepare = make("button", "整理并预览"); prepare.type = "submit";
   initial.append(uploadHint, prepare);
   const problem = field(editor, "核对更新后的完整问题"); problem.rows = 6;
@@ -121,7 +121,7 @@ export function mountContinuationView(container, controller, { client, conversat
   const editNote = field(editor, "变更说明（可选）"); editNote.rows = 2;
   const finalLogMode = field(editor, "日志处理方式", "select");
   for (const [value, title] of [["APPEND", "追加日志"], ["REPLACE", "替换日志"]]) { const option = make("option", title); option.value = value; finalLogMode.append(option); }
-  const finalList = make("div"), editFiles = field(editor, "再补充日志包", "input"); editFiles.type = "file"; editFiles.multiple = true; editFiles.accept = files.accept;
+  const finalList = make("div"), editFiles = field(editor, "再补充材料", "input"); editFiles.type = "file"; editFiles.multiple = true; editFiles.accept = files.accept;
   editor.append(make("h3", "本轮最终使用的日志"), make("p", "取消勾选的日志不会用于本轮诊断。修改后请先保存预览。"), finalList);
   const save = make("button", "保存并更新预览"), confirm = make("button", "确认并继续诊断"); save.type = "submit"; confirm.type = "button";
   const dirtyNotice = make("p"); editor.append(save, dirtyNotice, inputDelta, confirm);
@@ -163,7 +163,7 @@ export function mountContinuationView(container, controller, { client, conversat
     current = state;
     error.textContent = state.error ?? ""; storageNotice.textContent = state.storage_warning ?? "";
     const status = state.draft?.status;
-    notice.textContent = state.uploading ? "正在校验并上传日志，请稍候。" : state.busy ? "正在提交，请稍候。" :
+    notice.textContent = state.uploading ? "正在校验并上传材料，请稍候。" : state.busy ? "正在提交，请稍候。" :
       state.loading ? "正在读取报告版本和草稿。" : status === "PREPARING" ? "正在整理补充信息，完成后请核对草稿。" :
       status === "FAILED" ? state.draft.failure_message || "整理未完成，可直接编辑完整问题后保存。" :
       status === "FOLLOWUP" ? state.followup_receipt ? "追问已发送，点击“查看报告追问”查看回答。" : "核对下方问题后，发送到当前报告的追问记录。" :

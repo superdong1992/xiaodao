@@ -37,8 +37,9 @@ from .context_builder import (
     build_methods_specialist_method_cards_v2,
 )
 from .failures import runtime_failure
-from .methods_skill import (
-    ResolvedSpecializedSkillV1,
+from .specialized_skill import (
+    ResolvedSpecializedSkill,
+    is_document_skill,
     load_specialized_skill_registration,
 )
 from .workspace import PreparedWorkspace
@@ -89,6 +90,10 @@ class ResolvedJobAssets:
         skill_text = self.skill_text
         methods_skill = None
         method_cards = ()
+        specialized = (
+            None if self.skill is None else load_specialized_skill_registration(Path(self.skill.root_path))
+        )
+        document_skill = is_document_skill(specialized)
         if (methods_evidence_graph is None) != (methods_evaluation_plan is None):
             raise ValueError("Methods V2 Graph and Plan must be supplied together")
         if methods_evidence_graph is not None:
@@ -103,6 +108,8 @@ class ResolvedJobAssets:
             methods_skill = load_specialized_skill_registration(
                 Path(self.skill.root_path)
             )
+            if is_document_skill(methods_skill):
+                raise _invalid_asset() from None
             if job.methods_review_target is None:
                 method_cards = build_methods_specialist_method_cards_v2(
                     skill=methods_skill,
@@ -126,7 +133,8 @@ class ResolvedJobAssets:
                 loaded_method_ids=loaded_method_ids,
             )
         methods_v1_specialist = (
-            loaded_method_ids is not None
+            not document_skill
+            and loaded_method_ids is not None
             and methods_evidence_graph is None
             and workspace.manifest.job_type is JobType.DIAGNOSE
             and workspace.manifest.resolved_logparse_plan is not None
@@ -149,6 +157,7 @@ class ResolvedJobAssets:
             methods_evaluation_plan=methods_evaluation_plan,
             methods_skill=methods_skill,
             methods_method_cards=method_cards,
+            document_skill=document_skill,
         )
         return ResolvedContextAssets(
             profile=self.profile,
@@ -167,7 +176,7 @@ class _ResolvedSkillSnapshot:
     """One validated Methods Skill view reused within a single Job resolution."""
 
     asset: ResolvedAsset
-    specialized: ResolvedSpecializedSkillV1
+    specialized: ResolvedSpecializedSkill
 
 
 def _invalid_asset(
@@ -246,11 +255,11 @@ def _validate_resolved_asset(
     resolved: ResolvedAsset,
     expected_ref: VersionedRef,
     expected_kind: AssetKind,
-) -> tuple[Path, ResolvedSpecializedSkillV1 | None]:
+) -> tuple[Path, ResolvedSpecializedSkill | None]:
     if resolved.ref != expected_ref or resolved.asset_kind is not expected_kind:
         raise _invalid_asset() from None
     root = Path(resolved.root_path)
-    specialized: ResolvedSpecializedSkillV1 | None = None
+    specialized: ResolvedSpecializedSkill | None = None
     frozen = snapshot_asset(root)
     if frozen is not None:
         if frozen[0] != expected_ref:
@@ -290,7 +299,11 @@ def _load_entry_text(
     if expected_kind is AssetKind.DIAGNOSIS_SKILL:
         assert specialized is not None
         package_root = specialized.package_root
-        if loaded_method_ids is None:
+        if is_document_skill(specialized):
+            if loaded_method_ids:
+                raise _invalid_asset() from None
+            ordered_paths = list(specialized.document_paths)
+        elif loaded_method_ids is None:
             selected_method_ids = tuple(
                 item.id for item in specialized.methods.methods
             )
@@ -304,17 +317,18 @@ def _load_entry_text(
                 )
             ):
                 raise _invalid_asset() from None
-        selected = set(selected_method_ids)
-        ordered_paths = [
-            "SKILL.md",
-            "methods.json",
-            *specialized.methods.shared_references,
-            *(
-                item.reference
-                for item in specialized.methods.methods
-                if item.id in selected
-            ),
-        ]
+        if not is_document_skill(specialized):
+            selected = set(selected_method_ids)
+            ordered_paths = [
+                "SKILL.md",
+                "methods.json",
+                *specialized.methods.shared_references,
+                *(
+                    item.reference
+                    for item in specialized.methods.methods
+                    if item.id in selected
+                ),
+            ]
         rendered: list[str] = []
         seen: set[str] = set()
         for relative in ordered_paths:
@@ -326,10 +340,11 @@ def _load_entry_text(
                 text = snapshot_bytes(target).decode("utf-8")
             except (OSError, UnicodeDecodeError):
                 raise _invalid_asset() from None
+            boundary = "DOCUMENT_SKILL_FILE" if is_document_skill(specialized) else "METHODS_SKILL_FILE"
             rendered.append(
-                f'<<<METHODS_SKILL_FILE path="{relative}">>>\n'
+                f'<<<{boundary} path="{relative}">>>\n'
                 f"{text.rstrip()}\n"
-                "<<<END METHODS_SKILL_FILE>>>"
+                f"<<<END {boundary}>>>"
             )
         return "\n".join(rendered) + "\n"
     manifest_name = (
@@ -344,7 +359,7 @@ def _load_entry_text(
 
 
 def _skill_index_entry(
-    specialized: ResolvedSpecializedSkillV1,
+    specialized: ResolvedSpecializedSkill,
     expected_ref: VersionedRef,
 ) -> dict[str, Any]:
     registration = specialized.registration
@@ -363,8 +378,13 @@ def _skill_index_entry(
                 for condition in routing.exclusions
             ],
         },
-        "required_user_inputs": list(specialized.methods.required_user_inputs),
-        "required_artifacts": list(specialized.methods.required_artifacts),
+        "required_user_inputs": (
+            [item.name for item in registration.inputs.user if item.required]
+            if is_document_skill(specialized) else list(specialized.methods.required_user_inputs)
+        ),
+        "required_artifacts": (
+            [registration.attachment.name] if registration.attachment is not None and registration.attachment.required else []
+        ) if is_document_skill(specialized) else list(specialized.methods.required_artifacts),
         "requires_logparse": registration.preprocessing.requires_logparse,
         "logparse_product": registration.preprocessing.logparse_product,
     }

@@ -99,8 +99,9 @@ class ReportFollowupService:
             problem_text=problem, report_markdown=result.report_markdown, report_sha256=result.report_sha256,
             source_kind="GENERIC" if generic else "SKILL_DIRECT", has_logs=self._has_readable_logs(job, generic=generic),
             occurred_at=timestamp(run.get("completed_at") or result.occurred_at), skill_name=result.skill_name,
-            has_log_manifest=bool(generic and job.attachment_refs
-                and getattr(job, "generic_log_preparation", None) == "direct-v1"))
+            has_log_manifest=bool((generic and job.attachment_refs
+                and getattr(job, "generic_log_preparation", None) == "direct-v1")
+                or (direct and self._document_log_manifest(job) is not None)))
 
     def _archived_source(self, cid, rid, run):
         archived = self.agent.report_archive.read(cid, rid)
@@ -133,6 +134,10 @@ class ReportFollowupService:
             occurred_at=timestamp(run.get("completed_at") or run["updated_at"]), skill_name=skill_name)
 
     def _has_readable_logs(self, job, *, generic):
+        if not generic:
+            document = self._document_log_manifest(job)
+            if document is not None:
+                return bool(document["files"])
         if not job.attachment_refs:
             return False
         if not generic or getattr(job, "generic_log_preparation", None) != "direct-v1":
@@ -144,6 +149,18 @@ class ReportFollowupService:
         except (InputChanged, OSError, ValueError):
             return False
         return isinstance(payload, dict) and isinstance(payload.get("logs"), list) and bool(payload["logs"])
+
+    def _document_log_manifest(self, job):
+        try:
+            payload = json.loads(read_small(self.layout.jobs / job.job_id,
+                                           "document-evidence-manifest.json"))
+        except (InputChanged, OSError, ValueError):
+            return None
+        if (not isinstance(payload, dict) or payload.get("schema_version") != 1
+                or payload.get("preparation") not in ("none", "direct_files", "logparse")
+                or not isinstance(payload.get("files"), list)):
+            return None
+        return payload
 
     def schedule_observe(self, conversation_id):
         if self.enabled and not self._stop.is_set():

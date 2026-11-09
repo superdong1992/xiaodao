@@ -2,7 +2,7 @@
 
 [返回框架设计](README.md)
 
-本索引覆盖当前 `src/problem_locator/` 的全部 213 个文件。点击文件名查看源码，点击设计章节查看职责、接口、输入输出及关键机制。工程配置、合同快照、Skill、网站示例和测试导航见[工程配套](06-engineering.md)。
+本索引按模块列出 `src/problem_locator/` 的框架文件。点击文件名查看源码，点击设计章节查看职责、接口、输入输出及关键机制。工程配置、合同快照、Skill、网站示例和测试导航见[工程配套](06-engineering.md)。
 
 ## 入口、装配与外部集成（29 个文件）
 
@@ -88,7 +88,7 @@
 | [domain/methods_state_v2.py](../../src/problem_locator/domain/methods_state_v2.py) | [合同、领域与任务调度](02-core.md) |
 | [domain/projector.py](../../src/problem_locator/domain/projector.py) | [合同、领域与任务调度](02-core.md) |
 
-## 诊断运行时与资产（84 个文件）
+## 诊断运行时与资产
 
 | 源文件 | 详细设计 |
 | --- | --- |
@@ -142,6 +142,9 @@
 | [runtime/context_builder.py](../../src/problem_locator/runtime/context_builder.py) | [诊断运行时与资产](03-runtime.md) |
 | [runtime/context_policy.py](../../src/problem_locator/runtime/context_policy.py) | [诊断运行时与资产](03-runtime.md) |
 | [runtime/diagnosis_runtime.py](../../src/problem_locator/runtime/diagnosis_runtime.py) | [诊断运行时与资产](03-runtime.md) |
+| [runtime/document_runtime.py](../../src/problem_locator/runtime/document_runtime.py) | [文档型 Skill 注册与执行](03-runtime.md#v3-文档型专用定位) |
+| [runtime/document_skill.py](../../src/problem_locator/runtime/document_skill.py) | [文档型 Skill 注册与执行](03-runtime.md#v3-文档型专用定位) |
+| [runtime/specialized_skill.py](../../src/problem_locator/runtime/specialized_skill.py) | [文档型 Skill 注册与执行](03-runtime.md#v3-文档型专用定位) |
 | [runtime/failures.py](../../src/problem_locator/runtime/failures.py) | [诊断运行时与资产](03-runtime.md) |
 | [runtime/final_response.py](../../src/problem_locator/runtime/final_response.py) | [诊断运行时与资产](03-runtime.md) |
 | [runtime/followup_access.py](../../src/problem_locator/runtime/followup_access.py) | [诊断运行时与资产](03-runtime.md) |

@@ -154,11 +154,20 @@ export function methodsPrompt({ registrationId = CLAUDE_DEEPSEEK_REGISTRATION_ID
   requireMethods(Array.isArray(canonicalMarkers) && canonicalMarkers.length > 0 && canonicalMarkers.every((item) => typeof item === "string" && item && !/[\r\n]/u.test(item)) && new Set(canonicalMarkers).size === canonicalMarkers.length, "CLAUDE_DEEPSEEK_CANONICAL_MARKERS_INVALID", "Generation prompt requires the exact canonical marker allowlist");
   return `Use the wiki-to-logparse-diagnosis-skill Skill to convert inputs/wiki.md into one production registration named ${registrationId}. The generated Methods Skill name is ${CLAUDE_DEEPSEEK_SKILL_NAME}, and the fixed Logparse module is ${module}.
 
-Your first action must call the Skill tool with exactly {"skill":"wiki-to-logparse-diagnosis-skill"}. After that succeeds, read inputs/wiki.md and runtime/source-wiki-identity.json in full. Copy identity.sha256 verbatim into the package methods.json and use identity.log_templates as the complete ordered duplicate-preserving checklist for references/source-log-templates.md. Read only the linked references/output-contract.md from the Skill base directory. Do not read repository files, registrations, tests, validators, or oracles. Use only Skill, Read, and Write.
+Your first action must call the Skill tool with exactly {"skill":"wiki-to-logparse-diagnosis-skill"}. Select its explicit registration schema_version=2 / Methods V1 branch; this gate does not test the default v3 document package. After that succeeds, read inputs/wiki.md and runtime/source-wiki-identity.json in full. Copy identity.sha256 verbatim into the package methods.json and use identity.log_templates as the complete ordered duplicate-preserving checklist for references/source-log-templates.md. Read only the linked references/methods-v1-output-contract.md from the Skill base directory. Do not read repository files, registrations, tests, validators, or oracles. Use only Skill, Read, and Write.
 
 Every methods.json evidence_markers and activation_markers item must be copied byte-for-byte from this canonical stable marker allowlist: ${JSON.stringify(canonicalMarkers)}. Bare or shortened event names such as API_COMPLETE, DEADLOOP_DETECTED, LATE_RESPONSE, and QUEUE_HISTORY are invalid unless that exact whole string appears in the allowlist. Do not invent, shorten, or extend a marker. evidence_markers must include every log used to judge the method. activation_markers must be the ordered evidence_markers subset whose presence makes that method worth evaluating; a marker may activate more than one method, and activation alone does not mean CONFIRMED. Generic timeout/failure lines that only establish request context must not activate a method. Decide both lists from the authored Wiki; the allowlist does not assign markers to methods.
 
 Generate the complete registration directly under output/${registrationId}. Its root entries must be exactly registration-template.json and package; package must contain exactly ${CLAUDE_DEEPSEEK_SKILL_NAME} with SKILL.md, methods.json, and required references including references/source-log-templates.md. The registration must use schema_version 2, deployment_scope PRODUCTION, version 1.0.0, logparse_product default, module ${module}, and USER_FACT bindings for both slot/process/pid anchors. Declare routing.applicability and routing.exclusions from the authored Wiki: applicability is the domain, scenario, or symptom boundary, and exclusions contains only explicit exclusions. Missing logs, attachments, or parameters are collection gaps, never routing exclusions. Do not invent narrower product, version, or environment restrictions. The generated Methods Skill consumes only the Server-frozen request.json, target_logs.json, receipt, and listed logs; it must not call Skill(logparse-diagnose), the broker, Logparse, or a ZIP packer. Finish all Reads before the first Write, use exactly one successful Write per final file, keep Writes contiguous, never overwrite, never write outside that registration, and stop after the final Write. The authored Wiki is the only source of business meaning. Do not include generated JSON or Markdown in the final response.`;
+}
+
+export function selectMethodsOutputContract(skillRoot) {
+  const legacyReference = "references/methods-v1-output-contract.md";
+  const linkedReferences = discoverLinkedSkillReferences(skillRoot, {
+    requiredReferences: ["references/output-contract.md", legacyReference],
+  });
+  requireMethods(linkedReferences.includes(legacyReference), "CLAUDE_DEEPSEEK_GENERATION_REFERENCE_INVALID", "Methods generation requires its explicit legacy output contract");
+  return path.join(skillRoot, legacyReference);
 }
 
 function permissionAbsolute(filePath) {
@@ -196,7 +205,7 @@ export function auditRegistrationGenerationTrace({ processResult, workspaceRoot,
   requireMethods(records[0]?.name === "Skill" && records[0]?.input?.skill === "wiki-to-logparse-diagnosis-skill" && processResult.skills?.length === 1, "CLAUDE_DEEPSEEK_GENERATION_SKILL_INVALID", "Generation must load wiki-to-logparse-diagnosis-skill exactly once as its first action");
   const reads = records.filter((item) => item.name === "Read");
   const writes = records.filter((item) => item.name === "Write");
-  const outputContract = path.join(installedSkill, "references", "output-contract.md");
+  const outputContract = path.join(installedSkill, "references", "methods-v1-output-contract.md");
   const expectedReads = [path.join(workspaceRoot, "inputs", "wiki.md"), path.join(workspaceRoot, "runtime", "source-wiki-identity.json"), outputContract].map((item) => path.resolve(item));
   const actualReads = reads.map((item) => resolveToolPath(workspaceRoot, item.input?.file_path));
   requireMethods(reads.length === 3 && new Set(actualReads).size === 3 && expectedReads.every((item) => actualReads.includes(item)), "CLAUDE_DEEPSEEK_GENERATION_READS_INVALID", "Generation must read only the Wiki, source identity, and output contract once each");
@@ -350,9 +359,8 @@ export async function runMethodsBootstrap(options, { ambient = process.env, onPr
   const prepared = buildMethodsWorkspace({ workspaceRoot, configRoot, metaSkillRoot: options.metaSkillRoot, wiki: options.wiki });
   const settings = path.join(privateRoot, "claude-settings.json");
   materializeClaudeSettings(options.claudeSettings, settings);
-  const linkedReferences = discoverLinkedSkillReferences(prepared.installedSkill);
-  requireMethods(linkedReferences.length === 1 && linkedReferences[0] === "references/output-contract.md", "CLAUDE_DEEPSEEK_GENERATION_REFERENCE_INVALID", "Generation Skill must link exactly its output contract");
-  const allowedTools = generationPermissionRules({ workspaceRoot, skillRoot: prepared.installedSkill, outputContract: path.join(prepared.installedSkill, linkedReferences[0]) });
+  const outputContract = selectMethodsOutputContract(prepared.installedSkill);
+  const allowedTools = generationPermissionRules({ workspaceRoot, skillRoot: prepared.installedSkill, outputContract });
   const home = path.join(privateRoot, "home");
   const temporary = path.join(privateRoot, "tmp");
   for (const directory of [home, temporary]) fs.mkdirSync(directory, { mode: 0o700 });

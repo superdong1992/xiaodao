@@ -1360,6 +1360,10 @@ class DomainCoordinator:
         payload = trigger.payload
         assert isinstance(payload, SubmitSupplementTriggerPayload)
         state = case.diagnosis_state
+        policy = payload.optional_input_policy
+        if policy is not None and policy.skill_ref != case.selected_skill_ref:
+            return _validation("可选参数配置与本次固定的 Skill 不一致。", field="optional_input_policy.skill_ref")
+        optional_inputs = {} if policy is None else {item.name: item for item in policy.optional_inputs}
         open_requirements = {
             requirement.requirement_id: requirement
             for requirement in state.pending_requirements
@@ -1410,11 +1414,12 @@ class DomainCoordinator:
         for fact in payload.user_facts:
             name = fact.provenance.input_name
             requirement = None if name is None else open_inputs_by_name.get(name)
-            if requirement is None:
+            definition = requirement or optional_inputs.get(name)
+            if definition is None:
                 return _validation(
-                    "Supplement input does not match an OPEN INPUT requirement.",
+                    "补充参数未匹配当前要求或声明的可选参数。",
                     field="user_facts.provenance.input_name",
-                    expected="an OPEN INPUT requirement name",
+                    expected="an OPEN INPUT requirement or declared optional input name",
                     actual=name,
                 )
             if fact.item_id in existing_item_ids:
@@ -1431,7 +1436,7 @@ class DomainCoordinator:
                     expected=state.revision + 1,
                     actual=fact.created_revision,
                 )
-            constraints = requirement.constraints
+            constraints = definition.constraints
             assert isinstance(constraints, InputRequirementConstraints)
             encoded_length = len(fact.statement.encode("utf-8"))
             if not (
@@ -1469,13 +1474,14 @@ class DomainCoordinator:
                     actual=fact.statement,
                 )
             accepted_facts.append(fact)
-            fulfilled_ids.add(requirement.requirement_id)
-            fulfillments.append(
-                RequirementFulfillment(
-                    requirement_id=requirement.requirement_id,
-                    fulfilled_by_refs=[fact.item_id],
+            if requirement is not None:
+                fulfilled_ids.add(requirement.requirement_id)
+                fulfillments.append(
+                    RequirementFulfillment(
+                        requirement_id=requirement.requirement_id,
+                        fulfilled_by_refs=[fact.item_id],
+                    )
                 )
-            )
 
         if payload.ready_attachment_ids:
             attachment_requirements = [

@@ -4776,11 +4776,33 @@ class ReviewOutcomeTriggerPayload(ContractModel):
         return self
 
 
+class OptionalInputDefinition(ContractModel):
+    """A declared, non-blocking input resolved from one immutable Skill."""
+
+    name: ContractName
+    prompt: NonEmptyText
+    constraints: InputRequirementConstraints
+
+
+class SpecializedInputPolicy(ContractModel):
+    """Transient catalog policy; never part of a persisted Job or State."""
+
+    skill_ref: VersionedRef
+    optional_inputs: list[OptionalInputDefinition]
+    attachment_mode: Literal["none", "direct_files", "logparse"]
+
+    @model_validator(mode="after")
+    def validate_names(self) -> SpecializedInputPolicy:
+        _unique([item.name for item in self.optional_inputs], "optional input names")
+        return self
+
+
 class SubmitSupplementTriggerPayload(ContractModel):
     user_facts: list[DiagnosisItem]
     ready_attachment_ids: list[OpaqueId]
     stable_target_changed: Annotated[bool, Field(strict=True)]
     generic_supplement_text: str = Field(default="", exclude_if=lambda value: not value)
+    optional_input_policy: SpecializedInputPolicy | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def validate_payload(self) -> SubmitSupplementTriggerPayload:

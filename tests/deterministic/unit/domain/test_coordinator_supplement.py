@@ -11,11 +11,13 @@ from problem_locator.contracts import (
     DiagnosisProvenance,
     DiagnosisProvenanceType,
     InputRequirementConstraints,
+    OptionalInputDefinition,
     JobType,
     PendingRequirement,
     RequirementKind,
     RequirementStatus,
     SubmitSupplementTriggerPayload,
+    SpecializedInputPolicy,
     SupplementPolicy,
     TriggerType,
     canonical_json_bytes,
@@ -535,3 +537,21 @@ def test_supplement_outside_current_requirements_is_rejected_atomically() -> Non
     assert isinstance(result, ApplicationError)
     assert result.code.value == "VALIDATION_ERROR"
     assert result.retryable is False
+
+
+def test_optional_input_policy_must_match_the_case_pinned_skill() -> None:
+    source = diagnose_job()
+    state = rebuild(state_from_job(source), pending_requirements=[_requirement(REQ_A, "caller_service")])
+    snapshot = waiting_snapshot(state, status="WAITING_INPUT")
+    fact = _fact(FACT_A, "optional_method", "GetInventory", state.revision + 1)
+    policy = SpecializedInputPolicy(
+        skill_ref=source.skill_ref.model_copy(update={"content_hash": "f" * 64}), attachment_mode="none",
+        optional_inputs=[OptionalInputDefinition(name="optional_method", prompt="方法（选填）",
+            constraints=_requirement(REQ_B, "optional_method").constraints)])
+    request = trigger(snapshot, trigger_type=TriggerType.SUBMIT_SUPPLEMENT,
+        payload=SubmitSupplementTriggerPayload(user_facts=[fact], ready_attachment_ids=[],
+            stable_target_changed=False, optional_input_policy=policy))
+    result = DomainCoordinator().plan(snapshot, request)
+    assert isinstance(result, ApplicationError)
+    assert result.code.value == "VALIDATION_ERROR"
+    assert result.details[0].field == "optional_input_policy.skill_ref"

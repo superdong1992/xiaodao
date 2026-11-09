@@ -13,6 +13,7 @@ from problem_locator.application.audit_bundle import (
     build_audit_bundle,
 )
 from problem_locator.application.audit_bundle_assembler import (
+    assemble_unresolved_audit_bundle,
     _audit_job_ids,
     _source_draft_filename,
     _validated_decision_evidence_bytes,
@@ -24,11 +25,42 @@ from problem_locator.contracts import (
     JobOutcome,
     StateFile,
     WorkspaceInputManifest,
+    UnresolvedResultDraft,
     canonical_json_bytes,
 )
 
 
 FIXTURES = Path(__file__).resolve().parents[4] / "tests/fixtures/contracts/positive"
+
+
+def test_document_preflight_bundle_uses_server_request_and_excludes_private_raw(tmp_path):
+    from tests.document_skill_helpers import document_input, document_registration
+    from tests.deterministic.contracts.fakes import InMemoryCancellationSignal
+    from tests.deterministic.unit.runtime.test_document_runtime import make_runtime
+
+    registration = document_registration(user_inputs=[document_input("service")])
+    runtime, job, _, _, records, _ = make_runtime(tmp_path, registration=registration)
+    outcome = runtime.execute(job, InMemoryCancellationSignal()).job_outcome
+    aggregate = runtime._state_repository.read_case(job.case_id)
+    job = job.model_copy(update={"previous_outcome_refs": []})
+    state = aggregate.case.diagnosis_state.model_copy(update={"candidate_conclusion": None})
+    aggregate = aggregate.model_copy(update={"jobs": {job.job_id: job},
+        "case": aggregate.case.model_copy(update={"diagnosis_state": state})})
+    records.publish_audit_bytes(job.job_id, "document-prompt.txt", b"PRIVATE_PROMPT")
+    records.publish_audit_bytes(job.job_id, "document-diagnosis.raw.txt", b"PRIVATE_RAW")
+    unresolved = UnresolvedResultDraft(source_job_id=job.job_id, source_outcome_id=outcome.outcome_id,
+        reason_code="INVALID_NEED_MORE_REQUEST", summary="待补材料未能齐全。", blocking_rule_ids=[],
+        evidence_bindings=[], user_result_proposal_key="unresolved", recommended_next_step="请补充服务名称。",
+        occurred_at=outcome.produced_at)
+
+    bundle = assemble_unresolved_audit_bundle(aggregate=aggregate, source_job=job, source_outcome=outcome,
+        unresolved=unresolved, resolved_evidence_refs=[], execution_records=records)
+
+    with zipfile.ZipFile(io.BytesIO(bundle.payload)) as archive:
+        name = f"jobs/diagnose/{job.job_id}/document-preflight.json"
+        assert archive.read(name) == records.read_audit_bytes(job.job_id, "document-preflight.json")
+        assert not any(path.endswith(("document-prompt.txt", "document-diagnosis.raw.txt")) for path in archive.namelist())
+        assert all(b"PRIVATE_" not in archive.read(path) for path in archive.namelist())
 
 
 def test_audit_job_closure_sorts_mixed_offsets_by_instant() -> None:

@@ -259,8 +259,9 @@ def _verified_source(path, attachment, budget):
 
 
 class _Preparation:
-    def __init__(self, workspace, budget, capacity):
+    def __init__(self, workspace, budget, capacity, directory="generic-logs"):
         self.workspace, self.budget, self.capacity = workspace, budget, capacity
+        self.directory = directory
         self.logs, self.skipped, self.sources = [], [], []
         self.manifest_bytes = 0
 
@@ -274,7 +275,7 @@ class _Preparation:
         budget = self.budget
         if size is not None and (size < 0 or size > budget.limits.max_expanded_bytes):
             raise DirectGenericLogError("EXPANDED_BYTES_LIMIT", "日志文件展开后的大小超出限制。")
-        relative = f"inputs/generic-logs/log-{len(self.logs) + 1:06d}.log"
+        relative = f"inputs/{self.directory}/log-{len(self.logs) + 1:06d}.log"
         destination = self.workspace.root / relative
         reserve = size if size is not None else budget.limits.max_expanded_bytes - budget.expanded
         decoder = codecs.getincrementaldecoder("utf-8")("strict")
@@ -414,6 +415,17 @@ class _Preparation:
 def prepare_direct_generic_sources(workspace: PreparedWorkspace, *,
         sources: list[tuple[Path, Attachment]], cancellation: CancellationSignal,
         deadline: float, capacity=None, limits: DirectGenericLogLimits = DirectGenericLogLimits()) -> bytes:
+    return prepare_direct_sources(workspace, sources=sources, cancellation=cancellation,
+        deadline=deadline, capacity=capacity, limits=limits)
+
+
+def prepare_direct_sources(workspace: PreparedWorkspace, *,
+        sources: list[tuple[Path, Attachment]], cancellation: CancellationSignal,
+        deadline: float, capacity=None, limits: DirectGenericLogLimits = DirectGenericLogLimits(),
+        directory: str = "generic-logs", publish_manifest: bool = True) -> bytes:
+    """Prepare verified text for either Generic or document Skill execution."""
+    if directory not in {"generic-logs", "evidence"}:
+        raise ValueError("材料目录必须由服务端指定。")
     budget = _Budget(limits, cancellation, deadline)
     budget.check()
     if not sources or len(sources) > 20 or len({item.attachment_id for _, item in sources}) != len(sources):
@@ -423,9 +435,9 @@ def prepare_direct_generic_sources(workspace: PreparedWorkspace, *,
     if inputs.is_symlink() or (before.st_dev, before.st_ino) != (workspace.inputs_device, workspace.inputs_inode):
         raise DirectGenericLogError("SOURCE_CHANGED", "日志输入目录发生变化。")
     inputs.chmod(0o755)
-    preparation = _Preparation(workspace, budget, capacity or getattr(workspace, "capacity", None))
+    preparation = _Preparation(workspace, budget, capacity or getattr(workspace, "capacity", None), directory)
     try:
-        (inputs / "generic-logs").mkdir(mode=0o700)
+        (inputs / directory).mkdir(mode=0o700)
         for path, attachment in sources:
             if attachment.content_type not in GENERIC_DIRECT_LOG_CONTENT_TYPES:
                 raise DirectGenericLogError("UNSUPPORTED_INPUT_TYPE", "该附件类型不支持直接日志分析。")
@@ -464,7 +476,8 @@ def prepare_direct_generic_sources(workspace: PreparedWorkspace, *,
                 "complete": not preparation.skipped, "empty_reason": empty_reason}})
         if len(payload) > limits.max_manifest_bytes:
             raise DirectGenericLogError("MANIFEST_BYTES_LIMIT", "日志文件清单超出大小限制。")
-        _atomic_write(inputs / "generic_logs.json", payload)
+        if publish_manifest:
+            _atomic_write(inputs / "generic_logs.json", payload)
         return payload
     except StorageCapacityError as exc:
         raise runtime_failure(stage=ExecutionStage.WORKSPACE_PREPARE,

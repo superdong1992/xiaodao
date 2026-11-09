@@ -71,8 +71,11 @@ class ContextMaterials:
     methods_evaluation_plan: MethodEvaluationPlanV2 | None = None
     methods_skill: ResolvedSpecializedSkillV1 | None = None
     methods_method_cards: tuple[MethodsReviewMethodCardV2, ...] = ()
+    document_skill: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.document_skill) is not bool:
+            raise TypeError("document_skill 必须是服务端生成的布尔标记。")
         object.__setattr__(self, "previous_outcomes", tuple(self.previous_outcomes))
         object.__setattr__(self, "evidence", tuple(self.evidence))
         object.__setattr__(self, "methods_method_cards", tuple(self.methods_method_cards))
@@ -396,7 +399,8 @@ def _is_methods_v1_specialist(
     materials: ContextMaterials,
 ) -> bool:
     return (
-        materials.methods_evidence_graph is None
+        not materials.document_skill
+        and materials.methods_evidence_graph is None
         and materials.methods_evaluation_plan is None
         and job.job_type is JobType.DIAGNOSE
         and job.diagnosis_mode is DiagnosisMode.SPECIALIZED
@@ -654,6 +658,15 @@ class ContextBuilder:
 
     @staticmethod
     def _validate_role_materials(job: Job, materials: ContextMaterials) -> None:
+        if materials.document_skill and (
+            job.job_type is not JobType.DIAGNOSE
+            or job.diagnosis_mode is not DiagnosisMode.SPECIALIZED
+            or materials.methods_evidence_graph is not None
+            or materials.methods_evaluation_plan is not None
+            or materials.methods_skill is not None
+            or materials.methods_method_cards
+        ):
+            raise ValueError("文档型 Skill 的上下文只能用于专用诊断，不能混入 Methods 评估材料。")
         if job.job_type is JobType.ROUTE:
             if materials.skill is not None or materials.skill_index is None:
                 raise ValueError("ROUTE context requires only skill_index")

@@ -1,6 +1,14 @@
 # 诊断交付策略
 
-网站请求依次经过网站后端、Agent HTTP API、共享应用服务、调度器和运行时，最后生成报告及归档。MCP 也接入同一个应用服务。以下策略同时适用于 Web 和 MCP 发起的 Methods 诊断。
+网站请求依次经过网站后端、Agent HTTP API、共享应用服务、调度器和运行时，最后生成报告及归档。MCP 也接入同一个应用服务。以下策略同时适用于 Web 和 MCP。
+
+## v3 文档型 Skill
+
+`registration-template.json@3` 固定使用 `skill-direct` 状态标记和 Markdown，`METHODS_EVIDENCE_VALIDATION` 与 Reviewer 开关不改变它的输出。v1/v2 Methods 仍按下文的 `off/advisory/strict` 策略执行。
+
+v3 从任务固定的注册快照读取准备方式：`logparse` 使用现有 broker 和结果校验，`direct_files` 安全准备文本、JSON 和归档中的文本，`none` 不读取附件。三者都生成只读请求及材料清单；只有实际执行解析时才显示日志解析阶段。参考资料保存在 `inputs/skill/references/`，不依赖 marker 扫描。准备失败明确报错，不自动切换方式；跳过文件和材料不足仍须在诊断中如实说明。
+
+用户参数按各 Skill 的声明校验，必填项复用现有追问。可选项不创建待办，但用户在创建时或等待补充期间主动提供的值可被采用。Intake 在原有一次收参调用中识别这些参数，不读日志正文，不把未经提取的原话宣称为结构化事实。固定值和材料中提取的字段不转成用户必填项。
 
 ## 当前默认行为
 

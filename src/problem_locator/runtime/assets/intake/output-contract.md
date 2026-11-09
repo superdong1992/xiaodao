@@ -1,4 +1,4 @@
-# INTAKE 输出合同 1.3.1
+# INTAKE 输出合同 1.4.0
 
 根对象只能包含以下五个字段，全部必填：
 
@@ -18,7 +18,7 @@ problem_fields 和 user_facts 均为数组。每项只能包含 name、value、s
 
 problem_fields 的 name 只能是 statement、expected_behavior、actual_behavior、scope、goals、non_goals、constraints、completion_criteria。通常返回空数组；不能补全或重写已冻结的问题，也不能将建案默认值当成用户事实。服务端忽略问题字段的重新拆分、未知项和重复项，保留冻结的问题原文；这类重构不会触发 NEW_CASE_REQUIRED。
 
-SUBMIT_SUPPLEMENT 仅限已有任务的 OPEN INPUT requirements；其 user_facts 名称必须匹配要求，并满足字节长度、允许值和正则约束。NEED_CLARIFICATION 中携带的 user_facts 也必须满足同样要求。只要有部分有效新参数，就返回这些参数并选择 SUBMIT_SUPPLEMENT；其余要求可以继续等待，不得要求用户重新发送已提供的值。仅提交附件时允许空 user_facts，服务端会校验并处理附件要求。
+SUBMIT_SUPPLEMENT 可提交已有任务的 OPEN INPUT requirements 或 optional_inputs 中声明的参数；其 user_facts 名称必须匹配声明，并满足字节长度、允许值和正则约束。可选参数只提取用户明确提供的值，缺少时不追问、不补默认值，不阻止其他参数或附件提交。NEED_CLARIFICATION 中携带的 user_facts 也必须满足同样要求。只要有部分有效新参数，就返回这些参数并选择 SUBMIT_SUPPLEMENT；其余要求可以继续等待，不得要求用户重新发送已提供的值。仅提交附件时允许空 user_facts，服务端会校验并处理附件要求。
 
 提取范围包括第一条问题描述和全部提供的 USER 历史消息。服务端会合并经过当前要求重新校验的 draft_user_facts；本轮同名值覆盖未冻结的旧草稿，已冻结同值去重。未采用的草稿不能冒充 frozen_user_facts。无论 action 是 NEED_CLARIFICATION 还是 SUBMIT_SUPPLEMENT，存在有效新参数时服务端都会提交；只有已冻结同值重述时不会发起空补充命令。
 

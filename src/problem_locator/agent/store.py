@@ -14,7 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from contextlib import contextmanager
 
-from problem_locator.contracts import StateFile
+from problem_locator.contracts import ApplicationPortError, StateFile
 from problem_locator.application.projection import project_artifact_summaries
 from problem_locator.diagnostics import log_event
 from problem_locator.timestamps import now_timestamp, parse_timestamp
@@ -35,6 +35,8 @@ _PROGRESS = PUBLIC_PROGRESS_MESSAGES
 _SAFE_FAILURE = "本次定位未能完成，请重新发起任务。"
 _QUEUED_NOTICE = "已收到，尚未用于本次诊断。"
 _UNUSED_NOTICE = "这条消息未用于本次诊断，请另建任务继续。"
+_UNUSED_ATTACHMENTS_NOTICE = "当前定位方法不需要附件，已上传的材料未用于本次诊断。"
+_DEFERRED_ATTACHMENTS_NOTICE = "材料已收到，补齐当前参数后会按所选方法校验，符合要求的材料将用于诊断。"
 _KEEP_ATTACHMENT_NOTICE = object()
 
 
@@ -161,6 +163,7 @@ class AgentStore:
 
     def __init__(self, repository, clock=None, id_generator=None, runtime_epoch=None):
         self.repository = repository
+        self.specialized_input_policy = None
         self.clock = clock
         self.ids = id_generator
         self.runtime_epoch = runtime_epoch or str(uuid.uuid4())
@@ -1088,6 +1091,32 @@ class AgentStore:
                 and item["requirement_id"] == notice["requirement_id"] else item["prompt"]
                 for item in entries]
 
+    @staticmethod
+    def _unadopted_attachment_message(db, body, messages, covered=None):
+        """Revisit an explicit selection when a later preflight first requests it."""
+        if body.get("case_status") not in {"WAITING_INPUT", "WAITING_ATTACHMENT"}:
+            return None
+        requirements = [item for item in body.get("intake_authoritative_question_entries", [])
+            if item["kind"] == "ATTACHMENT"]
+        if len(requirements) != 1:
+            return None
+        notice = body.get("intake_attachment_notice")
+        if notice is not None and notice["requirement_id"] == requirements[0]["requirement_id"]:
+            return None
+        selected = next((item for item in reversed(messages)
+            if item["status"] != "UNUSED" and item.get("attachment_ids")), None)
+        if selected is None:
+            return None
+        covered = set(body.get("intake_covered_message_ids", [])) if covered is None else covered
+        if any(item["status"] != "UNUSED" and item["message_id"] not in covered
+                for item in messages[messages.index(selected) + 1:]):
+            # A later pending message already includes this explicit choice in
+            # its source prefix. Do not split that batch or add an intake pass.
+            return None
+        imported = {row[0] for row in db.execute(
+            "SELECT attachment_id FROM agent_attachment_imports WHERE run_id=?", (body["run_id"],))}
+        return selected["message_id"] if set(selected["attachment_ids"]) - imported else None
+
     def finish_intake(self, conversation_id, covered_message_ids, questions=None, *,
                       attachment_notice=_KEEP_ATTACHMENT_NOTICE):
         """Settle one frozen source batch without covering concurrently new input.
@@ -1123,6 +1152,9 @@ class AgentStore:
             covered = set(body.get("intake_covered_message_ids", [])) | set(covered_message_ids)
             if not covered <= known:
                 raise AgentStoreError("AGENT_MESSAGE_NOT_FOUND", "整理记录引用了不属于本会话的消息。", 404)
+            # A preflight may commit before this batch's coverage receipt. Its
+            # new material requirement must retain the earlier explicit choice.
+            covered.discard(self._unadopted_attachment_message(db, body, messages, covered))
             body["intake_covered_message_ids"] = [message["message_id"] for message in messages
                                                    if message["message_id"] in covered]
             pending = any(message["status"] != "UNUSED" and message["message_id"] not in covered
@@ -1205,7 +1237,9 @@ class AgentStore:
                 raise AgentStoreError("AGENT_MESSAGE_FINALIZED", "已处理消息的状态不能更改。", 409)
             self._ensure_open(body)
             message.status = status
-            message.notice = notice if notice is not None else (_UNUSED_NOTICE if status == "UNUSED" else None)
+            message.notice = notice if notice is not None else (
+                message.notice if message.notice == _UNUSED_ATTACHMENTS_NOTICE else
+                (_UNUSED_NOTICE if status == "UNUSED" else None))
             db.execute("UPDATE agent_messages SET body=? WHERE message_id=?", (_json(message), message_id))
             self._append(db, body, "message.updated", {"message_id": message_id, "status": status, "notice": message.notice},
                          "message-status:" + message_id + ":" + status)
@@ -1258,7 +1292,11 @@ class AgentStore:
         self._notify(conversation_id)
 
     def _finalize_message(self, db, body, message, status):
-        message.update(status=status, notice=_UNUSED_NOTICE if status == "UNUSED" else None)
+        attachment_notice = message.get("notice") == _UNUSED_ATTACHMENTS_NOTICE
+        notice = _UNUSED_NOTICE if status == "UNUSED" else None
+        if attachment_notice:
+            notice = (notice + " " if notice else "") + _UNUSED_ATTACHMENTS_NOTICE
+        message.update(status=status, notice=notice)
         db.execute("UPDATE agent_messages SET body=? WHERE message_id=?", (_json(message), message["message_id"]))
         self._append(db, body, "message.updated", {"message_id": message["message_id"], "status": status,
             "notice": message["notice"]}, "message-status:" + message["message_id"] + ":" + status)
@@ -1460,6 +1498,35 @@ class AgentStore:
                 self._accept_committed_adoptions(db, body, state)
                 self._project_case(db, body, aggregate)
 
+    def _project_unused_attachments(self, db, body, case):
+        resolver = self.specialized_input_policy
+        if resolver is None or case.selected_skill_ref is None:
+            return
+        try:
+            policy = resolver(case.selected_skill_ref)
+        except ApplicationPortError:
+            # An unavailable pinned asset is handled by the core runtime. A
+            # website projection must not prevent that failure from committing.
+            return
+        if policy is None or policy.skill_ref != case.selected_skill_ref or policy.attachment_mode != "none":
+            return
+        imported = {row[0] for row in db.execute(
+            "SELECT attachment_id FROM agent_attachment_imports WHERE run_id=?", (body["run_id"],))}
+        rows = db.execute("SELECT body FROM agent_messages WHERE conversation_id=? AND run_id=?",
+                          (body["conversation_id"], body["run_id"]))
+        for row in list(rows):
+            message = json.loads(row[0])
+            if (not message.get("attachment_ids") or message["status"] == "UNUSED"
+                    or imported.intersection(message["attachment_ids"])):
+                continue
+            if message.get("notice") == _UNUSED_ATTACHMENTS_NOTICE:
+                continue
+            message["notice"] = _UNUSED_ATTACHMENTS_NOTICE
+            db.execute("UPDATE agent_messages SET body=? WHERE message_id=?", (_json(message), message["message_id"]))
+            self._append(db, body, "message.updated", {"message_id": message["message_id"],
+                "status": message["status"], "notice": message["notice"]},
+                "unused-attachments:" + message["message_id"] + ":" + case.selected_skill_ref.content_hash)
+
     def _project_case(self, db, body, aggregate):
         case = aggregate.case
         if body["status"] in _CLOSED:
@@ -1467,6 +1534,7 @@ class AgentStore:
         body.update(case_id=case.case_id, job_id=case.active_job_id, case_status=case.status.value,
                     archive_status=case.archive_status,
                     case_has_selected_skill=getattr(case, "selected_skill_ref", None) is not None)
+        self._project_unused_attachments(db, body, case)
         self._append(db, body, "case.updated", {"status": case.status.value, "case_revision": case.case_revision},
                      "case:" + str(case.case_revision))
         if body.get("stop_requested") and case.status.value not in _RESULT:
@@ -1485,6 +1553,14 @@ class AgentStore:
                 body["intake_attachment_notice"] = None
             questions = self._intake_questions(body)
             body["intake_question_revision"] = case.case_revision
+            messages = [json.loads(row[0]) for row in db.execute(
+                "SELECT body FROM agent_messages WHERE conversation_id=? AND run_id=? ORDER BY event_sequence",
+                (body["conversation_id"], body["run_id"]))]
+            selected = self._unadopted_attachment_message(db, body, messages)
+            if selected is not None:
+                body["intake_covered_message_ids"] = [item for item in body.get("intake_covered_message_ids", [])
+                    if item != selected]
+                body["intake_pending"] = True
             if body.get("intake_pending", False):
                 body["status"] = "INTAKE"
                 body["current_questions"] = []
@@ -1680,6 +1756,15 @@ class AgentStore:
             attachment.case_attachment_id = case_attachment_id
             db.execute("UPDATE agent_attachments SET body=? WHERE attachment_id=?", (_json(attachment), attachment_id))
             self._append(db, body, "attachment.updated", attachment.model_dump(mode="json"), "attachment:" + attachment_id + ":IMPORTED")
+            for message_row in list(db.execute("SELECT body FROM agent_messages WHERE conversation_id=? AND run_id=?",
+                    (body["conversation_id"], body["run_id"]))):
+                message = json.loads(message_row[0])
+                if (message.get("notice") == _DEFERRED_ATTACHMENTS_NOTICE
+                        and attachment_id in message.get("attachment_ids", [])):
+                    message["notice"] = None
+                    db.execute("UPDATE agent_messages SET body=? WHERE message_id=?", (_json(message), message["message_id"]))
+                    self._append(db, body, "message.updated", {"message_id": message["message_id"],
+                        "status": message["status"], "notice": None}, "deferred-materials-adopted:" + message["message_id"])
             self._save(db, body)
         self._notify(attachment.conversation_id)
         return AttachmentRecord(**attachment.model_dump(), storage_path=row[1])
