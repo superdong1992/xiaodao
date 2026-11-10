@@ -113,12 +113,19 @@
 
 - `version` 固定为 `1.0.0`，`deployment_scope` 固定为 `PRODUCTION`。
 - 新生成的 registration 必须使用 `schema_version=2` 并声明 `routing`；旧版注册没有适用条件，不能自动进入专用路由。
-- `routing` 只含 `applicability` 和 `exclusions`。适用条件为 1–16 项，必须全部满足；排除条件为
+- `routing` 必须包含 `applicability` 和 `exclusions`，可选 `direct_match_keywords`。适用条件为 1–16 项，必须全部满足；排除条件为
   0–16 项，任意一项成立都不能进入专用流程。每项只含 `id` 和 `description`；两组的 ID 合并后
   必须唯一，采用小写 kebab-case，最多 64 个字符；description 去除首尾空白后不能为空，最多 1024 个字符。
 - 条件只描述 Wiki 的领域、场景、症状和排除边界，不要求日志、附件或参数已经齐全。明确适用但缺少
   材料时，专用流程负责索取材料。不得把某个可能原因的确认条件当成整个 Skill 的路由门槛，也不能加入
   Wiki 未给出的产品、版本或环境限制。Wiki 未声明排除边界时保留空 `exclusions`，不要自行补充。
+- `direct_match_keywords` 缺省或为空数组时保留模型路由；声明时最多 16 项，每项 3–128 个字符，
+  不得重复、含首尾空白或控制字符，也不能只使用“超时”“失败”“错误”“故障”“异常”、
+  `timeout`、`error`、`failure`、`slow`、`rpc` 等泛词。匹配区分大小写，仅按字面检查，不支持正则。
+  只填写作者确认足以确定整个 Skill 归属的故障码或特征短语，不从 summary、Skill 名或日志 marker
+  自动抽词，不为启用快速路由硬凑关键词。用户原文唯一明确命中一个 Skill 且其 `exclusions` 为空时，
+  可跳过 ROUTE 的 LLM 调用；多 Skill 命中、未命中、明显否定、历史或示例语境仍走原模型路由。
+  这些词法检查不保证理解任意自然语言；缺少参数或日志仍由 DIAGNOSE 按原规则索取。
 - `logparse_product` 是 Server 内部字段，固定为 `default`，不能要求用户提供，也不能根据 Wiki 改写。
 - diagnose/review 四元绑定逐项固定，不能改成生成 Agent 自选的 profile、tool、context 或 output。
 - client 与 server 共用用户确认的同一个 module，两个绑定都使用 `SKILL_FIXED`。

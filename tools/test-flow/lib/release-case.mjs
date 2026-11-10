@@ -153,7 +153,22 @@ function loadRegistrationTemplate(loaded) {
   const value = readJson(loaded.registration_template_path);
   exactKeys(value, REGISTRATION_FIELDS, "RELEASE_CASE_REGISTRATION_FIELDS", "Release registration template");
   assertFlow(value.schema_version === 2, "RELEASE_CASE_REGISTRATION_VERSION", "Release registration schema_version 必须是 2");
-  exactKeys(value.routing, ["applicability", "exclusions"], "RELEASE_CASE_REGISTRATION_ROUTING", "Release registration routing");
+  const routingFields = ["applicability", "exclusions"];
+  if (value.routing && Object.hasOwn(value.routing, "direct_match_keywords")) routingFields.push("direct_match_keywords");
+  exactKeys(value.routing, routingFields, "RELEASE_CASE_REGISTRATION_ROUTING", "Release registration routing");
+  if (Object.hasOwn(value.routing, "direct_match_keywords")) {
+    const keywords = value.routing.direct_match_keywords;
+    assertFlow(Array.isArray(keywords) && keywords.length <= 16, "RELEASE_CASE_REGISTRATION_ROUTING", "routing.direct_match_keywords 必须是最多 16 项的数组");
+    const seen = new Set();
+    const generic = new Set(["超时", "失败", "错误", "故障", "异常", "timeout", "error", "failure", "slow", "rpc"]);
+    for (const keyword of keywords) {
+      assertFlow(typeof keyword === "string" && [...keyword].length >= 3 && [...keyword].length <= 128
+        && !/^\p{White_Space}|\p{White_Space}$/u.test(keyword) && !/[\u0000-\u001f\u007f-\u009f]/u.test(keyword)
+        && !seen.has(keyword) && !generic.has(keyword.toLowerCase().replaceAll("ſ", "s")),
+      "RELEASE_CASE_REGISTRATION_ROUTING", "routing.direct_match_keywords 每项须为 3–128 个字符，不得含首尾空白、控制字符、重复值或泛词");
+      seen.add(keyword);
+    }
+  }
   const conditionIds = new Set();
   for (const [group, minimum] of [["applicability", 1], ["exclusions", 0]]) {
     const conditions = value.routing[group];

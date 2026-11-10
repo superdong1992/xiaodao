@@ -119,7 +119,8 @@ from .context_builder import ContextBuilder, ContextLimitExceeded, ContextMateri
 from .context_policy import ResolvedJobAssets, RuntimeAssetResolver
 from .continuation_context import build_report_continuation_context
 from .failures import RuntimeExecutionError, runtime_failure
-from .final_response import parse_route_response, parse_specialist_response, specialist_prompt
+from .final_response import build_direct_keyword_draft, parse_route_response, parse_specialist_response, specialist_prompt
+from .keyword_route import try_direct_keyword_route
 from .generic_locator import GenericLocatorExecutor
 from .skill_direct import parse_skill_direct_response
 from .input_profile import expand_profile_requirements, load_builtin_input_profile
@@ -1298,6 +1299,15 @@ class DiagnosisRuntime:
                     job, reason="已注册的专用 Skill 均未声明路由适用范围，转入通用定位。",
                 )
         aggregate = self._read_case(job)
+        direct_route = None
+        if job.job_type is JobType.ROUTE:
+            if cancellation.is_cancelled():
+                raise runtime_failure(stage=ExecutionStage.BACKEND_EXECUTE,
+                    code=ErrorCode.BACKEND_CANCELLED, message="路由已取消。",
+                    retryable=cancellation.reason is CancellationReason.SERVICE_SHUTDOWN)
+            direct_route = try_direct_keyword_route(job,
+                skill_index=assets.skill_index_text,
+                raw_problem_text=aggregate.case.raw_problem_text)
         if job.job_type is JobType.DIAGNOSE and job.diagnosis_mode is DiagnosisMode.SPECIALIZED:
             specialized = self._resolved_registered_skill(assets)
             if is_document_skill(specialized):
@@ -1501,7 +1511,7 @@ class DiagnosisRuntime:
                     broker_environment=None,
                     test_limits=self._backend_test_limits,
                     backend_phase="METHODS_SPECIALIST",
-                    file_access="none" if inputs_inlined else "read-only",
+                    file_access="diagnose",
                 )
             final_response = backend_result.final_result
             secrets = methods_preprocessing.secrets
@@ -1531,12 +1541,15 @@ class DiagnosisRuntime:
                     "output/method-review.draft.json. Logparse is unavailable.\n"
                     "<<<END METHODS_REVIEW_BOUNDARY>>>\n"
                 )
-            secrets, parse_request_bytes, claim, broker_audit_bytes, final_response = self._execute_backend(
-                job,
-                workspace,
-                cancellation,
-                backend_prompt,
-            )
+            if direct_route is not None:
+                secrets, parse_request_bytes, claim, broker_audit_bytes, final_response = (), None, None, None, None
+            else:
+                secrets, parse_request_bytes, claim, broker_audit_bytes, final_response = self._execute_backend(
+                    job,
+                    workspace,
+                    cancellation,
+                    backend_prompt,
+                )
         if broker_audit_bytes is not None:
             self._publish_audit_bytes(job, "broker_audit.json", broker_audit_bytes)
         if job.job_type is JobType.DIAGNOSE and isinstance(final_response, str):
@@ -1576,9 +1589,9 @@ class DiagnosisRuntime:
         validating = record_stage_started(ExecutionStage.OUTCOME_VALIDATE)
         try:
             if job.job_type is JobType.ROUTE:
-                validated_draft = parse_route_response(
-                    final_response, job, skill_index=assets.skill_index_text,
-                )
+                validated_draft = (build_direct_keyword_draft(job, direct_route)
+                    if direct_route is not None else parse_route_response(
+                        final_response, job, skill_index=assets.skill_index_text))
             elif job.job_type is JobType.DIAGNOSE:
                 validated_draft = parse_specialist_response(final_response, secrets=secrets,
                     preserve_evidence_items=(job.review_policy is ReviewPolicy.NONE
@@ -1793,6 +1806,10 @@ class DiagnosisRuntime:
             )
         if job.job_type is not JobType.ROUTE:
             self._announce(job, "REPORTING")
+        if direct_route is not None and cancellation.is_cancelled():
+            raise runtime_failure(stage=ExecutionStage.OUTCOME_VALIDATE,
+                code=ErrorCode.BACKEND_CANCELLED, message="路由已取消。",
+                retryable=cancellation.reason is CancellationReason.SERVICE_SHUTDOWN)
         finalized = finalize_server_outcome(
             workspace_root=workspace.root,
             job=job,
@@ -1806,6 +1823,8 @@ class DiagnosisRuntime:
             target_logs=target_logs,
             route_admission=(validated_draft.route_admission
                 if isinstance(validated_draft, ValidatedAgentDraft) else None),
+            route_skill_index=assets.skill_index_text if direct_route is not None else None,
+            route_raw_problem_text=aggregate.case.raw_problem_text if direct_route is not None else None,
         )
         self._publish_audit_bytes(
             job,

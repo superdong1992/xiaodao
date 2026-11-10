@@ -1,6 +1,6 @@
 # 已修复问题台账
 
-更新时间：2026-11-09
+更新时间：2026-11-10
 
 本文件记录已经在当前工作区验证、修复并由专项回归测试保护的问题。活跃待办仍只写入
 [`TODO.md`](TODO.md)；同一问题再次回归时更新原条目，不另建一个缺少历史关联的条目。
@@ -21,6 +21,35 @@
 
 本轮最终验收环境：Ubuntu 22.04、Python 3.12.13、锁定依赖及真实 PostgreSQL 15.19。已确认 WSL 持久盘存在同步等待及同机测试竞争，旧源码也有明显耗时波动；前轮 ext4 完整验证及专项证据保留。本轮使用正式 `--evidence-root` 指向本任务独立的 32 GiB tmpfs，承载测试临时数据、字节码缓存及现场证据；执行源码、运行时和 PostgreSQL 仍在原持久盘。32 GiB 是按需分配的挂载上限，不是物理内存；运行时记录实际占用。测试范围、fsync、重开与崩溃恢复、默认容量阈值、真实数据库及 300 秒门槛均不调整。结束后立即将完整 attempt 复制到持久盘，逐文件校验并复核证据封印。该环境只用于确定性开发验收与反馈预算，不证明生产磁盘性能、真实模型效果或 Release 通过；结果仍以最终 verdict 为准。
 
+## PL-FIX-102：确定性验证在每个 Gate 重复编译 Python 文件
+
+- **症状与受影响版本**：`8.2.0 / 56faca0` 的 Test Flow 为每个 pytest Gate 新建并删除独立字节码目录，完整验证反复编译同一源码和依赖。当前冻结工作区上，单元测试仅收集用例的两次冷缓存测量分别为 7.574、7.608 秒，同缓存为 1.855 秒；完整八组选择器仅收集时，逐 Gate 冷缓存合计 26.812 秒，同次共享为 15.580 秒。测量不执行断言，不替代正式验证，也不证明产品模型速度收益。
+- **根因**：`pytestAction` 将 `PYTHONPYCACHEPREFIX` 放入 Gate 专属 scratch，并在 Gate 结束时删除；后续独立 Python 进程无法使用已经编译的相同文件。
+- **不可回归行为**：仅 Linux/macOS 的普通确定性 pytest Gate 在同一 attempt、同一运行时内共享字节码；不同 attempt、Windows 和真实模型执行保持隔离。每个 Gate 仍独立启动、收集和执行，basetemp、fixture、数据库、断言、Gate 清单、预算及门槛均不变，不复用测试结果。Gate 清理不得删掉共享字节码；整个 attempt 仍按既有 scratch 边界清理，源码快照核验保留。
+- **修复历史（2026-11-10）**：在专用定位优化的推送验证中确认该框架开销。先保留 321.24 秒及 309.323 秒两轮性能失败的完整证据，再针对重复编译补充同次运行内的缓存；不以缩减测试或调整 300 秒门槛处理超时。原 PostgreSQL 磁盘同步波动作为独立环境现象留证，未据此修改产品存储逻辑或持久化强度。
+- **专项回归测试**：新增 `pytest-cache.test.mjs` 的 3 项回归：实际 `executeGate` 启动独立子进程，核对跨 Gate 字节码复用、独立 basetemp、跨 attempt 隔离、Gate 与 attempt 清理边界；实际入口核对真实配置和非确定性阶段不共享，另覆盖 Windows 与隔离 Agent 路径。旧实现经实际入口复现 Gate 结束即删除缓存；修正后与 `actions.test.mjs` 联合 **44 passed，0 skipped**。测量、先红及绿测证据保存在 `.tmp/specialized-optimization-push-20261110/pytest-cache-regression/` 和 `collection-cache-sequence-02/`，命令见同任务目录记录。未改超大参数的原始值、用例名或断言。
+- **最新 Test Flow verdict（PL-FIX-102）**：2026-11-10 Linux `dev.default` [run-20261110T082144Z-b32c279e](.tmp/specialized-optimization-push-20261110/evidence/run-20261110T082144Z-b32c279e/verdict.json) 为 `PASS_WITH_WARNINGS`；源码快照 `git-visible-worktree-v1:3afe8697363103bf807844ab6fcd6fe5efe05c36e37d95a53313b5dc72c0e6a8`，verdict SHA-256 `de9c929be5095987a20ccaa81cd08427cd82b0e0c2a2792917ef63e9ca7e62c4`。功能、运行和源码核验均为 `PASS`，完整确定性阶段 287.392 秒，低于原 300 秒门槛；性能历史样本不足，状态为 `NOT_CALIBRATED`，本次通过不证明长期稳定达标。101 份证据已完整保存到持久盘，逐文件及封印校验通过。使用 D 盘独立 Ubuntu 22.04 环境，PostgreSQL 持久化、用例、断言和报告协议保持，零真实模型调用。此前 321.24 秒与 309.323 秒两轮仍为性能 `FAIL`，原始证据保留；本次不代表产品真实模型速度、报告质量对照、生产部署或 Release 验收。本行是验证后回填的引用元数据，不宣称被所引用快照覆盖。
+
+## PL-FIX-101：文档型定位的小份参考资料仍需另行读取
+
+- **症状与受影响版本**：`8.2.0 / 56faca0` 的文档型 v3 最终提示词只有 `SKILL.md`，小份 `references/*.md` 也只出现在文件清单中，模型需要另行读取才能获得正文。当前代码路径已确认这一行为；本次按用户要求优化资料加载，不宣称已复现或量化真实模型耗时。该优化承接 PL-FIX-099 的文档型执行能力，不改变旧 Methods 的选卡策略。
+- **根因**：资产加载器虽已读取文档包，文档运行时仍将 Skill 上下文替换为入口原文，再提示模型按需读取全部参考文件；没有按实际预算启用小包内联。
+- **不可回归行为**：只从本次任务固定的 `documents` 快照取参考资料，按稳定顺序一次内联全部原文，保留中文、CRLF、代码块、空白及文件边界，不重复 `SKILL.md`。完整提示词（含续接及执行说明）、请求和材料清单按 UTF-8 字节计入 128 KiB 内联阈值及 Job 上下文预算；任一不足时整组回退为完整文件，不截断或只内联部分资料。入口本身超预算仍失败，不能借回退绕过限额。参考文档不进入日志证据清单，原有文件副本、工具策略、执行后完整性校验、最终报告协议和私有提示词审计保持。
+- **修复历史（2026-11-10）**：在一次基础上下文构建后追加参考文档，先计算完整候选字节数，再拼接符合预算的原文。沿用既有 `DOCUMENT_SKILL_FILE` 路径边界，`document-prompt.txt` 保存实际后端输入；大包和空参考目录均有明确说明。不增加模型调用、注册字段或公开 MCP 参数。
+- **专项回归测试**：`test_document_runtime.py` 新增三种准备方式的完整原文、稳定顺序、一次内联、最终提示词审计、参考资料与证据分离、128 KiB/请求预留/Job 预算整组回退、UTF-8 精确边界、空参考目录、部署目录替换后仍用固定快照及内联文档篡改拒绝等直接用例；既有大文档和必读请求超限用例继续覆盖。全文件 **37 passed**，随后补充的入口超限用例 **1 passed**；网站交付及旧 Methods 选卡 **11 passed**，此前运行时/注册/最终响应兼容 **122 passed**，文档 **4 passed**。各组存在重叠，不累计总数。命令与证据见本机 `.tmp/document-reference-inline-20261110/validation-commands.txt`，零真实模型调用。
+- **实现期验证记录**：首批新用例中 1 项直接修改 Job 限额，未同步固定 role 的上下文限额，导致夹具在进入后端前失败；改为构建 Job 前统一设置限额后，全文件 **31 passed**。随后增加精确边界、空目录和快照用例得到上述 **37 passed**，没有为修复该夹具而放宽生产限额，也没有把实现后的运行登记为先红。
+- **最新 Test Flow verdict（PL-FIX-101）**：2026-11-10 Linux `dev.default` [run-20261110T082144Z-b32c279e](.tmp/specialized-optimization-push-20261110/evidence/run-20261110T082144Z-b32c279e/verdict.json) 为 `PASS_WITH_WARNINGS`；源码快照 `git-visible-worktree-v1:3afe8697363103bf807844ab6fcd6fe5efe05c36e37d95a53313b5dc72c0e6a8`，verdict SHA-256 `de9c929be5095987a20ccaa81cd08427cd82b0e0c2a2792917ef63e9ca7e62c4`。功能、运行和源码核验均为 `PASS`，完整确定性阶段 287.392 秒，低于原 300 秒门槛；性能历史样本不足，状态为 `NOT_CALIBRATED`，本次通过不证明长期稳定达标。101 份证据已完整保存到持久盘，逐文件及封印校验通过。使用 D 盘独立 Ubuntu 22.04 环境，PostgreSQL 持久化、用例、断言和报告协议保持，零真实模型调用。此前 321.24 秒与 309.323 秒两轮仍为性能 `FAIL`，原始证据保留；本次不代表产品真实模型速度、报告质量对照、生产部署或 Release 验收。本行是验证后回填的引用元数据，不宣称被所引用快照覆盖。
+
+## PL-FIX-100：专用定位工具限制阻止检索和命令分析
+
+- **症状与受影响版本**：在 `8.2.0 / 56faca031f7341b7dd6c88f309e9b32dfa22f4db` 确认，文档型 v3 诊断固定使用 `read-only`，只允许 `Read`；旧 Methods 小输入使用 `none`，大输入使用 `read-only`。`Grep`、`Glob`、`Bash` 不可用，即使自定义启动器执行了这些工具，也会被执行后审计拒绝。
+- **根因**：专用诊断复用了最终响应迁移时的只读策略，输入是否内联还决定了工具权限；命令生成和工具审计都没有独立的诊断工具集合。仓库 wrapper 只读 `--file-access`，忽略后端传入的同名环境策略。本次按用户要求调整专用诊断能力，替代 PL-FIX-053 历史记录中的“小 Specialist 不调用 Read/Write”限制；保留其输出协议与其他修复行为。
+- **不可回归行为**：文档型 v3 和旧 Methods 的内联、文件输入均允许 `Read`、`Grep`、`Glob`、`Bash`。启动参数和实际工具审计必须使用同一策略；未知工具及策略仍拒绝。`none`、`read-only`、`read-search` 保持原含义，Router、历史只读追问和经验纠正不扩权。只读材料、执行后输入完整性检查、最终响应及资源限制保留；`Bash` 不被描述为只能读取 `inputs/` 的沙箱。
+- **修复历史（2026-11-09）**：新增 `diagnose` 策略并接入两个专用入口，原生 Claude/codeagent 显式设置四个工具及非交互权限，继续使用 stream-json。仓库 wrapper 接收后端环境策略，未知值及 CLI/环境冲突拒绝。诊断工具资产升至 `5.0.0`，同步提示词和文档；不改变 Skill 包的脚本、额外工具或依赖格式。
+- **专项回归测试**：`test_claude_command.py` 覆盖 Claude/codeagent 的工具参数；`test_agent_telemetry.py::test_diagnose_tool_audit_allows_analysis_tools_without_widening_read_only` 覆盖四个工具和未知工具拒绝；`test_diagnosis_runtime.py::test_methods_v1_specialist_prompt_uses_this_jobs_frozen_marker_scan` 覆盖内联与文件输入；`test_document_runtime.py` 覆盖文档型三种准备方式和输入防篡改。联合 `test_agent_telemetry_boundaries.py`、`test_final_response.py`、`test_report_followup_policy.py`、`test_p0_semantic_assets.py` 在 Linux 为 **360 passed**，先红记录为 **26 failed / 158 passed**。`isolated-agent-wrapper.test.mjs`、`isolated-agent-env.test.mjs`、`report-followup-gate.test.mjs` 为 **93 passed / 1 skipped**（Windows 实机断言），启动器新回归先红 **6 failed / 3 passed**。相关文档专项 **2 passed**；命令与证据保存在本机 `.tmp/specialized-tools-20261109/`，不累计重叠用例，零真实模型调用。
+- **集成补充（2026-11-10）**：关键词路由联调确认 `test_document_skill_web.py` 的模型替身仍断言旧 `read-only`，此前 360 项单元组合未覆盖该文件。同步为实际 `diagnose` 后，文件全部 8 个场景在本次 294 项联合专项中通过；只修正过期断言，生产权限和输入检查未放宽。失败与通过证据保存在 `.tmp/direct-keyword-route-20261110/`。
+- **最新 Test Flow verdict（PL-FIX-100）**：2026-11-10 Linux `dev.default` [run-20261110T082144Z-b32c279e](.tmp/specialized-optimization-push-20261110/evidence/run-20261110T082144Z-b32c279e/verdict.json) 为 `PASS_WITH_WARNINGS`；源码快照 `git-visible-worktree-v1:3afe8697363103bf807844ab6fcd6fe5efe05c36e37d95a53313b5dc72c0e6a8`，verdict SHA-256 `de9c929be5095987a20ccaa81cd08427cd82b0e0c2a2792917ef63e9ca7e62c4`。功能、运行和源码核验均为 `PASS`，完整确定性阶段 287.392 秒，低于原 300 秒门槛；性能历史样本不足，状态为 `NOT_CALIBRATED`，本次通过不证明长期稳定达标。101 份证据已完整保存到持久盘，逐文件及封印校验通过。使用 D 盘独立 Ubuntu 22.04 环境，PostgreSQL 持久化、用例、断言和报告协议保持，零真实模型调用。此前 321.24 秒与 309.323 秒两轮仍为性能 `FAIL`，原始证据保留；本次不代表产品真实模型速度、报告质量对照、生产部署或 Release 验收。本行是验证后回填的引用元数据，不宣称被所引用快照覆盖。
+
 ## PL-FIX-099：专用定位 Skill 的参数与日志准备方式被旧 Methods 流程固定
 
 - **状态**：实现与专项回归已完成，2026-11-09 已整理推送范围并合并远端 `a7d26f0` 的追问更新，准备对最终源码运行 `dev.default`；当前仍待完整验证。正式验证状态仅看本节最新 Test Flow verdict，不沿用旧 PASS。使用隔离 Linux 环境、锁定依赖与独立持久盘 PostgreSQL，保留全部测试和 300 秒门槛，零真实模型调用；活跃待办见 `TODO.md`。
@@ -36,7 +65,7 @@
 - **同轮失败与修正记录**：旧兼容专项为 **134 passed / 1 failed**（`.tmp/document-skill-compat-20261105-01.xml`），唯一失败是合同摘要清单未同步；更新清单后对应两例 **2 passed**（`.tmp/document-skill-contract-manifest-20261105-01.xml`），不能据此把原整组写成全部通过。可选材料预上传与等待补参的失败证据分别保留在 `.tmp/document-skill-optional-materials-20261105-red-01.xml`、`.tmp/document-skill-optional-materials-waiting-20261105-red-01.xml`。材料重试调整一度使旧的“先附件、再描述”入口多处理一次描述，现有用例在 `.tmp/document-skill-material-clarification-20261105-01.xml` 复现；现改为已有后续未处理消息时沿用完整消息前缀，不单独重开更早的材料消息。最后一组 **112 passed**（`.tmp/document-skill-material-handoff-final-20261105-02.xml`），覆盖 8 个真实 Web 场景、首条附件追问、旧路由竞态、附件选择、Agent store、通用交接，以及 `test_document_material_handoff.py` 的固定版本、来源和幂等边界。待采用说明在材料采用后清除，刷新及重试一致。最后一轮文档型及旧 Methods 运行时 **52 passed / 80 deselected**（`.tmp/document-runtime-final-20261105-01.xml`），文档与 REST 指南 **50 passed**。Windows 文件元数据和权限造成的既有测试失败保留记录，Server 路径以受支持的 Linux 专项为准。精确命令和结果索引见 `.tmp/document-skill-20261105/validation-commands.txt`，不合计重叠用例。
 - **合并专项（2026-11-09）**：远端将追问改为直接进入 Generic 后，7 个新增快照用例仍依赖旧的自动排队流程，Linux 专项已复现失败。现将它们明确改为历史快照兼容检查，另补三种材料模式直接进入通用诊断、保留原附件和父报告且请求幂等的回归；没有恢复旧生产流程。整文件 **46 passed**，证据 `.tmp/document-followup-rebase-20261109-02.xml`；网站视图与接入文档专项 **89 passed**。沙箱首次阻止本机回环连接产生的 3 项失败已在相同测试范围、开放回环连接后通过，未修改测试断言。完整验证仍以以下元数据为准。
 - **首次完整验证与修正（2026-11-09）**：`run-20261109T033434Z-6aa9d798` 为 `FAIL`，共 26 项失败：23 项来自旧测试夹具遗漏 `selected_skill_ref`，另有内部 Trigger 字段预期、Fake 返回类型及共享归档入口名称未同步。已按当前真实合同修正测试，不修改生产行为、不扩大归档 API 许可；直接夹具与合同专项 **158 passed**，归档及材料安全专项 **76 passed**，证据分别为 `.tmp/document-fixture-sync-20261109-01.xml` 和 `.tmp/document-skill-push-20261109/archive-boundary-green-01.xml`。首次运行的其余 Gate 通过，完整阶段耗时 314.564 秒；因功能失败，该阶段性能未评估，不能登记为通过。101 份证据已完整保存到持久盘并逐文件校验；修正后的源码须重新审阅计划并完成完整验证。
-- **最新 Test Flow verdict（PL-FIX-099）**：第二轮 Linux `dev.default` [run-20261109T034418Z-e5669374](.tmp/document-skill-push-20261109/evidence/run-20261109T034418Z-e5669374/verdict.json) 为 `FAIL`；源码快照 `git-visible-worktree-v1:db423bd4f33468e4c873bd03a952bf725bd41dc81c458fa9f8a2e5d8a1c3f071`，verdict SHA-256 `8e4aa4e0ed9327ae8b355dc98bf886134b0c2da8bf279d17aafa587f46600594`。全部功能 Gate、运行和证据验证均为 `PASS`，完整阶段 310.273 秒超过 300 秒门槛，性能为 `FAIL`。用户获知该结果后于 2026-11-09 明确回复“允许本次推送”，本次按授权例外推送，保留 FAIL 记录，不登记为完整验证通过。101 份证据已保存并校验；只读采样确认 PostgreSQL 数据文件同步等待，尚无经验证的环境修正。零真实模型调用，不代表生产部署或 Release 验收。本行是验证后回填的引用元数据，不宣称被其引用的源码快照覆盖；除本行外，交付字节须与该快照一致。
+- **最新 Test Flow verdict（PL-FIX-099）**：2026-11-09 对已推送的 `56faca0` 复测，Linux `dev.default` [run-20261109T064349Z-b7d75b69](.tmp/document-skill-push-20261109/evidence/run-20261109T064349Z-b7d75b69/verdict.json) 为 `PASS_WITH_WARNINGS`；源码快照 `git-visible-worktree-v1:3856ca4d62b0742fdc7767ed9e9f8c37609ee958637f584e1cb673110237bca0`，verdict SHA-256 `489a08bbfb4f45b79ce2b560e34b61645fd071d13a5e6273afb242d44cb9344d`。全部功能 Gate、运行和源码核验均为 `PASS`，完整阶段 294.889 秒，低于原 300 秒门槛；性能历史样本不足，状态为 `NOT_CALIBRATED`，不代表已证明长期稳定达标。PostgreSQL 从上轮 78.549 秒降至 64.822 秒，采样支持存储 I/O 波动，未确认产品逻辑缺陷，也未修改源码、用例、依赖或数据库耐久性设置。101 份证据已保存并校验，零真实模型调用。本轮通过不改写历史：第二轮 [run-20261109T034418Z-e5669374](.tmp/document-skill-push-20261109/evidence/run-20261109T034418Z-e5669374/verdict.json) 仍为性能 `FAIL`（310.273 秒），此前已按用户“允许本次推送”的明确授权例外推送，原始证据保留。本行是验证后回填的引用元数据，不宣称被其引用的源码快照覆盖；除本行外，交付字节须与该快照一致，不代表生产部署或 Release 验收。
 
 ## PL-FIX-098：codeagent 子进程延迟退出导致正常调用失败
 
@@ -447,6 +476,16 @@
 - **独立提交（2026-09-28）**：从合并快照中拆出路由与必要的环境兼容改动，保留其他任务工作区。独立提交须重新运行中央 Dev，最终状态以随后追加的验证元数据为准。
 
 - **最新 Test Flow verdict（2026-09-28 独立提交）**：中央 Linux `dev.default` [run-20260928T071148Z-b75f709e](.tmp/route-admission-push-dev/run-20260928T071148Z-b75f709e/verdict.json)，`PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，仅 performance 为 `NOT_CALIBRATED`。源码快照 `git-visible-worktree-v1:e7add69142343ebff3b417bd7affeab60a4a3c90cbb2a252b41ce2d1836f9925`（898 文件），verdict digest `e2f907b2956913d74336529a0bd1e9fb2a21354b12d25bcae82f5bf3cc337fe1`。完整证据复制后由本次交付版本的扫描器重新核验为 PASS，模型调用、token 和费用均为 0。affected 由编排器交完整套件覆盖：Core 32、合同 592、单元 3382、集成 192、SameJob 5、MCP 2、Web API 2 项通过，单元 2 项平台跳过，网站示例 Gate 通过；完整轨 278.522 秒。本行是验证后的引用元数据，不宣称被所引用源码快照覆盖；不代表真实路由模型、Release 或部署环境验收。
+
+### 2026-11-10：显式关键词免模型路由
+
+- **确认、受影响版本与原因**：在 `8.2.0 / 56faca031f7341b7dd6c88f309e9b32dfa22f4db` 核对注册、索引与实际执行入口，只有自然语言 `applicability/exclusions`，明确特征问题仍需 ROUTE LLM。Skill 名称、摘要及日志 marker 均不能证明路由归属，不能直接拿来替代原准入审核。
+- **调整与历史关联**：按用户本次要求增加可选 `routing.direct_match_keywords`，由作者显式声明足以确定整个 Skill 归属的故障码或特征短语。上述旧模型门槛继续适用于 LLM 分支；本次新增独立 `direct_keyword_route_v1` 规则分支，不伪造模型 assessments、原始响应或模型置信度。保留正常 ROUTE Outcome → DIAGNOSE 状态流转及 PL-FIX-001 的补材料行为。
+- **不可回归行为**：只匹配 Case 的真实原文，使用 Job 固定的完整候选和版本；区分大小写，ASCII 标识符检查边界。只有首轮、唯一明确命中且所选 Skill 无待判断的排除条件时直达。无声明、空声明、未命中、多候选、历史结果及明显否定/疑似/假设/引用等词法信号都回到原 LLM 分支。有限词法检查不等于理解任意自然语言；错误的充分条件声明不能由程序自动纠正。缺参数和附件仍由 DIAGNOSE 检查，取消及审计保存失败不得发布 MATCHED。
+- **实现与审计**：注册 v2/v3、固定索引、两个独立生成校验器及 Node 消费者统一校验可选关键词。审核保存原文/上下文/索引摘要和命中位置，标记 `model_called=false`；每个关键词至多保留一个位置，最多 16 条。发布前用同一原文与索引重算决策，核对完整草稿和审核记录。现场规则需显式配置并重启，不自动修改已安装 Skill。
+- **专项回归**：`test_keyword_route.py` 覆盖字面命中、边界、歧义、旧结果、原文来源和长文本；`test_keyword_route_finalizer.py` 覆盖原文、版本、位置、审核、草稿篡改拒绝；`test_keyword_route_runtime.py` 覆盖零模型调用、LLM 回退、取消和审计故障；`test_keyword_route_delivery.py` 覆盖 Methods 与文档型 Web 流程继续补参数和日志。上述用例与旧准入、发布、文档型 Web、模型路由及报告交付最终联合 **294 passed，48.07 秒**（1 条既有 Starlette 弃用警告）。注册/索引 **208 passed**，独立生成器 **192 passed**，Node 消费者 **30 passed**，文档 **4 passed**；不累计重叠用例。
+- **先红与联调记录**：注册新字段先复现 **12 failed / 21 passed**；生成器先红 **62 failed / 2 passed**，其中 8 项为合法新字段被拒绝，其余 54 项仅为错误信息尚未指向关键词，不冒充旧误放行。Node 两个消费者先红 2 项，发布入口先红 1 项。交叉复核确认 `isn't`、`didn't`、“未再出现”“仅是举例”4 个误命中，先红后补常见否定缩写和中文词法回退。首次联调的 9 项新夹具未标记 RUNNING、8 项旧工具权限断言，以及后续 6 项替身遗漏非空 reason 均已按真实合同修正；不把这些装配失败当成生产缺陷。所有失败和最终证据保留在本机 `.tmp/direct-keyword-route-20261110/`，准确命令见同目录索引。
+- **最新 Test Flow verdict（PL-FIX-073，2026-11-10 关键词直达）**：2026-11-10 Linux `dev.default` [run-20261110T082144Z-b32c279e](.tmp/specialized-optimization-push-20261110/evidence/run-20261110T082144Z-b32c279e/verdict.json) 为 `PASS_WITH_WARNINGS`；源码快照 `git-visible-worktree-v1:3afe8697363103bf807844ab6fcd6fe5efe05c36e37d95a53313b5dc72c0e6a8`，verdict SHA-256 `de9c929be5095987a20ccaa81cd08427cd82b0e0c2a2792917ef63e9ca7e62c4`。功能、运行和源码核验均为 `PASS`，完整确定性阶段 287.392 秒，低于原 300 秒门槛；性能历史样本不足，状态为 `NOT_CALIBRATED`，本次通过不证明长期稳定达标。101 份证据已完整保存到持久盘，逐文件及封印校验通过。使用 D 盘独立 Ubuntu 22.04 环境，PostgreSQL 持久化、用例、断言和报告协议保持，零真实模型调用。此前 321.24 秒与 309.323 秒两轮仍为性能 `FAIL`，原始证据保留；本次不代表产品真实模型速度、报告质量对照、生产部署或 Release 验收。本行是验证后回填的引用元数据，不宣称被所引用快照覆盖。
 
 ## PL-FIX-074：Windows 自动补入 WINDIR 导致隔离测试进程误拒绝
 

@@ -1,1 +1,1 @@
-{"schema_version":1,"tools":["workspace-file-read"]}
+{"schema_version":1,"tools":["workspace-file-read","workspace-file-search","workspace-shell"]}

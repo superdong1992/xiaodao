@@ -18,6 +18,7 @@ _FILE_TOOLS = {
     "none": frozenset(),
     "read-only": frozenset({"Read"}),
     "read-search": frozenset({"Read", "Grep"}),
+    "diagnose": frozenset({"Read", "Grep", "Glob", "Bash"}),
 }
 
 

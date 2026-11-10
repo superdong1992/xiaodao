@@ -213,7 +213,22 @@ export function validateRegistrationRoot(registrationRoot, { module = CLAUDE_DEE
   const registration = readJson(path.join(root, "registration-template.json"), "generated registration template");
   requireContract(registration.schema_version === 2 && registration.registration_id === path.basename(root) && registration.registration_id === CLAUDE_DEEPSEEK_REGISTRATION_ID && registration.version === "1.0.0" && registration.deployment_scope === "PRODUCTION", "CLAUDE_DEEPSEEK_REGISTRATION_INVALID", "Generated registration identity is invalid");
   const routing = registration.routing;
-  requireContract(routing && typeof routing === "object" && !Array.isArray(routing) && Object.keys(routing).sort().join(",") === "applicability,exclusions", "CLAUDE_DEEPSEEK_REGISTRATION_ROUTING_INVALID", "生成的 registration 必须声明 applicability 和 exclusions");
+  const routingFields = routing && Object.hasOwn(routing, "direct_match_keywords")
+    ? "applicability,direct_match_keywords,exclusions" : "applicability,exclusions";
+  requireContract(routing && typeof routing === "object" && !Array.isArray(routing) && Object.keys(routing).sort().join(",") === routingFields, "CLAUDE_DEEPSEEK_REGISTRATION_ROUTING_INVALID", "生成的 registration 必须声明 applicability 和 exclusions，可选 direct_match_keywords");
+  if (Object.hasOwn(routing, "direct_match_keywords")) {
+    const keywords = routing.direct_match_keywords;
+    requireContract(Array.isArray(keywords) && keywords.length <= 16, "CLAUDE_DEEPSEEK_REGISTRATION_ROUTING_INVALID", "routing.direct_match_keywords 必须是最多 16 项的数组");
+    const seen = new Set();
+    const generic = new Set(["超时", "失败", "错误", "故障", "异常", "timeout", "error", "failure", "slow", "rpc"]);
+    for (const keyword of keywords) {
+      requireContract(typeof keyword === "string" && [...keyword].length >= 3 && [...keyword].length <= 128
+        && !/^\p{White_Space}|\p{White_Space}$/u.test(keyword) && !/[\u0000-\u001f\u007f-\u009f]/u.test(keyword)
+        && !seen.has(keyword) && !generic.has(keyword.toLowerCase().replaceAll("ſ", "s")),
+      "CLAUDE_DEEPSEEK_REGISTRATION_ROUTING_INVALID", "routing.direct_match_keywords 每项须为 3–128 个字符，不得含首尾空白、控制字符、重复值或泛词");
+      seen.add(keyword);
+    }
+  }
   const conditionIds = new Set();
   for (const [group, minimum] of [["applicability", 1], ["exclusions", 0]]) {
     const conditions = routing[group];

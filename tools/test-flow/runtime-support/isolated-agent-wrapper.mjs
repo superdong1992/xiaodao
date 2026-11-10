@@ -48,6 +48,10 @@ const caps = {
   hard_timeout_seconds: Number(values.hard_timeout_seconds),
 };
 const workflow = values.workflow ?? "job";
+const runtimeFileAccess = process.env.PROBLEM_LOCATOR_AGENT_FILE_ACCESS;
+if (workflow === "job" && values.file_access !== undefined && runtimeFileAccess !== undefined
+    && values.file_access !== runtimeFileAccess) throw new Error("WRAPPER_FILE_ACCESS_CONFLICT");
+const fileAccess = runtimeFileAccess ?? values.file_access;
 const outputCapValid = hasMaxOutputTokens === hasMaxOutputTokensUpperLimit
   && (!hasMaxOutputTokens || (
     Number.isSafeInteger(caps.max_output_tokens)
@@ -95,11 +99,13 @@ if (workflow === "report-followup") {
     "--allowedTools", ...permissionRules,
     "--permission-mode", "dontAsk",
   ];
-} else if (values.file_access === "none") {
+} else if (fileAccess === "none") {
   toolArguments = ["--tools", "", "--permission-mode", "dontAsk"];
-} else if (values.file_access === "read-only") {
+} else if (fileAccess === "read-only") {
   toolArguments = ["--tools", "Read", "--allowedTools", `Read(${process.cwd()}/inputs/**)`, "--permission-mode", "dontAsk"];
-} else if (values.file_access !== undefined) {
+} else if (fileAccess === "diagnose") {
+  toolArguments = ["--tools", "Read,Grep,Glob,Bash", "--allowedTools", "Read,Grep,Glob,Bash", "--permission-mode", "dontAsk"];
+} else if (fileAccess !== undefined) {
   throw new Error("WRAPPER_FILE_ACCESS_INVALID");
 } else {
   toolArguments = ["--tools", "Read,Write", "--dangerously-skip-permissions"];

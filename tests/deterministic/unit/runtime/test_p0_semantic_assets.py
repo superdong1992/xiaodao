@@ -101,6 +101,7 @@ def _production_plan() -> MethodEvaluationPlanV2:
 def test_methods_v1_asset_versions_match_the_builtin_catalog() -> None:
     expected = {
         "tool-bundle/router": "3.0.0",
+        "tool-bundle/diagnose": "5.0.0",
         "output-contract/route": "6.0.0",
         "agent-profile/specialist": "8.0.0",
         "agent-profile/reviewer": "7.0.0",
@@ -141,7 +142,10 @@ def test_specialist_assets_require_grounded_methods_v1_output() -> None:
 
     assert profile_meta["version"] == "8.0.0"
     assert contract_meta["version"] == "11.0.0"
-    assert tool_meta["version"] == "4.0.0"
+    assert tool_meta["version"] == "5.0.0"
+    assert json.loads(tool_bundle)["tools"] == [
+        "workspace-file-read", "workspace-file-search", "workspace-shell",
+    ]
     assert "SPECIALIST" in profile
     assert "authoritative target logs" in profile
     assert "不要调用 Write" in contract

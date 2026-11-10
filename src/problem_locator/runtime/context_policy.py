@@ -377,6 +377,8 @@ def _skill_index_entry(
                 {"id": condition.id, "description": condition.description}
                 for condition in routing.exclusions
             ],
+            **({"direct_match_keywords": list(routing.direct_match_keywords)}
+               if routing.direct_match_keywords else {}),
         },
         "required_user_inputs": (
             [item.name for item in registration.inputs.user if item.required]

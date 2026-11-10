@@ -198,6 +198,26 @@ test("registration generation requires v2 and rejects missing or invalid routing
   }
 });
 
+test("registration generation preserves optional direct-match keywords and rejects malformed rules", () => {
+  const f = fixture();
+  const original = JSON.parse(fs.readFileSync(f.registration, "utf8"));
+  for (const keywords of [[], ["POOL_DEADLOCK_42"], ["🦊".repeat(128)]]) {
+    const value = structuredClone(original);
+    value.routing.direct_match_keywords = keywords;
+    fs.writeFileSync(f.registration, JSON.stringify(value));
+    assert.deepEqual(validateRegistrationRoot(f.registrationRoot).registration.routing.direct_match_keywords, keywords);
+  }
+  for (const keywords of [null, "POOL_DEADLOCK_42", [true], ["ab"], ["x".repeat(129)],
+    ["🦊".repeat(129)], [" POOL_DEADLOCK_42"], ["POOL_DEADLOCK_42 "], ["POOL\nDEADLOCK"],
+    ["POOL\x00DEADLOCK"], ["POOL\x7fDEADLOCK"], ["POOL\x85DEADLOCK"], ["ERROR"], ["timeout"],
+    ["POOL_DEADLOCK_42", "POOL_DEADLOCK_42"], Array.from({ length: 17 }, (_, index) => `ERR_${index}`)]) {
+    const value = structuredClone(original);
+    value.routing.direct_match_keywords = keywords;
+    fs.writeFileSync(f.registration, JSON.stringify(value));
+    assert.throws(() => validateRegistrationRoot(f.registrationRoot), (error) => error.code === "CLAUDE_DEEPSEEK_REGISTRATION_ROUTING_INVALID");
+  }
+});
+
 test("registration receipt detects post-validation tampering", () => {
   const f = fixture();
   const producer = buildRegistrationProducerIdentity({ wiki: f.wiki, metaSkillRoot: f.meta, claudeIdentity: claudeIdentity(), module: "rpc" });

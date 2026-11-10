@@ -23,7 +23,8 @@ FIXTURE_ROOT = (
 )
 
 
-@pytest.mark.parametrize("access,tools", [("none", ""), ("read-only", "Read")])
+@pytest.mark.parametrize("access,tools", [("none", ""), ("read-only", "Read"),
+    ("diagnose", "Read,Grep,Glob,Bash")])
 @pytest.mark.parametrize(
     "executable", ["claude", "claude.exe", "claude.cmd", "codeagent", "codeagent.exe", "codeagent.cmd"]
 )
@@ -38,7 +39,7 @@ def test_final_json_native_cli_has_only_the_required_file_tools(
         os_name="posix",
     )
     result = apply_final_response_policy(
-        invocation, file_access=access, workspace_root=tmp_path, phase="ROUTE"
+        invocation, file_access=access, workspace_root=tmp_path, phase="DIAGNOSE"
     )
     assert result.argv[0] == command
     assert result.argv[result.argv.index("--tools") + 1] == tools
@@ -51,13 +52,16 @@ def test_final_json_native_cli_has_only_the_required_file_tools(
         assert result.argv[result.argv.index("--allowedTools") + 1] == (
             f"Read({tmp_path.as_posix()}/inputs/**)"
         )
+    elif access == "diagnose":
+        assert result.argv[result.argv.index("--allowedTools") + 1] == tools
     else:
         assert "--allowedTools" not in result.argv
     assert result.environment["PROBLEM_LOCATOR_AGENT_FILE_ACCESS"] == access
-    assert result.environment["PROBLEM_LOCATOR_AGENT_PHASE"] == "ROUTE"
+    assert result.environment["PROBLEM_LOCATOR_AGENT_PHASE"] == "DIAGNOSE"
 
 
-@pytest.mark.parametrize("access,tools", [("none", ""), ("read-only", "Read")])
+@pytest.mark.parametrize("access,tools", [("none", ""), ("read-only", "Read"),
+    ("diagnose", "Read,Grep,Glob,Bash")])
 @pytest.mark.parametrize(
     "owned_options",
     [
@@ -86,6 +90,8 @@ def test_codeagent_final_json_policy_replaces_conflicting_flags_and_preserves_op
     )
     if access == "read-only":
         expected_policy += ("--allowedTools", f"Read({tmp_path.as_posix()}/inputs/**)")
+    elif access == "diagnose":
+        expected_policy += ("--allowedTools", tools)
     assert result.argv[9:] == expected_policy
     assert result.environment["ANTHROPIC_BASE_URL"] == "https://model.example.test"
     assert result.environment["PROBLEM_LOCATOR_AGENT_FILE_ACCESS"] == access

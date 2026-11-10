@@ -24,6 +24,7 @@ from .asset_snapshot import snapshot_bytes
 from .continuation_context import build_report_continuation_context
 from .direct_generic_logs import DirectGenericLogError, prepare_direct_sources
 from .failures import runtime_failure
+from .final_response import INLINE_INPUT_BYTES
 from .resolved_logparse import _active_role_labels, compile_resolved_logparse_plans
 from .skill_direct import parse_skill_direct_response
 from .workspace import _atomic_write, _fallback_expected_directory, _set_inputs_read_only
@@ -200,6 +201,29 @@ def _verify_inputs(workspace, request_bytes, evidence_bytes, evidence, documents
             raise _invalid_input("诊断材料内容与准备时的记录不一致。", "evidence")
 
 
+def _with_inline_references(prompt, documents, *, reserved_bytes, context_limit):
+    """Append every frozen reference or keep the complete file-reading path."""
+    references = [(relative, content) for relative, content in documents if relative != "SKILL.md"]
+    if not references:
+        return prompt + "\n本 Skill 没有参考 Markdown 文档。\n"
+    prefix = prompt + (
+        "\n以下已完整内联本 Skill 的全部参考 Markdown，无需再次读取这些文件。"
+        "文档路径相对于 inputs/skill/；它们说明诊断方法，不是本次故障的日志证据。\n")
+    headers = [f'<<<DOCUMENT_SKILL_FILE path="{relative}">>>\n' for relative, _ in references]
+    footer = "\n<<<END DOCUMENT_SKILL_FILE>>>\n"
+    # Count the original UTF-8 bytes and framing before constructing a large
+    # candidate. The base prompt includes continuation and execution guidance.
+    complete_bytes = len(prefix.encode("utf-8")) + reserved_bytes + sum(
+        len(header.encode("utf-8")) + len(content) + len(footer)
+        for header, (_, content) in zip(headers, references, strict=True))
+    if complete_bytes <= min(INLINE_INPUT_BYTES, context_limit):
+        return prefix + "".join(header + content.decode("utf-8") + footer
+            for header, (_, content) in zip(headers, references, strict=True))
+    return prompt + (
+        "\n完整输入超过本次内联预算，参考 Markdown 全部保留为完整文件，未截断或选取部分文档。"
+        "按需要读取 inputs/request.json 的 skill_documents 中列出的参考资料。\n")
+
+
 def execute_document_skill(runtime: DiagnosisRuntime, job, aggregate, assets, cancellation,
                            skill: ResolvedDocumentSkill):
     preprocessing = skill.registration.preprocessing
@@ -297,13 +321,17 @@ def execute_document_skill(runtime: DiagnosisRuntime, job, aggregate, assets, ca
     entry_text = dict(documents)["SKILL.md"].decode("utf-8")
     materials = replace(materials, skill=(entry_text + "\n\n"
         "本 Skill 的工作区入口是 inputs/skill/SKILL.md；相对引用从 inputs/skill/ 解析。"
-        "参考资料已固定在 inputs/skill/references/，按需要读取 request.json 中 skill_documents 列出的文档。\n"))
+        "参考资料已固定在 inputs/skill/references/，内联原文或读取方式见本次提示词末尾。\n"))
     context = runtime._materialize_context(job, workspace, materials)
     prompt = context.body + build_report_continuation_context(job.continuation_context) + (
         "\n本次为文档型专用 Skill。读取 inputs/request.json 和 inputs/evidence-manifest.json，"
         "只使用清单列出的可读材料；资源登记表中的原始上传路径不属于可读材料。"
         "本次准备方式为 " + mode + "。清单只说明准备情况，不代表已分析；请保留跳过项和证据缺口。"
+        "可使用 Read、Grep、Glob、Bash 读取、检索和分析材料，不得修改已准备的输入。"
         "按 Skill 判断并遵守输出合同返回状态标记和 Markdown 正文，不创建结果文件。\n")
+    prompt = _with_inline_references(prompt, documents,
+        reserved_bytes=len(request_bytes) + len(evidence_bytes),
+        context_limit=job.resource_limits.context_bytes)
     if len(prompt.encode("utf-8")) + len(request_bytes) + len(evidence_bytes) > job.resource_limits.context_bytes:
         raise runtime_failure(stage=ExecutionStage.CONTEXT_BUILD, code=ErrorCode.CONTEXT_LIMIT,
             message="文档型 Skill 的上下文超过任务限额。")
@@ -314,7 +342,7 @@ def execute_document_skill(runtime: DiagnosisRuntime, job, aggregate, assets, ca
         cancellation=cancellation, log_sinks=runtime._open_log_sinks(job),
         resource_limits=job.resource_limits,
         test_limits=replace(limits, wall_time_seconds=max(0.001, deadline - time.monotonic())),
-        broker_environment=None, backend_phase="DIAGNOSE", file_access="read-only")
+        broker_environment=None, backend_phase="DIAGNOSE", file_access="diagnose")
     check_abort()
     _verify_inputs(workspace, request_bytes, evidence_bytes, evidence, document_manifest, check_abort)
     if isinstance(result.final_result, str):

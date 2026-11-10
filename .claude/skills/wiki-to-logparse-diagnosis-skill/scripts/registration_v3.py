@@ -203,7 +203,22 @@ def source_identity(source: Path) -> dict[str, str]:
 
 
 def _routing(raw: Any) -> None:
-    value = _object(raw, {"applicability", "exclusions"}, "routing")
+    keys = {"applicability", "exclusions"}
+    _require(isinstance(raw, dict) and keys <= set(raw) <= keys | {"direct_match_keywords"}, "routing 的字段不符合 v3 合同。")
+    value = raw
+    if "direct_match_keywords" in value:
+        keywords = value["direct_match_keywords"]
+        _require(isinstance(keywords, list) and len(keywords) <= 16, "routing.direct_match_keywords 必须是最多 16 项的数组。")
+        seen: set[str] = set()
+        generic = {"超时", "失败", "错误", "故障", "异常", "timeout", "error", "failure", "slow", "rpc"}
+        for keyword in keywords:
+            _require(isinstance(keyword, str) and 3 <= len(keyword) <= 128
+                and keyword.strip() == keyword
+                and not any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in keyword),
+                "routing.direct_match_keywords 每项须为 3–128 个字符，不得含首尾空白或控制字符。")
+            _require(keyword not in seen and keyword.casefold() not in generic,
+                "routing.direct_match_keywords 不得重复，也不能只使用泛词。")
+            seen.add(keyword)
     names: set[str] = set()
     for kind, minimum in (("applicability", 1), ("exclusions", 0)):
         items = value[kind]

@@ -347,6 +347,43 @@ def test_registration_v2_preserves_explicit_immutable_routing_scope(tmp_path: Pa
         resolved.registration.routing.applicability[0].description = "changed"
 
 
+@pytest.mark.parametrize("keywords", [None, [], ["RPC request deadline exceeded", "服务请求超时"]])
+def test_registration_v2_preserves_optional_direct_match_keywords(tmp_path: Path, keywords) -> None:
+    root = _write_registration(tmp_path / "skills")
+    scope = _routing()
+    if keywords is not None:
+        scope["direct_match_keywords"] = keywords
+    _add_routing(root, scope)
+
+    resolved = load_specialized_skill_registration(root)
+    routing = resolved.registration.routing
+    assert routing is not None
+    assert routing.direct_match_keywords == tuple(keywords or [])
+    expected = _routing()
+    if keywords:
+        expected["direct_match_keywords"] = keywords
+    indexed = _skill_index_entry(resolved, VersionedRef(
+        id="diagnosis-skill/test-timeout", version="1.0.0", content_hash=resolved.combined_sha256
+    ))["routing"]
+    assert canonical_json_bytes(indexed) == canonical_json_bytes(expected)
+    with pytest.raises(FrozenInstanceError):
+        routing.direct_match_keywords = ()
+
+
+@pytest.mark.parametrize("keywords", [
+    None, "RPC request deadline exceeded", ["RPC request deadline exceeded"] * 2,
+    [" RPC request deadline exceeded"], ["RPC\nrequest"], ["ab"], ["x" * 129],
+    [f"alarm-{index}" for index in range(17)], ["TIMEOUT"], ["超时"], [False],
+])
+def test_registration_v2_rejects_invalid_direct_match_keywords(tmp_path: Path, keywords) -> None:
+    root = _write_registration(tmp_path / "skills")
+    scope = _routing()
+    scope["direct_match_keywords"] = keywords
+    _add_routing(root, scope)
+    with pytest.raises(ValueError):
+        load_specialized_skill_registration(root)
+
+
 @pytest.mark.parametrize("exclusion_count", [0, 16])
 def test_registration_v2_accepts_routing_bounds(tmp_path: Path, exclusion_count: int) -> None:
     root = _write_registration(tmp_path / "skills")
@@ -1284,12 +1321,15 @@ def test_product_hash_rejects_links_and_detects_content_drift(tmp_path: Path) ->
         hash_product_directory(root)
 
 
-@pytest.mark.parametrize("changed_asset", ["package", "routing"])
+@pytest.mark.parametrize("changed_asset", ["package", "routing", "direct_match_keywords"])
 def test_catalog_keeps_startup_bytes_until_restart(tmp_path: Path, changed_asset: str) -> None:
     store = tmp_path / "skills"
     root = _write_registration(store)
-    if changed_asset == "routing":
-        _add_routing(root, _routing())
+    initial_scope = _routing()
+    if changed_asset == "direct_match_keywords":
+        initial_scope["direct_match_keywords"] = ["RPC request deadline exceeded"]
+    if changed_asset != "package":
+        _add_routing(root, initial_scope)
     logparse_root = tmp_path / "logparse"
     logparse_root.mkdir()
     (logparse_root / "identity.txt").write_text("test\n", encoding="utf-8")
@@ -1312,17 +1352,20 @@ def test_catalog_keeps_startup_bytes_until_restart(tmp_path: Path, changed_asset
     ref = catalog.route_bindings().available_skill_refs[0]
     package_entry = root / "package/diagnose-test-timeout/SKILL.md"
     before = catalog.resolved_specialized_skill(ref)
-    if changed_asset == "routing":
+    if changed_asset != "package":
         scope = _routing()
-        scope["applicability"][0]["description"] = "修改后的明确适用条件。"
+        if changed_asset == "direct_match_keywords":
+            scope["direct_match_keywords"] = ["SERVICE_QUEUE_STALLED"]
+        else:
+            scope["applicability"][0]["description"] = "修改后的明确适用条件。"
         _add_routing(root, scope)
     else:
         package_entry.write_text(package_entry.read_text(encoding="utf-8") + "\ndrift\n", encoding="utf-8")
     assert catalog.check([ref]).available
     frozen = catalog.resolve(ref)
     assert "\ndrift\n" not in _load_entry_text(frozen, ref, AssetKind.DIAGNOSIS_SKILL)
-    if changed_asset == "routing":
-        assert _skill_index_entry(catalog.resolved_specialized_skill(ref), ref)["routing"] == _routing()
+    if changed_asset != "package":
+        assert _skill_index_entry(catalog.resolved_specialized_skill(ref), ref)["routing"] == initial_scope
         assert load_specialized_skill_registration(Path(frozen.root_path)).registration.routing == before.registration.routing
     restarted = VersionedAssetCatalog(
         skill_dir=store, assets_root=BUILTIN_ASSET_ROOT, logparse_tool=logparse,
@@ -1330,7 +1373,7 @@ def test_catalog_keeps_startup_bytes_until_restart(tmp_path: Path, changed_asset
     )
     assert restarted.check([ref]).missing_refs == [ref]
     current_ref = restarted.route_bindings().available_skill_refs[0]
-    if changed_asset == "routing":
+    if changed_asset != "package":
         after = restarted.resolved_specialized_skill(current_ref)
         assert _skill_index_entry(after, current_ref)["routing"] == scope
         assert after.package_tree_sha256 == before.package_tree_sha256

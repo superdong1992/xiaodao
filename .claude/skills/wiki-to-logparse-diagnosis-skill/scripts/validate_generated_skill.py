@@ -938,9 +938,26 @@ def _validate_methods(
 
 
 def _validate_routing(value: object, errors: list[str]) -> None:
-    if not isinstance(value, dict) or set(value) != {"applicability", "exclusions"}:
-        errors.append("registration routing 只能包含 applicability 和 exclusions")
+    required = {"applicability", "exclusions"}
+    if not isinstance(value, dict) or not required <= set(value) <= required | {"direct_match_keywords"}:
+        errors.append("registration routing 必须包含 applicability 和 exclusions，可选 direct_match_keywords")
         return
+    if "direct_match_keywords" in value:
+        keywords = value["direct_match_keywords"]
+        if not isinstance(keywords, list) or len(keywords) > 16:
+            errors.append("registration routing.direct_match_keywords 必须是最多 16 项的数组")
+        else:
+            seen: set[str] = set()
+            generic = {"超时", "失败", "错误", "故障", "异常", "timeout", "error", "failure", "slow", "rpc"}
+            for keyword in keywords:
+                if (not isinstance(keyword, str) or not 3 <= len(keyword) <= 128
+                        or keyword.strip() != keyword
+                        or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in keyword)):
+                    errors.append("registration routing.direct_match_keywords 每项须为 3–128 个字符，不得含首尾空白或控制字符")
+                elif keyword in seen or keyword.casefold() in generic:
+                    errors.append("registration routing.direct_match_keywords 不得重复，也不能只使用泛词")
+                else:
+                    seen.add(keyword)
     seen_ids: set[str] = set()
     for group, minimum in (("applicability", 1), ("exclusions", 0)):
         conditions = value[group]

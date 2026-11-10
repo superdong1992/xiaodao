@@ -40,7 +40,7 @@
 | GENERIC 输出格式 / 运行配置 | `2.0.0` / `3.0.0` |
 | Specialist / Reviewer 运行配置 | `8.0.0` / `7.0.0` |
 | 默认 Skill 直接输出所用配置 | `agent-profile/skill-direct` / `output-contract/skill-direct` |
-| Router / Diagnose / Review 工具包 | `3.0.0` / `4.0.0` / `3.0.0` |
+| Router / Diagnose / Review 工具包 | `3.0.0` / `5.0.0` / `3.0.0` |
 
 State、Job 和服务端确认的 Outcome 使用 V11。当前服务使用 PostgreSQL。新安装须使用独立的空数据库和新的空 `DATA_ROOT`；保留历史数据时，先按 [SQLite → PostgreSQL 迁移说明](docs/postgresql-migration.md)停服，再显式导入当前 V11 r2、会话 v2 格式。源数据库、目录和历史报告原样保留，不自动迁移。[8.0 / 8.1 离线升级说明](docs/data-upgrade-v11-r2.md)只处理历史 SQLite 格式，不能替代 PostgreSQL 导入。
 
@@ -79,7 +79,28 @@ v3 每个 Skill 声明一个可含多份文件的材料集合，以及各自的�
 
 要求输出 JSON 的 ROUTE、Intake、Specialist 和 Reviewer 阶段按[模型输出兼容规则](docs/model-output-compatibility.md)解析。新版报告追问直接进入 Generic，使用正式 V2 报告合同，不再要求旧追问控制包；旧格式兼容记录保留供排查历史任务。七个 MCP 工具的输入格式要求不变。网站快照的 failure 字段用于展示安全失败原因并关联服务端日志；调度或持久化异常会使服务停止接收新任务。结果提交可在现有 30 秒窗口内重试，窗口到期不强行中断单次阻塞 I/O，也不重新调用模型。
 
-专用 Skill 必须声明明确的适用范围。ROUTE 一次性逐项审核，只有唯一候选明确适用、其余候选均可排除、原文引用有效且置信度不低于 0.95 时才放行。低置信、依据不足或歧义转通用定位；已明确适用但缺诊断材料，仍进入专用流程补齐。旧注册未补齐范围声明时不能自动选用。详见[路由准入与注册升级](docs/route-admission.md)。
+专用 Skill 必须声明明确的适用范围。默认由 ROUTE 模型一次性逐项审核，只有唯一候选明确适用、其余候选均可排除、原文引用有效且置信度不低于 0.95 时才放行。低置信、依据不足或歧义转通用定位；已明确适用但缺诊断材料，仍进入专用流程补齐。旧注册未补齐范围声明时不能自动选用。模型审核规则见[路由准入与注册升级](docs/route-admission.md)。
+
+注册 v2/v3 可选填 `routing.direct_match_keywords`，让明确命中的首轮问题跳过 ROUTE 模型调用。每个关键词都应由作者确认：它足以选择整个 Skill，而不只是某条日志的线索。不能从 `summary`、Skill 名或方法 marker 自动抽取。下面是完整的 `routing` 字段示例，修改时保留注册中的其他字段；示例告警名仅用于说明格式，不能代替现场确认：
+
+```json
+{
+  "routing": {
+    "applicability": [
+      {
+        "id": "service-queue-stalled",
+        "description": "服务报告 SERVICE_QUEUE_STALLED，需定位队列停滞原因。"
+      }
+    ],
+    "exclusions": [],
+    "direct_match_keywords": ["SERVICE_QUEUE_STALLED"]
+  }
+}
+```
+
+关键词数组最多 16 项，每项 3～128 个字符，不得重复或包含首尾空白、控制字符，不能只写“超时”“错误”“RPC”等泛词。不声明或使用空数组时，仍走原有模型路由。服务端只匹配真实 `Case.raw_problem_text`，按区分大小写的字面文本匹配，并检查 ASCII 字母、数字和下划线的标识符边界。只有唯一 Skill 命中时才可能直达；`previous_outcome_refs` 非空、命中的 Skill 有排除条件，或原文出现常见否定、疑似、历史、引用、示例、假设等词法信号时，都回到 ROUTE 模型。词法检查只能避开已列出的歧义，不能保证理解全部自然语言。
+
+关键词直达保留 ROUTE Job 及正常的 Outcome → DIAGNOSE 状态推进，只省去这一次模型调用；专用流程仍负责补参数和日志。独立审计使用 `direct_keyword_route_v1` 和 `model_called=false`，发布前重新计算命中结果。修改注册后需重启服务，由新 Case 使用新关键词；没有现场确认的关键词时，不会自动启用这条路径。
 
 新 ROUTE 审核协议严格拒绝非法 JSON，包括根 `reason` 中未转义的引号。原始响应和有效审核记录分别归档，不自动修补字段或证据；旧版 reason 引号恢复记录仍可用于历史排查。展示格式兼容与排查方式见[模型输出兼容说明](docs/model-output-compatibility.md)。
 
@@ -156,11 +177,15 @@ uv lock --check
 
 Reviewer 必须继续使用 `DIAGNOSE_CLAUDE_COMMAND`，确保与 Specialist 使用相同的模型。
 
-Specialist 的完整输入不超过 128 KiB 时，请求、命中的方法卡和目标日志直接放入上下文，无需调用 Read/Write；超过上限时，会完整列出允许读取的输入文件，不截断内容。默认 `off` 模式下，模型在首行返回最终状态标记，后面附上 Markdown 正文。服务端检查执行协议并原样交付正文，不提取 JSON，也不复核结论证据。
+专用定位统一使用 `diagnose` 工具策略，文档型 v3 和旧 Methods 流程都允许 `Read`、`Grep`、`Glob`、`Bash`。Methods Specialist 的完整输入不超过 128 KiB 时，请求、命中的方法卡和目标日志直接放入上下文；超过上限时，完整列出输入文件，不截断内容。输入是否内联不改变工具权限。模型可按需读取、检索或计算，仍须使用本次准备的材料，直接返回最终响应，不创建结果草稿。
+
+文档型 v3 除 `SKILL.md` 外，还会尝试将 `references/` 下全部 Markdown 原文一次放入提示词，省去单独读取参考文档的工具调用。只有完整提示词加上请求、材料清单的 UTF-8 字节数不超过 128 KiB 且符合 Job 上下文限额时才内联；超限则整组保留为文件，按需读取，不截断或只挑选部分文档。两种方式都使用本次任务固定的文档快照。日志仍按材料清单读取，参考文档不作为本次故障证据。
+
+`Bash` 不受只读工具沙箱限制；原有的只读输入、执行后完整性校验和工具调用审计继续生效。此策略不改变 Skill 包的格式限制，不接入 Skill 自带脚本、额外工具或依赖。默认 `off` 模式下，模型在首行返回最终状态标记，后面附上 Markdown 正文。服务端检查执行协议并原样交付正文，不提取 JSON，也不复核结论证据。
 
 MCP 写操作和默认查询返回简要进度及 `artifact_views`；完整事实和结果元数据可用 `get_case(include_details=true)` 查询。如果写操作返回时任务已经完成，直接使用该响应中的下载信息。当前客户端的接口约定不兼容缺少下载字段的旧服务。HTTP keep-alive 保持 75 秒。
 
-上传时会合并小数据块，每次跨线程读取不超过 1 MiB，每路上传由应用分配的缓冲区不超过 2 MiB。接收过程中计算一次长度和 SHA-256，后续提交状态时复用已校验的资源记录，不重新读取历史附件。自定义 Claude wrapper 须遵循 `PROBLEM_LOCATOR_AGENT_FILE_ACCESS=none|read-only`，使用 stream-json 最终响应，并将大输入的 Read 权限限制在当前工作区的 `inputs/**`。
+上传时会合并小数据块，每次跨线程读取不超过 1 MiB，每路上传由应用分配的缓冲区不超过 2 MiB。接收过程中计算一次长度和 SHA-256，后续提交状态时复用已校验的资源记录，不重新读取历史附件。自定义 Claude wrapper 须接收并执行 `PROBLEM_LOCATOR_AGENT_FILE_ACCESS`：`none` 不允许文件工具，`read-only` 仅允许 `Read`，`read-search` 允许 `Read`、`Grep`，`diagnose` 允许 `Read`、`Grep`、`Glob`、`Bash`。wrapper 必须使用 stream-json 返回最终响应，并保留完整工具事件供服务端审计；`read-only` 的读取范围仍限于当前工作区的 `inputs/**`。
 
 上述四个并发配置只接受正整数，默认值适用于 4 核、8 GB 服务器。同一 Case 内的任务串行执行，不同 Case 可并行；取消操作只终止对应的 Job。资源保留与磁盘阈值按[存储策略](docs/storage-retention.md)配置；不接受 `JOB_CONCURRENCY` 或未列出的配置覆盖项。
 

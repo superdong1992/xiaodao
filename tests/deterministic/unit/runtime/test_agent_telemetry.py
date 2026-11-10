@@ -230,6 +230,27 @@ def test_large_assistant_event_preserves_tool_audit_even_when_text_is_not_sample
     assert summary["tool_observations"][0]["completed_count"] == 1
 
 
+@pytest.mark.parametrize("name,allowed", [
+    ("Read", True), ("Grep", True), ("Glob", True), ("Bash", True),
+    ("StructuredOutput", True), ("structuredoutput", True),
+    ("Write", False), ("Edit", False), ("mcp__custom__Bash", False), ("unknown", False),
+])
+def test_diagnose_tool_audit_allows_analysis_tools_without_widening_read_only(name, allowed):
+    telemetry = AgentStreamTelemetry()
+    telemetry.write(_line({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": "tool-1", "name": name, "input": {}},
+    ]}}))
+    telemetry.write(_line({"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "tool-1", "content": "result"},
+    ]}}))
+    assert telemetry.permits_file_access("diagnose") is allowed
+    if name in {"Grep", "Glob", "Bash"}:
+        assert not telemetry.permits_file_access("read-only")
+        assert not telemetry.permits_file_access("none")
+    if name in {"Glob", "Bash"}:
+        assert not telemetry.permits_file_access("read-search")
+
+
 def test_stream_phase_output_budget_invalidates_previously_received_terminal():
     event = _line({"type": "result", "subtype": "success", "is_error": False, "result": "{}"})
     telemetry = AgentStreamTelemetry(output_limit_bytes=len(event))

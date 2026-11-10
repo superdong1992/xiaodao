@@ -101,7 +101,7 @@ _BUILTIN_SPECS = (
     _BuiltinSpec("profiles/reviewer", AssetKind.AGENT_PROFILE, "agent-profile/reviewer", "7.0.0"),
     _BuiltinSpec("profiles/generic-locator", AssetKind.AGENT_PROFILE, "agent-profile/generic-locator", "5.0.0"),
     _BuiltinSpec("tool-bundles/router", AssetKind.TOOL_BUNDLE, "tool-bundle/router", "3.0.0"),
-    _BuiltinSpec("tool-bundles/diagnose", AssetKind.TOOL_BUNDLE, "tool-bundle/diagnose", "4.0.0"),
+    _BuiltinSpec("tool-bundles/diagnose", AssetKind.TOOL_BUNDLE, "tool-bundle/diagnose", "5.0.0"),
     _BuiltinSpec("tool-bundles/review", AssetKind.TOOL_BUNDLE, "tool-bundle/review", "3.0.0"),
     _BuiltinSpec("tool-bundles/generic-locator", AssetKind.TOOL_BUNDLE, "tool-bundle/generic-locator"),
     _BuiltinSpec("context-policies/route", AssetKind.CONTEXT_POLICY, "context-policy/route"),

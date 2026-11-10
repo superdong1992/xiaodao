@@ -63,6 +63,26 @@ def test_explicit_unique_match_admits_even_when_diagnostic_inputs_and_logs_are_m
     }
 
 
+@pytest.mark.parametrize("keywords", [[], ["RPC request deadline exceeded"]])
+@pytest.mark.parametrize("verdict,matched", [("SUPPORTED", True), ("REFUTED", False), ("UNKNOWN", False)])
+def test_direct_match_keywords_preserve_model_route_admission(keywords, verdict, matched):
+    job, index, response = _inputs()
+    index["skills"][0]["routing"]["direct_match_keywords"] = keywords
+    response["assessments"][0]["applicability"][0]["verdict"] = verdict
+    result = _parse(job, index, response)
+    assert (result.draft.payload.kind is RouteKind.MATCHED) is matched
+    assert result.route_admission["policy"] == "strict_route_admission_v1"
+
+
+@pytest.mark.parametrize("keywords", [None, "RPC request deadline exceeded", ["RPC request deadline exceeded"] * 2,
+    ["timeout"], ["bad\nkeyword"], ["x" * 129]])
+def test_model_route_rejects_invalid_indexed_direct_match_keywords(keywords):
+    job, index, response = _inputs()
+    index["skills"][0]["routing"]["direct_match_keywords"] = keywords
+    with pytest.raises(RuntimeExecutionError):
+        _parse(job, index, response)
+
+
 @pytest.mark.parametrize("confidence,matched", [(0, False), (0.94, False), (0.949999, False), (0.95, True), (1, True)])
 def test_confidence_is_a_required_additional_gate(confidence, matched):
     job, index, response = _inputs()

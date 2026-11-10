@@ -2,7 +2,7 @@
 
 [返回框架设计目录](README.md)
 
-本章说明 `src/problem_locator/runtime/` 的模块边界、执行流程和逐文件设计。原有流程以 2026-09-28 源码为基础，2026-11-05 补充文档型 Skill 的注册与执行。本章记录实现，不代表已完成完整 Test Flow 验证。
+本章说明 `src/problem_locator/runtime/` 的模块边界、执行流程和逐文件设计。原有流程以 2026-09-28 源码为基础，2026-11-05 补充文档型 Skill 的注册与执行，2026-11-10 补充可选关键词直达路由。本章记录实现，不代表已完成完整 Test Flow 验证。
 
 ## 1. 模块职责与依赖
 
@@ -37,18 +37,20 @@ Runtime 接收应用层已认领、状态为 `RUNNING` 的不可变 `Job`，解�
 
 `catalog.py` 为 v3 固定 `skill-direct` 运行配置和 `ReviewPolicy.NONE`。`diagnosis_runtime.py` 在 Methods 预检前转入 `document_runtime.py`，后者按 `none/direct_files/logparse` 准备材料。直接读取复用 `direct_generic_logs.py` 的文件校验、安全解压和容量限制；Logparse 复用 broker、回执和结果校验，再转换为统一清单。没有调用解析器的分支不生成解析回执。
 
-三种模式都保存只读 `inputs/request.json`、`inputs/evidence-manifest.json` 和 `inputs/skill/` 文档。请求保留原始问题和已接受参数，清单记录文件来源、大小、SHA-256、跳过项和限制。入口文档进入提示词，参考资料按需读取，不受 marker 命中限制。上下文预算包含必读的请求和清单，准备耗时计入 Job 总时限；执行后重新核对请求、清单、材料和 Skill 文档的内容与文件身份，再发布状态标记和 Markdown 报告。
+三种模式都保存只读 `inputs/request.json`、`inputs/evidence-manifest.json` 和 `inputs/skill/` 文档。请求保留原始问题和已接受参数，清单记录文件来源、大小、SHA-256、跳过项和限制。入口文档进入基础上下文；参考资料不受 marker 命中限制，按固定文档清单的顺序，将全部原文及路径边界追加到最终提示词。完整提示词（含续接上下文、说明和文档边界）加上必读请求、材料清单的 UTF-8 字节数须同时符合 `128 KiB` 内联阈值和 Job 上下文限额，否则全部参考资料保留为按需读取的完整文件，不截断或选择部分文档。`document-prompt.txt` 记录实际交给后端的完整提示词，`context.txt` 保留基础上下文；参考资料始终是 Skill 文档，不进入日志证据清单。准备耗时计入 Job 总时限；执行后重新核对请求、清单、材料和 Skill 文档的内容与文件身份，再发布状态标记和 Markdown 报告。
 
 必填参数生成现有 `PendingRequirement`，可选参数不生成待办。`SpecializedInputPolicy` 只在应用层、Intake 和领域补充流程中临时传递，不写入 Job 或 State V11。v3 不使用通用定位专属的 `generic_log_preparation`，也不进入 Methods 的证据核验和 Reviewer。
 
-### 2.1 ROUTE：模型审核，服务端决定是否准入
+### 2.1 ROUTE：先检查显式关键词，再按需调用模型
 
 1. `RuntimeAssetResolver` 解析 Job 固定的资产与全部候选 Skill，生成包含 `routing` 的索引。
 2. 无候选，或所有候选都未声明适用范围时，直接发布 `NO_CAPABILITY`；后一种情况保存 `model_called: false` 的准入审计，不调用模型。
-3. `ContextBuilder` 按固定段落和字节预算构造提示词。Router 不允许文件工具，以最终响应返回四字段 JSON。
-4. `parse_route_response()` 提取模型 JSON；`evaluate_route_admission()` 核对所有候选、所有条件和原文引用，再给出有效选择。
-5. 只有唯一候选明确适用、其他有声明候选均已排除、无不确定项，且置信度不低于 `0.95` 时才能 `MATCHED`。证据引用无效会把对应条件降为 `UNKNOWN`，普通不匹配转入通用定位。
-6. 字段错误、未知 ID 或遗漏审核项属于无效输出，不能伪装成正常回退，也不会因此自动再次调用模型。发布前 `server_outcome_finalizer` 再核对准入记录与本次 Job、草稿摘要和有效 Skill 是否一致。
+3. 先以真实 `Case.raw_problem_text` 检查作者显式声明的 `routing.direct_match_keywords`。仅首轮、唯一 Skill 字面命中且无阻止条件时跳过模型，保存 `direct_keyword_route_v1`、`model_called=false` 的独立准入审计。没有关键词或无法直达时继续原有模型路由。
+4. 模型路径由 `ContextBuilder` 按固定段落和字节预算构造提示词。Router 不允许文件工具，以最终响应返回四字段 JSON；`parse_route_response()` 提取模型 JSON，`evaluate_route_admission()` 核对所有候选、所有条件和原文引用，再给出有效选择。
+5. 模型路径只有唯一候选明确适用、其他有声明候选均已排除、无不确定项，且置信度不低于 `0.95` 时才能 `MATCHED`。证据引用无效会把对应条件降为 `UNKNOWN`，普通不匹配转入通用定位。
+6. 字段错误、未知 ID 或遗漏审核项属于无效输出，不能伪装成正常回退，也不会因此自动再次调用模型。发布前 `server_outcome_finalizer` 核对准入记录与本次 Job、草稿摘要和有效 Skill；关键词路径还须根据原始问题和冻结索引重新计算命中结果。
+
+两条路径都保留 ROUTE Job，并由正常 Outcome 接收流程推进到 DIAGNOSE。关键词直达只省去路由模型调用，不绕过专用流程的参数和材料收集。`previous_outcome_refs` 非空时不使用直达，避免把首轮原文误当成后续路由的新依据。
 
 逐字引用只证明引用来自本次冻结输入，不证明模型的语义判断正确。
 
@@ -59,7 +61,7 @@ Runtime 接收应用层已认领、状态为 `RUNNING` 的不可变 `Job`，解�
 3. 服务端建立独立 `logparse-preprocess` 工作区并执行预处理。主诊断工作区最初只写元数据，不再复制原始归档。
 4. 从 broker 审计重建目标日志集合，重新读取并校验受控源树、目标日志和摘要，再将目标字节、请求与回执写成冻结输入。Specialist 不获得 broker 能力。
 5. 完整扫描日志中的方法 marker，按命中加载方法卡。`off` 允许没有可交付目标日志时使用空扫描回执。过大的完整 Skill 材料写到 `inputs/methods-package.txt`，不会只截取部分卡片。
-6. 所有必要输入不超过 `128 KiB` 时完整内联，Agent 文件策略为 `none`；超过时列出完整输入文件，策略为 `read-only`。可选 marker 行号索引超过 `8 KiB` 时整体省略，不能截成不完整清单。
+6. 所有必要输入不超过 `128 KiB` 时完整内联；超过时列出完整输入文件。两种情况都使用 `diagnose` 策略，允许 `Read`、`Grep`、`Glob`、`Bash`。文档型 v3 专用定位也使用同一策略，按其请求和材料清单读取输入。可选 marker 行号索引超过 `8 KiB` 时整体省略，不能截成不完整清单。
 7. `off` 解析 Skill 状态包络，直接发布 Markdown 型 `JobOutcome`。其他模式先解析 Methods V1 JSON，再分别进入 advisory、逐项选择或 strict 核验。
 8. 结构化路径将 Methods 结果映射为领域草稿，服务端生成最终 Outcome、Result v3 和归档计划，暂存资源，最后发布执行回执。
 
@@ -172,6 +174,8 @@ Methods 输入中的命名事实以 `request.json` 为唯一模型可见来源�
 
 `load_specialized_skill_registration()` 要求注册根只有 `registration-template.json` 和 `package/`，后者恰有一个真实 Skill 目录。注册 V1 没有路由范围，V2 增加 `routing.applicability` 与 `routing.exclusions`；每组最多 16 条，适用条件至少一条，条件 ID 在整个 Skill 内唯一。运行角色绑定限定为框架已有 ID，预处理绑定核对角色与 Logparse 计划。
 
+V2 与文档型 V3 共用 `RoutingScopeV1`，可额外声明 `direct_match_keywords`，由 `routing_keywords.py` 统一校验。缺省或空数组保持原路由行为，索引也不输出此字段；有值时关键词随注册摘要和目录快照一起固定。修改注册需重启服务，再由新 Case 使用，不能覆盖已有 Job 的固定引用。
+
 输出 `ResolvedSpecializedSkillV1` 同时保存注册 SHA-256、包树 SHA-256 和两者组合摘要。`load_registered_skill_from_package()` 是提供给 Test Flow 的简化读取面。`MethodCardV1`、`MethodsManifestV1`、`RegistrationTemplateV1` 等不可变值对象供目录、选卡、预处理与核验共享。
 
 ## 4. Agent 进程、响应和追问边界文件
@@ -194,7 +198,9 @@ Methods 输入中的命名事实以 `request.json` 为唯一模型可见来源�
 
 `parse_command_tokens()` 将配置中的单条 `CLAUDE_COMMAND` 拆成 argv 和前置环境赋值，不启动 shell。`sanitize_environment()` 去掉环境中已有的 Logparse 仓库、配置和 broker 能力变量，并禁止命令自行覆盖保留键；只接受本 Job 注入的 endpoint/token。Windows 另外处理 PATH 大小写与可执行 shim 查找。
 
-`apply_final_response_policy()` 支持 `none`、`read-only`、`read-search`。对已识别的 Claude、codeagent 或相应 Node CLI，重写工具、权限和 stream-json 参数，同时保留运营方模型、端点等配置。`none` 无工具，`read-only` 仅 Read，`read-search` 仅 Read/Grep。
+`apply_final_response_policy()` 支持 `none`、`read-only`、`read-search`、`diagnose`。对已识别的 Claude、codeagent 或相应 Node CLI，重写工具、权限和 stream-json 参数，同时保留运营方模型、端点等配置。`none` 不允许文件工具，`read-only` 仅允许 `Read`，`read-search` 允许 `Read`、`Grep`；专用定位的 `diagnose` 允许 `Read`、`Grep`、`Glob`、`Bash`，不随输入是否内联而改变。自定义 wrapper 从 `PROBLEM_LOCATOR_AGENT_FILE_ACCESS` 接收策略，必须执行对应工具限制，并用 stream-json 提供最终响应和完整工具事件供服务端审计。
+
+`diagnose` 的 `Bash` 不属于只读沙箱，工具策略不保证命令只能访问 `inputs/`。运行时继续固定只读材料、检查执行后的输入完整性，并审计实际工具集合。Skill 包本身的脚本、工具和依赖限制保持不变。
 
 报告追问只接受已知可执行策略的 CLI 或仓库拥有的 `isolated-agent-wrapper.mjs --workflow report-followup`。`supports_read_search()` 提供提前检查。追问阶段生成独立 settings，隔离继承的插件、MCP、slash commands、浏览器接入和会话保存；未知 launcher 不能获得原始日志输入。
 
@@ -261,6 +267,26 @@ Methods 输入中的命名事实以 `request.json` 为唯一模型可见来源�
 每个候选必须恰好审核其全部 applicability/exclusions 条件。`_assess_conditions()` 检查 condition ID、verdict、理由和引用；无引用、空引用或引用不属于对应原文时，将模型 verdict 转为 UNKNOWN。候选存在反对适用的事实或成立的排除项时为 ruled_out，全部适用成立且全部排除不成立才是 match，其余为 uncertain。
 
 准入按固定优先级生成 reason code：模型不选、无路由声明、低置信度、有不确定候选、多匹配、所选项未匹配，最后才是 ADMITTED。审计保存模型选择与实际选择、每条条件的 model/effective verdict、冻结上下文与目录摘要，使调用方可以区别模型判断、服务器校验和最终业务路由。
+
+索引可包含经过校验的 `direct_match_keywords`，但此字段不改变上述模型准入规则。模型没有确认适用，或存在排除、不确定条件时，不能用关键词覆盖它的审核结果。
+
+### `routing_keywords.py`
+
+源码：[routing_keywords.py](../../src/problem_locator/runtime/routing_keywords.py)
+
+`parse_direct_match_keywords()` 接受 0～16 项字符串数组，返回不可变 tuple。每项必须为 3～128 个字符，不含首尾空白或控制字符，按原始文本去重；与超时、失败、错误、故障、异常、timeout、error、failure、slow、rpc 这些泛词完全相同的声明按忽略大小写规则拒绝。
+
+这些关键词是作者明确确认足以选择整个 Skill 的充分条件，不是摘要分词或日志 marker。生成器与服务端都不自动补出现场未确认的关键词；有排除条件的 Skill 可以保存声明，但不能靠它跳过模型审核。
+
+### `keyword_route.py`
+
+源码：[keyword_route.py](../../src/problem_locator/runtime/keyword_route.py)
+
+`try_direct_keyword_route()` 核对 ROUTE Job、全部冻结候选和真实 `Case.raw_problem_text`，仅在唯一 Skill 命中时返回 `RouteAdmissionResult`，否则返回 `None`，继续原有模型路由。匹配区分大小写，不做正则、模糊或语义扩展；关键词首尾为 ASCII 字母、数字或下划线时，检查相邻字符，避免命中更长标识符内部。
+
+首轮以 `previous_outcome_refs` 为空为条件。后续轮次、多个 Skill 命中、命中 Skill 有 `exclusions`，以及常见否定、疑似、历史、引用、示例和假设等词法信号，均交回模型；引用范围和代码块也保守处理。这些有限规则不能保证理解任意自然语言，关键词本身的充分性仍须由作者确认。
+
+独立审计策略为 `direct_keyword_route_v1`，记录 `model_called=false`、原始问题/冻结上下文/索引的摘要、所选 Skill ID 和匹配位置。位置以 Unicode 码点计数；`confidence=1.0` 表示确定性的字面命中，不是模型置信度。发布时重新计算结果，不把这份记录伪装成模型逐项审核。
 
 ### `skill_direct.py`
 
@@ -418,6 +444,8 @@ Methods V1 的严格协议与字节核验。`FrozenTargetLogV1` 保存 source ID
 
 ROUTE 非失败草稿必须带本次准入证明；DIAGNOSE/REVIEW 非失败草稿必须带 verification。COMPLETED 未通过正向 gate，或目标缺失且当前策略不允许部分结果时，改为 INCONCLUSIVE，并清除不应进入结论的内容。随后替换服务端 provenance、构造 Result v3，校验 Outcome/Result 与 Job 一致。
 
+关键词直达使用独立的 `direct_keyword_route_v1` 分支。最终化接收本次真实问题原文和冻结 Skill 索引，重新执行匹配，核对决策、审计和草稿摘要；只改 `model_called`、Skill ID、匹配位置或摘要不能构造有效的直达结果。原 `strict_route_admission_v1` 模型审核分支保持原有检查。
+
 最终 `output/job_outcome.json` 必须原先不存在；服务端独占创建 `runtime/server-state/`，原子写入结果和 `server-job-outcome.finalized`，marker 绑定源草稿、Outcome、DecisionAudit 与决策原文字节摘要。`off` 的 Markdown 直接交付路径在 Runtime 中构造并发布 Outcome，不经过这里的证据 gate。
 
 ### `user_results.py`
@@ -495,8 +523,8 @@ Logparse 运行的 claim、parse 参数和资源 metadata 需要相互一致，�
 | --- | --- |
 | [tool-bundles/router/asset.json](../../src/problem_locator/runtime/assets/tool-bundles/router/asset.json) | 注册 `tool-bundle/router` `3.0.0`，绑定 router 工具声明。 |
 | [tool-bundles/router/tool-bundle.json](../../src/problem_locator/runtime/assets/tool-bundles/router/tool-bundle.json) | `tools: []`，Router 所需资料已内联。实际 CLI 禁用工具由命令策略落实。 |
-| [tool-bundles/diagnose/asset.json](../../src/problem_locator/runtime/assets/tool-bundles/diagnose/asset.json) | 注册 `tool-bundle/diagnose` `4.0.0`，专用诊断与 direct 共用。 |
-| [tool-bundles/diagnose/tool-bundle.json](../../src/problem_locator/runtime/assets/tool-bundles/diagnose/tool-bundle.json) | 只声明 `workspace-file-read`；输入全部内联时 Runtime 进一步禁用所有文件工具。 |
+| [tool-bundles/diagnose/asset.json](../../src/problem_locator/runtime/assets/tool-bundles/diagnose/asset.json) | 注册 `tool-bundle/diagnose` `5.0.0`，文档型 v3 与旧 Methods 专用定位共用。 |
+| [tool-bundles/diagnose/tool-bundle.json](../../src/problem_locator/runtime/assets/tool-bundles/diagnose/tool-bundle.json) | 声明 `workspace-file-read`、`workspace-file-search`、`workspace-shell`，对应 `Read`、`Grep`、`Glob`、`Bash`；输入内联时保留这些工具。 |
 | [tool-bundles/review/asset.json](../../src/problem_locator/runtime/assets/tool-bundles/review/asset.json) | 注册 `tool-bundle/review` `3.0.0`。 |
 | [tool-bundles/review/tool-bundle.json](../../src/problem_locator/runtime/assets/tool-bundles/review/tool-bundle.json) | 声明 `workspace-file-read` 与 `workspace-proposal-write`，支持读取冻结审核材料并写 Methods REVIEW 草稿。 |
 | [tool-bundles/generic-locator/asset.json](../../src/problem_locator/runtime/assets/tool-bundles/generic-locator/asset.json) | 注册 `tool-bundle/generic-locator` `1.0.0`。 |

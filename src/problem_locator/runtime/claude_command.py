@@ -127,10 +127,13 @@ def apply_final_response_policy(invocation: ClaudeCommand, *, file_access: str |
             rewritten.append('-p')
         if '--verbose' not in rewritten:
             rewritten.append('--verbose')
+        tool_names = ','.join(name for name in ('Read', 'Grep', 'Glob', 'Bash') if name in file_tools)
         rewritten.extend(['--output-format', 'stream-json', '--permission-mode', 'dontAsk',
-            '--tools', ','.join(name for name in ('Read', 'Grep') if name in file_tools)])
+            '--tools', tool_names])
         if file_access == 'read-only':
             rewritten.extend(['--allowedTools', f'Read({workspace_root.as_posix()}/inputs/**)'])
+        elif file_access == 'diagnose':
+            rewritten.extend(['--allowedTools', tool_names])
         if followup_policy:
             rewritten.extend(['--setting-sources', '', '--settings', str(settings_path),
                 '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',

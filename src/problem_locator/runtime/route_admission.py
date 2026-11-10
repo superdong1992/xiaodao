@@ -16,6 +16,8 @@ from problem_locator.contracts import (
 )
 from problem_locator.integrations.agent_json import parse_agent_json_bytes
 
+from .routing_keywords import parse_direct_match_keywords
+
 
 MIN_ROUTE_CONFIDENCE = 0.95
 _VERDICTS = frozenset({"SUPPORTED", "REFUTED", "UNKNOWN"})
@@ -86,7 +88,11 @@ def _routing_candidates(job: Job, skill_index: str) -> dict[str, dict[str, tuple
         routing = item["routing"]
         if routing is None:
             continue
-        _object(routing, {"applicability", "exclusions"}, "路由声明")
+        fields = {"applicability", "exclusions"}
+        if isinstance(routing, dict) and "direct_match_keywords" in routing:
+            fields.add("direct_match_keywords")
+        _object(routing, fields, "路由声明")
+        parse_direct_match_keywords(routing.get("direct_match_keywords", []))
         applicability = _conditions(routing["applicability"])
         exclusions = _conditions(routing["exclusions"])
         if not applicability or len(set(applicability + exclusions)) != len(applicability + exclusions):

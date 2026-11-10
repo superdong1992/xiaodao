@@ -35,6 +35,7 @@ from problem_locator.integrations.agent_json import atomic_replace_agent_json
 from problem_locator.integrations.logparse.paths import resolve_workspace_path
 
 from .authoritative_targets import AuthoritativeTargetSet
+from .keyword_route import DIRECT_KEYWORD_ROUTE_POLICY, try_direct_keyword_route
 from .outcome_finalizer import SERVER_OUTCOME_RELATIVE_PATH
 from .result_types import CapturedTargetLog, ServerGeneratedResultFile
 from .route_admission import MIN_ROUTE_CONFIDENCE
@@ -165,11 +166,33 @@ def _server_state_path(root: Path) -> Path:
 def _validate_route_admission(
     job: Job, draft: AgentJobOutcomeDraftV2, draft_bytes: bytes,
     admission: dict[str, Any] | None,
+    *, skill_index: str | None = None, raw_problem_text: str | None = None,
 ) -> None:
     """Require this execution's server admission before minting a ROUTE Outcome."""
     payload = draft.payload
     if not isinstance(admission, dict) or not isinstance(payload, RouteDecision):
         raise ValueError("ROUTE 发布缺少服务端路由准入记录。")
+    if admission.get("policy") == DIRECT_KEYWORD_ROUTE_POLICY:
+        if not isinstance(skill_index, str) or not isinstance(raw_problem_text, str):
+            raise ValueError("直接关键词路由准入缺少冻结索引或原始问题描述。")
+        try:
+            recomputed = try_direct_keyword_route(job, skill_index=skill_index, raw_problem_text=raw_problem_text)
+        except (TypeError, ValueError):
+            raise ValueError("直接关键词路由准入无法从当前输入重新确认。") from None
+        if recomputed is None:
+            raise ValueError("当前输入不满足直接关键词路由准入条件。")
+        expected_draft = AgentJobOutcomeDraftV2(
+            schema_version=2, job_id=job.job_id, case_id=job.case_id, job_type=job.job_type,
+            base_state_revision=job.base_state_revision, result_type=OutcomeResultType.COMPLETED,
+            payload=recomputed.decision, consumed_evidence_refs=[], proposed_evidence_drafts=[],
+            proposed_artifact_drafts=[], rule_claims=[], error=None,
+        )
+        expected_bytes = canonical_json_bytes(expected_draft)
+        expected_audit = {**recomputed.audit, "draft_sha256": bytes_sha256(expected_bytes)}
+        if (draft_bytes != expected_bytes or canonical_json_bytes(draft) != expected_bytes
+                or canonical_json_bytes(admission) != canonical_json_bytes(expected_audit)):
+            raise ValueError("直接关键词路由准入记录、输入或最终草稿不一致。")
+        return
     expected_skill_id = None if payload.skill_ref is None else payload.skill_ref.id
     hashes = admission.get("input_hashes")
     if (
@@ -209,11 +232,14 @@ def finalize_server_outcome(
     authoritative_targets: AuthoritativeTargetSet | None,
     target_logs: tuple[CapturedTargetLog, ...],
     route_admission: dict[str, Any] | None = None,
+    route_skill_index: str | None = None,
+    route_raw_problem_text: str | None = None,
 ) -> ServerFinalizationResult:
     """Validate, possibly downgrade, then atomically publish one final Outcome."""
 
     if draft.job_type is JobType.ROUTE and draft.result_type is not OutcomeResultType.FAILED:
-        _validate_route_admission(job, draft, draft_bytes, route_admission)
+        _validate_route_admission(job, draft, draft_bytes, route_admission,
+            skill_index=route_skill_index, raw_problem_text=route_raw_problem_text)
     if draft.job_type is JobType.ROUTE or draft.result_type is OutcomeResultType.FAILED:
         if verification is not None:
             raise ValueError("ROUTE/FAILED drafts forbid a DecisionAudit")

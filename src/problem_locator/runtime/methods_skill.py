@@ -20,6 +20,7 @@ from problem_locator.contracts import canonical_json_sha256
 
 from .catalog_hash import hash_product_directory
 from .asset_snapshot import snapshot_asset
+from .routing_keywords import parse_direct_match_keywords
 
 
 _KEBAB = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
@@ -467,6 +468,7 @@ class RoutingConditionV1:
 class RoutingScopeV1:
     applicability: tuple[RoutingConditionV1, ...]
     exclusions: tuple[RoutingConditionV1, ...]
+    direct_match_keywords: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -855,7 +857,9 @@ def _preprocessing(value: Any, methods: MethodsManifestV1) -> PreprocessingBindi
 def _routing_scope(value: Any) -> RoutingScopeV1:
     if not isinstance(value, dict):
         raise ValueError("registration.routing 必须是对象。")
-    _exact_fields(value, _ROUTING_FIELDS, "registration routing")
+    fields = _ROUTING_FIELDS | ({"direct_match_keywords"} if "direct_match_keywords" in value else set())
+    _exact_fields(value, fields, "registration routing")
+    direct_match_keywords = parse_direct_match_keywords(value.get("direct_match_keywords", []))
     identifiers: set[str] = set()
     conditions: dict[str, tuple[RoutingConditionV1, ...]] = {}
     for name, minimum in (("applicability", 1), ("exclusions", 0)):
@@ -884,7 +888,8 @@ def _routing_scope(value: Any) -> RoutingScopeV1:
             parsed.append(RoutingConditionV1(id=identifier, description=description))
         conditions[name] = tuple(parsed)
     return RoutingScopeV1(
-        applicability=conditions["applicability"], exclusions=conditions["exclusions"]
+        applicability=conditions["applicability"], exclusions=conditions["exclusions"],
+        direct_match_keywords=direct_match_keywords,
     )
 
 

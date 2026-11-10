@@ -95,6 +95,29 @@ test("release registration requires explicit v2 routing conditions", () => {
   }
 });
 
+test("release registration preserves optional direct-match keywords and rejects malformed rules", () => {
+  const root = cloneCase("release-keywords-");
+  const template = path.join(root, "registration/rpc-timeout-methods-v1/registration-template.json");
+  const original = JSON.parse(fs.readFileSync(template, "utf8"));
+  for (const keywords of [[], ["POOL_DEADLOCK_42"], ["🦊".repeat(128)]]) {
+    const value = structuredClone(original);
+    value.routing.direct_match_keywords = keywords;
+    fs.writeFileSync(template, canonicalJson(value));
+    refreshManifest(root);
+    assert.deepEqual(loadReleaseCaseInputs(root).registration_template.routing.direct_match_keywords, keywords);
+  }
+  for (const keywords of [null, "POOL_DEADLOCK_42", [true], ["ab"], ["x".repeat(129)],
+    ["🦊".repeat(129)], [" POOL_DEADLOCK_42"], ["POOL_DEADLOCK_42 "], ["POOL\nDEADLOCK"],
+    ["POOL\x00DEADLOCK"], ["POOL\x7fDEADLOCK"], ["POOL\x85DEADLOCK"], ["ERROR"], ["timeout"],
+    ["POOL_DEADLOCK_42", "POOL_DEADLOCK_42"], Array.from({ length: 17 }, (_, index) => `ERR_${index}`)]) {
+    const value = structuredClone(original);
+    value.routing.direct_match_keywords = keywords;
+    fs.writeFileSync(template, canonicalJson(value));
+    refreshManifest(root);
+    assert.throws(() => loadReleaseCaseInputs(root), (error) => error.code === "RELEASE_CASE_REGISTRATION_ROUTING");
+  }
+});
+
 test("release case directory ordering is ordinal and independent of host collation", () => {
   const entries = [{ name: "registration-template.json" }, { name: "SKILL.md" }];
   assert.deepEqual(entries.sort(compareReleaseCaseEntries).map((entry) => entry.name), ["SKILL.md", "registration-template.json"]);

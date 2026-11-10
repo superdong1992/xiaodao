@@ -3072,10 +3072,14 @@ def test_methods_v1_specialist_publishes_json_and_durable_archive_plan() -> None
     temporary.cleanup()
 
 
+@pytest.mark.parametrize("inlined", [True, False], ids=["inline-inputs", "file-inputs"])
 def test_methods_v1_specialist_prompt_uses_this_jobs_frozen_marker_scan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    inlined: bool,
 ) -> None:
+    if not inlined:
+        monkeypatch.setattr("problem_locator.runtime.final_response.INLINE_INPUT_BYTES", 1)
     runtime, job, _factory, backend, _resources = _public_fake_claiming_runtime(
         tmp_path, "success",
     )
@@ -3110,7 +3114,7 @@ def test_methods_v1_specialist_prompt_uses_this_jobs_frozen_marker_scan(
     assert len(backend.calls) == 1
     call = backend.calls[0]
     assert call["backend_phase"] == "METHODS_SPECIALIST"
-    assert call["file_access"] == "none"
+    assert call["file_access"] == "diagnose"
     prompt = call["prompt"]
     index = json.loads(prompt.split("<<<SERVER_MARKER_INDEX>>>\n", 1)[1].split(
         "\n<<<END SERVER_MARKER_INDEX>>>", 1,
@@ -3120,8 +3124,11 @@ def test_methods_v1_specialist_prompt_uses_this_jobs_frozen_marker_scan(
         "client": {"rpc deadline exceeded": [1]},
         "server": {"connection pool wait": [1]},
     }
-    assert "rpc deadline exceeded request_id=42" in prompt
-    assert "connection pool wait request_id=42" in prompt
+    if inlined:
+        assert "rpc deadline exceeded request_id=42" in prompt
+        assert "connection pool wait request_id=42" in prompt
+    else:
+        assert "The full inputs exceed the inline limit" in prompt
     assert json.loads(backend.written_draft_bytes)["schema_version"] == 1
 
 

@@ -190,6 +190,7 @@ def test_specialist_inlines_complete_input_or_keeps_every_file(tmp_path, size, i
     prompt, actual, total = specialist_prompt(context, tmp_path, logs)
     assert actual is inlined
     assert context in prompt
+    assert 'Read, Grep, Glob and Bash' in prompt
     for name in ['request.json', 'target_logs.json', 'logparse-receipt.json', 'source_1.log']:
         assert name in prompt
     if inlined:

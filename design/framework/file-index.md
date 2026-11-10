@@ -151,6 +151,7 @@
 | [runtime/generic_locator.py](../../src/problem_locator/runtime/generic_locator.py) | [诊断运行时与资产](03-runtime.md) |
 | [runtime/generic_logs.py](../../src/problem_locator/runtime/generic_logs.py) | [诊断运行时与资产](03-runtime.md) |
 | [runtime/input_profile.py](../../src/problem_locator/runtime/input_profile.py) | [诊断运行时与资产](03-runtime.md) |
+| [runtime/keyword_route.py](../../src/problem_locator/runtime/keyword_route.py) | [显式关键词直达路由](03-runtime.md#keyword_routepy) |
 | [runtime/limits.py](../../src/problem_locator/runtime/limits.py) | [诊断运行时与资产](03-runtime.md) |
 | [runtime/methods_advisory.py](../../src/problem_locator/runtime/methods_advisory.py) | [诊断运行时与资产](03-runtime.md) |
 | [runtime/methods_evaluation_input_v2.py](../../src/problem_locator/runtime/methods_evaluation_input_v2.py) | [诊断运行时与资产](03-runtime.md) |
@@ -173,6 +174,7 @@
 | [runtime/result_types.py](../../src/problem_locator/runtime/result_types.py) | [诊断运行时与资产](03-runtime.md) |
 | [runtime/route_admission.py](../../src/problem_locator/runtime/route_admission.py) | [诊断运行时与资产](03-runtime.md) |
 | [runtime/route_json.py](../../src/problem_locator/runtime/route_json.py) | [诊断运行时与资产](03-runtime.md) |
+| [runtime/routing_keywords.py](../../src/problem_locator/runtime/routing_keywords.py) | [直接路由关键词校验](03-runtime.md#routing_keywordspy) |
 | [runtime/secret_redactor.py](../../src/problem_locator/runtime/secret_redactor.py) | [诊断运行时与资产](03-runtime.md) |
 | [runtime/server_outcome_finalizer.py](../../src/problem_locator/runtime/server_outcome_finalizer.py) | [诊断运行时与资产](03-runtime.md) |
 | [runtime/skill_direct.py](../../src/problem_locator/runtime/skill_direct.py) | [诊断运行时与资产](03-runtime.md) |

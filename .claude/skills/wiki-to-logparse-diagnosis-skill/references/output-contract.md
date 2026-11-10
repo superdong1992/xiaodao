@@ -114,10 +114,19 @@ python3 <本元-Skill目录>/scripts/validate_generated_skill.py \
 - `version` 使用三段 SemVer，可以包含预发布或构建标识，最长 128 个字符；更新已有能力时保留版本语义，
   不无条件重置为 `1.0.0`。新部署使用 `PRODUCTION`；测试夹具可使用 `TEST_ONLY`。
 - `capability` 为非空单行文本，最多 256 个 UTF-8 字节；`summary` 最多 4096 个 UTF-8 字节。
-- `routing` 仅包含 `applicability` 与 `exclusions`。前者 1–16 项，必须全部满足；后者 0–16 项，
-  任意一项成立都排除该 Skill。每项只有 `id` 和 `description`，两组 ID 不得重复。
+- `routing` 必须包含 `applicability` 与 `exclusions`，可选 `direct_match_keywords`。
+  `applicability` 为 1–16 项，必须全部满足；`exclusions` 为 0–16 项，任意一项成立都排除该 Skill。
+  每项只有 `id` 和 `description`，两组 ID 不得重复。
   ID 为最长 64 字符的小写 kebab-case，说明为最多 1024 字符的非空文本。
 - 路由条件描述领域、场景与症状，不能要求参数或附件已经齐全。没有明确排除条件时使用空数组。
+- `direct_match_keywords` 缺省或为空数组时保留模型路由；声明时最多 16 项，每项 3–128 个字符，
+  不得重复、含首尾空白或控制字符，也不能只使用“超时”“失败”“错误”“故障”“异常”、
+  `timeout`、`error`、`failure`、`slow`、`rpc` 等泛词。匹配区分大小写，仅按字面检查，不支持正则。
+  仅填写作者确认足以确定整个 Skill 归属的故障码或特征短语，例如 `POOL_DEADLOCK_42`；
+  不从 summary、Skill 名或日志 marker 自动抽词，没有可靠特征就省略，不为启用快速路由硬凑关键词。
+  只有用户原文唯一明确命中一个 Skill，且该 Skill 没有待判断的 `exclusions` 时，才跳过 ROUTE 的 LLM 调用。
+  多 Skill 命中、未命中、明显否定、历史或示例语境均保留原模型路由；这些词法检查不保证理解任意自然语言。
+  进入 DIAGNOSE 后仍按原规则收集缺少的参数和日志。
 - `runtime` 只声明 `preprocessing`。Profile、工具包与输出协议由服务端固定；作者不能自行授予工具权限。
 
 ## 输入声明

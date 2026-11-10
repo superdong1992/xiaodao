@@ -66,6 +66,31 @@ def test_package_and_registration_names_may_differ(tmp_path: Path) -> None:
     assert skill.registration.skill_name == "diagnose-service"
 
 
+@pytest.mark.parametrize("keywords", [None, [], ["SERVICE_QUEUE_STALLED", "队列阻塞告警"]])
+def test_document_registration_preserves_optional_direct_match_keywords(tmp_path: Path, keywords) -> None:
+    value = document_registration()
+    original_routing = deepcopy(value["routing"])
+    if keywords is not None:
+        value["routing"]["direct_match_keywords"] = keywords
+    root = write_document_registration(tmp_path, registration=value)
+    skill = load_document_skill_registration(root)
+    assert skill.registration.routing.direct_match_keywords == tuple(keywords or [])
+    ref = VersionedRef(id="diagnosis-skill/document-triage", version="1.0.0", content_hash=skill.combined_sha256)
+    expected = dict(original_routing)
+    if keywords:
+        expected["direct_match_keywords"] = keywords
+    assert _skill_index_entry(skill, ref)["routing"] == expected
+
+
+@pytest.mark.parametrize("keywords", [None, "SERVICE_QUEUE_STALLED", ["ERROR"], ["bad\x00keyword"]])
+def test_document_registration_rejects_invalid_direct_match_keywords(tmp_path: Path, keywords) -> None:
+    value = document_registration()
+    value["routing"]["direct_match_keywords"] = keywords
+    root = write_document_registration(tmp_path, registration=value)
+    with pytest.raises(ValueError):
+        load_document_skill_registration(root)
+
+
 @pytest.mark.parametrize("policy", ["off", "advisory", "strict"])
 @pytest.mark.parametrize("mode", ["none", "direct_files", "logparse"])
 def test_v3_catalog_always_freezes_direct_bindings(tmp_path: Path, policy: str, mode: str) -> None:

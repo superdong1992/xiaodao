@@ -160,6 +160,21 @@ export function pytestBaseTempPath(scratch, platform = process.platform) {
   return `\\\\?\\${absolute}`;
 }
 
+export function pytestBytecodeCachePath({
+  platform = process.platform,
+  stageKind,
+  attemptRoot,
+  scratch,
+  real = false,
+  isolatedAgent = false,
+}) {
+  // Bytecode is reusable only within the frozen attempt. Keep test fixtures,
+  // Windows scratch, and real-model environments on their existing boundaries.
+  return platform !== "win32" && stageKind === "deterministic" && !real && !isolatedAgent
+    ? path.join(attemptRoot, "scratch", "pytest-pycache")
+    : path.join(scratch, "pycache");
+}
+
 function gateRoot(context, stage) {
   return context.gateRoot ?? path.join(context.attemptRoot, "payload", "stages", stage.id);
 }
@@ -1487,7 +1502,13 @@ async function pytestAction(context, stage, selectors, {
   ensureDirectory(scratch);
   const processEnvironment = {
     PYTHONNOUSERSITE: "1",
-    PYTHONPYCACHEPREFIX: path.join(scratch, "pycache"),
+    PYTHONPYCACHEPREFIX: pytestBytecodeCachePath({
+      stageKind: stage.kind,
+      attemptRoot: context.attemptRoot,
+      scratch,
+      real,
+      isolatedAgent,
+    }),
     ...env,
   };
   const loopbackEnvironment = isolatedAgent

@@ -44,7 +44,7 @@ class ReadingBackend:
     def execute(self, **kwargs):
         self.calls.append(kwargs)
         root = Path(kwargs["workspace_root"])
-        assert kwargs["file_access"] == "read-only"
+        assert kwargs["file_access"] == "diagnose"
         assert kwargs["broker_environment"] is None
         assert not (root / "inputs/attachments").exists()
         assert not (root / "inputs/logparse-receipt.json").exists()
@@ -52,7 +52,8 @@ class ReadingBackend:
         assert "服务端已完成日志预处理" not in kwargs["prompt"]
         self.requests.append(json.loads((root / "inputs/request.json").read_bytes()))
         assert (root / "inputs/skill/SKILL.md").is_file()
-        assert (root / "inputs/skill/references/diagnosis.md").is_file()
+        for document in self.requests[-1]["skill_documents"]:
+            assert (root / document["path"]).is_file()
         manifest = json.loads((root / "inputs/evidence-manifest.json").read_bytes())
         self.manifests.append(manifest)
         for item in manifest["files"]:
@@ -254,6 +255,20 @@ def test_required_request_bytes_count_toward_context_budget(tmp_path):
     assert result.error.code.value == "CONTEXT_LIMIT" and not backend.calls
 
 
+def test_oversized_entry_prompt_still_fails_context_limit(tmp_path, monkeypatch):
+    original = write_document_registration
+    def with_large_entry(*args, **kwargs):
+        root = original(*args, **kwargs)
+        entry = root / "package/document-triage/SKILL.md"
+        entry.write_bytes(entry.read_bytes() + ("入口正文不得截断。\n" * 20_000).encode("utf-8"))
+        return root
+    monkeypatch.setattr(f"{__name__}.write_document_registration", with_large_entry)
+    runtime, job, backend, _, _, _ = make_runtime(tmp_path)
+    result = runtime.execute(job, InMemoryCancellationSignal()).job_outcome
+    assert result.result_type == OutcomeResultType.FAILED
+    assert result.error.code.value == "CONTEXT_LIMIT" and not backend.calls
+
+
 def test_backend_receives_remaining_task_time_after_preparation(tmp_path, monkeypatch):
     from problem_locator.runtime import document_runtime
     clock = SimpleNamespace(value=0.0)
@@ -284,6 +299,185 @@ def test_long_reference_is_available_without_inlining_all_documents(tmp_path, mo
     assert "诊断细节" not in backend.calls[0]["prompt"]
     documents = backend.requests[0]["skill_documents"]
     assert documents[1]["size"] > job.resource_limits.context_bytes
+
+
+def _write_references(monkeypatch, documents):
+    original = write_document_registration
+    def with_references(*args, **kwargs):
+        root = original(*args, **kwargs)
+        for name, content in documents.items():
+            (root / "package/document-triage/references" / name).write_bytes(content)
+        return root
+    monkeypatch.setattr(f"{__name__}.write_document_registration", with_references)
+
+
+@pytest.mark.parametrize("mode", ["none", "direct_files", "logparse"])
+def test_all_references_are_inlined_once_with_original_bytes_in_every_preparation_mode(tmp_path, monkeypatch, mode):
+    documents = {
+        "z-last.md": "# 最后一个参考\r\n\r\n```text\r\n  保留缩进和空白  \t\r\n```\r\n\r\n".encode("utf-8"),
+        "diagnosis.md": "# 特有诊断步骤\n\n逐字保留中文与 emoji：🧭\n\t尾行  \n\n".encode("utf-8"),
+        "a-first.md": b"# Unique first reference\n\n    indented code\n\n",
+    }
+    _write_references(monkeypatch, documents)
+    value = document_registration(mode=mode)
+    facts, files = {}, []
+    if mode == "direct_files":
+        files = [("app.log", "text/plain", b"uploaded-evidence-only\n")]
+    elif mode == "logparse":
+        prep = value["runtime"]["preprocessing"]
+        prep["roles"][0]["label"] = prep["logparse_plan"]["anchors"][0]["label"] = "client"
+        facts = {"problem_time": "2026-07-31T00:00:00.000Z", "process_name": "client"}
+        files = [("logs.zip", "application/zip", _zip(b"source"))]
+    runtime, job, backend, broker, records, _ = make_runtime(
+        tmp_path, registration=value, facts=facts, files=files)
+    if mode == "logparse":
+        producer = _MethodsRuntimeBackend(broker, job, "confirmed")
+        broker.preprocessing_executor = lambda session, *_: (
+            producer._run_preprocessing({"workspace_root": session.workspace_root}), None)[1]
+    result = runtime.execute(job, InMemoryCancellationSignal()).job_outcome
+    assert result.result_type == OutcomeResultType.COMPLETED, result.error
+    assert len(backend.calls) == 1
+    prompt = backend.calls[0]["prompt"]
+    assert records.read_audit_bytes(job.job_id, "document-prompt.txt") == prompt.encode("utf-8")
+    positions = []
+    for name in sorted(documents):
+        content = documents[name]
+        marker = f'<<<DOCUMENT_SKILL_FILE path="references/{name}">>>'
+        assert prompt.count(marker) == 1
+        assert prompt.count(content.decode("utf-8")) == 1
+        positions.append(prompt.index(marker))
+        document = next(item for item in backend.requests[0]["skill_documents"]
+                        if item["path"] == f"inputs/skill/references/{name}")
+        assert document["size"] == len(content)
+        assert document["sha256"] == hashlib.sha256(content).hexdigest()
+    assert positions == sorted(positions)
+    assert prompt.count("# 服务故障定位") == 1
+    assert '<<<DOCUMENT_SKILL_FILE path="SKILL.md">>>' not in prompt
+    evidence = json.dumps(backend.manifests[0], ensure_ascii=False)
+    assert "references/" not in evidence and "inputs/skill/" not in evidence
+    assert all(content not in backend.contents for content in documents.values())
+
+
+@pytest.mark.parametrize("budget_source", ["inline-limit", "request-reservation", "job-context"])
+def test_reference_group_falls_back_without_partial_inlining_when_total_budget_is_insufficient(
+        tmp_path, monkeypatch, budget_source):
+    from problem_locator.runtime.final_response import INLINE_INPUT_BYTES
+    reference_size = {"inline-limit": INLINE_INPUT_BYTES - 1024,
+                      "request-reservation": 65_000, "job-context": 48_000}[budget_source]
+    documents = {
+        "diagnosis.md": b"# Large reference unique prefix\n" + b"x" * reference_size + b"\nunique ending\n",
+        "a-small.md": b"# Small reference must fall back together\n",
+    }
+    _write_references(monkeypatch, documents)
+    value = document_registration()
+    if budget_source == "request-reservation":
+        value["inputs"]["fixed"] = [{"name": "large_registered_value", "value": "v" * 65_000}]
+    if budget_source == "job-context":
+        from problem_locator.contracts import limits
+        monkeypatch.setattr(limits, "DIAGNOSE_CONTEXT_BYTES", 32_000)
+    runtime, job, backend, _, _, _ = make_runtime(tmp_path, registration=value)
+    result = runtime.execute(job, InMemoryCancellationSignal()).job_outcome
+    assert result.result_type == OutcomeResultType.COMPLETED, result.error
+    prompt = backend.calls[0]["prompt"]
+    assert "<<<DOCUMENT_SKILL_FILE" not in prompt
+    assert "Large reference unique prefix" not in prompt
+    assert "unique ending" not in prompt
+    assert "Small reference must fall back together" not in prompt
+    root = Path(backend.calls[0]["workspace_root"])
+    for name, content in documents.items():
+        assert (root / "inputs/skill/references" / name).read_bytes() == content
+    reserved = sum((root / "inputs" / name).stat().st_size
+                   for name in ("request.json", "evidence-manifest.json"))
+    assert len(prompt.encode("utf-8")) + reserved <= job.resource_limits.context_bytes
+    reference_bytes = sum(map(len, documents.values()))
+    assert reference_bytes < INLINE_INPUT_BYTES
+    assert len(prompt.encode("utf-8")) + reserved + reference_bytes > min(
+        INLINE_INPUT_BYTES, job.resource_limits.context_bytes)
+    if budget_source == "request-reservation":
+        assert len(prompt.encode("utf-8")) + reference_bytes < INLINE_INPUT_BYTES
+
+
+def test_modified_inlined_reference_cannot_be_delivered(tmp_path, monkeypatch):
+    original = b"# Reference included before backend execution\n"
+    _write_references(monkeypatch, {"diagnosis.md": original})
+    def tamper(root):
+        path = root / "inputs/skill/references/diagnosis.md"
+        path.chmod(0o644)
+        path.write_bytes(b"# Modified reference\n")
+    runtime, job, backend, _, _, _ = make_runtime(tmp_path, backend=ReadingBackend(tamper))
+    result = runtime.execute(job, InMemoryCancellationSignal()).job_outcome
+    assert original.decode("utf-8") in backend.calls[0]["prompt"]
+    assert result.result_type == OutcomeResultType.FAILED
+    assert "不一致" in result.error.message
+
+
+@pytest.mark.parametrize("budget_source", ["inline-limit", "job-context"])
+@pytest.mark.parametrize("budget_delta", [0, -1])
+def test_reference_inlining_uses_exact_complete_utf8_budget(tmp_path, monkeypatch, budget_source, budget_delta):
+    from problem_locator.contracts import limits
+    from problem_locator.runtime import document_runtime
+    documents = {
+        "diagnosis.md": ("# 精确预算边界\r\n\r\n" + "中文原文保留。\n" * 200).encode("utf-8"),
+        "unlinked.md": "# 未被入口链接的参考\n\n```text\n  原始文本  \n```\n".encode("utf-8"),
+    }
+    _write_references(monkeypatch, documents)
+    probe_runtime, probe_job, probe_backend, _, _, _ = make_runtime(tmp_path / "probe0")
+    probe_result = probe_runtime.execute(probe_job, InMemoryCancellationSignal()).job_outcome
+    assert probe_result.result_type == OutcomeResultType.COMPLETED, probe_result.error
+    probe_root = Path(probe_backend.calls[0]["workspace_root"])
+    complete_bytes = len(probe_backend.calls[0]["prompt"].encode("utf-8")) + sum(
+        (probe_root / "inputs" / name).stat().st_size
+        for name in ("request.json", "evidence-manifest.json"))
+    assert all(content.decode("utf-8") in probe_backend.calls[0]["prompt"] for content in documents.values())
+    if budget_source == "inline-limit":
+        monkeypatch.setattr(document_runtime, "INLINE_INPUT_BYTES", complete_bytes + budget_delta)
+    else:
+        monkeypatch.setattr(limits, "DIAGNOSE_CONTEXT_BYTES", complete_bytes + budget_delta)
+    runtime, job, backend, _, _, _ = make_runtime(tmp_path / "actual")
+    result = runtime.execute(job, InMemoryCancellationSignal()).job_outcome
+    assert result.result_type == OutcomeResultType.COMPLETED, result.error
+    prompt = backend.calls[0]["prompt"]
+    for name, content in documents.items():
+        marker = f'<<<DOCUMENT_SKILL_FILE path="references/{name}">>>'
+        assert (marker in prompt) is (budget_delta == 0)
+        assert (content.decode("utf-8") in prompt) is (budget_delta == 0)
+
+
+def test_empty_reference_directory_does_not_require_reference_reads(tmp_path, monkeypatch):
+    original = write_document_registration
+    def without_references(*args, **kwargs):
+        root = original(*args, **kwargs)
+        package = root / "package/document-triage"
+        entry = package / "SKILL.md"
+        entry.write_bytes(entry.read_bytes().replace(b"references/diagnosis.md", b"SKILL.md"))
+        (package / "references/diagnosis.md").unlink()
+        return root
+    monkeypatch.setattr(f"{__name__}.write_document_registration", without_references)
+    runtime, job, backend, _, _, _ = make_runtime(tmp_path)
+    result = runtime.execute(job, InMemoryCancellationSignal()).job_outcome
+    assert result.result_type == OutcomeResultType.COMPLETED, result.error
+    assert [item["path"] for item in backend.requests[0]["skill_documents"]] == ["inputs/skill/SKILL.md"]
+    assert "<<<DOCUMENT_SKILL_FILE" not in backend.calls[0]["prompt"]
+    assert backend.calls[0]["prompt"].count("# 服务故障定位") == 1
+    assert backend.manifests[0]["files"] == []
+
+
+def test_replaced_deployment_directory_keeps_frozen_reference_text(tmp_path, monkeypatch):
+    original = "# 固定版本的参考\r\n\r\n本次诊断只使用该原文。  \r\n".encode("utf-8")
+    _write_references(monkeypatch, {"diagnosis.md": original})
+    runtime, job, backend, _, _, _ = make_runtime(tmp_path)
+    package = tmp_path / "skills/document-triage/package/document-triage"
+    package.rename(tmp_path / "previous-deployment")
+    (package / "references").mkdir(parents=True)
+    (package / "SKILL.md").write_bytes(b"# Replaced deployment entry\n")
+    (package / "references/diagnosis.md").write_bytes(b"# Replaced deployment reference\n")
+    result = runtime.execute(job, InMemoryCancellationSignal()).job_outcome
+    assert result.result_type == OutcomeResultType.COMPLETED, result.error
+    prompt = backend.calls[0]["prompt"]
+    assert prompt.count(original.decode("utf-8")) == 1
+    assert "Replaced deployment" not in prompt
+    root = Path(backend.calls[0]["workspace_root"])
+    assert (root / "inputs/skill/references/diagnosis.md").read_bytes() == original
 
 
 @pytest.mark.parametrize("roles", ["single", "dual", "optional-inactive", "optional-active"])

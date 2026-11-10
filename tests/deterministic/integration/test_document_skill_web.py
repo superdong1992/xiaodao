@@ -59,7 +59,7 @@ class ReadingDocumentBackend:
             output = json.dumps(route_response_for_prompt(kwargs["prompt"], self.skill_ref.id), ensure_ascii=False)
         else:
             root = Path(kwargs["workspace_root"])
-            assert kwargs["file_access"] == "read-only"
+            assert kwargs["file_access"] == "diagnose"
             assert kwargs["broker_environment"] is None
             request = json.loads((root / "inputs/request.json").read_bytes())
             manifest = json.loads((root / "inputs/evidence-manifest.json").read_bytes())
