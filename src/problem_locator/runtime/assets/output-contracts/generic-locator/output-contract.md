@@ -27,6 +27,8 @@ For `UNRESOLVED`, the Markdown report must state the leading hypotheses and the
 missing information that prevents confirmation. Do not return the report only as
 chat text, stdout, or stderr; the V2 result file is the sole authoritative result.
 
-以上是推荐的输出格式。服务端接受状态行的 BOM、空白、大小写和换行差异，以及包住状态行与整份报告的 Markdown 围栏。缺少状态行或状态无法识别时，非空报告按 UNRESOLVED 原文交付，不猜测诊断是否完成，不因此报错或记录异常。只移除明确的展示包裹和开头 BOM，正文中的普通代码块、标记示例及其他内容保持原样。旧 V1 报告也允许正文包含代码块或标记示例。
+以上是推荐的输出格式。服务端接受状态行的 BOM、空白、大小写和换行差异，以及包住状态行与整份报告的 Markdown 围栏。缺少状态行或状态无法识别时，非空报告按 UNRESOLVED 原文交付，不猜测诊断是否完成，不因此报错或记录异常。只移除明确的展示包裹和开头 BOM，正文中的普通代码块、标记示例及其他内容保持原样。
+
+旧 V1 报告保留 `CONCLUSION` 与 `ROOT_CAUSE_ANALYSIS` 两段正文，允许正文包含代码块或标记示例。`STATUS` 行可以省略；缺少状态或状态无法识别时按 `UNRESOLVED` 交付，两段正文保持原文，不记录格式异常、不重试模型。
 
 若新旧两个结果文件同时存在，优先读取 V2 Markdown 文件；V2 文件为空、超限或无法安全读取时仍失败，不改用旧文件掩盖问题。文件路径、文件身份、UTF-8、正文非空及 65536 字节上限保持不变，展示包裹额外允许最多 1024 字节。

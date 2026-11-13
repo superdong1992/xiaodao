@@ -565,7 +565,7 @@ Logparse 运行的 claim、parse 参数和资源 metadata 需要相互一致，�
 | [output-contracts/skill-direct/output-contract.md](../../src/problem_locator/runtime/assets/output-contracts/skill-direct/output-contract.md) | 固定 `SKILL_DIAGNOSIS_RESULT_V1` 状态首行与最长 `65536` UTF-8 字节正文；不要求证据核验 JSON，保留 Skill 报告。 |
 | [output-contracts/review/asset.json](../../src/problem_locator/runtime/assets/output-contracts/review/asset.json) | 注册 `output-contract/review` `10.0.0`。 |
 | [output-contracts/review/output-contract.md](../../src/problem_locator/runtime/assets/output-contracts/review/output-contract.md) | 输出 REVIEW 草稿；顶层与逐发现 verdict 为 PASS/NEED_MORE_EVIDENCE/REJECT。strict 路径按已知发现对齐，缺项或冲突按证据不足处理。 |
-| [output-contracts/generic-locator/asset.json](../../src/problem_locator/runtime/assets/output-contracts/generic-locator/asset.json) | 注册 `output-contract/generic-locator` `2.0.0`。 |
+| [output-contracts/generic-locator/asset.json](../../src/problem_locator/runtime/assets/output-contracts/generic-locator/asset.json) | 注册 `output-contract/generic-locator` `2.1.0`。 |
 | [output-contracts/generic-locator/output-contract.md](../../src/problem_locator/runtime/assets/output-contracts/generic-locator/output-contract.md) | 只写 V2 `.md` 结果文件，状态首行后为完整 Markdown；正文保留原字节，不得同时生成旧 `.txt`，未确认报告说明假设与缺口。 |
 
 ### 8.5 输入模板与 intake：4 个文件

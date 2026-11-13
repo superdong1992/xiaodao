@@ -7,29 +7,37 @@ import uuid
 
 from .extraction import parse_card_json
 
-_FIELDS = {"card_id", "card_sha256", "relation", "evidence_indexes", "scope_terms"}
 RELATIONS = frozenset({"GLOBAL_ERROR", "NOT_APPLICABLE", "DIAGNOSIS_OMISSION", "UNRELATED"})
 SCOPED_RELATIONS = frozenset({"NOT_APPLICABLE", "DIAGNOSIS_OMISSION"})
 
 
-def validate_memory_review(value, usage, evidence, card_json):
+def validate_memory_review(value, usage, evidence, card_json, *, allow_none=False):
     """Check identity and citation bindings; the reviewer decides the semantic relation."""
     # Import lazily so recall can share these rules without a module cycle.
     from .retrieval import _ERROR_CODE, keywords
 
-    if not isinstance(value, dict) or not _FIELDS - {"scope_terms"} <= value.keys() or not isinstance(usage, dict):
+    if not isinstance(value, dict) or not isinstance(usage, dict):
         raise ValueError("经验纠正关联字段无效。")
     card_id, old_raw, old_hash = usage.get("card_id"), usage.get("card_json"), usage.get("card_sha256")
     if (not isinstance(card_id, str) or str(uuid.UUID(card_id)) != card_id
-            or value["card_id"] != card_id or value["card_sha256"] != old_hash
+            or value.get("card_id", card_id) != card_id or value.get("card_sha256", old_hash) != old_hash
             or not isinstance(old_raw, str)):
         raise ValueError("经验纠正未关联本次实际采用的经验。")
     old_card = parse_card_json(old_raw)
     if old_card != old_raw or hashlib.sha256(old_card.encode("utf-8")).hexdigest() != old_hash:
         raise ValueError("实际采用的经验内容与记录不一致。")
-    relation, indexes, terms = value["relation"], value["evidence_indexes"], value.get("scope_terms", [])
+    relation, indexes, terms = value.get("relation"), value.get("evidence_indexes"), value.get("scope_terms")
+    if allow_none and not relation:
+        return None
     if not isinstance(relation, str) or relation not in RELATIONS:
         raise ValueError("经验纠正关系无效。")
+    if indexes is None and relation == "UNRELATED":
+        indexes = []
+    if terms is None:
+        terms = []
+    if allow_none and ((relation != "UNRELATED" and not indexes)
+            or (relation in SCOPED_RELATIONS and not terms)):
+        return None
     if (not isinstance(evidence, list) or not 1 <= len(evidence) <= 4
             or not isinstance(indexes, list)
             or any(type(index) is not int or not 0 <= index < len(evidence) for index in indexes)

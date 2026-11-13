@@ -2519,6 +2519,15 @@
 - **推送前完整验证修正**：首轮 `run-20261113T035633Z-4fbf9c2e` 的失败还包括旧 Methods 引用、报告正文、JSON 尾部说明、额外产物提议及部分结果审核断言。按当前实现同步后，仍检查无效引用不被采用、合法发现保留、伪造提议文件不被读取、模型原文和摘要不变，Reviewer 只能收到已筛选的有效稿，HTTP 报告和持久化内容不得包含伪造发现。只修改测试与夹具，不放宽生产约束；失败和专项证据均保存在 `.tmp/route-top5-push-20261113/`，再次完整验证前不宣称本次通过。
 - **最新 Test Flow verdict（2026-11-12 全项目专项）**：2026-11-13 Linux `dev.default` [run-20261113T040803Z-70be2c08](.tmp/route-top5-push-20261113/evidence/run-20261113T040803Z-70be2c08/verdict.json) 为 `PASS_WITH_WARNINGS`；源码快照 `git-visible-worktree-v1:1cdeaa6c7c2fc141988f4946041581d750e20a365612d41a13a3864424fc831e`，verdict SHA-256 `d6047005a2e0605197693598648af2de84884843e58cf96787f7f495c7f73f35`。功能、运行和源码核验均为 `PASS`；完整确定性阶段 290.188 秒，低于原 300 秒门槛，性能状态为 `NOT_CALIBRATED`。101 份证据已完整保存到持久盘，逐文件及封印校验通过。本次覆盖 Top5 路由和 LLM 输出容错的最终实现，历史条件审核已按 11-13 方案替换；零真实模型调用。公司环境原故障问题、模型循环和 token/耗时对比仍待验收，本次不代表生产部署或 Release 通过。本行是验证后回填的引用元数据，不宣称被所引用源码快照覆盖。
 
+### 2026-11-13：补齐非必要字段缺省与正常不入库
+
+- **症状、受影响版本与确认**：在 `8.2.0 / 46f9f96c897ca88eecf3e0c52efd1068198f66e4`，实际 `DiagnosisRuntime.execute` 读取两段正文完整的 Generic V1 报告时，仅删除 `STATUS` 行或写未知状态，就从正常交付变为 `OUTCOME_INVALID`，并记录 ERROR 级 `job.stage.failed`。反馈和追问纠错的真实 worker 中，`UNRELATED` 省略空的 `evidence_indexes`、模型省略卡片或文件哈希回显，以及缺少可采用内容时，仍会记录 `memory.extraction.failed`。先红输入、输出和事件保存在 `.tmp/llm-optional-fields-20261113/`，没有把旧版本产物或公司现场描述当作当前复现。
+- **根因与历史关联**：前一轮已放宽当前 V2 Markdown 和普通经验提炼，但遗漏 Generic V1 兼容读取的强制状态正则，以及两条经验纠错入口的字段集合校验。服务端已知道实际使用卡片和输入清单，仍要求模型回显 ID、哈希和空集合；无法采用的模型内容也被当作异常。沿本条 11-12 的全项目专项继续补齐，不另建割裂历史的新问题。
+- **修复历史**：V1 缺省、空或未知状态按 `UNRESOLVED` 交付，两段正文保持原文；Generic 输出合同资源及内置目录同步至 `2.1.0`。经验纠错只读取实际采用的字段，重复 ID/哈希缺省时绑定已核验的 usage/manifest；不需要的空集合可省略。未明确采纳、卡片或引用内容不足、无法确定归因或局部条件时，模型入口正常返回无可用经验，不抛异常、不新增失败日志或模型调用。提示词同步最短拒绝输出及可省略字段。
+- **不可回归行为**：完整报告不能仅因缺少状态而失败；缺省不凭空认定已解决。缺少证据或归因内容不得发布经验、停用旧卡或新增修订；引用整组不采纳，不重排索引。可选回显由真实记录补齐，显式冲突仍不能覆盖可信身份。共享存储的严格默认、模型执行后的输入完整性核对、来源与隐私边界继续生效。公开 MCP/REST、Job 和持久化格式不变。
+- **专项回归测试与结果**：Generic 两文件 `-k generic` 为 Linux 68 passed、66 deselected，新增解析和 Runtime 用例先红 7 failed；经验八文件联合 214 passed，其中新 `test_memory_optional_output.py` 的 68 项覆盖两条 worker、真实存储、无异常日志及单次执行。Methods 另做 78/78 组只读缺省复核，不计入 pytest 数量；当前 Specialist、Reviewer、直达/文档报告、Intake 和 telemetry 未发现其他同类问题。文档检查 4 passed，`git diff --check` 通过。命令、范围和证据见 `TODO.md`；所有先红、旧断言同步和最终结果保留，零真实模型调用。
+- **最新 Test Flow verdict（2026-11-13 非必要字段补查）**：2026-11-13 Linux `dev.default` [run-20261113T044145Z-87182b53](.tmp/llm-optional-push-20261113/evidence/run-20261113T044145Z-87182b53/verdict.json) 为 `PASS_WITH_WARNINGS`；源码快照 `git-visible-worktree-v1:9366d662ddf4a205b4582c0274b2311e497cca5665aa3b1978395b74ea1dc68c`，verdict SHA-256 `be5e05a51d6219c4ee2b75e996984b4774dddf72097e848fc37ed68a4941eb5b`。功能、运行和源码核验均为 `PASS`；完整确定性阶段 282.540 秒，低于原 300 秒门槛，性能状态为 `NOT_CALIBRATED`。101 份证据已完整保存到持久盘，逐文件及封印校验通过。本次覆盖 Generic V1 状态缺省、经验可选字段补齐及正常不入库的最终实现；零真实模型调用。本次不代表公司环境真实模型验收、生产部署或 Release 通过。本行是验证后回填的引用元数据，不宣称被所引用源码快照覆盖。
+
 ## PL-FIX-043：Methods marker 大小写语义在多阶段校验中不一致
 
 - **状态**：已按 Evidence V2 单次扫描合同再次修复；是否验证通过以本条“最新 Test Flow verdict”为准。

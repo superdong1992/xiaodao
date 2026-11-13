@@ -4,6 +4,23 @@
 
 本文件是仓库活跃待办的唯一清单。已完成事项由代码、当前设计与 Git 历史证明，不在这里保留关闭项。
 
+## 模型非必要字段缺省补查（2026-11-13）
+
+- 基线为 `8.2.0 / 46f9f96`。已沿实际输出读取链复核，修复 Generic 旧 V1 报告省略 `STATUS` 时的 `OUTCOME_INVALID`，以及经验纠错缺少可选字段、重复回显或无可用内容时的失败记录。修复历史沿 PL-FIX-042 追加；Generic 输出合同资源升至 `2.1.0`，公开接口与存储格式不变。
+- **专项通过，待推送前完整验证**。本次已进入推送准备，最终验证状态以 PL-FIX-042 的“2026-11-13 非必要字段补查”verdict 元数据为准，不沿用 `46f9f96` 的完整 PASS。全部模型执行均为确定性替身；专项证据保存在 `.tmp/llm-optional-fields-20261113/`，失败轮和临时工作区均保留。
+
+| 范围 | 命令与用例 | 结果及证据 |
+| --- | --- | --- |
+| Generic 解析与 Runtime | `python -m pytest -q -p no:cacheprovider --basetemp /tmp/omg-g01 --junitxml .tmp/llm-optional-fields-20261113/generic-status-green.xml tests/deterministic/unit/runtime/test_generic_locator.py tests/deterministic/unit/runtime/test_diagnosis_runtime.py -k generic` | Linux 68 passed、66 deselected；先红 7 failed，`generic-status-red.xml` |
+| 经验纠错与存储 | `python -m pytest -q -p no:cacheprovider --tb=short --basetemp /tmp/xi-mo-c45ab8d3 --junitxml .tmp/llm-optional-fields-20261113/memory-final.xml` 加下列八文件 | Linux 214 passed；`memory-final.xml` |
+| Methods 只读缺省复核 | 当前 Linux Python 运行 `.tmp/llm-optional-fields-20261113/methods_optional_audit.py`，详见同目录 `methods-command.txt` | 78/78 组通过，涵盖逐字段删除、真实 Specialist Runtime、Reviewer 文件和 DTO 转换；`methods-optional-audit.json`。这是复核脚本的检查数，不是 pytest 用例数 |
+| 文档与差异 | `node --test tools/test-flow/tests/docs-drift.test.mjs`；`git diff --check` | 4 passed；差异检查通过 |
+
+- 经验八文件包括 `tests/deterministic/unit/agent/` 下的 `test_memory_optional_output.py`、`test_followup_corrections.py`、`test_feedback_comment_review.py`、`test_memory_correction_attribution_review.py`、`test_memory_revision_store.py`、`test_llm_output_tolerance.py`，以及 `tests/deterministic/unit/runtime/test_memory_correction_review.py`、`tests/deterministic/integration/test_generic_memory_correction_loop.py`。覆盖省略 ID/哈希后绑定真实记录、缺内容不入库、无异常日志和重试、引用不重排、旧卡不被停用，以及显式伪造和输入漂移仍被拒绝。
+- 经验先红分别为 `memory-red.xml`（31 failed、11 passed）、`memory-nested-red.xml`（20 failed）、`memory-blank-quote-red.xml`（4 failed、2 passed）；初次联合运行 `memory-initial.xml` 为 174 passed、3 failed，三项是旧测试仍要求空证据或缺关联说明抛错，已同步为正常不采用并保留不发布断言。最终八文件全部通过。
+- Generic V2、专用/文档报告、结构化终态和当前 Reviewer 路径没有发现其他同类遗漏，证据见 `reports-readonly-probe.json`。当前模型链不经过旧 `AgentJobOutcomeDraftV2` 封装读取分支；服务端任务归属、文件完整性和发布记录的检查不按模型可选字段处理。
+- 推送前使用既有 D 盘 Ubuntu 22.04、锁定依赖和持久盘 PostgreSQL，先审阅 `dev.default --plan-only`，再对同一源码快照执行完整确定性测试。证据保存在 `.tmp/llm-optional-push-20261113/`，保留全部用例与 300 秒门槛，零真实模型调用；通过后只回填 verdict 引用元数据，再提交推送。
+
 ## 路由 Top5 召回与简短结果（2026-11-13）
 
 - 已按确认方案实现：精准关键词未直达后，本地召回最多 5 个有命中的候选；模型完整阅读条件，只返回 `skill_id/reason/confidence`。零命中直接通用，额外审核字段忽略，无格式异常或新增重试。完整目录和版本保留在服务端。修复历史沿 PL-FIX-073 追加，使用和升级说明见 `docs/route-admission.md`。

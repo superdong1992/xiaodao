@@ -102,6 +102,34 @@ def test_legacy_generic_report_allows_code_blocks_and_literal_markers():
     assert result.root_cause_analysis == analysis
 
 
+@pytest.mark.parametrize("status_line,expected_status", [
+    ("", "UNRESOLVED"),
+    ("STATUS: PARTIAL\n", "UNRESOLVED"),
+    ("STATUS: \t\n", "UNRESOLVED"),
+    (" status \t: resolved \t\n", "RESOLVED"),
+    ("status: unresolved\n", "UNRESOLVED"),
+], ids=["missing", "unknown", "empty", "spaced-resolved", "lowercase-unresolved"])
+def test_legacy_generic_optional_status_preserves_both_sections_without_logging(
+    caplog, status_line, expected_status,
+):
+    conclusion = "已有结论。\n保留原始措辞。"
+    analysis = "日志如下：\n```text\nerror\n```"
+    raw = (
+        "<<<GENERIC_DIAGNOSIS_RESULT_V1>>>\n"
+        f"{status_line}CONCLUSION:\n{conclusion}\n"
+        f"ROOT_CAUSE_ANALYSIS:\n{analysis}\n"
+        "<<<END_GENERIC_DIAGNOSIS_RESULT_V1>>>\n"
+    ).encode("utf-8")
+
+    result = _parse_v1_result(raw, skill_name="generic-diagnosis")
+
+    assert result.status.value == expected_status
+    assert result.conclusion == conclusion
+    assert result.root_cause_analysis == analysis
+    assert result.skill_name == "generic-diagnosis"
+    assert not caplog.records
+
+
 def test_generic_prefers_current_report_when_legacy_file_also_exists(tmp_path):
     body = b"# Current report\nA useful finding.\n"
     workspace = _workspace(tmp_path, b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n" + body)

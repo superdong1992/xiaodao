@@ -129,4 +129,15 @@ ROUTE 保存可编码为 UTF-8 的模型响应原文和正常 `route-admission.j
 
 可用事实和证据仍须属于本次输入；本轮不会补造用户事实、放行目录外 Skill、跳过工具授权或放松文件访问边界。结果内容差异直接按正常流程处理，不为这些差异新增异常或警告记录，不增加模型重试。日常专项与完整 Test Flow 的结论分别记录在 `TODO.md`、`FIXED_ISSUES.md`。
 
+## 非必要字段缺省复核（2026-11-13）
+
+在 `46f9f96` 继续按真实读取入口逐字段复核，补齐两处遗漏：
+
+- Generic 旧 V1 报告仍要求 `STATUS` 行。现在缺少状态或状态无法识别时按 `UNRESOLVED` 交付，保留 `CONCLUSION` 与 `ROOT_CAUSE_ANALYSIS` 两段正文，不产生 `OUTCOME_INVALID` 或失败事件。标准输出仍使用 V2 Markdown，Generic 输出合同资源版本为 `2.1.0`。
+- 经验纠错中，模型没有给出可采用的经验或必要证据时正常不入库；不再因省略空字段记录 `memory.extraction.failed`。`UNRELATED` 可省略空的 `evidence_indexes`；不涉及局部适用范围时，`scope_terms` 可省略或为 null。卡片 ID 和哈希可省略，由服务端绑定本次实际使用的经验；明确返回其他卡片身份时仍不得采用。
+
+经验引用的文件哈希可从已固定清单取得。无法定位原文的引用缺项，以及无法确定关系或局部范围的审核缺项，按整次不采纳处理，不重排引用索引、不修改旧经验。具体规则见[经验处理说明](generic-feedback-memory.md)。
+
+Methods 的 strict/advisory Specialist、Reviewer 文件读取和内部 DTO 转换，以及保留的 V2 读取路径，逐字段省略均按可用证据返回结果或信息不足。当前报告追问使用 Generic，不重新启用历史只读输出协议。正常决策审计继续保留；缺省字段不产生异常或警告，不触发模型重试。
+
 正式验证须运行 Test Flow Dev 的受影响测试和完整确定性测试（affected + full deterministic），结果以当前源码对应的 `verdict.json` 为准，记录见 `FIXED_ISSUES.md`。模拟测试不能证明公司内网实测完成率，也不能说明调用真实模型的 Release 已通过。

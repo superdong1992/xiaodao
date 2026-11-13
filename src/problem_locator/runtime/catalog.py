@@ -111,7 +111,7 @@ _BUILTIN_SPECS = (
     _BuiltinSpec("output-contracts/route", AssetKind.OUTPUT_CONTRACT, "output-contract/route", "7.0.0"),
     _BuiltinSpec("output-contracts/diagnose", AssetKind.OUTPUT_CONTRACT, "output-contract/diagnose", "11.0.0"),
     _BuiltinSpec("output-contracts/review", AssetKind.OUTPUT_CONTRACT, "output-contract/review", "10.0.0"),
-    _BuiltinSpec("output-contracts/generic-locator", AssetKind.OUTPUT_CONTRACT, "output-contract/generic-locator", "2.0.0"),
+    _BuiltinSpec("output-contracts/generic-locator", AssetKind.OUTPUT_CONTRACT, "output-contract/generic-locator", "2.1.0"),
 )
 _BUILTIN_SPECS_BY_ID = {item.asset_id: item for item in _BUILTIN_SPECS}
 

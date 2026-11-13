@@ -57,7 +57,7 @@ MAX_GENERIC_REPORT_BYTES = 65_536
 MAX_GENERIC_RESULT_V2_BYTES = MAX_GENERIC_REPORT_BYTES + 1024  # Status and presentation framing.
 GENERIC_RESULT_PATTERN = re.compile(
     r"\A<<<GENERIC_DIAGNOSIS_RESULT_V1>>>\r?\n"
-    r"STATUS: (?P<status>RESOLVED|UNRESOLVED)\r?\n"
+    r"(?:[ \t]*(?i:STATUS)[ \t]*:[ \t]*(?P<status>[^\r\n]*)\r?\n)?"
     r"CONCLUSION:\r?\n"
     r"(?P<conclusion>\S(?:[\s\S]*?\S)?)\r?\n"
     r"ROOT_CAUSE_ANALYSIS:\r?\n"
@@ -174,7 +174,11 @@ def _parse_v1_result(raw: bytes, *, skill_name: str) -> GenericDiagnosisOutcome:
     conclusion = match.group("conclusion")
     root_cause_analysis = match.group("root_cause_analysis")
     return GenericDiagnosisOutcome(
-        status=GenericResultStatus(match.group("status")),
+        status=(
+            GenericResultStatus.RESOLVED
+            if (match.group("status") or "").strip().upper() == "RESOLVED"
+            else GenericResultStatus.UNRESOLVED
+        ),
         conclusion=conclusion,
         root_cause_analysis=root_cause_analysis,
         # The name is bound by the immutable Job, never trusted from Agent text.

@@ -1200,6 +1200,46 @@ def test_generic_runtime_passes_only_exact_multiline_unicode_and_reads_result_fi
     assert len(records.publish_outcome_calls) == 1
 
 
+@pytest.mark.parametrize("status_line", [b"", b"STATUS: PARTIAL\n"], ids=["missing", "unknown"])
+def test_generic_runtime_delivers_legacy_optional_status_without_retry_or_error_events(
+    tmp_path: Path,
+    journey_stream: io.StringIO,
+    caplog: pytest.LogCaptureFixture,
+    status_line: bytes,
+) -> None:
+    conclusion = "已有完整结论。"
+    analysis = "保留分析原文。\n```text\nrequest=订单-α-42\n```"
+    result_bytes = _generic_result_bytes(
+        conclusion=conclusion, root_cause=analysis,
+    ).replace(b"STATUS: RESOLVED\n", status_line, 1)
+    backend = _GenericRuntimeBackend(result_bytes)
+    runtime, job, _, records = _generic_runtime_fixture(tmp_path, backend)
+    caplog.set_level(logging.DEBUG)
+
+    with bind_diagnostics(
+        case_id=job.case_id, job_id=job.job_id, job_type=job.job_type.value,
+    ):
+        receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    outcome = receipt.job_outcome
+    assert outcome.result_type is OutcomeResultType.COMPLETED
+    assert outcome.error is None
+    assert isinstance(outcome.payload, GenericDiagnosisOutcome)
+    assert outcome.payload.status is GenericResultStatus.UNRESOLVED
+    assert outcome.payload.conclusion == conclusion
+    assert outcome.payload.root_cause_analysis == analysis
+    assert outcome.payload.skill_name == job.generic_skill_name
+    assert len(backend.calls) == 1
+    assert len(records.publish_outcome_calls) == 1
+    workspace_root = Path(backend.calls[0]["workspace_root"])
+    assert (workspace_root / "output" / GENERIC_RESULT_FILENAME).read_bytes() == result_bytes
+    journey_events = [json.loads(line) for line in journey_stream.getvalue().splitlines()]
+    assert journey_events
+    assert not any(event["event"] == "job.stage.failed" for event in journey_events)
+    assert not any(event["level"] in {"WARNING", "ERROR", "CRITICAL"} for event in journey_events)
+    assert not any(record.levelno >= logging.WARNING or record.exc_info for record in caplog.records)
+
+
 @pytest.mark.parametrize("status", ["RESOLVED", "UNRESOLVED"])
 @pytest.mark.parametrize("header_prefix,header_ending", [
     (b"", b"\n"), (b"", b"\r\n"),

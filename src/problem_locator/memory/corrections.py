@@ -28,12 +28,12 @@ inputs/correction.json 中包含原问题、原报告、历史问答、被纠正
 确认成立后，card 只写通用问题特征、适用条件、最短排查步骤和限制，优先给出能最快证实或排除假设的检查。
 不得照搬根因；必须写清适用边界及仍需核查的条件。移除人名、客户、账号、IP、URL、路径、时间戳、密钥和长标识。
 不得把原始日志、用户原话或整份回答放进 card。保留通用产品名及公开错误码。
-只返回 JSON，恰好包含 adopt、card、evidence 三项，无 Markdown 围栏。
-拒绝时：{"adopt":false,"card":null,"evidence":[]}。
-采纳时 adopt=true，card 恰好包含 problem_features（1至8项，每项96字）、applicability（1至6项，每项256字）、
-steps（1至8项，每项256字）、limitations（1至6项，每项256字），值均为非空字符串数组，整体不超过4096 UTF-8字节。
-evidence 必须有1至4个独立日志引用，每项恰好包含 path、sha256、start_line、end_line、quote。
-path 与 sha256 必须取自 inputs/logs.json；行号从1开始，每段最多40行；quote 是完整所选行，行间用换行符连接，不含最后的换行。
+只返回 JSON。拒绝时只需返回 {"adopt":false}，无需补齐空字段。
+采纳时返回 adopt=true、card、evidence。card 包含 problem_features（最多8项，每项96字）和 steps（最多8项，每项256字）；
+applicability、limitations 按需提供（各最多6项，每项256字），值均为字符串数组，整体不超过4096 UTF-8字节。
+evidence 必须有1至4个独立日志引用，每项包含 path、start_line、end_line、quote。
+path 必须取自 inputs/logs.json；sha256 可省略，服务端按该清单绑定文件，提供时必须与清单一致。
+行号从1开始，每段最多40行；quote 是完整所选行，行间用换行符连接，不含最后的换行。
 quote 每段不超过8192 UTF-8字节。引用只用于服务端私下校验，不会进入共享经验。
 """
 
@@ -52,12 +52,12 @@ ORIGINAL_LOG 是原始诊断日志；WEB_ANALYSIS 是网站后端附带的外部
 确认成立后，card 只写通用问题特征、适用条件、最短排查步骤和限制，优先列能最快证实或排除假设的检查。
 不得照搬根因、原始日志、用户原话、管理员原文或整份回答。移除人名、客户、账号、IP、URL、路径、时间戳、密钥和长标识。
 保留通用产品名及公开错误码。不要把外部资料未能验证的结论写成事实。
-只返回 JSON，恰好包含 adopt、card、evidence 三项，无 Markdown 围栏。
-拒绝时：{"adopt":false,"card":null,"evidence":[]}。
-采纳时 adopt=true，card 恰好包含 problem_features（1至8项，每项96字）、applicability（1至6项，每项256字）、
-steps（1至8项，每项256字）、limitations（1至6项，每项256字），值均为非空字符串数组，整体不超过4096 UTF-8字节。
-evidence 必须有1至4个引用，每项恰好包含 path、sha256、start_line、end_line、quote。
-path 与 sha256 必须取自 inputs/feedback-evidence.json；行号从1开始，每段最多40行；
+只返回 JSON。拒绝时只需返回 {"adopt":false}，无需补齐空字段。
+采纳时返回 adopt=true、card、evidence。card 包含 problem_features（最多8项，每项96字）和 steps（最多8项，每项256字）；
+applicability、limitations 按需提供（各最多6项，每项256字），值均为字符串数组，整体不超过4096 UTF-8字节。
+evidence 必须有1至4个引用，每项包含 path、start_line、end_line、quote。
+path 必须取自 inputs/feedback-evidence.json；sha256 可省略，服务端按该清单绑定文件，提供时必须与清单一致。
+行号从1开始，每段最多40行；
 quote 是完整所选行，行间用换行符连接，不含最后的换行，每段不超过8192 UTF-8字节。
 引用只用于服务端私下校验，不会进入共享经验。
 """
@@ -71,28 +71,23 @@ GLOBAL_ERROR：证据足以证明经验本身的一般性错误，继续使用�
 NOT_APPLICABLE：历史方法在其他条件下仍可能正确，但不适用于本次条件；保留旧方法，card 必须写清这类场景的限制和替代检查。
 DIAGNOSIS_OMISSION：历史方法本身未被证伪，但本次诊断遗漏必要检查；card 写明此类场景必须核查的步骤，不要全局否定旧经验。
 UNRELATED：现有证据不能把问题归因到这张历史经验；不得修改它。纠正本身仍需满足原有采纳标准。
-采纳时 memory_review 恰好包含 card_id、card_sha256、relation、evidence_indexes、scope_terms 五项。
-card_id 和 card_sha256 必须与 used-memory.json 一致；relation 必须是上述四个大写值之一。
-evidence_indexes 是本次 evidence 数组从 0 开始的引用索引，不得重复；前三类必须有至少一个已支持判断的引用，UNRELATED 可以为空。
-GLOBAL_ERROR 和 UNRELATED 的 scope_terms 必须为空数组。
+采纳时 memory_review 说明 relation 及该关系需要的 evidence_indexes、scope_terms。
+card_id 和 card_sha256 可省略，由服务端绑定 used-memory.json 的确切版本；提供时必须与该文件一致。
+relation 必须是上述四个大写值之一。evidence_indexes 是本次 evidence 数组从 0 开始的引用索引；
+前三类必须有至少一个已支持判断的引用，UNRELATED 可省略或为空。
+GLOBAL_ERROR 和 UNRELATED 可省略 scope_terms，无需填写空数组。
 NOT_APPLICABLE 和 DIAGNOSIS_OMISSION 的 scope_terms 必须是 2 至 8 个唯一、特有的条件关键词，且全部出现在最终 card 的 problem_features 或 applicability 中。
 英文词及标识符用小写、至少 3 个字符；中文只用连续两个汉字。不用“问题”“检查”“服务”“错误”等宽泛词，不用带空格的短语。
 只有至少 8 个字符的明确错误码可单独作为一个条件，例如 err_pool_1024。后续问题必须命中全部条件才优先使用这条局部纠正。
 除 UNRELATED 外，card 必须实际修正旧经验，不能原样复制。引用历史经验本身不能证明纠正成立。
-拒绝采纳时 memory_review=null。
+拒绝采纳时无需返回 memory_review。
 """
 
 
 def _review_prompt(profile, usage):
     if usage is None:
         return profile
-    return (profile.replace("恰好包含 adopt、card、evidence 三项", "恰好包含 adopt、card、evidence、memory_review 四项")
-        .replace('{"adopt":false,"card":null,"evidence":[]}',
-            '{"adopt":false,"card":null,"evidence":[],"memory_review":null}') + _USED_MEMORY_PROFILE)
-
-
-def _review_fields(usage):
-    return {"adopt", "card", "evidence"} | ({"memory_review"} if usage is not None else set())
+    return profile + _USED_MEMORY_PROFILE
 
 
 class _Cancellation:
@@ -114,8 +109,10 @@ class _Cancellation:
         return self.is_cancelled()
 
 
-def validate_evidence(value, workspace, rows, cancellation, *, include_web_analysis=False):
+def validate_evidence(value, workspace, rows, cancellation, *, include_web_analysis=False, allow_none=False):
     """Bind every claimed citation to actual copied log bytes; never trust a path from the model."""
+    if allow_none and not value:
+        return None
     if not isinstance(value, list) or not 1 <= len(value) <= 4:
         raise ValueError("纠正缺少可核对的来源证据。")
     if cancellation.is_cancelled():
@@ -124,10 +121,16 @@ def validate_evidence(value, workspace, rows, cancellation, *, include_web_analy
         or (include_web_analysis and row["path"] == "inputs/feedback-analysis.txt")}
     checked = []
     for entry in value:
-        if not isinstance(entry, dict) or not {"path", "sha256", "start_line", "end_line", "quote"} <= entry.keys():
+        if not isinstance(entry, dict):
             raise ValueError("纠正证据字段无效。")
-        path, start, end, quote = entry["path"], entry["start_line"], entry["end_line"], entry["quote"]
-        if (not isinstance(path, str) or path not in logs or entry["sha256"] != logs[path]["sha256"]
+        path, start, end, quote = (entry.get(field) for field in ("path", "start_line", "end_line", "quote"))
+        if path and (not isinstance(path, str) or path not in logs
+                or entry.get("sha256", logs[path]["sha256"]) != logs[path]["sha256"]):
+            raise ValueError("纠正证据的文件或版本无效。")
+        if allow_none and (not path or start is None or end is None or not quote
+                or (isinstance(quote, str) and not quote.strip())):
+            return None
+        if (not isinstance(path, str) or path not in logs
                 or type(start) is not int or type(end) is not int or not 1 <= start <= end <= 1_000_000
                 or end - start >= 40 or not isinstance(quote, str) or not quote.strip()
                 or len(quote.encode("utf-8")) > 8192):
@@ -236,12 +239,13 @@ class CorrectionMemoryHandler:
             if not isinstance(output, str) or len(output.encode("utf-8")) > 65_536:
                 raise ValueError("纠正审核结果无效。")
             value = parse_model_json_response(output.encode("utf-8")).document.value
-            if isinstance(value, dict) and value.get("adopt") is False:
+            if not isinstance(value, dict) or value.get("adopt") is not True:
                 return None
-            if (not isinstance(value, dict) or not _review_fields(usage) <= value.keys()
-                    or value["adopt"] is not True):
-                raise ValueError("现有日志不足以支持共享这次纠正。")
-            evidence = validate_evidence(value["evidence"], workspace, rows, signal)
+            if not value.get("card") or (usage is not None and not value.get("memory_review")):
+                return None
+            evidence = validate_evidence(value.get("evidence"), workspace, rows, signal, allow_none=True)
+            if evidence is None:
+                return None
             verify_inputs(workspace, rows, signal)
             card = parse_card_json(json.dumps(value["card"], ensure_ascii=False), sources=(context_raw,), allow_none=True)
             if card is None:
@@ -250,7 +254,10 @@ class CorrectionMemoryHandler:
                 "original_report_sha256": source.report_sha256, "answer_sha256": task["report_sha256"],
                 "context_sha256": hashlib.sha256(raw).hexdigest(), "evidence": evidence}
             if usage is not None:
-                receipt["memory_review"] = validate_memory_review(value["memory_review"], usage, evidence, card)
+                review = validate_memory_review(value["memory_review"], usage, evidence, card, allow_none=True)
+                if review is None:
+                    return None
+                receipt["memory_review"] = review
             return card, json.dumps(receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
@@ -339,12 +346,14 @@ class CorrectionMemoryHandler:
             if not isinstance(output, str) or len(output.encode("utf-8")) > 65_536:
                 raise ValueError("纠正审核结果无效。")
             value = parse_model_json_response(output.encode("utf-8")).document.value
-            if isinstance(value, dict) and value.get("adopt") is False:
+            if not isinstance(value, dict) or value.get("adopt") is not True:
                 return None
-            if (not isinstance(value, dict) or not _review_fields(usage) <= value.keys()
-                    or value["adopt"] is not True):
-                raise ValueError("现有资料不足以支持共享这次纠正。")
-            evidence = validate_evidence(value["evidence"], workspace, rows, signal, include_web_analysis=True)
+            if not value.get("card") or (usage is not None and not value.get("memory_review")):
+                return None
+            evidence = validate_evidence(value.get("evidence"), workspace, rows, signal,
+                include_web_analysis=True, allow_none=True)
+            if evidence is None:
+                return None
             verify_inputs(workspace, rows, signal)
             provenance = {row["path"]: row for row in evidence_sources}
             for entry in evidence:
@@ -360,5 +369,8 @@ class CorrectionMemoryHandler:
                 "answer_sha256": task["report_sha256"], "context_sha256": hashlib.sha256(raw).hexdigest(),
                 "evidence": evidence}
             if usage is not None:
-                receipt["memory_review"] = validate_memory_review(value["memory_review"], usage, evidence, card)
+                review = validate_memory_review(value["memory_review"], usage, evidence, card, allow_none=True)
+                if review is None:
+                    return None
+                receipt["memory_review"] = review
             return card, json.dumps(receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

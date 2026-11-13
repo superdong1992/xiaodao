@@ -191,7 +191,7 @@ def test_unsupported_or_fabricated_correction_never_publishes(system, output):
     task = prepare_logged_task(system)
     backend = Backend(output)
     handler = CorrectionMemoryHandler(system.service, "claude", backend=backend)
-    if json.loads(output).get("adopt") is False:
+    if json.loads(output).get("adopt") is False or not json.loads(output).get("evidence"):
         assert handler.extract(task, cancellation=CancellationController()) is None
     else:
         with pytest.raises(ValueError):

@@ -52,11 +52,11 @@ def test_report_correction_reviews_exact_used_memory_in_same_model_call(system, 
     assert "GLOBAL_ERROR" in call["prompt"] and "不是证据" in call["prompt"]
 
 
-def test_existing_usage_requires_review_instead_of_silently_leaving_old_memory(system):
+def test_existing_usage_without_review_does_not_publish_a_correction(system):
     task = feedback_task(system)
     bind_usage(system, task)
-    with pytest.raises(ValueError):
-        run_review(system, task, json.loads(analysis_response()))
+    result, backend = run_review(system, task, json.loads(analysis_response()))
+    assert result is None and len(backend.calls) == 1
 
 
 @pytest.mark.parametrize("field,value", [("card_id", "00000000-0000-0000-0000-000000000001"),
