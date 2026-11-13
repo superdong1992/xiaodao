@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -26,27 +27,23 @@ def _inputs(count=1, *, legacy=False):
         "required_user_inputs": ["request_id"], "required_artifacts": ["log_archive"],
     } for ref in job.available_skill_refs]}
     response = {
-        "skill_id": job.available_skill_refs[0].id, "reason": "已逐项确认适用条件并排除其他候选。",
-        "confidence": 0.99,
-        "assessments": [] if legacy else [_assessment(ref.id, job) for ref in job.available_skill_refs],
+        "skill_id": job.available_skill_refs[0].id,
+        "reason": "问题属于专用 Skill 的适用范围。", "confidence": 0.99,
     }
     return job, index, response
-
-
-def _assessment(skill_id, job):
-    quote = {"pointer": "/problem_spec/scope", "quote": job.context_snapshot.problem_spec.scope}
-    return {"skill_id": skill_id, "applicability": [{
-        "condition_id": "rpc-timeout", "verdict": "SUPPORTED", "reason": "已明确 RPC 调用范围。",
-        "evidence": [dict(quote)],
-    }], "exclusions": [{
-        "condition_id": "not-rpc", "verdict": "REFUTED", "reason": "已明确这是服务间 RPC。",
-        "evidence": [dict(quote)],
-    }]}
 
 
 def _parse(job, index, response):
     return parse_route_response(json.dumps(response, ensure_ascii=False), job,
                                 skill_index=json.dumps(index, ensure_ascii=False))
+
+
+def test_short_route_result_does_not_require_condition_assessments(caplog):
+    job, index, response = _inputs(2)
+    assert set(response) == {"skill_id", "reason", "confidence"}
+    result = _parse(job, index, response)
+    assert result.draft.payload.kind is RouteKind.MATCHED
+    assert not caplog.records
 
 
 def test_explicit_unique_match_admits_even_when_diagnostic_inputs_and_logs_are_missing():
@@ -55,23 +52,136 @@ def test_explicit_unique_match_admits_even_when_diagnostic_inputs_and_logs_are_m
     result = _parse(job, index, response)
     assert result.draft.payload.kind is RouteKind.MATCHED
     assert result.draft.payload.skill_ref == job.available_skill_refs[0]
+    assert result.route_admission["policy"] == "shortlisted_route_v1"
     assert result.route_admission["reason_code"] == "ADMITTED"
     assert result.route_admission["draft_sha256"] == bytes_sha256(result.canonical_bytes)
     assert result.route_admission["input_hashes"] == {
         "context_snapshot_sha256": bytes_sha256(canonical_json_bytes(job.context_snapshot)),
         "skill_index_sha256": bytes_sha256(json.dumps(index, ensure_ascii=False).encode()),
     }
+    assert result.route_admission["retrieval"]["candidate_ids"] == [response["skill_id"]]
 
 
-@pytest.mark.parametrize("keywords", [[], ["RPC request deadline exceeded"]])
-@pytest.mark.parametrize("verdict,matched", [("SUPPORTED", True), ("REFUTED", False), ("UNKNOWN", False)])
-def test_direct_match_keywords_preserve_model_route_admission(keywords, verdict, matched):
+def test_other_four_candidates_do_not_require_separate_refutations():
+    job, index, response = _inputs(5)
+    result = _parse(job, index, response)
+    assert len(result.route_admission["retrieval"]["candidate_ids"]) == 5
+    assert result.draft.payload.kind is RouteKind.MATCHED
+    assert "assessments" not in result.route_admission
+    assert "candidate_results" not in result.route_admission
+
+
+@pytest.mark.parametrize("assessments", [
+    None, True, 7, "[]", {}, [], [None],
+    [{"skill_id": "unknown", "applicability": "wrong", "exclusions": [{"id": "not-rpc", "verdict": "REFUTED"}]}],
+    [{"skill_id": "rpc-timeout", "applicability": [{"condition_id": "rpc-timeout", "verdict": "REFUTED", "evidence": []}],
+      "exclusions": [{"id": "not-rpc", "verdict": "SUPPORTED", "reason": None, "evidence": {}}]}],
+])
+def test_legacy_assessments_and_evidence_are_ignored_without_exception(caplog, assessments):
+    caplog.set_level(logging.DEBUG)
     job, index, response = _inputs()
-    index["skills"][0]["routing"]["direct_match_keywords"] = keywords
-    response["assessments"][0]["applicability"][0]["verdict"] = verdict
+    response.update(assessments=assessments, extra={"description": "附加说明"})
+    result = _parse(job, index, response)
+    assert result.draft.payload.kind is RouteKind.MATCHED
+    assert result.draft.error is None and result.route_recovery is None
+    assert not caplog.records
+
+
+@pytest.mark.parametrize("confidence,matched", [
+    (0, False), (0.94, False), (0.949999, False), (0.95, True), (1, True),
+    ("0.94", False), ("0.95", True), ("1", True),
+])
+def test_confidence_threshold_accepts_json_numbers_and_numeric_strings(confidence, matched):
+    job, index, response = _inputs()
+    response["confidence"] = confidence
     result = _parse(job, index, response)
     assert (result.draft.payload.kind is RouteKind.MATCHED) is matched
-    assert result.route_admission["policy"] == "strict_route_admission_v1"
+    assert result.draft.payload.confidence == float(confidence)
+    assert result.route_admission["reason_code"] == ("ADMITTED" if matched else "LOW_CONFIDENCE")
+
+
+@pytest.mark.parametrize("confidence", [None, True, False, "", "invalid", "NaN", "Infinity", -1, 1.1, 10 ** 500, [], {}])
+def test_unusable_confidence_uses_generic_without_exception(caplog, confidence):
+    job, index, response = _inputs()
+    response["confidence"] = confidence
+    result = _parse(job, index, response)
+    assert result.draft.payload.kind is RouteKind.NO_CAPABILITY
+    assert result.draft.payload.confidence == 0
+    assert result.route_admission["reason_code"] == "LOW_CONFIDENCE"
+    assert result.draft.error is None and not caplog.records
+
+
+def test_missing_confidence_does_not_admit_the_selected_skill():
+    job, index, response = _inputs()
+    del response["confidence"]
+    result = _parse(job, index, response)
+    assert result.draft.payload.kind is RouteKind.NO_CAPABILITY
+    assert result.draft.payload.confidence == 0
+
+
+@pytest.mark.parametrize("skill_id", [None, "unknown", "", True, 42, [], {}])
+def test_absent_or_unknown_choice_is_not_promoted_to_a_recalled_skill(skill_id):
+    job, index, response = _inputs()
+    response["skill_id"] = skill_id
+    result = _parse(job, index, response)
+    assert result.route_admission["retrieval"]["candidate_ids"] == [job.available_skill_refs[0].id]
+    assert result.draft.payload.kind is RouteKind.NO_CAPABILITY
+    assert result.draft.payload.skill_ref is None
+    assert result.route_admission["reason_code"] == "MODEL_NO_MATCH"
+
+
+def test_known_sixth_candidate_is_not_admitted_but_a_recalled_candidate_is():
+    job, index, response = _inputs(6)
+    response["skill_id"] = job.available_skill_refs[-1].id
+    outside = _parse(job, index, response)
+    candidates = outside.route_admission["retrieval"]["candidate_ids"]
+    assert len(candidates) == 5 and response["skill_id"] not in candidates
+    assert len(job.available_skill_refs) == len(index["skills"]) == 6
+    assert outside.draft.payload.kind is RouteKind.NO_CAPABILITY
+    assert outside.route_admission["reason_code"] == "OUTSIDE_CANDIDATES"
+    response["skill_id"] = candidates[-1]
+    admitted = _parse(job, index, response)
+    assert admitted.draft.payload.kind is RouteKind.MATCHED
+    assert admitted.draft.payload.skill_ref.id == candidates[-1]
+
+
+def test_no_lexical_match_cannot_be_overridden_by_a_known_skill_choice():
+    job, index, response = _inputs()
+    value = job.model_dump(mode="json")
+    value["context_snapshot"]["problem_spec"].update(
+        statement="问题", actual_behavior="错误", expected_behavior="定位", scope="问题",
+        goals=["定位"], completion_criteria=["定位"],
+    )
+    result = _parse(Job.model_validate(value), index, response)
+    assert result.draft.payload.kind is RouteKind.NO_CAPABILITY
+    assert result.route_admission["reason_code"] == "NO_RECALL_MATCH"
+    assert result.route_admission["retrieval"]["candidate_ids"] == []
+
+
+def test_legacy_skill_without_routing_is_not_recalled():
+    job, index, response = _inputs(legacy=True)
+    result = _parse(job, index, response)
+    assert result.draft.payload.kind is RouteKind.NO_CAPABILITY
+    assert result.route_admission["reason_code"] == "NO_ELIGIBLE_SKILL"
+    assert result.route_admission["retrieval"]["candidate_ids"] == []
+
+
+@pytest.mark.parametrize("mutation", ["wrong_hash", "wrong_version", "missing_ref", "duplicate_ref", "unknown_ref"])
+def test_frozen_catalog_mismatch_is_still_rejected(mutation):
+    job, index, response = _inputs(2)
+    other = index["skills"][-1]
+    if mutation == "wrong_hash":
+        other["ref"]["content_hash"] = "0" * 64
+    elif mutation == "wrong_version":
+        other["ref"]["version"] = "99.0.0"
+    elif mutation == "missing_ref":
+        index["skills"].pop()
+    elif mutation == "duplicate_ref":
+        index["skills"].append(copy.deepcopy(other))
+    else:
+        other["ref"]["id"] = "unknown-skill"
+    with pytest.raises(RuntimeExecutionError):
+        _parse(job, index, response)
 
 
 @pytest.mark.parametrize("keywords", [None, "RPC request deadline exceeded", ["RPC request deadline exceeded"] * 2,
@@ -83,203 +193,43 @@ def test_model_route_rejects_invalid_indexed_direct_match_keywords(keywords):
         _parse(job, index, response)
 
 
-@pytest.mark.parametrize("confidence,matched", [(0, False), (0.94, False), (0.949999, False), (0.95, True), (1, True)])
-def test_confidence_is_a_required_additional_gate(confidence, matched):
+@pytest.mark.parametrize("reason", [None, "", [], "说明" * 1024])
+def test_route_reason_is_display_metadata_not_an_admission_requirement(reason):
     job, index, response = _inputs()
-    response["confidence"] = confidence
+    response["reason"] = reason
     result = _parse(job, index, response)
-    assert (result.draft.payload.kind is RouteKind.MATCHED) is matched
-    assert result.draft.payload.confidence == confidence
-    if not matched:
-        assert result.route_admission["reason_code"] == "LOW_CONFIDENCE"
-        assert "通用定位" in result.draft.payload.reason
+    assert result.draft.payload.kind is RouteKind.MATCHED
+    assert 0 < len(result.draft.payload.reason) <= 1024
 
 
-@pytest.mark.parametrize("kind,verdict,expected", [
-    ("applicability", "REFUTED", "ruled_out"),
-    ("applicability", "UNKNOWN", "uncertain"),
-    ("exclusions", "SUPPORTED", "ruled_out"),
-    ("exclusions", "UNKNOWN", "uncertain"),
+def test_missing_reason_uses_a_nonempty_display_default():
+    job, index, response = _inputs()
+    del response["reason"]
+    result = _parse(job, index, response)
+    assert result.draft.payload.kind is RouteKind.MATCHED and result.draft.payload.reason
+
+
+@pytest.mark.parametrize("raw", [
+    None, "", "{broken", "null", "[]", "{}", "\ud800",
+    '{"skill_id":"rpc-timeout","reason":"选择 "RPC" 定位","confidence":0.99}',
+    '{"skill_id":"rpc-timeout","reason":"a","confidence":0.99,"confidence":1}',
 ])
-def test_high_confidence_cannot_override_negative_or_unknown_assessments(kind, verdict, expected):
-    job, index, response = _inputs()
-    response["confidence"] = 1
-    response["assessments"][0][kind][0]["verdict"] = verdict
-    result = _parse(job, index, response)
+def test_unusable_json_and_unencodable_text_use_generic_without_exception(raw, caplog):
+    job, index, _ = _inputs()
+    result = parse_route_response(raw, job, skill_index=json.dumps(index))
     assert result.draft.payload.kind is RouteKind.NO_CAPABILITY
-    assert result.route_admission["candidate_results"][0]["status"] == expected
+    assert result.draft.error is None and result.route_recovery is None
+    assert not caplog.records
 
 
-@pytest.mark.parametrize("evidence", [
-    [], [{"pointer": "/problem_spec/scope", "quote": ""}],
-    [{"pointer": "/problem_spec/scope", "quote": "   "}],
-    [{"pointer": "/problem_spec/scope", "quote": "并不存在的系统名称"}],
-    [{"pointer": "/active_hypotheses/0/statement", "quote": "payment-to-inventory RPC"}],
-    [{"pointer": "/previous_outcomes/0/payload/reason", "quote": "payment-to-inventory RPC"}],
-    [{"pointer": "/skills/0/routing/applicability/0/description", "quote": "服务间 RPC 调用超时。"}],
-    [{"pointer": "/problem_spec/scope/0", "quote": "p"}],
-    [{"pointer": "/problem_spec/revision", "quote": "1"}],
-    [{"pointer": "/problem_spec/goals/00", "quote": "Locate the timeout cause."}],
-    [{"pointer": "/problem_spec/scope", "quote": "payment-to-inventory RPC"},
-     {"pointer": "/invented", "quote": "bad"}],
-])
-def test_ungrounded_evidence_falls_back_without_protocol_failure(evidence):
+@pytest.mark.parametrize("wrapper", ["{}", "```json\n{}\n```", "路由结果如下。\n{}"])
+def test_valid_escaped_reason_and_original_response_hash_survive_display_wrappers(wrapper):
     job, index, response = _inputs()
-    response["assessments"][0]["applicability"][0]["evidence"] = evidence
-    result = _parse(job, index, response)
-    assert result.draft.payload.kind is RouteKind.NO_CAPABILITY
-    assert result.route_admission["reason_code"] == "UNCERTAIN_CANDIDATE"
-    assert result.route_admission["candidate_results"][0]["conditions"][0]["effective_verdict"] == "UNKNOWN"
-
-
-def test_literal_problem_list_item_is_a_supported_source():
-    job, index, response = _inputs()
-    response["assessments"][0]["applicability"][0]["evidence"] = [{
-        "pointer": "/problem_spec/goals/0", "quote": job.context_snapshot.problem_spec.goals[0],
-    }]
-    assert _parse(job, index, response).draft.payload.kind is RouteKind.MATCHED
-
-
-@pytest.mark.parametrize("collection", ["user_facts", "confirmed_facts"])
-def test_actual_active_fact_statement_is_supported_but_metadata_is_not(collection):
-    job, index, response = _inputs()
-    data = job.model_dump(mode="json")
-    fact = {
-        "item_id": "00000000-0000-4000-8000-000000000498",
-        "statement": "payment-to-inventory RPC", "status": "ACTIVE",
-        "provenance": {"source_type": "USER_INPUT", "source_ref": "00000000-0000-4000-8000-000000000497", "input_name": "scope"},
-        "evidence_refs": [], "created_revision": 1, "supersedes": [],
-    }
-    if collection == "confirmed_facts":
-        fact["provenance"] = {"source_type": "AGENT_OUTCOME", "source_ref": "00000000-0000-4000-8000-000000000497", "input_name": None}
-        fact["evidence_refs"] = ["00000000-0000-4000-8000-000000000499"]
-        data["context_snapshot"]["evidence_refs"] = list(fact["evidence_refs"])
-        data["evidence_refs"] = list(fact["evidence_refs"])
-    data["context_snapshot"][collection] = [fact]
-    job = Job.model_validate(data)
-    evidence = response["assessments"][0]["applicability"][0]["evidence"][0]
-    evidence.update(pointer=f"/{collection}/0/statement", quote=fact["statement"])
-    assert _parse(job, index, response).draft.payload.kind is RouteKind.MATCHED
-    evidence.update(pointer=f"/{collection}/0/provenance/source_ref", quote=fact["provenance"]["source_ref"])
-    assert _parse(job, index, response).draft.payload.kind is RouteKind.NO_CAPABILITY
-
-
-@pytest.mark.parametrize("other_state,matched", [("SUPPORTED", False), ("UNKNOWN", False), ("REFUTED", True)])
-def test_selected_match_requires_every_other_candidate_to_be_ruled_out(other_state, matched):
-    job, index, response = _inputs(2)
-    response["assessments"][1]["applicability"][0]["verdict"] = other_state
-    result = _parse(job, index, response)
-    assert (result.draft.payload.kind is RouteKind.MATCHED) is matched
-
-
-def test_bad_quote_cannot_rule_out_an_alternative():
-    job, index, response = _inputs(2)
-    alternative = response["assessments"][1]["applicability"][0]
-    alternative.update(verdict="REFUTED", evidence=[])
-    assert _parse(job, index, response).draft.payload.kind is RouteKind.NO_CAPABILITY
-
-
-def test_legacy_skill_without_routing_cannot_be_selected_automatically():
-    job, index, response = _inputs(legacy=True)
-    result = _parse(job, index, response)
-    assert result.draft.payload.kind is RouteKind.NO_CAPABILITY
-    assert result.route_admission["reason_code"] == "NO_ROUTING_DECLARATION"
-
-
-def test_null_selection_is_never_promoted_even_when_one_skill_passes():
-    job, index, response = _inputs()
-    response["skill_id"] = None
-    result = _parse(job, index, response)
-    assert result.draft.payload.kind is RouteKind.NO_CAPABILITY
-    assert result.route_admission["reason_code"] == "MODEL_NO_MATCH"
-
-
-@pytest.mark.parametrize("mutation", [
-    "three_fields", "unknown_skill", "missing_candidate", "duplicate_candidate", "extra_candidate",
-    "missing_condition", "duplicate_condition", "extra_condition", "wrong_assessments_type",
-    "wrong_evidence_type", "wrong_pointer_type", "extra_evidence_field", "wrong_verdict",
-    "wrong_condition_reason", "extra_root_field", "bool_confidence", "string_confidence", "huge_confidence",
-])
-def test_protocol_failures_never_turn_into_accepted_routes(mutation):
-    job, index, response = _inputs()
-    condition = response["assessments"][0]["applicability"][0]
-    if mutation == "three_fields":
-        del response["assessments"]
-    elif mutation == "unknown_skill":
-        response["skill_id"] = "unknown"
-    elif mutation == "missing_candidate":
-        response["assessments"] = []
-    elif mutation == "duplicate_candidate":
-        response["assessments"] *= 2
-    elif mutation == "extra_candidate":
-        response["assessments"].append(_assessment("unknown", job))
-    elif mutation == "missing_condition":
-        response["assessments"][0]["applicability"] = []
-    elif mutation == "duplicate_condition":
-        response["assessments"][0]["applicability"] *= 2
-    elif mutation == "extra_condition":
-        condition["condition_id"] = "unknown"
-    elif mutation == "wrong_assessments_type":
-        response["assessments"] = "[]"
-    elif mutation == "wrong_evidence_type":
-        condition["evidence"] = {}
-    elif mutation == "wrong_pointer_type":
-        condition["evidence"][0]["pointer"] = None
-    elif mutation == "extra_evidence_field":
-        condition["evidence"][0]["trusted"] = True
-    elif mutation == "wrong_verdict":
-        condition["verdict"] = True
-    elif mutation == "wrong_condition_reason":
-        condition["reason"] = None
-    elif mutation == "extra_root_field":
-        response["trusted"] = True
-    elif mutation == "bool_confidence":
-        response["confidence"] = True
-    elif mutation == "string_confidence":
-        response["confidence"] = "1"
-    elif mutation == "huge_confidence":
-        response["confidence"] = 10 ** 500
-    with pytest.raises(RuntimeExecutionError):
-        _parse(job, index, response)
-
-
-def test_frozen_skill_version_mismatch_is_rejected():
-    job, index, response = _inputs()
-    index["skills"][0]["ref"]["content_hash"] = "0" * 64
-    with pytest.raises(RuntimeExecutionError):
-        _parse(job, index, response)
-
-
-@pytest.mark.parametrize("assessment_first", [False, True])
-def test_malformed_root_reason_is_rejected_in_every_field_order(assessment_first):
-    job, index, response = _inputs()
-    if assessment_first:
-        response = {"assessments": response["assessments"], **response}
-    raw = json.dumps(response, ensure_ascii=False).replace(json.dumps(response["reason"], ensure_ascii=False), '"选择 "RPC" 定位"')
-    with pytest.raises(RuntimeExecutionError):
-        parse_route_response(raw, job, skill_index=json.dumps(index))
-
-
-def test_valid_escaped_quotes_preserve_original_reason_and_raw_hash():
-    job, index, response = _inputs()
-    response["reason"] = '选择 "RPC" 定位'
-    raw = json.dumps(response, ensure_ascii=False)
-    parsed = parse_route_response(raw, job, skill_index=json.dumps(index))
-    assert parsed.draft.payload.kind is RouteKind.MATCHED
-    assert parsed.route_recovery is None
-    assert parsed.route_admission["model_reason"] == response["reason"]
-    assert parsed.route_admission["raw_response_sha256"] == bytes_sha256(raw.encode())
-
-
-@pytest.mark.parametrize("root_broken", [False, True])
-@pytest.mark.parametrize("field", ["reason", "quote", "verdict"])
-def test_nested_assessment_strings_cannot_be_repaired_or_swallowed(field, root_broken):
-    job, index, response = _inputs()
-    condition = response["assessments"][0]["applicability"][0]
-    target = condition["evidence"][0] if field == "quote" else condition
-    target[field] = 'broken "nested" value'
-    raw = json.dumps(response, ensure_ascii=False).replace('broken \\"nested\\" value', 'broken "nested" value')
-    if root_broken:
-        raw = raw.replace(json.dumps(response["reason"], ensure_ascii=False), '"选择 "RPC" 定位"')
-    with pytest.raises(RuntimeExecutionError):
-        parse_route_response(raw, job, skill_index=json.dumps(index))
+    response["reason"] = '选择 "RPC" 定位；路径 C:\\logs\\new，保留字面量 \\n。'
+    raw = wrapper.format(json.dumps(response, ensure_ascii=False))
+    result = parse_route_response(raw, job, skill_index=json.dumps(index))
+    assert result.draft.payload.kind is RouteKind.MATCHED
+    assert result.draft.payload.reason == response["reason"]
+    assert result.route_admission["model_reason"] == response["reason"]
+    assert result.route_admission["raw_response_sha256"] == bytes_sha256(raw.encode())
+    assert result.route_recovery is None

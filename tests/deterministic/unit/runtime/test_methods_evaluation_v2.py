@@ -202,13 +202,15 @@ def test_response_root_is_array_with_exact_item_fields() -> None:
     ],
     ids=["out-of-order", "missing", "extra-item", "extra-field"],
 )
-def test_response_rejects_order_coverage_and_extra_fields(mutation: object) -> None:
+def test_response_uses_plan_order_and_ignores_extra_fields(mutation: object) -> None:
     plan = _plan()
     response = _response(plan)
     mutation(response)  # type: ignore[operator]
 
-    with pytest.raises(MethodEvaluationResponseError):
-        parse_method_evaluation_response_v2(plan=plan, response=response)
+    parsed = parse_method_evaluation_response_v2(plan=plan, response=response)
+    assert tuple(item.evaluation_ref for item in parsed) == tuple(item.evaluation_ref for item in plan.evaluations)
+    assert parsed[0].verdict == "CONFIRMED"
+    assert parsed[-1].verdict == ("UNKNOWN" if len(response) < len(plan.evaluations) else "REJECTED")
 
 
 @pytest.mark.parametrize(
@@ -245,35 +247,36 @@ def test_response_binds_supporting_event_presence_to_verdict(
         for ref in supporting
     ]
 
-    with pytest.raises(MethodEvaluationResponseError):
-        parse_method_evaluation_response_v2(plan=plan, response=response)
+    parsed = parse_method_evaluation_response_v2(plan=plan, response=response)
+    assert parsed[0].verdict == ("UNKNOWN" if verdict == "CONFIRMED" else verdict)
+    assert parsed[0].supporting_event_refs == ()
 
 
-def test_response_rejects_duplicate_or_foreign_supporting_event_refs() -> None:
+def test_response_deduplicates_support_and_omits_foreign_event_refs() -> None:
     plan = _plan()
     planned_ref = plan.evaluations[0].evidence_event_refs[0]
     foreign_ref = plan.evaluations[1].evidence_event_refs[0]
 
     duplicate = _response(plan)
     duplicate[0]["supporting_event_refs"] = [planned_ref, planned_ref]
-    with pytest.raises(MethodEvaluationResponseError):
-        parse_method_evaluation_response_v2(plan=plan, response=duplicate)
+    assert parse_method_evaluation_response_v2(plan=plan, response=duplicate)[0].supporting_event_refs == (planned_ref,)
 
     foreign = _response(plan)
     foreign[0]["supporting_event_refs"] = [foreign_ref]
-    with pytest.raises(MethodEvaluationResponseError, match="belong"):
-        parse_method_evaluation_response_v2(plan=plan, response=foreign)
+    parsed = parse_method_evaluation_response_v2(plan=plan, response=foreign)
+    assert parsed[0].verdict == "UNKNOWN"
+    assert parsed[0].supporting_event_refs == ()
 
 
-def test_response_requires_supporting_refs_in_current_evaluation_event_order() -> None:
+def test_response_restores_current_evaluation_event_order() -> None:
     plan = _same_method_target_and_noise_plan()
     response = _response(plan, ("CONFIRMED",))
     response[0]["supporting_event_refs"] = list(
         reversed(plan.evaluations[0].evidence_event_refs)
     )
 
-    with pytest.raises(MethodEvaluationResponseError, match="planned event order"):
-        parse_method_evaluation_response_v2(plan=plan, response=response)
+    parsed = parse_method_evaluation_response_v2(plan=plan, response=response)
+    assert parsed[0].supporting_event_refs == plan.evaluations[0].evidence_event_refs
 
 
 @pytest.mark.parametrize(

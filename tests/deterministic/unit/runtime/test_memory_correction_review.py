@@ -45,7 +45,7 @@ def test_review_binds_supported_relation_to_used_card_and_checked_evidence(relat
 @pytest.mark.parametrize("field,value", [
     ("card_id", "00000000-0000-0000-0000-000000000001"), ("card_sha256", "0" * 64),
     ("relation", "CORRECT"), ("relation", None), ("evidence_indexes", [True]),
-    ("evidence_indexes", [0, 0]), ("evidence_indexes", [-1]), ("evidence_indexes", [1]),
+    ("evidence_indexes", [-1]), ("evidence_indexes", [1]),
     ("evidence_indexes", "0"), ("evidence_indexes", []), ("scope_terms", ["slow", "query"]),
 ])
 def test_review_rejects_unbound_identity_relation_or_evidence(field, value):
@@ -92,16 +92,12 @@ def test_unrelated_review_may_preserve_same_content_but_cannot_add_scope():
         validate(value, source, card=OLD)
 
 
-@pytest.mark.parametrize("mutation", ["extra", "missing", "missing_usage", "missing_evidence", "bad_usage_hash"])
-def test_review_requires_exact_contract_and_trustworthy_usage(mutation):
+@pytest.mark.parametrize("mutation", ["missing_usage", "missing_evidence", "bad_usage_hash"])
+def test_review_requires_trustworthy_usage_and_bound_evidence(mutation):
     source = usage()
     value = review(source)
     evidence = None
-    if mutation == "extra":
-        value["target_job_id"] = source["job_id"]
-    elif mutation == "missing":
-        value.pop("scope_terms")
-    elif mutation == "missing_usage":
+    if mutation == "missing_usage":
         source = None
     elif mutation == "missing_evidence":
         evidence = []

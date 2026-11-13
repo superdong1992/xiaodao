@@ -88,11 +88,12 @@ def test_malformed_duplicate_cannot_preserve_conflicting_group():
 
 
 @pytest.mark.parametrize("items", [[], [None], [{"method_id": "unknown"}]])
-def test_confirmed_without_any_recognizable_evidence_remains_format_failure(items):
+def test_confirmed_without_any_recognizable_evidence_becomes_insufficient(items):
     kwargs = _input()
     kwargs["draft"]["evidence"] = items
-    with pytest.raises(ValueError):
-        select_method_diagnosis(**kwargs)
+    selected = select_method_diagnosis(**kwargs)
+    assert selected.draft.status == "INSUFFICIENT"
+    assert selected.draft.evidence == selected.draft.confirmed_methods == ()
 
 
 def test_missing_target_downgrades_valid_finding_without_removing_it():
@@ -152,6 +153,32 @@ def test_missing_target_keeps_finding_through_finalizer_and_zip(tmp_path):
     assert len(backend.calls) == 1
 
 
+@pytest.mark.parametrize("partial", [False, True])
+def test_selected_diagnosis_with_reviewer_keeps_only_real_review_rules(tmp_path, monkeypatch, partial):
+    runtime, job, _, backend, _ = _public_fake_claiming_runtime(tmp_path, "success")
+    job = Job.model_validate({**job.model_dump(mode="json"), "review_policy": "INDEPENDENT"})
+    runtime._state_repository.aggregate.jobs[job.job_id] = job
+    backend.job = job
+    execute = backend._run_methods
+
+    def response(kwargs):
+        result = execute(kwargs)
+        value = json.loads(result.final_result)
+        if partial:
+            value["evidence"].append({**value["evidence"][0], "method_id": "unknown"})
+        return replace(result, final_result=canonical_json_bytes(value).decode())
+
+    monkeypatch.setattr(backend, "_run_methods", response)
+    outcome = runtime.execute(job, InMemoryCancellationSignal()).job_outcome
+    assert outcome.result_type is OutcomeResultType.COMPLETED, outcome.error
+    assert outcome.payload.candidate_conclusion_draft.resolution_status.value == ("PARTIAL" if partial else "COMPLETE")
+    assert "methods:evidence-selection" not in outcome.decision_audit.required_rule_ids
+    assert len(outcome.decision_audit.required_rule_ids) == len(outcome.payload.findings)
+    if partial:
+        assert any("未纳入结论" in text for text in outcome.payload.limitations)
+    assert len(backend.calls) == 1
+
+
 @pytest.mark.parametrize("review", [False, True])
 def test_partial_criteria_are_unknown_without_independent_completion_evidence(tmp_path, monkeypatch, review):
     factory = _public_fake_claiming_runtime if review else _no_review_runtime
@@ -175,7 +202,8 @@ def test_partial_criteria_are_unknown_without_independent_completion_evidence(tm
     assert len(backend.calls) == 1
 
 
-def test_same_log_findings_retain_only_their_own_line_citations(tmp_path, monkeypatch):
+@pytest.mark.parametrize("identity_tokens", [True, False])
+def test_same_log_findings_retain_only_their_own_line_citations(tmp_path, monkeypatch, identity_tokens):
     runtime, job, _, backend, resources = _no_review_runtime(tmp_path, "success")
     lines = [f"rpc deadline exceeded request_id={number}" for number in (42, 43)]
     backend.target_contents["client"] = ("\n".join(lines) + "\n").encode()
@@ -186,7 +214,7 @@ def test_same_log_findings_retain_only_their_own_line_citations(tmp_path, monkey
         value = json.loads(result.final_result)
         value["status"] = "PARTIAL"
         value["evidence"] = [{"method_id": "rpc-call-timeout", "summary": f"finding {index}",
-            "identity_tokens": [f"request_id={42 + index}"], "sources": [{"source_id": "client",
+            "identity_tokens": [f"request_id={42 + index}"] if identity_tokens else [], "sources": [{"source_id": "client",
                 "line_number": index + 1, "marker": "rpc deadline exceeded", "line": line}]}
             for index, line in enumerate(lines)]
         return replace(result, final_result=canonical_json_bytes(value).decode())

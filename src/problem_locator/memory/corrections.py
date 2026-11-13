@@ -9,6 +9,7 @@ from problem_locator.followup.models import MAX_CONTEXT_BYTES
 from problem_locator.followup.snapshots import (_row, copy_snapshot, ordinary_path, protect_inputs,
     verify_inputs, write_new)
 from problem_locator.runtime.agent_backend import AgentBackend
+from problem_locator.runtime.model_json import parse_model_json_response
 from problem_locator.storage.atomic import require_real_directory
 from problem_locator.storage.paths import ensure_no_symlink_ancestors
 
@@ -121,17 +122,16 @@ def validate_evidence(value, workspace, rows, cancellation, *, include_web_analy
         raise ValueError("纠正核对已停止。")
     logs = {row["path"]: row for row in rows if row["path"].startswith("inputs/logs/")
         or (include_web_analysis and row["path"] == "inputs/feedback-analysis.txt")}
-    checked, seen = [], set()
+    checked = []
     for entry in value:
-        if not isinstance(entry, dict) or set(entry) != {"path", "sha256", "start_line", "end_line", "quote"}:
+        if not isinstance(entry, dict) or not {"path", "sha256", "start_line", "end_line", "quote"} <= entry.keys():
             raise ValueError("纠正证据字段无效。")
         path, start, end, quote = entry["path"], entry["start_line"], entry["end_line"], entry["quote"]
         if (not isinstance(path, str) or path not in logs or entry["sha256"] != logs[path]["sha256"]
                 or type(start) is not int or type(end) is not int or not 1 <= start <= end <= 1_000_000
                 or end - start >= 40 or not isinstance(quote, str) or not quote.strip()
-                or len(quote.encode("utf-8")) > 8192 or (path, start, end) in seen):
+                or len(quote.encode("utf-8")) > 8192):
             raise ValueError("纠正证据的文件、行号或内容无效。")
-        seen.add((path, start, end))
         selected = []
         with ordinary_path(workspace, path).open("r", encoding="utf-8", newline=None) as stream:
             for number in range(1, end + 1):
@@ -235,13 +235,17 @@ class CorrectionMemoryHandler:
             output = result.final_result
             if not isinstance(output, str) or len(output.encode("utf-8")) > 65_536:
                 raise ValueError("纠正审核结果无效。")
-            value = json.loads(output, object_pairs_hook=_unique_object)
-            if (not isinstance(value, dict) or set(value) != _review_fields(usage)
+            value = parse_model_json_response(output.encode("utf-8")).document.value
+            if isinstance(value, dict) and value.get("adopt") is False:
+                return None
+            if (not isinstance(value, dict) or not _review_fields(usage) <= value.keys()
                     or value["adopt"] is not True):
                 raise ValueError("现有日志不足以支持共享这次纠正。")
             evidence = validate_evidence(value["evidence"], workspace, rows, signal)
             verify_inputs(workspace, rows, signal)
-            card = parse_card_json(json.dumps(value["card"], ensure_ascii=False), sources=(context_raw,))
+            card = parse_card_json(json.dumps(value["card"], ensure_ascii=False), sources=(context_raw,), allow_none=True)
+            if card is None:
+                return None
             receipt = {"schema_version": 1, "source_job_id": task["source_job_id"],
                 "original_report_sha256": source.report_sha256, "answer_sha256": task["report_sha256"],
                 "context_sha256": hashlib.sha256(raw).hexdigest(), "evidence": evidence}
@@ -334,8 +338,10 @@ class CorrectionMemoryHandler:
             output = result.final_result
             if not isinstance(output, str) or len(output.encode("utf-8")) > 65_536:
                 raise ValueError("纠正审核结果无效。")
-            value = json.loads(output, object_pairs_hook=_unique_object)
-            if (not isinstance(value, dict) or set(value) != _review_fields(usage)
+            value = parse_model_json_response(output.encode("utf-8")).document.value
+            if isinstance(value, dict) and value.get("adopt") is False:
+                return None
+            if (not isinstance(value, dict) or not _review_fields(usage) <= value.keys()
                     or value["adopt"] is not True):
                 raise ValueError("现有资料不足以支持共享这次纠正。")
             evidence = validate_evidence(value["evidence"], workspace, rows, signal, include_web_analysis=True)
@@ -345,7 +351,9 @@ class CorrectionMemoryHandler:
                 entry["source_kind"] = provenance[entry["path"]]["source_kind"]
                 if entry["source_kind"] == "WEB_ANALYSIS":
                     entry["analysis_reference"] = reference
-            card = parse_card_json(json.dumps(value["card"], ensure_ascii=False), sources=(context_raw, analysis))
+            card = parse_card_json(json.dumps(value["card"], ensure_ascii=False), sources=(context_raw, analysis), allow_none=True)
+            if card is None:
+                return None
             receipt = {"schema_version": 1, "origin": "FEEDBACK_COMMENT", "comment_id": feedback["comment_id"],
                 "source_job_id": task["source_job_id"],
                 "original_report_sha256": hashlib.sha256(context["original_report"].encode("utf-8")).hexdigest(),

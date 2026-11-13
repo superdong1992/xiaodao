@@ -20,7 +20,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 import pytest
 
-from problem_locator.contracts import ReviewPolicy
+from problem_locator.contracts import DiagnosisMode, JobType, ReviewPolicy
 from tests.deterministic.journey.test_rpc_timeout import (
     ARCHIVE, PARAMETER_GROUP_A, RPC_CLIENT_LOG, RPC_SERVER_LOG,
     _Stack, _windows_extended_path,
@@ -145,7 +145,7 @@ def close(stack):
 async def diagnosis(system_stack, protocol, review):
     stack, build, release = system_stack
     stack.catalog._specialized_review_policy = ReviewPolicy.INDEPENDENT if review else ReviewPolicy.NONE
-    raw = "A payment service call to inventory times out."
+    raw = "A payment service RPC call to inventory times out."
     create = dict(request_id="public-create", raw_problem_text=raw, statement=raw, actual_behavior=raw)
     async with public_client(stack, protocol) as client:
         created = await client.call("create_case", **create)
@@ -156,9 +156,18 @@ async def diagnosis(system_stack, protocol, review):
         stack.start()
         await asyncio.to_thread(stack.wait_idle)
         waiting = await client.view(case_id)
-        assert waiting["status"] == "WAITING_INPUT"
+        assert waiting["status"] == "WAITING_INPUT", waiting
         assert waiting["raw_problem_text"] == raw
+        assert waiting["problem_spec"]["statement"] == waiting["problem_spec"]["actual_behavior"] == raw
+        assert waiting["problem_spec"]["scope"] == skill_input("create_case")["scope"]
         assert waiting["user_facts"] == []
+        assert waiting["selected_skill_ref"]["id"] == "diagnosis-skill/rpc-log-analysis"
+        initial_jobs = tuple(stack.repository.read_case(case_id).jobs.values())
+        route = next(job for job in initial_jobs if job.job_type is JobType.ROUTE)
+        admission = json.loads(stack.records.read_audit_bytes(route.job_id, "route-admission.json"))
+        assert admission["reason_code"] == "ADMITTED"
+        assert admission["effective_skill_id"] == waiting["selected_skill_ref"]["id"]
+        assert all(job.diagnosis_mode is not DiagnosisMode.GENERIC for job in initial_jobs)
         assert [item["name"] for item in waiting["pending_requirements"] if item["status"] == "OPEN"] == [*PARAMETER_GROUP_A, "log_archive"]
 
         # A stale write must neither advance the revision nor adopt any input.

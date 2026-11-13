@@ -121,6 +121,8 @@ from .continuation_context import build_report_continuation_context
 from .failures import RuntimeExecutionError, runtime_failure
 from .final_response import build_direct_keyword_draft, parse_route_response, parse_specialist_response, specialist_prompt
 from .keyword_route import try_direct_keyword_route
+from .route_admission import evaluate_route_admission
+from .route_recall import recall_route_candidates
 from .generic_locator import GenericLocatorExecutor
 from .skill_direct import parse_skill_direct_response
 from .input_profile import expand_profile_requirements, load_builtin_input_profile
@@ -1280,26 +1282,9 @@ class DiagnosisRuntime:
             return receipt
         if job.job_type is JobType.ROUTE and not job.available_skill_refs:
             return self._publish_no_capability(job)
-        if job.job_type is JobType.ROUTE:
-            assert assets.skill_index_text is not None
-            index = json.loads(assets.skill_index_text)
-            if not any(item["routing"] is not None for item in index["skills"]):
-                self._publish_audit_bytes(job, "route-admission.json", canonical_json_bytes({
-                    "schema_version": 1, "policy": "strict_route_admission_v1",
-                    "job_id": job.job_id, "case_id": job.case_id,
-                    "base_state_revision": job.base_state_revision,
-                    "reason_code": "NO_ELIGIBLE_SKILL", "model_called": False,
-                    "model_skill_id": None, "effective_skill_id": None,
-                    "input_hashes": {
-                        "skill_index_sha256": bytes_sha256(assets.skill_index_text.encode("utf-8")),
-                        "context_snapshot_sha256": bytes_sha256(canonical_json_bytes(job.context_snapshot)),
-                    },
-                }))
-                return self._publish_no_capability(
-                    job, reason="已注册的专用 Skill 均未声明路由适用范围，转入通用定位。",
-                )
         aggregate = self._read_case(job)
         direct_route = None
+        route_candidates = None
         if job.job_type is JobType.ROUTE:
             if cancellation.is_cancelled():
                 raise runtime_failure(stage=ExecutionStage.BACKEND_EXECUTE,
@@ -1308,6 +1293,18 @@ class DiagnosisRuntime:
             direct_route = try_direct_keyword_route(job,
                 skill_index=assets.skill_index_text,
                 raw_problem_text=aggregate.case.raw_problem_text)
+            if direct_route is None:
+                route_candidates = recall_route_candidates(job, skill_index=assets.skill_index_text)
+                if not route_candidates.skill_ids:
+                    admission = evaluate_route_admission({}, job,
+                        skill_index=assets.skill_index_text, candidates=route_candidates)
+                    self._publish_audit_bytes(job, "route-admission.json",
+                        canonical_json_bytes({**admission.audit, "model_called": False}))
+                    log_event("runtime.route.admission", case_id=job.case_id, job_id=job.job_id,
+                        reason_code=admission.audit["reason_code"],
+                        model_skill_id=None, effective_skill_id=None)
+                    return self._publish_no_capability(job,
+                        reason=admission.decision.reason, confidence=admission.decision.confidence)
         if job.job_type is JobType.DIAGNOSE and job.diagnosis_mode is DiagnosisMode.SPECIALIZED:
             specialized = self._resolved_registered_skill(assets)
             if is_document_skill(specialized):
@@ -1520,10 +1517,13 @@ class DiagnosisRuntime:
             claim = None if multi_source else methods_preprocessing.claim
             broker_audit_bytes = None if multi_source else methods_preprocessing.validated.broker_audit_bytes
         else:
+            materials = resolved.materials
+            if route_candidates is not None:
+                materials = replace(materials, skill_index=route_candidates.model_index)
             context = self._materialize_context(
                 job,
                 workspace,
-                resolved.materials,
+                materials,
             )
             backend_prompt = context.body
             if job.job_type is JobType.REVIEW:
@@ -1555,7 +1555,12 @@ class DiagnosisRuntime:
         if job.job_type is JobType.DIAGNOSE and isinstance(final_response, str):
             self._publish_audit_bytes(job, "method-diagnosis.raw.txt", final_response.encode("utf-8"))
         if job.job_type is JobType.ROUTE and isinstance(final_response, str):
-            self._publish_audit_bytes(job, "route-response.raw.txt", final_response.encode("utf-8"))
+            try:
+                raw_route_response = final_response.encode("utf-8")
+            except UnicodeEncodeError:
+                final_response = None
+            else:
+                self._publish_audit_bytes(job, "route-response.raw.txt", raw_route_response)
         if is_specialized_direct(job):
             validating = record_stage_started(ExecutionStage.OUTCOME_VALIDATE)
             payload = parse_skill_direct_response(
@@ -1591,11 +1596,11 @@ class DiagnosisRuntime:
             if job.job_type is JobType.ROUTE:
                 validated_draft = (build_direct_keyword_draft(job, direct_route)
                     if direct_route is not None else parse_route_response(
-                        final_response, job, skill_index=assets.skill_index_text))
+                        final_response, job, skill_index=assets.skill_index_text,
+                        candidates=route_candidates))
             elif job.job_type is JobType.DIAGNOSE:
                 validated_draft = parse_specialist_response(final_response, secrets=secrets,
-                    preserve_evidence_items=(job.review_policy is ReviewPolicy.NONE
-                        or self._methods_evidence_validation == "advisory"))
+                    preserve_evidence_items=True)
             else:
                 validated_draft = read_agent_output(
                     workspace, job, workspace.manifest, secrets=secrets,
@@ -1823,7 +1828,7 @@ class DiagnosisRuntime:
             target_logs=target_logs,
             route_admission=(validated_draft.route_admission
                 if isinstance(validated_draft, ValidatedAgentDraft) else None),
-            route_skill_index=assets.skill_index_text if direct_route is not None else None,
+            route_skill_index=assets.skill_index_text if job.job_type is JobType.ROUTE else None,
             route_raw_problem_text=aggregate.case.raw_problem_text if direct_route is not None else None,
         )
         self._publish_audit_bytes(
@@ -4077,6 +4082,7 @@ class DiagnosisRuntime:
 
     def _publish_no_capability(
         self, job: Job, *, reason: str = "生产目录中没有可用的专用 Skill，转入通用定位。",
+        confidence: float = 1.0,
     ) -> RuntimeExecutionReceipt:
         outcome = JobOutcome(
             outcome_id=self._id_generator.new("job_outcome"),
@@ -4089,7 +4095,7 @@ class DiagnosisRuntime:
                 kind=RouteKind.NO_CAPABILITY,
                 skill_ref=None,
                 reason=reason,
-                confidence=1.0,
+                confidence=confidence,
             ),
             consumed_evidence_refs=[],
             proposed_evidence=[],
@@ -4166,23 +4172,25 @@ class DiagnosisRuntime:
         if diagnosis_bytes is None or audit_bytes is None or receipt_bytes is None:
             raise ValueError("prior Methods diagnosis audit material is unavailable")
         audit = _method_grounding_audit_from_bytes(audit_bytes)
-        if audit.validation_mode == "advisory":
+        receipt_name = ("method-evidence-advisory.json" if audit.validation_mode == "advisory"
+                        else "method-evidence-selection.json")
+        effective_receipt_bytes = self._execution_records.read_audit_bytes(source_job_id, receipt_name)
+        if audit.validation_mode == "advisory" or effective_receipt_bytes is not None:
             original_digest = bytes_sha256(diagnosis_bytes)
             authority_audit = matches[0].decision_audit
-            advisory_bytes = self._execution_records.read_audit_bytes(
-                source_job_id, "method-evidence-advisory.json")
             if (authority_audit is None or authority_audit.source_draft_sha256 != original_digest
-                    or advisory_bytes is None):
+                    or effective_receipt_bytes is None):
                 raise ValueError("prior Methods source draft identity is invalid")
-            advisory_receipt = parse_canonical_json_bytes(advisory_bytes)
+            effective_receipt = parse_canonical_json_bytes(effective_receipt_bytes)
             diagnosis_bytes = self._execution_records.read_audit_bytes(
                 source_job_id, "method-diagnosis.effective.json")
             if diagnosis_bytes is None:
                 raise ValueError("prior effective Methods diagnosis is unavailable")
-            if (not isinstance(advisory_receipt, dict)
-                    or advisory_receipt.get("validation_mode") != "advisory"
-                    or advisory_receipt.get("source_draft_sha256") != original_digest
-                    or advisory_receipt.get("effective_draft_sha256") != bytes_sha256(diagnosis_bytes)):
+            if (not isinstance(effective_receipt, dict)
+                    or (audit.validation_mode == "advisory"
+                        and effective_receipt.get("validation_mode") != "advisory")
+                    or effective_receipt.get("source_draft_sha256") != original_digest
+                    or effective_receipt.get("effective_draft_sha256") != bytes_sha256(diagnosis_bytes)):
                 raise ValueError("prior effective Methods diagnosis identity is invalid")
         diagnosis_value = parse_canonical_json_bytes(diagnosis_bytes)
         diagnosis = (parse_advisory_diagnosis(diagnosis_value) if audit.validation_mode == "advisory"

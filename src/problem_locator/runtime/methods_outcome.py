@@ -138,6 +138,9 @@ def _method_rule_id(method_id: str, identity_tokens: tuple[str, ...]) -> str:
 
 def _evidence_rule_id(item: MethodEvidenceV1, *, advisory: bool) -> str:
     if not advisory:
+        if not item.identity_tokens:
+            digest = canonical_json_sha256([asdict(source) for source in item.sources])[:24]
+            return f"methods:{item.method_id}:{digest}"
         return _method_rule_id(item.method_id, item.identity_tokens)
     # Tokens remain model metadata. Distinct judgments with the same tokens
     # must not collide or acquire invented identity tokens.
@@ -326,8 +329,6 @@ def _diagnosis_projection(
         raise ValueError("grounded Methods identity differs from the pinned Job Skill")
     selected = verified.selection is not None
     advisory = verified.audit.validation_mode == "advisory"
-    if selected and job.review_policy is not ReviewPolicy.NONE:
-        raise ValueError("evidence selection requires the frozen no-review policy")
 
     validated = preprocessing.validated
     target_logs = validated.target_logs
@@ -502,7 +503,7 @@ def _diagnosis_projection(
             )
         )
 
-    if selected and verified.selection["gap_messages"]:
+    if selected and job.review_policy is ReviewPolicy.NONE and verified.selection["gap_messages"]:
         rule_id = "methods:evidence-selection"
         claim = AgentRuleClaim(rule_id=rule_id, claimed_result=RuleClaimResult.UNKNOWN,
             fact_refs=[], citations=[], explanation="部分发现未通过核验，具体缺口已单独记录。")
@@ -650,6 +651,7 @@ def _diagnosis_projection(
             else "请补充覆盖证据缺口的目标日志，再创建新的定位任务。"
         ),
         limitations=list(dict.fromkeys([*verified.draft.limitations,
+            *(verified.selection["gap_messages"] if selected else []),
             *(["无法定位的模型引用已省略；无行号的日志关联只表示该日志属于本次模型输入，不表示结论已获证实。"]
               if omitted_locations else []),
             *(["模型未提供可校准的置信度；报告中的 0.5 仅为占位值，不表示经过统计验证的概率。"]
@@ -867,7 +869,7 @@ def _review_projection(
 
     verdict = ReviewVerdict(review.verdict)
     reasons = [item.reason for item in review.findings if item.verdict != "PASS"]
-    if advisory and verdict is not ReviewVerdict.PASS and not reasons:
+    if verdict is not ReviewVerdict.PASS and not reasons:
         reasons = ["Reviewer 对整份结果的判断为 " + review.verdict + "。"]
     assessment = ReviewAssessment(
         candidate_conclusion_id=job.review_target.candidate_conclusion_id,

@@ -47,8 +47,7 @@ def _accept(**kwargs):
 def test_quote_location_and_marker_metadata_do_not_remove_a_judgment(change):
     args = _input()
     args["draft"]["evidence"][0]["sources"][0].update(change)
-    with pytest.raises(ValueError):
-        verify_method_diagnosis(**args)
+    assert verify_method_diagnosis(**args).draft.status == "INSUFFICIENT"
     accepted = _accept(**args)
     assert accepted.audit.validation_mode == "advisory"
     assert accepted.audit.checked_source_count == 0
@@ -127,18 +126,20 @@ def test_effective_metadata_limits_allow_reloading_normalized_findings():
 
 
 @pytest.mark.parametrize("field,value", [("status", "PASS"), ("evidence", "[]"), ("confirmed_methods", {})])
-def test_top_level_protocol_type_and_status_errors_remain_fatal(field, value):
+def test_optional_type_and_status_differences_keep_recognizable_findings(field, value):
     args = _input()
     args["draft"][field] = value
-    with pytest.raises((TypeError, ValueError)):
-        _accept(**args)
+    accepted = _accept(**args)
+    assert accepted.draft.status == ("INSUFFICIENT" if field == "evidence" else "PARTIAL")
+    assert len(accepted.draft.evidence) == (0 if field == "evidence" else 1)
 
 
-def test_unrecognizable_findings_and_frozen_input_identity_drift_remain_fatal():
+def test_unrecognizable_findings_are_insufficient_but_frozen_identity_drift_remains_fatal():
     args = _input()
     args["draft"]["evidence"] = [{"method_id": "rpc-call-timeout"}]
-    with pytest.raises(ValueError, match="recognizable"):
-        _accept(**args)
+    accepted = _accept(**args)
+    assert accepted.draft.status == "INSUFFICIENT"
+    assert accepted.draft.evidence == ()
     args = _input()
     args["skill_load"] = replace(args["skill_load"], package_tree_sha256="b" * 64)
     with pytest.raises(ValueError, match="input identities"):
@@ -149,8 +150,8 @@ def test_unrecognizable_findings_and_frozen_input_identity_drift_remain_fatal():
         FrozenTargetLogV1("client", "../other-case.log", bytes_sha256(b"actual\n"), b"actual\n")
 
 
-def _mapped(args):
-    accepted = _accept(**args)
+def _mapped(args, accept=_accept):
+    accepted = accept(**args)
     job = _contract("job-diagnose.json", Job)
     skill = args["skill"]
     job = Job.model_validate({**job.model_dump(mode="json"), "skill_ref": {
@@ -177,6 +178,26 @@ def _mapped(args):
         source_draft_bytes=canonical_json_bytes(args["draft"]), verified_diagnosis=accepted,
         preprocessing=SimpleNamespace(validated=validated))
     return job, accepted, mapped
+
+
+@pytest.mark.parametrize("verdict", ["REJECT", "NEED_MORE_EVIDENCE"])
+def test_strict_review_whole_result_judgment_maps_without_item_reason_failure(verdict, caplog):
+    from problem_locator.runtime.diagnosis_runtime import DiagnosisRuntime
+
+    diagnosis_job, verified, diagnosed = _mapped(_input(), accept=verify_method_diagnosis)
+    job = _contract("job-review.json", Job)
+    job = Job.model_validate({**job.model_dump(mode="json"),
+                              "skill_ref": diagnosis_job.skill_ref.model_dump(mode="json")})
+    manifest = _contract("workspace-input-manifest-review.json", WorkspaceInputManifest)
+    manifest = manifest.model_copy(update={"review_subject": DiagnosisRuntime._methods_review_subject(job, verified)})
+    value = {"verdict": verdict, "findings": [{"method_id": "rpc-call-timeout",
+        "identity_tokens": ["request_id=42"], "verdict": "PASS", "reason": "逐项引用可用。"}]}
+    reviewed = map_verified_methods_draft(job=job, manifest=manifest,
+        source_draft_bytes=canonical_json_bytes(value), verified_diagnosis=verified,
+        verified_review=verify_method_review(verified, value), diagnosis_audit=diagnosed.verification.audit)
+    assert reviewed.draft.payload.verdict.value == verdict
+    assert reviewed.draft.payload.unsupported_findings or reviewed.draft.payload.missing_evidence
+    assert not caplog.records
 
 
 @pytest.mark.parametrize("location", ["text_differs", "line_out_of_range", "unknown_source", "absent_sources"])
@@ -226,11 +247,9 @@ def test_advisory_review_accepts_whole_result_verdict_and_keeps_strict_history_s
     assert verify_method_review(advisory, review) == parsed
     strict = verify_method_diagnosis(**args)
     assert strict.audit.validation_mode == "strict"
-    with pytest.raises(ValueError):
-        verify_method_review(strict, review)
+    assert verify_method_review(strict, review).verdict == "NEED_MORE_EVIDENCE"
     assert "validation_mode" in asdict(advisory.audit)
-    with pytest.raises(ValueError):
-        parse_advisory_review({**review, "verdict": "APPROVED"})
+    assert parse_advisory_review({**review, "verdict": "APPROVED"}).verdict == "NEED_MORE_EVIDENCE"
 
 
 def test_unknown_method_punctuation_does_not_collide_in_persisted_factor_ids():

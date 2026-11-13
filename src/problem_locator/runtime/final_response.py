@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from problem_locator.contracts import (
     AgentJobOutcomeDraftV2, ErrorCode, ExecutionStage, Job,
@@ -16,6 +17,9 @@ from .methods_grounding import (
 )
 from .methods_skill import ResolvedSpecializedSkillV1
 from .output_reader import ValidatedAgentDraft, ValidatedMethodDiagnosisDraft
+
+if TYPE_CHECKING:
+    from .route_recall import RouteCandidates
 
 INLINE_INPUT_BYTES = 128 * 1024
 MARKER_INDEX_BYTES = 8 * 1024
@@ -147,12 +151,20 @@ def build_direct_keyword_draft(job: Job, admission: RouteAdmissionResult) -> Val
     )
 
 
-def parse_route_response(text: str | None, job: Job, *, skill_index: str) -> ValidatedAgentDraft:
+def parse_route_response(
+    text: str | None, job: Job, *, skill_index: str, candidates: RouteCandidates | None = None,
+) -> ValidatedAgentDraft:
+    raw = b""
     try:
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("CLI final result is missing")
-        parsed = parse_model_json_response(text.encode("utf-8"))
-        admission = evaluate_route_admission(parsed.document.value, job, skill_index=skill_index)
+        raw = text.encode("utf-8") if isinstance(text, str) else b""
+        parsed = parse_model_json_response(raw)
+    except ValueError:
+        parsed = None
+    try:
+        admission = evaluate_route_admission(
+            parsed.document.value if parsed is not None else {}, job, skill_index=skill_index,
+            candidates=candidates,
+        )
         matched = admission.decision.kind is RouteKind.MATCHED
         draft = AgentJobOutcomeDraftV2(
             schema_version=2, job_id=job.job_id, case_id=job.case_id,
@@ -165,16 +177,16 @@ def parse_route_response(text: str | None, job: Job, *, skill_index: str) -> Val
         draft_bytes = canonical_json_bytes(draft)
         audit = {
             **admission.audit,
-            "raw_response_sha256": bytes_sha256(text.encode("utf-8")),
+            "raw_response_sha256": bytes_sha256(raw),
             "draft_sha256": bytes_sha256(draft_bytes),
         }
         return ValidatedAgentDraft(draft=draft, canonical_bytes=draft_bytes,
             proposal_resources=(), authoritative_targets=None, target_logs=(),
-            model_json_extraction=parsed.extraction,
+            model_json_extraction=parsed.extraction if parsed is not None else None,
             route_admission=audit)
     except (TypeError, ValueError):
         raise runtime_failure(stage=ExecutionStage.OUTCOME_VALIDATE, code=ErrorCode.OUTCOME_INVALID,
-            message="ROUTE 最终响应无效，必须返回 skill_id、reason、confidence 和完整的 assessments。") from None
+            message="路由任务或 Skill 目录无法使用。") from None
 
 
 def parse_specialist_response(

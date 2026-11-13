@@ -29,6 +29,7 @@ def _runtime(tmp_path, *, text="服务报错 ACME_RPC_DEADLINE，请定位。", 
         path = root / "registration-template.json"
         value = json.loads(path.read_bytes())
         value["registration_id"] = root.name
+        value["routing"]["applicability"][0]["description"] += "包括 RPC 调用故障。"
         if declared:
             value["routing"]["direct_match_keywords"] = ["ACME_RPC_DEADLINE"]
         if exclusions:
@@ -80,7 +81,7 @@ def test_non_unique_or_unclear_keyword_keeps_existing_llm_route(tmp_path, option
     assert result.result_type is OutcomeResultType.NO_CAPABILITY, result.error
     assert [call["backend_phase"] for call in backend.calls] == ["ROUTE"]
     audit = json.loads(records.read_audit_bytes(job.job_id, "route-admission.json"))
-    assert audit["policy"] == "strict_route_admission_v1"
+    assert audit["policy"] == "shortlisted_route_v1"
 
 
 @pytest.mark.parametrize("when", ["before", "after-audit"])

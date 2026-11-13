@@ -1,9 +1,12 @@
 """Only memory passed to a successful generic invocation can become a usage receipt."""
+import hashlib
+import logging
 from types import SimpleNamespace
 
 import pytest
 
 from tests.deterministic.contracts.fakes import InMemoryCancellationSignal
+from problem_locator.contracts import GenericResultStatus
 from problem_locator.memory.retrieval import ExperienceRetriever
 from problem_locator.runtime.failures import RuntimeExecutionError
 from problem_locator.runtime.generic_locator import GenericLocatorExecutor
@@ -62,10 +65,29 @@ def test_missing_empty_and_oversized_memory_do_not_create_usage(tmp_path, select
     assert result.memory_selection is None
 
 
-@pytest.mark.parametrize("failure", ["backend", "invalid-report"])
+def test_plain_report_preserves_content_and_returns_the_used_memory_selection(tmp_path, caplog):
+    report = b"invalid"
+    memory = selection()
+    agent = _GenericRuntimeBackend(None, v2_result_bytes=report)
+
+    result, _, _ = run_executor(tmp_path, agent, memory)
+
+    payload = result.outcome.payload
+    assert payload.status is GenericResultStatus.UNRESOLVED
+    assert payload.report_markdown.encode("utf-8") == report
+    assert payload.report_utf8_size == len(report)
+    assert payload.report_sha256 == hashlib.sha256(report).hexdigest()
+    assert (result.workspace.root / "output/generic_diagnosis_result.md").read_bytes() == report
+    assert result.memory_selection is memory
+    assert len(agent.calls) == 1
+    assert memory.reference_text in agent.calls[0]["prompt"]
+    assert not any(record.levelno >= logging.WARNING or record.exc_info for record in caplog.records)
+
+
+@pytest.mark.parametrize("failure", ["backend", "empty-report"])
 def test_failed_execution_cannot_return_a_successful_usage_receipt(tmp_path, failure):
     agent = (_GenericRuntimeBackend(None, failure=_failure()) if failure == "backend"
-        else _GenericRuntimeBackend(None, v2_result_bytes=b"invalid"))
+        else _GenericRuntimeBackend(None, v2_result_bytes=b""))
     with pytest.raises(RuntimeExecutionError):
         run_executor(tmp_path, agent, selection())
     assert len(agent.calls) == 1

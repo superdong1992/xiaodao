@@ -24,6 +24,8 @@ from problem_locator.runtime.agent_backend import AgentBackend, BackendExecution
 from problem_locator.runtime.context_builder import ContextBuilder, ContextMaterials
 from problem_locator.runtime.failures import RuntimeExecutionError
 from problem_locator.runtime.final_response import parse_route_response
+from problem_locator.runtime.route_admission import ROUTE_ADMISSION_POLICY
+from problem_locator.runtime.route_recall import RouteCandidates, recall_route_candidates
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -69,7 +71,7 @@ _SCENARIOS = (
 )
 
 
-def _route_scenario(scenario: str) -> tuple[Job, str, RouteKind, list[str]]:
+def _route_scenario(scenario: str) -> tuple[Job, str, RouteKind]:
     value = json.loads(ROUTE_JOB.read_bytes())
     value["goal"] = "审核冻结问题是否明确符合唯一专用 Skill 的适用范围。"
     statement = (
@@ -78,20 +80,16 @@ def _route_scenario(scenario: str) -> tuple[Job, str, RouteKind, list[str]]:
     )
     scope = "payment 到 inventory 的跨进程网络 RPC"
     expected_kind = RouteKind.MATCHED
-    expected_candidates = ["match"]
     if scenario == "generic-symptom":
         statement = "系统很慢，有时卡住，尚不清楚涉及哪个组件或调用方式。"
         scope = "业务系统响应速度"
         expected_kind = RouteKind.NO_CAPABILITY
-        expected_candidates = ["uncertain"]
     elif scenario == "out-of-scope":
         statement = "图片编辑器进程内的本地滤镜函数执行很慢，已确认没有 RPC 或网络调用。"
         scope = "图片编辑器的进程内滤镜函数"
         expected_kind = RouteKind.NO_CAPABILITY
-        expected_candidates = ["ruled_out"]
     elif scenario == "ambiguous-candidates":
         expected_kind = RouteKind.NO_CAPABILITY
-        expected_candidates = ["match", "match"]
     elif scenario == "missing-diagnostic-materials":
         statement += "还没有提供日志、问题时间和进程名。"
     else:
@@ -137,7 +135,22 @@ def _route_scenario(scenario: str) -> tuple[Job, str, RouteKind, list[str]]:
                 }],
             },
         })
-    return job, canonical_json_bytes({"schema_version": 3, "skills": skills}).decode("utf-8"), expected_kind, expected_candidates
+    return job, canonical_json_bytes({"schema_version": 3, "skills": skills}).decode("utf-8"), expected_kind
+
+
+def _route_context(job: Job, candidates: RouteCandidates, manifest: WorkspaceInputManifest):
+    materials = ContextMaterials(
+        profile=(ASSET_ROOT / "profiles/router/profile.md").read_text(encoding="utf-8"),
+        tool_bundle=(
+            ASSET_ROOT / "tool-bundles/router/tool-bundle.json"
+        ).read_text(encoding="utf-8"),
+        output_contract=(
+            ASSET_ROOT / "output-contracts/route/output-contract.md"
+        ).read_text(encoding="utf-8"),
+        manifest=manifest,
+        skill_index=candidates.model_index,
+    )
+    return ContextBuilder().build(job, materials)
 
 
 @pytest.mark.parametrize("scenario", _SCENARIOS)
@@ -150,8 +163,10 @@ def test_real_route_agent_synthesizes_valid_outcome_from_production_contract(
     command = os.environ.get("S08_REAL_ROUTE_AGENT_COMMAND")
     assert command, "S08_REAL_ROUTE_AGENT_COMMAND is required for the real ROUTE gate"
 
-    job, skill_index, expected_kind, expected_candidates = _route_scenario(scenario)
+    job, skill_index, expected_kind = _route_scenario(scenario)
     assert job.job_type is JobType.ROUTE
+    candidates = recall_route_candidates(job, skill_index=skill_index)
+    assert 1 <= len(candidates.skill_ids) <= 5
     skill_ref = job.available_skill_refs[0]
     manifest = WorkspaceInputManifest(
         schema_version=2,
@@ -164,18 +179,7 @@ def test_real_route_agent_synthesizes_valid_outcome_from_production_contract(
         resolved_logparse_plan=None,
         review_subject=None,
     )
-    materials = ContextMaterials(
-        profile=(ASSET_ROOT / "profiles/router/profile.md").read_text(encoding="utf-8"),
-        tool_bundle=(
-            ASSET_ROOT / "tool-bundles/router/tool-bundle.json"
-        ).read_text(encoding="utf-8"),
-        output_contract=(
-            ASSET_ROOT / "output-contracts/route/output-contract.md"
-        ).read_text(encoding="utf-8"),
-        manifest=manifest,
-        skill_index=skill_index,
-    )
-    context = ContextBuilder().build(job, materials)
+    context = _route_context(job, candidates, manifest)
 
     workspace = tmp_path / "workspace"
     inputs = workspace / "inputs"
@@ -222,7 +226,9 @@ def test_real_route_agent_synthesizes_valid_outcome_from_production_contract(
 
     assert execution.returncode == 0
     assert list((runtime / "tool-state").iterdir()) == []
-    validated = parse_route_response(execution.final_result, job, skill_index=skill_index)
+    validated = parse_route_response(
+        execution.final_result, job, skill_index=skill_index, candidates=candidates,
+    )
     assert validated.draft.result_type is (
         OutcomeResultType.COMPLETED if expected_kind is RouteKind.MATCHED
         else OutcomeResultType.NO_CAPABILITY
@@ -231,7 +237,12 @@ def test_real_route_agent_synthesizes_valid_outcome_from_production_contract(
     assert validated.draft.payload.kind is expected_kind
     assert validated.draft.payload.skill_ref == (skill_ref if expected_kind is RouteKind.MATCHED else None)
     assert validated.route_admission is not None
-    assert [item["status"] for item in validated.route_admission["candidate_results"]] == expected_candidates
+    assert validated.route_admission["policy"] == ROUTE_ADMISSION_POLICY
+    assert validated.route_admission["retrieval"] == candidates.audit
+    assert validated.route_admission["effective_skill_id"] == (
+        skill_ref.id if expected_kind is RouteKind.MATCHED else None
+    )
+    assert "candidate_results" not in validated.route_admission
     assert validated.draft.consumed_evidence_refs == []
     assert validated.draft.proposed_evidence_drafts == []
     assert validated.draft.proposed_artifact_drafts == []

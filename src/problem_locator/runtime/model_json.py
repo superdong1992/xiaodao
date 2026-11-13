@@ -13,14 +13,8 @@ _BOM = b"\xef\xbb\xbf"
 MAX_MODEL_JSON_EXTRACTION_BYTES = 1024 * 1024
 _WHITESPACE = b" \t\r\n"
 _WHOLE_JSON_FENCE = re.compile(
-    rb"\A```(?:json)?[ \t]*\r?\n(?P<body>[\s\S]*?)\r?\n```[ \t]*\Z"
-)
-_FENCE_OPEN = re.compile(rb"```(?:json)?[ \t]*\Z")
-_ARRAY_HINT = re.compile(rb'\[[ \t]*(?:\Z|[\[\]{}"0-9tfn-])')
-_SCALAR_LINE = re.compile(
-    rb'(?:true|false|null|NaN|Infinity|-Infinity|'
-    rb'-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)'
-    rb'[ \t]*(?:\Z|[,}\]])'
+    rb"\A```(?:json)?[ \t]*\r?\n(?P<body>[\s\S]*?)\r?\n```[ \t]*\Z",
+    re.IGNORECASE,
 )
 
 
@@ -109,9 +103,10 @@ def _trim_range(data: bytes, start: int, end: int) -> tuple[int, int]:
 
 
 def _scan_mixed_model_json(data: bytes, start: int, end: int) -> tuple[int, int, str]:
-    """Locate one final envelope in linear time, without parsing candidates."""
+    """Read one complete object; prose and Markdown are presentation only."""
     cursor = start
-    saw_prose = False
+    candidate = None
+    after_fence = False
     while cursor < end:
         newline = data.find(b"\n", cursor, end)
         next_line = end if newline < 0 else newline + 1
@@ -121,50 +116,47 @@ def _scan_mixed_model_json(data: bytes, start: int, end: int) -> tuple[int, int,
         if not line:
             cursor = next_line
             continue
-        if line.startswith(b"```"):
-            if _FENCE_OPEN.fullmatch(line) is None or not saw_prose:
-                raise InvalidJsonBytesError("model JSON extraction requires one final JSON fence")
-            body_start = next_line
-            cursor = next_line
-            while cursor < end:
-                newline = data.find(b"\n", cursor, end)
-                next_line = end if newline < 0 else newline + 1
-                line_end = end if newline < 0 else newline
-                close_start, close_end = _trim_range(data, cursor, line_end)
-                closing = data[close_start:close_end]
-                if closing.startswith(b"```"):
-                    if closing != b"```" or data[next_line:end].strip(_WHITESPACE):
-                        raise InvalidJsonBytesError("model JSON extraction has ambiguous or trailing content")
-                    body_start, body_end = _trim_range(data, body_start, cursor)
-                    if data[body_start:body_start + 1] != b"{" or data[body_end - 1:body_end] != b"}":
-                        raise InvalidJsonBytesError("model JSON extraction requires an object body")
-                    # A damaged string may be handled by a surface-specific
-                    # repair after extraction. An earlier complete object may
-                    # never be selected or discarded to resolve ambiguity.
-                    complete_end = _object_end(data, body_start, body_end)
-                    if complete_end is not None and complete_end != body_end:
-                        raise InvalidJsonBytesError("model JSON extraction contains multiple or trailing values")
-                    return body_start, body_end, "final_json_fence_v1"
-                cursor = next_line
-            raise InvalidJsonBytesError("model JSON extraction has an incomplete fence")
-        if line.startswith(b"{"):
-            if not saw_prose:
-                raise InvalidJsonBytesError("model JSON extraction cannot unwrap a damaged JSON root")
-            complete_end = _object_end(data, line_start, end)
-            if complete_end is None or data[complete_end:end].strip(_WHITESPACE):
-                raise InvalidJsonBytesError("model JSON extraction requires one complete final object")
-            return line_start, complete_end, "final_json_object_v1"
-        if (
-            b"{" in line
-            or b"```" in line
-            or line.startswith((b"[", b'"', _BOM))
-            or _ARRAY_HINT.search(line) is not None
-            or _SCALAR_LINE.match(line) is not None
-        ):
-            raise InvalidJsonBytesError("model JSON extraction has another possible JSON value")
-        saw_prose = True
+        if line.startswith((b"[", b'"', _BOM)):
+            # Do not mistake an object nested inside another JSON value for
+            # the response itself.
+            raise InvalidJsonBytesError("model JSON extraction found a non-object root")
+        opening = line.find(b"{")
+        # An inline object must stand on its own, not inside a preceding
+        # array or quoted JSON value. Balanced prose punctuation is harmless.
+        quoted = escaped = False
+        array_depth = 0
+        for char in line[:opening] if opening >= 0 else line:
+            if quoted:
+                if escaped:
+                    escaped = False
+                elif char == 92:
+                    escaped = True
+                elif char == 34:
+                    quoted = False
+            elif char == 34:
+                quoted = True
+            elif char == 91:
+                array_depth += 1
+            elif char == 93:
+                array_depth -= 1
+        if quoted or array_depth > 0:
+            raise InvalidJsonBytesError("model JSON extraction found a non-object root")
+        if opening >= 0:
+            if candidate is not None:
+                raise InvalidJsonBytesError("model JSON extraction contains multiple objects")
+            body_start = line_start + opening
+            body_end = _object_end(data, body_start, end)
+            if body_end is None:
+                raise InvalidJsonBytesError("model JSON extraction requires one complete object")
+            rule = "final_json_fence_v1" if after_fence else "final_json_object_v1"
+            candidate = body_start, body_end, rule
+            cursor = body_end
+            continue
+        after_fence = line.startswith(b"```")
         cursor = next_line
-    raise InvalidJsonBytesError("model JSON extraction found no final object")
+    if candidate is None:
+        raise InvalidJsonBytesError("model JSON extraction found no object")
+    return candidate
 
 
 def extract_model_json_bytes(data: bytes) -> ModelJsonExtraction:
@@ -201,9 +193,9 @@ def parse_model_json_response(data: bytes) -> ModelJsonParse:
     try:
         return ModelJsonParse(_parse_model_document(normalized))
     except InvalidJsonBytesError as exc:
-        # Preserve strict errors and the existing surface-specific recovery
-        # path for roots and whole fences. Never mine their nested objects.
-        if isinstance(exc.__cause__, RecursionError) or normalized.startswith((b"{", b"[", b'"', _BOM)):
+        # Never mine nested objects from a different JSON root type. Complete
+        # objects may still be followed by ordinary explanatory text.
+        if isinstance(exc.__cause__, RecursionError) or normalized.startswith((b"[", b'"', _BOM)):
             raise
     extraction = extract_model_json_bytes(data)
     return ModelJsonParse(_parse_model_document(extraction.effective_bytes), extraction)

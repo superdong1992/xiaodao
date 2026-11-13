@@ -92,8 +92,14 @@ def test_intent_result_preserves_request_data_without_a_second_backend_call(tmp_
     "{broken json}",
     None,
 ])
-def test_invalid_intent_contract_is_rejected_without_adopting_result(tmp_path, result):
+def test_intent_uses_effective_text_only_when_continuing(tmp_path, result):
     engine, backend = _engine(tmp_path, result)
+    if isinstance(result, dict) and result.get("intent") == "FOLLOWUP":
+        parsed = engine.prepare_continuation(source_problem_text=SOURCE, text="为什么？")
+        assert parsed["effective_problem_text"] == SOURCE
+        assert set(parsed) == {"intent", "effective_problem_text", "change_note"}
+        assert len(backend.calls) == 1
+        return
     with pytest.raises(IntakeError) as exc:
         engine.prepare_continuation(source_problem_text=SOURCE, text="为什么？")
     assert exc.value.code == "INTAKE_OUTPUT_INVALID"

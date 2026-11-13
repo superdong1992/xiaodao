@@ -5,34 +5,25 @@ import hashlib
 from collections.abc import Iterable
 
 from problem_locator.contracts import (
-    ErrorCode, ExecutionStage, GenericDiagnosisOutcomeV2, GenericResultStatus,
+    ErrorCode, ExecutionStage, GenericDiagnosisOutcomeV2,
 )
 
 from .failures import runtime_failure
 from .generic_locator import MAX_GENERIC_REPORT_BYTES
-
-
-_HEADERS = {
-    "<<<SKILL_DIAGNOSIS_RESULT_V1:RESOLVED>>>": GenericResultStatus.RESOLVED,
-    "<<<SKILL_DIAGNOSIS_RESULT_V1:UNRESOLVED>>>": GenericResultStatus.UNRESOLVED,
-}
+from .report_text import read_report_text
 
 
 def parse_skill_direct_response(
     text: str | None, *, skill_name: str, secrets: Iterable[bytes | str] = (),
 ) -> GenericDiagnosisOutcomeV2:
-    """Validate only the delivery envelope; preserve every report body byte."""
+    """Accept presentation differences without checking the Skill's reasoning."""
     try:
         if not isinstance(text, str):
             raise ValueError("Skill response is missing")
-        header, separator, body = text.partition("\n")
-        status = _HEADERS.get(header.removesuffix("\r"))
-        if not separator or status is None or not body.strip():
-            raise ValueError("Skill report envelope is invalid")
         raw = text.encode("utf-8")
-        report = body.encode("utf-8")
-        if len(report) > MAX_GENERIC_REPORT_BYTES:
-            raise ValueError("Skill report exceeds its byte limit")
+        status, body, report = read_report_text(
+            text, marker="SKILL_DIAGNOSIS_RESULT_V1", max_bytes=MAX_GENERIC_REPORT_BYTES,
+        )
         for secret in secrets:
             token = secret.encode("utf-8") if isinstance(secret, str) else secret
             if token and token in raw:
@@ -45,5 +36,5 @@ def parse_skill_direct_response(
     except (TypeError, UnicodeError, ValueError):
         raise runtime_failure(
             stage=ExecutionStage.OUTCOME_VALIDATE, code=ErrorCode.OUTCOME_INVALID,
-            message="Skill 报告的状态包络、正文或长度不符合输出合同。",
+            message="Skill 报告为空、超过长度限制或包含不可交付的内容。",
         ) from None

@@ -432,6 +432,10 @@ def _make_route_catalog(tmp_path: Path) -> VersionedAssetCatalog:
         CATALOG_FIXTURES / "skill-dir/manual-triage",
         skill_dir / "manual-triage",
     )
+    registration_path = skill_dir / "manual-triage/registration-template.json"
+    registration = json.loads(registration_path.read_bytes())
+    registration["routing"]["applicability"][0]["description"] += "包括 RPC 调用故障。"
+    registration_path.write_bytes(canonical_json_bytes(registration))
     return VersionedAssetCatalog(
         skill_dir=skill_dir,
         generic_skill_name="generic-problem-locator-smoke",
@@ -465,8 +469,8 @@ def test_route_skill_index_v3_exposes_only_the_complete_namespaced_ref(
         BUILTIN_ASSET_ROOT / "output-contracts" / "route" / "output-contract.md"
     ).read_text(encoding="utf-8")
     assert "`skill_id`" in route_contract
-    assert "`ref.id`" in route_contract
-    assert catalog.route_bindings().output_contract_ref.version == "6.0.0"
+    assert "`assessments`" not in route_contract
+    assert catalog.route_bindings().output_contract_ref.version == "7.0.0"
 
 
 def test_route_reuses_one_validated_skill_snapshot_for_the_index(
@@ -1066,7 +1070,7 @@ def test_extra_user_fact_keeps_registered_route_candidate_for_semantic_router(
     assert receipt.job_outcome.payload.kind.value == "NO_CAPABILITY"
     assert receipt.job_outcome.payload.skill_ref is None
     assert receipt.job_outcome.payload.reason == (
-        "路由审核未选择专用 Skill，转入通用定位。"
+        "路由未选择专用 Skill，转入通用定位。"
     )
     assert len(backend.calls) == 1
     assert state.calls == [job.case_id]
@@ -1265,23 +1269,19 @@ def test_generic_runtime_accepts_exact_v2_markdown_body_byte_limit(
     "v2_result_bytes",
     [
         b"",
-        b"<<<GENERIC_DIAGNOSIS_RESULT_V2:UNKNOWN>>>\n# report\n",
         b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>",
         b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n",
         b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n \t\n",
         b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n\xff",
-        b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n\xef\xbb\xbf# report\n",
         b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n"
         + b"x" * (MAX_GENERIC_REPORT_BYTES + 1),
     ],
     ids=[
         "empty-file",
-        "unknown-status",
         "missing-status-lf",
         "empty-body",
         "whitespace-body",
         "invalid-body-utf8",
-        "body-utf8-bom",
         "oversize-body",
     ],
 )
@@ -1320,7 +1320,7 @@ def test_generic_runtime_never_falls_back_from_invalid_v2_to_valid_v1(
     assert receipt.job_outcome.error.retryable is False
 
 
-def test_generic_runtime_rejects_valid_v1_and_v2_files_as_ambiguous(
+def test_generic_runtime_prefers_v2_when_legacy_result_also_exists(
     tmp_path: Path,
 ) -> None:
     backend = _GenericRuntimeBackend(
@@ -1331,9 +1331,26 @@ def test_generic_runtime_rejects_valid_v1_and_v2_files_as_ambiguous(
 
     receipt = runtime.execute(job, InMemoryCancellationSignal())
 
-    assert receipt.job_outcome.result_type is OutcomeResultType.FAILED
-    assert receipt.job_outcome.error is not None
-    assert receipt.job_outcome.error.code is ErrorCode.OUTCOME_INVALID
+    assert receipt.job_outcome.result_type is OutcomeResultType.COMPLETED
+    assert receipt.job_outcome.error is None
+    assert receipt.job_outcome.payload.report_markdown == "# complete report\n"
+
+
+@pytest.mark.parametrize("response,status", [
+    (b"# report\n", "UNRESOLVED"),
+    (b"<<<GENERIC_DIAGNOSIS_RESULT_V2:UNKNOWN>>>\n# report\n", "UNRESOLVED"),
+    (b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n\xef\xbb\xbf# report\n", "RESOLVED"),
+    (b"```markdown\n<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n# report\n```\n", "RESOLVED"),
+])
+def test_generic_runtime_delivers_report_format_variants_without_retry(tmp_path, response, status):
+    backend = _GenericRuntimeBackend(None, v2_result_bytes=response)
+    runtime, job, _, _ = _generic_runtime_fixture(tmp_path, backend)
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+    assert receipt.job_outcome.result_type is OutcomeResultType.COMPLETED
+    assert receipt.job_outcome.error is None
+    assert receipt.job_outcome.payload.report_markdown == "# report\n"
+    assert receipt.job_outcome.payload.status.value == status
+    assert len(backend.calls) == 1
 
 
 @pytest.mark.parametrize("unsafe_kind", ["directory", "hardlink"])
@@ -1366,10 +1383,9 @@ def test_generic_runtime_rejects_unsafe_v2_result_nodes(
         None,
         b"\xff",
         b"prefix\n" + _generic_result_bytes(),
-        _generic_result_bytes(conclusion="```not-allowed```"),
         b"x" * (MAX_GENERIC_RESULT_BYTES + 1),
     ],
-    ids=["missing", "invalid-utf8", "extra-text", "code-fence", "oversize"],
+    ids=["missing", "invalid-utf8", "extra-text", "oversize"],
 )
 def test_generic_runtime_maps_invalid_result_file_to_nonretryable_failure(
     tmp_path: Path,
@@ -2102,22 +2118,31 @@ def test_open_log_sinks_typed_failure_is_replayable_execution_failure(
     assert len(records.publish_outcome_calls) == 1
 
 
-def test_successful_backend_without_final_json_publishes_output_error(
+def test_successful_backend_without_final_json_routes_to_generic_without_error(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     records = InMemoryExecutionRecordStore()
+    backend = _RuntimeBackend(None)
     runtime, job, _, _, _ = _runtime_fixture(
         tmp_path,
-        backend=_RuntimeBackend(None),
+        backend=backend,
         records=records,
     )
 
-    receipt = runtime.execute(job, InMemoryCancellationSignal())
+    with caplog.at_level(logging.INFO):
+        receipt = runtime.execute(job, InMemoryCancellationSignal())
 
-    assert receipt.job_outcome.error is not None
-    assert receipt.job_outcome.error.stage is ExecutionStage.OUTCOME_VALIDATE
-    assert receipt.job_outcome.error.code is ErrorCode.OUTCOME_INVALID
+    assert receipt.job_outcome.error is None
+    assert receipt.job_outcome.result_type is OutcomeResultType.NO_CAPABILITY
+    assert isinstance(receipt.job_outcome.payload, RouteDecision)
+    assert receipt.job_outcome.payload.kind is RouteKind.NO_CAPABILITY
+    assert receipt.job_outcome.payload.skill_ref is None
+    assert len(backend.calls) == 1
+    assert len(records.publish_outcome_calls) == 1
     assert records.publish_rejected_agent_output_calls == []
+    assert all(record.levelno < logging.WARNING and record.exc_info is None
+               for record in caplog.records)
 
 
 class _RuntimeBrokerSession:

@@ -12,23 +12,8 @@ def context_section(prompt: str, name: str):
 
 
 def route_response(index, snapshot, skill_id, *, confidence=0.99, reason="测试模型明确判断适用范围。"):
-    """Declare a chosen semantic answer with real frozen quote bytes."""
-    quote = snapshot["problem_spec"]["statement"]
-    assessments = []
-    for entry in index["skills"]:
-        if entry["routing"] is None:
-            continue
-        assessment = {"skill_id": entry["ref"]["id"]}
-        for group in ("applicability", "exclusions"):
-            verdict = "SUPPORTED" if group == "applicability" and entry["ref"]["id"] == skill_id else "REFUTED"
-            assessment[group] = [{
-                "condition_id": condition["id"], "verdict": verdict,
-                "reason": "固定测试场景的语义判断。",
-                "evidence": [{"pointer": "/problem_spec/statement", "quote": quote}],
-            } for condition in entry["routing"][group]]
-        assessments.append(assessment)
-    return {"skill_id": skill_id, "reason": reason, "confidence": confidence,
-            "assessments": assessments}
+    """Return only the model-owned choice; versions remain server-owned."""
+    return {"skill_id": skill_id, "reason": reason, "confidence": confidence}
 
 
 def route_response_for_prompt(prompt, skill_id, **kwargs):

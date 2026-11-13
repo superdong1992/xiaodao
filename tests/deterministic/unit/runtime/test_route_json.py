@@ -138,7 +138,6 @@ def test_recovery_cannot_swallow_control_duplicate_extra_or_missing_comma_fields
     b'{"skill_id":null,"reason":"broken "x"" "confidence":0.9}',
     b'{"skill_id":null,"reason":"broken "x"","confidence":0.9,}',
     b'{"skill_id":null,"reason":"broken "x"","confidence":0.9}{}',
-    b'prefix {"skill_id":null,"reason":"broken "x"","confidence":0.9}',
     b'{"skill_id":"broken "id"","reason":"good","confidence":0.9}',
     b'{"skill_id":null,"reason":3,"confidence":0.9,}',
     b'{"skill_id":null,"reason":"broken "x"","confidence":true}',
@@ -148,11 +147,18 @@ def test_recovery_cannot_swallow_control_duplicate_extra_or_missing_comma_fields
     b'{"skill_id":null,"reason":"broken "x"","confidence":-1}',
     b'{"confidence":999999999999999999999999999999999999999999999999999,"skill_id":null,"reason":"broken "x""}',
     b'{"skill_id":null,"reason":"broken "x"","confidence":0.9}\xff',
-    b'```json\n{"skill_id":null,"reason":"broken "x"","confidence":0.9}\n``` trailing',
 ])
 def test_non_quote_failures_and_non_finite_control_values_remain_rejected(raw):
     with pytest.raises(InvalidJsonBytesError):
         parse_route_json_bytes(raw)
+
+
+@pytest.mark.parametrize("raw", [
+    b'prefix {"skill_id":null,"reason":"broken "x"","confidence":0.9}',
+    b'```json\n{"skill_id":null,"reason":"broken "x"","confidence":0.9}\n``` trailing',
+])
+def test_legacy_quote_recovery_uses_the_shared_presentation_reader(raw):
+    assert parse_route_json_bytes(raw).document.value["reason"] == 'broken "x"'
 
 
 @pytest.mark.parametrize("raw", [

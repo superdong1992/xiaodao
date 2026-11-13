@@ -101,8 +101,10 @@ def _production_plan() -> MethodEvaluationPlanV2:
 def test_methods_v1_asset_versions_match_the_builtin_catalog() -> None:
     expected = {
         "tool-bundle/router": "3.0.0",
+        "agent-profile/router": "3.0.0",
+        "context-policy/route": "2.0.0",
         "tool-bundle/diagnose": "5.0.0",
-        "output-contract/route": "6.0.0",
+        "output-contract/route": "7.0.0",
         "agent-profile/specialist": "8.0.0",
         "agent-profile/reviewer": "7.0.0",
         "context-policy/review": "3.0.0",
@@ -119,20 +121,29 @@ def test_router_returns_minimal_json_without_file_tools() -> None:
     tool_meta, tool_bundle_text = _asset("tool-bundles/router")
     tool_bundle = json.loads(tool_bundle_text)
 
-    assert contract_meta["version"] == "6.0.0"
+    assert contract_meta["version"] == "7.0.0"
     assert tool_meta["version"] == "3.0.0"
     assert tool_bundle == {"schema_version": 1, "tools": []}
     assert "不要调用文件工具" in contract
     assert "problem-locator-seal-outcome-draft" not in contract
-    assert all(field in contract for field in ('skill_id', 'reason', 'confidence', 'assessments'))
+    example = json.loads(contract.split("```json\n", 1)[1].split("```", 1)[0])
+    assert set(example) == {"skill_id", "reason", "confidence"}
+    assert "逐项审核结果" in contract
 
 
-def test_router_profile_does_not_claim_the_unfiltered_skill_index_was_prefiltered() -> None:
-    _profile_meta, profile = _asset("profiles/router")
+def test_router_profile_reads_complete_conditions_for_at_most_five_candidates() -> None:
+    profile_meta, profile = _asset("profiles/router")
+    policy_meta, policy = _asset("context-policies/route")
 
-    assert "不按初始事实名过滤" in profile
-    assert "只有一个候选也必须完整审核" in profile
+    assert profile_meta["version"] == "3.0.0"
+    assert policy_meta["version"] == "2.0.0"
+    assert "最多 5 个候选" in profile
+    assert "完整阅读" in profile
+    assert "适用条件和排除条件" in profile
+    assert "召回顺序不代表" in profile
     assert "保留 `input_name` 的准确含义" in profile
+    assert "最多 5 个候选" in policy
+    assert "完整保留" in policy
 
 
 def test_specialist_assets_require_grounded_methods_v1_output() -> None:
@@ -161,7 +172,8 @@ def test_specialist_assets_require_grounded_methods_v1_output() -> None:
     assert "PARTIAL" in contract
     assert "INSUFFICIENT" in contract
     assert "output/job_outcome.draft.json" not in contract
-    assert "Candidate, Outcome, JSON, or ZIP" in contract
+    assert "strict 模式核对原文引用" in contract
+    assert "advisory 模式保留模型判断" in contract
     assert "problem-locator-logparse" not in tool_bundle
     assert "problem-locator-seal-outcome-draft" not in tool_bundle
 
@@ -257,7 +269,7 @@ def test_asset_response_shape_is_accepted_by_production_v2_parser() -> None:
     )
 
 
-def test_asset_response_rejects_one_added_field_from_production_baseline() -> None:
+def test_asset_response_ignores_one_added_field_from_production_baseline() -> None:
     plan = _production_plan()
     response = [
         {
@@ -271,5 +283,4 @@ def test_asset_response_rejects_one_added_field_from_production_baseline() -> No
     mutated = copy.deepcopy(response)
     mutated[0]["marker"] = "TIMEOUT"
 
-    with pytest.raises(MethodEvaluationResponseError):
-        parse_method_evaluation_response_v2(plan=plan, response=mutated)
+    assert parse_method_evaluation_response_v2(plan=plan, response=mutated) == parse_method_evaluation_response_v2(plan=plan, response=response)

@@ -1,4 +1,4 @@
-"""Valid route strings survive delivery; malformed strings remain failures."""
+"""Valid route strings survive delivery; unusable choices use Generic."""
 from __future__ import annotations
 
 import hashlib
@@ -14,6 +14,7 @@ from problem_locator.runtime.model_json import parse_model_json_bytes
 from tests.deterministic.integration.test_website_agent import (
     PARAMETER_GROUP_A, _converse_to_waiting, _post, website,
 )
+from tests.deterministic.unit.runtime.test_diagnosis_runtime import _GenericRuntimeBackend, _generic_result_bytes
 
 
 def _inject_route_quotes(stack, monkeypatch, *, broken=False):
@@ -27,6 +28,7 @@ def _inject_route_quotes(stack, monkeypatch, *, broken=False):
         if kwargs.get("backend_phase") != "ROUTE":
             return result
         value = json.loads(result.final_result)
+        assert set(value) == {"skill_id", "reason", "confidence"}
         value["reason"] = '选择 "rpc_timeout"；保留路径 C:\\logs\\new 和字面量 \\n。'
         text = json.dumps(value, ensure_ascii=False)
         if broken:
@@ -129,19 +131,22 @@ def test_route_cannot_succeed_without_durable_audit(website, monkeypatch, failed
     assert not any(event.type == "result.available" for event in store.list_events(conversation))
 
 
-def test_unescaped_root_reason_is_not_repaired_or_sent_to_generic(website, monkeypatch):
+def test_unescaped_root_reason_uses_generic_without_repair(website, monkeypatch):
     stack, store, engine, service, client = website
     observed = _inject_route_quotes(stack, monkeypatch, broken=True)
+    generic = _GenericRuntimeBackend(_generic_result_bytes())
+    monkeypatch.setattr(stack.runtime._generic_locator_executor, "_backend", generic)
     cid = _post(client, "/api/v1/agent/conversations", {"request_id": "create:bad-json"})["conversation_id"]
     prefix = f"/api/v1/agent/conversations/{cid}"
     _post(client, prefix + "/messages", {"request_id": "message:bad-json", "text": "RPC timeout"})
     assert service.run_once(cid)
     assert stack.scheduler.wait_until_idle(15)
     view = service.get_conversation(cid)
-    assert view.case_status == "FAILED"
+    assert view.case_status == "RESOLVED"
     aggregate = stack.repository.read_case(view.case_id)
-    assert aggregate.case.failure.code.value == "OUTCOME_INVALID"
-    assert len(aggregate.jobs) == 1
-    route = next(iter(aggregate.jobs.values()))
+    assert aggregate.case.failure is None
+    assert len(aggregate.jobs) == 2
+    route = next(job for job in aggregate.jobs.values() if job.job_type.value == "ROUTE")
     assert stack.records.read_audit_bytes(route.job_id, "route-response.raw.txt") == observed["raw"]
     assert observed["phases"] == ["ROUTE"] and engine.calls == []
+    assert len(generic.calls) == 1

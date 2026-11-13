@@ -1,15 +1,10 @@
-"""Server admission for one model-authored review of frozen routing conditions.
-
-The model supplies semantic assessments. This module verifies their completeness
-and quoted sources, then applies a conservative, deterministic admission policy.
-It does not claim that literal quotation proves the model's semantic judgment.
-"""
+"""Bind a short model choice to this execution's recalled, frozen Skills."""
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from problem_locator.contracts import (
     Job, JobType, RouteDecision, RouteKind, bytes_sha256, canonical_json_bytes,
@@ -18,17 +13,18 @@ from problem_locator.integrations.agent_json import parse_agent_json_bytes
 
 from .routing_keywords import parse_direct_match_keywords
 
+if TYPE_CHECKING:
+    from .route_recall import RouteCandidates
+
 
 MIN_ROUTE_CONFIDENCE = 0.95
-_VERDICTS = frozenset({"SUPPORTED", "REFUTED", "UNKNOWN"})
+ROUTE_ADMISSION_POLICY = "shortlisted_route_v1"
 _FALLBACK_REASONS = {
-    "MODEL_NO_MATCH": "路由审核未选择专用 Skill，转入通用定位。",
-    "NO_ROUTING_DECLARATION": "所选 Skill 尚未声明适用和排除条件，转入通用定位。",
+    "MODEL_NO_MATCH": "路由未选择专用 Skill，转入通用定位。",
+    "OUTSIDE_CANDIDATES": "所选 Skill 不在本次候选中，转入通用定位。",
     "LOW_CONFIDENCE": "路由置信度低于 0.95，转入通用定位。",
-    "UNCERTAIN_CANDIDATE": "候选 Skill 的适用范围或排除条件仍不明确，转入通用定位。",
-    "MULTIPLE_MATCHES": "多个专用 Skill 同时满足适用条件，转入通用定位。",
-    "SELECTED_SKILL_NOT_MATCHED": "所选 Skill 未通过适用条件审核，转入通用定位。",
-    "NO_ELIGIBLE_SKILLS": "没有声明适用和排除条件的专用 Skill，转入通用定位。",
+    "NO_RECALL_MATCH": "未找到与本次问题相关的专用 Skill，转入通用定位。",
+    "NO_ELIGIBLE_SKILL": "没有声明适用和排除条件的专用 Skill，转入通用定位。",
 }
 
 
@@ -44,11 +40,9 @@ def _object(value: Any, fields: set[str], label: str) -> dict[str, Any]:
     return value
 
 
-def _text(value: Any, label: str, *, max_length: int | None = None) -> str:
+def _text(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} 必须是非空字符串。")
-    if max_length is not None and len(value) > max_length:
-        raise ValueError(f"{label} 超过长度限制。")
     return value
 
 
@@ -65,7 +59,10 @@ def _conditions(value: Any) -> tuple[str, ...]:
     return tuple(names)
 
 
-def _routing_candidates(job: Job, skill_index: str) -> dict[str, dict[str, tuple[str, ...]]]:
+def read_route_catalog(job: Job, skill_index: str) -> list[dict[str, Any]]:
+    """Read the complete server-owned catalog against its frozen Job refs."""
+    if job.job_type is not JobType.ROUTE or job.context_snapshot is None:
+        raise ValueError("路由需要 ROUTE Job 的冻结上下文。")
     index = parse_agent_json_bytes(skill_index.encode("utf-8")).value
     _object(index, {"schema_version", "skills"}, "Skill 索引")
     if type(index["schema_version"]) is not int or index["schema_version"] != 3:
@@ -74,7 +71,6 @@ def _routing_candidates(job: Job, skill_index: str) -> dict[str, dict[str, tuple
         raise ValueError("Skill 索引必须包含候选数组。")
     frozen_refs = {ref.id: ref.model_dump(mode="json") for ref in job.available_skill_refs}
     seen = set()
-    eligible = {}
     for item in index["skills"]:
         if not isinstance(item, dict) or "ref" not in item or "routing" not in item:
             raise ValueError("Skill 索引缺少冻结版本或路由声明。")
@@ -97,132 +93,47 @@ def _routing_candidates(job: Job, skill_index: str) -> dict[str, dict[str, tuple
         exclusions = _conditions(routing["exclusions"])
         if not applicability or len(set(applicability + exclusions)) != len(applicability + exclusions):
             raise ValueError("适用条件不能为空，且同一 Skill 的条件 ID 不得重复。")
-        eligible[skill_id] = {"applicability": applicability, "exclusions": exclusions}
     if seen != set(frozen_refs):
         raise ValueError("Skill 索引未完整覆盖 Job 的冻结候选。")
-    return eligible
+    return index["skills"]
 
 
-def _quoted_sources(job: Job) -> dict[str, str]:
-    if job.job_type is not JobType.ROUTE or job.context_snapshot is None:
-        raise ValueError("路由审核需要 ROUTE Job 的冻结上下文。")
-    snapshot = job.context_snapshot.model_dump(mode="json")
-    sources = {}
-    for field, value in snapshot["problem_spec"].items():
-        if isinstance(value, str):
-            sources[f"/problem_spec/{field}"] = value
-        elif isinstance(value, list):
-            for index, item in enumerate(value):
-                if isinstance(item, str):
-                    sources[f"/problem_spec/{field}/{index}"] = item
-    for collection in ("user_facts", "confirmed_facts"):
-        for index, item in enumerate(snapshot[collection]):
-            if item["status"] == "ACTIVE":
-                sources[f"/{collection}/{index}/statement"] = item["statement"]
-    return sources
+def _routing_candidates(job: Job, skill_index: str) -> dict[str, dict[str, tuple[str, ...]]]:
+    return {
+        item["ref"]["id"]: {group: tuple(condition["id"] for condition in item["routing"][group])
+                            for group in ("applicability", "exclusions")}
+        for item in read_route_catalog(job, skill_index) if item["routing"] is not None
+    }
 
 
-def _assess_conditions(
-    value: Any, expected: tuple[str, ...], sources: dict[str, str], kind: str,
-) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        raise ValueError("条件审核必须是数组。")
-    seen = set()
-    checked = []
-    for item in value:
-        _object(item, {"condition_id", "verdict", "reason", "evidence"}, "条件审核")
-        condition_id = _text(item["condition_id"], "条件 ID")
-        if condition_id not in expected or condition_id in seen:
-            raise ValueError("审核包含未知或重复的条件 ID。")
-        seen.add(condition_id)
-        verdict = item["verdict"]
-        if not isinstance(verdict, str) or verdict not in _VERDICTS:
-            raise ValueError("条件审核 verdict 无效。")
-        _text(item["reason"], "审核理由", max_length=1024)
-        if not isinstance(item["evidence"], list):
-            raise ValueError("审核证据必须是数组。")
-        evidence_valid = bool(item["evidence"])
-        for evidence in item["evidence"]:
-            _object(evidence, {"pointer", "quote"}, "审核证据")
-            if not isinstance(evidence["pointer"], str) or not isinstance(evidence["quote"], str):
-                raise ValueError("审核证据的 pointer 和 quote 必须是字符串。")
-            source = sources.get(evidence["pointer"])
-            evidence_valid = evidence_valid and bool(evidence["quote"].strip()) and (
-                source is not None and evidence["quote"] in source
-            )
-        checked.append({
-            "kind": kind, "condition_id": condition_id,
-            "model_verdict": verdict,
-            "effective_verdict": verdict if evidence_valid else "UNKNOWN",
-            "evidence_valid": evidence_valid,
-        })
-    if seen != set(expected):
-        raise ValueError("审核未完整覆盖所有声明的条件。")
-    return checked
-
-
-def evaluate_route_admission(value: Any, job: Job, *, skill_index: str) -> RouteAdmissionResult:
-    """Validate the private model protocol and reduce it to the existing DTO."""
-    _object(value, {"skill_id", "reason", "confidence", "assessments"}, "ROUTE 响应")
-    skill_id = value["skill_id"]
-    if skill_id is not None and not isinstance(skill_id, str):
-        raise ValueError("skill_id 必须是字符串或 null。")
+def evaluate_route_admission(
+    value: Any, job: Job, *, skill_index: str, candidates: RouteCandidates | None = None,
+) -> RouteAdmissionResult:
+    """Read the model's choice without requiring repeated condition assessments."""
+    if candidates is None:
+        from .route_recall import recall_route_candidates
+        candidates = recall_route_candidates(job, skill_index=skill_index)
+    value = value if isinstance(value, dict) else {}
+    skill_id = value.get("skill_id")
+    if not isinstance(skill_id, str):
+        skill_id = None
     refs = {ref.id: ref for ref in job.available_skill_refs}
-    if skill_id is not None and skill_id not in refs:
-        raise ValueError("所选 Skill 不在冻结目录中。")
-    reason = _text(value["reason"], "路由理由", max_length=1024)
-    confidence = value["confidence"]
-    if (
-        type(confidence) not in (int, float) or not 0 <= confidence <= 1
-        or not math.isfinite(confidence)
-    ):
-        raise ValueError("confidence 必须是 0 到 1 之间的有限 JSON 数字。")
-    eligible = _routing_candidates(job, skill_index)
-    sources = _quoted_sources(job)
-    if not isinstance(value["assessments"], list):
-        raise ValueError("assessments 必须是数组。")
-    candidate_results = []
-    seen = set()
-    for assessment in value["assessments"]:
-        _object(assessment, {"skill_id", "applicability", "exclusions"}, "候选审核")
-        candidate_id = _text(assessment["skill_id"], "审核 Skill ID")
-        if candidate_id not in eligible or candidate_id in seen:
-            raise ValueError("审核包含未知、未声明或重复的候选 Skill。")
-        seen.add(candidate_id)
-        checks = [
-            check for kind in ("applicability", "exclusions")
-            for check in _assess_conditions(
-                assessment[kind], eligible[candidate_id][kind], sources, kind,
-            )
-        ]
-        ruled_out = any(
-            check["effective_verdict"] == ("REFUTED" if check["kind"] == "applicability" else "SUPPORTED")
-            for check in checks
-        )
-        matched = all(
-            check["effective_verdict"] == ("SUPPORTED" if check["kind"] == "applicability" else "REFUTED")
-            for check in checks
-        )
-        candidate_results.append({
-            "skill_id": candidate_id,
-            "status": "ruled_out" if ruled_out else "match" if matched else "uncertain",
-            "conditions": checks,
-        })
-    if seen != set(eligible):
-        raise ValueError("审核未完整覆盖所有声明路由条件的候选 Skill。")
-    matches = [item["skill_id"] for item in candidate_results if item["status"] == "match"]
-    if skill_id is None:
+    reason = value.get("reason")
+    reason = reason.strip()[:1024] if isinstance(reason, str) and reason.strip() else "按问题描述选择定位能力。"
+    try:
+        confidence = float(value.get("confidence", 0))
+    except (TypeError, ValueError, OverflowError):
+        confidence = 0.0
+    if isinstance(value.get("confidence"), bool) or not math.isfinite(confidence) or not 0 <= confidence <= 1:
+        confidence = 0.0
+    if not candidates.skill_ids:
+        reason_code = "NO_RECALL_MATCH" if candidates.audit["ranked_candidates"] else "NO_ELIGIBLE_SKILL"
+    elif skill_id not in refs:
         reason_code = "MODEL_NO_MATCH"
-    elif skill_id not in eligible:
-        reason_code = "NO_ROUTING_DECLARATION"
+    elif skill_id not in candidates.skill_ids:
+        reason_code = "OUTSIDE_CANDIDATES"
     elif confidence < MIN_ROUTE_CONFIDENCE:
         reason_code = "LOW_CONFIDENCE"
-    elif any(item["status"] == "uncertain" for item in candidate_results):
-        reason_code = "UNCERTAIN_CANDIDATE"
-    elif len(matches) > 1:
-        reason_code = "MULTIPLE_MATCHES"
-    elif matches != [skill_id]:
-        reason_code = "SELECTED_SKILL_NOT_MATCHED"
     else:
         reason_code = "ADMITTED"
     admitted = reason_code == "ADMITTED"
@@ -233,7 +144,7 @@ def evaluate_route_admission(value: Any, job: Job, *, skill_index: str) -> Route
         confidence=confidence,
     )
     audit = {
-        "schema_version": 1, "policy": "strict_route_admission_v1",
+        "schema_version": 1, "policy": ROUTE_ADMISSION_POLICY,
         "job_id": job.job_id, "case_id": job.case_id,
         "base_state_revision": job.base_state_revision,
         "input_hashes": {
@@ -243,6 +154,6 @@ def evaluate_route_admission(value: Any, job: Job, *, skill_index: str) -> Route
         "model_skill_id": skill_id, "model_reason": reason,
         "effective_skill_id": skill_id if admitted else None,
         "reason_code": reason_code, "confidence": confidence,
-        "assessments": value["assessments"], "candidate_results": candidate_results,
+        "retrieval": candidates.audit,
     }
     return RouteAdmissionResult(decision=decision, audit=audit)

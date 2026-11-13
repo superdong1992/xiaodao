@@ -170,9 +170,11 @@
 | [runtime/output_reader.py](../../src/problem_locator/runtime/output_reader.py) | [诊断运行时与资产](03-runtime.md) |
 | [runtime/process_tree.py](../../src/problem_locator/runtime/process_tree.py) | [诊断运行时与资产](03-runtime.md) |
 | [runtime/proposal_stager.py](../../src/problem_locator/runtime/proposal_stager.py) | [诊断运行时与资产](03-runtime.md) |
+| [runtime/report_text.py](../../src/problem_locator/runtime/report_text.py) | [诊断运行时与资产](03-runtime.md) |
 | [runtime/resolved_logparse.py](../../src/problem_locator/runtime/resolved_logparse.py) | [诊断运行时与资产](03-runtime.md) |
 | [runtime/result_types.py](../../src/problem_locator/runtime/result_types.py) | [诊断运行时与资产](03-runtime.md) |
 | [runtime/route_admission.py](../../src/problem_locator/runtime/route_admission.py) | [诊断运行时与资产](03-runtime.md) |
+| [runtime/route_recall.py](../../src/problem_locator/runtime/route_recall.py) | [本地候选召回](03-runtime.md#route_recallpy) |
 | [runtime/route_json.py](../../src/problem_locator/runtime/route_json.py) | [诊断运行时与资产](03-runtime.md) |
 | [runtime/routing_keywords.py](../../src/problem_locator/runtime/routing_keywords.py) | [直接路由关键词校验](03-runtime.md#routing_keywordspy) |
 | [runtime/secret_redactor.py](../../src/problem_locator/runtime/secret_redactor.py) | [诊断运行时与资产](03-runtime.md) |

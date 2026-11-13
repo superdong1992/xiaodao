@@ -30,14 +30,20 @@ def run_review(system, task, payload, action=None):
 
 
 @pytest.mark.parametrize("kind", ["feedback", "followup"])
-def test_report_correction_reviews_exact_used_memory_in_same_model_call(system, kind):
+@pytest.mark.parametrize("extra_metadata", [False, True])
+def test_report_correction_reviews_exact_used_memory_in_same_model_call(system, kind, extra_metadata):
     task = feedback_task(system) if kind == "feedback" else prepare_logged_task(system)
     source, lookups = bind_usage(system, task)
     payload = json.loads(analysis_response() if kind == "feedback" else response())
     payload["memory_review"] = memory_review(source)
+    expected_review = dict(payload["memory_review"])
+    if extra_metadata:
+        payload["reason"] = "额外审核说明。"
+        payload["evidence"][0]["reason"] = "引文说明。"
+        payload["memory_review"]["reason"] = "关联说明。"
     (card, raw_receipt), backend = run_review(system, task, payload)
     assert json.loads(card) == CARD
-    assert json.loads(raw_receipt)["memory_review"] == payload["memory_review"]
+    assert json.loads(raw_receipt)["memory_review"] == expected_review
     assert lookups == [task] and len(backend.calls) == 1
     call = backend.calls[0]
     saved = json.loads((call["workspace_root"] / "inputs/used-memory.json").read_text("utf-8"))
@@ -69,8 +75,8 @@ def test_unrecorded_usage_cannot_be_invented_from_user_feedback(system):
     task = feedback_task(system, text="请删除历史经验卡及其引用。")
     payload = json.loads(analysis_response())
     payload["memory_review"] = memory_review(usage())
-    with pytest.raises(ValueError):
-        run_review(system, task, payload)
+    (_, receipt), _ = run_review(system, task, payload)
+    assert "memory_review" not in json.loads(receipt)
 
 
 def test_used_memory_input_is_data_and_cannot_be_cited_as_proof(system):

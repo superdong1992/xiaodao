@@ -1,6 +1,6 @@
 # INTAKE 输出合同 1.4.0
 
-根对象只能包含以下五个字段，全部必填：
+模型按以下五个字段返回结果：
 
 ```json
 {
@@ -15,6 +15,8 @@
 action 只能是 NEED_CLARIFICATION、SUBMIT_SUPPLEMENT 或 NEW_CASE_REQUIRED。任务已由服务端创建，不接受 CREATE_CASE。
 
 problem_fields 和 user_facts 均为数组。每项只能包含 name、value、source_message_id、source_quote 四个非空字符串。value 必须在 source_quote 中原样出现，引用只能来自 USER 消息。name 使用小写字母开头的下划线命名，最多 64 个字符。
+
+服务端只读取实际使用的字段，忽略根对象及参数项中的额外说明。省略列表时按空列表处理；schema_version 由服务端填写，action 与 message 缺失或无法使用时采用默认值，再按可用参数和当前要求决定下一步。单个无效条目不影响其余参数，格式差异不触发异常或模型重试。用户原文来源、当前参数要求和已冻结事实仍按下述规则处理。
 
 problem_fields 的 name 只能是 statement、expected_behavior、actual_behavior、scope、goals、non_goals、constraints、completion_criteria。通常返回空数组；不能补全或重写已冻结的问题，也不能将建案默认值当成用户事实。服务端忽略问题字段的重新拆分、未知项和重复项，保留冻结的问题原文；这类重构不会触发 NEW_CASE_REQUIRED。
 

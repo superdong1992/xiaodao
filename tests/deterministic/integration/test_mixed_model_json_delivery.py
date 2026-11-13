@@ -18,11 +18,14 @@ from tests.deterministic.integration.test_website_agent import (
 
 def _mixed(text, style):
     prefix = "## 分析说明\r\n已经检查输入，最终结果如下。\r\n"
+    if style == "suffix":
+        return prefix + "```JSON\r\n" + text + "\r\n```\r\n以上为本次结果。"
     return prefix + ("```json\r\n" + text + "\r\n```" if style == "fence" else text)
 
 
 @pytest.mark.parametrize("style,review,policy", [
     ("fence", False, "strict"), ("tail", True, "strict"), ("fence", True, "advisory"),
+    ("suffix", True, "strict"), ("partial", True, "strict"),
 ])
 def test_mixed_model_json_reaches_report_archive_and_replay_once(
     website, monkeypatch, caplog, style, review, policy,
@@ -48,6 +51,13 @@ def test_mixed_model_json_reaches_report_archive_and_replay_once(
                 path.write_bytes(text.encode())
             elif phase in {"ROUTE", "METHODS_SPECIALIST"}:
                 original = result.final_result
+                if phase == "ROUTE":
+                    assert set(json.loads(original)) == {"skill_id", "reason", "confidence"}
+                if phase == "METHODS_SPECIALIST" and style == "partial":
+                    value = json.loads(original)
+                    value["evidence"].append({**value["evidence"][0],
+                        "method_id": "unregistered-method", "identity_tokens": ["unavailable-token"]})
+                    original = json.dumps(value, ensure_ascii=False)
                 text = _mixed(original, style)
                 stream = AgentStreamTelemetry()
                 for event in [
@@ -82,9 +92,17 @@ def test_mixed_model_json_reaches_report_archive_and_replay_once(
     assert stack.scheduler.wait_until_idle(25)
     view = service.get_conversation(conversation)
     assert view.failure is None
-    assert view.case_status == ("RESOLVED" if policy == "strict" else "PARTIALLY_RESOLVED")
+    partial = policy == "advisory" or style == "partial"
+    assert view.case_status == ("PARTIALLY_RESOLVED" if partial else "RESOLVED")
     state = stack.repository.read_case(view.case_id)
     records = stack.runtime._execution_records
+    if style == "partial":
+        diagnosed = next(job for job in state.jobs.values()
+                         if records.read_audit_bytes(job.job_id, "method-evidence-selection.json"))
+        selection = json.loads(records.read_audit_bytes(diagnosed.job_id, "method-evidence-selection.json"))
+        assert selection["retained"] and selection["rejected"]
+        assert not records.read_audit_bytes(diagnosed.job_id, "method-validation-failure.json")
+        assert not any(record.levelno >= logging.WARNING or record.exc_info for record in caplog.records)
     extracted_jobs = 0
     for job in state.jobs.values():
         receipt_bytes = records.read_audit_bytes(job.job_id, "model-json-extraction.json")
@@ -116,7 +134,7 @@ def test_mixed_model_json_reaches_report_archive_and_replay_once(
     report = client.get(report_ref["download_url"])
     assert report.status_code == 200
     assert hashlib.sha256(report.content).hexdigest() == report_ref["sha256"]
-    assert report.json()["status"] == ("COMPLETED" if policy == "strict" else "PARTIAL")
+    assert report.json()["status"] == ("PARTIAL" if partial else "COMPLETED")
     assert stack.archive.run_once()
     assert service.get_conversation(conversation).archive_status == "READY"
     replay = client.get(prefix + "/events")
@@ -126,8 +144,11 @@ def test_mixed_model_json_reaches_report_archive_and_replay_once(
     assert len(engine.calls) == 1
 
 
-def test_two_route_json_candidates_fail_visibly_without_model_retry(website, monkeypatch):
+def test_two_route_json_candidates_use_generic_without_model_retry(website, monkeypatch):
     stack, store, engine, service, client = website
+    from tests.deterministic.unit.runtime.test_diagnosis_runtime import _GenericRuntimeBackend, _generic_result_bytes
+    generic = _GenericRuntimeBackend(_generic_result_bytes())
+    monkeypatch.setattr(stack.runtime._generic_locator_executor, "_backend", generic)
     backend = stack.runtime._route_backend
     execute = backend.execute
     calls = []
@@ -144,7 +165,8 @@ def test_two_route_json_candidates_fail_visibly_without_model_retry(website, mon
     assert service.run_once(conversation)
     assert stack.scheduler.wait_until_idle(15)
     view = client.get(prefix).json()["data"]
-    assert view["failure"]["code"] == "OUTCOME_INVALID"
-    assert view["failure"]["retryable"] is False
+    assert view["failure"] is None
+    assert view["case_status"] == "RESOLVED"
     assert calls == ["ROUTE"] and not engine.calls
-    assert not any(event.type == "result.available" for event in store.list_events(conversation))
+    assert len(generic.calls) == 1
+    assert any(event.type == "result.available" for event in store.list_events(conversation))

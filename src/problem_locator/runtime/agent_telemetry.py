@@ -384,19 +384,17 @@ class AgentStreamTelemetry:
         self._final_result = None
         if (self._result_count == 1 and payload.get("subtype") == "success"
                 and payload.get("is_error") is False):
-            if "structured_output" in payload:
-                value = payload["structured_output"]
-                if isinstance(value, dict):
-                    try:
-                        rendered = json.dumps(value, ensure_ascii=False,
-                            allow_nan=False, separators=(",", ":"))
-                        rendered.encode("utf-8")
-                        self._final_result = rendered
-                    except (TypeError, ValueError):
-                        pass
-            else:
-                value = payload.get("result")
-                self._final_result = value if isinstance(value, str) else None
+            value = payload.get("result")
+            self._final_result = value if isinstance(value, str) else None
+            structured = payload.get("structured_output")
+            if isinstance(structured, dict):
+                try:
+                    rendered = json.dumps(structured, ensure_ascii=False,
+                        allow_nan=False, separators=(",", ":"))
+                    rendered.encode("utf-8")
+                    self._final_result = rendered
+                except (TypeError, ValueError):
+                    pass
         self._terminal_result = True
         self._result_observed_ms = observed_ms
         self._cli_duration_ms = _nonnegative_number(payload.get("duration_ms"))

@@ -303,13 +303,13 @@ def test_plain_json_does_not_write_extraction_audit_or_emit_extraction_event(tmp
     ]
 
 
-@pytest.mark.parametrize("shape", ["two-objects", "two-fences", "wrong-contract"])
+@pytest.mark.parametrize("shape", ["two-objects", "two-fences", "array-root"])
 def test_ambiguous_or_invalid_mixed_intake_output_is_never_adopted_or_audited(tmp_path, monkeypatch, shape):
     valid = _decision().model_dump_json()
     raw = {
         "two-objects": "说明\n" + valid + "\n" + valid,
         "two-fences": "说明\n```json\n" + valid + "\n```\n```json\n" + valid + "\n```",
-        "wrong-contract": '说明\n```json\n{"reason":"X1"}\n```',
+        "array-root": '说明\n```json\n[]\n```',
     }[shape]
     extractions = []
     with pytest.raises(IntakeError) as parsed:

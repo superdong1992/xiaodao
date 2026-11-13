@@ -19,6 +19,7 @@ from problem_locator.runtime.model_json import (
     (b"", b""),
     (b"\xef\xbb\xbf", b""),
     (b"```json\n", b"\n```"),
+    (b"```JSON\n", b"\n```"),
     (b"```\r\n", b"\r\n```"),
     (b"\xef\xbb\xbf \r\n```json\r\n", b"\r\n```\r\n"),
 ])
@@ -31,11 +32,7 @@ def test_model_json_accepts_only_presentation_wrappers(prefix, suffix):
 @pytest.mark.parametrize("raw", [
     b"\xef\xbb\xbf\xef\xbb\xbf{}",
     b"```json\n\xef\xbb\xbf{}\n```",
-    b"```json\n```json\n{}\n```\n```",
-    b"```json\n{}\n```\nDone.",
     b"```json\n{}\n```\n```json\n{}\n```",
-    b"```json\n{}",
-    b"```javascript\n{}\n```",
     b"{} {}",
     b'{"a":1,"a":2}',
     b'```json\n{"a":1,"a":2}\n```',
@@ -92,29 +89,19 @@ def test_markdown_followed_by_one_final_object_is_extracted_without_changing_byt
 @pytest.mark.parametrize("raw", [
     b"Explanation.\n{}\n{}",
     b"Example: {}\nFinal:\n{}",
-    b"Explanation.\n{}\nDone.",
-    b"Explanation.\n```json\n{}\n```\nDone.",
     b"Explanation.\n```json\n{}\n```\n```json\n{}\n```",
     b"Explanation.\n```json\n{}\n{}\n```",
     b"Explanation.\n```json\n{}\n```\n{}",
-    b"Explanation.\n```javascript\n{}\n```",
-    b"Explanation.\n```JSON\n{}\n```",
-    b"Explanation.\n```json\n{}",
-    b"Explanation.\n```json\n```json\n{}\n```\n```",
     b"Explanation.\n[\n{}\n]",
+    b'Result: [{"a":1}]',
+    b'Result: "{\\"a\\":1}"',
+    b'Result: [\n{"a":1}\n]',
     b"[\n{}\n] trailing",
     b'{"outer":\n{}',
     b'"damaged string\n{}',
     b'Explanation.\n{"outer":\n{}',
     b'Explanation.\n{"outer":[}\n{}',
     b'Explanation.\n"damaged string\n{}',
-    b"Explanation.\nnull\n{}",
-    b"Explanation.\n123\n{}",
-    b"Explanation.\n-12\n{}",
-    b"Explanation.\n12.5e-2\n{}",
-    b"Explanation with array [1, 2].\n{}",
-    b"Explanation with damaged array [\n{}",
-    b"Explanation. {}",
     b"Explanation.\n```json\n[]\n```",
     b"Explanation.\n```json\n\xef\xbb\xbf{}\n```",
     b"\xef\xbb\xbf\xef\xbb\xbfExplanation.\n{}",
@@ -125,6 +112,32 @@ def test_markdown_followed_by_one_final_object_is_extracted_without_changing_byt
 def test_mixed_json_rejects_ambiguous_damaged_or_non_json_envelopes(raw):
     with pytest.raises(InvalidJsonBytesError):
         parse_model_json_response(raw)
+
+
+@pytest.mark.parametrize("raw", [
+    b"```JSON\n{}\n```",
+    b"```json\n{}\n```\nDone.",
+    b"```javascript\n{}\n```",
+    b"```json\n{}",
+    b"Explanation.\n{}\nDone.",
+    b"{}\nDone.",
+    b"Explanation.\n```json\n{}\n```\nDone.",
+    b"Explanation.\n```JSON\n{}\n```",
+    b"Explanation.\n```javascript\n{}\n```",
+    b"Explanation.\n```json\n{}",
+    b"Explanation with array [1, 2].\n{}",
+    b'Explanation with [1, 2] and "notes": {}',
+    b"Explanation. {}",
+    b"Explanation.\nnull\n{}",
+    b"Explanation.\n123\n{}",
+    b"Explanation.\n-12\n{}",
+    b"Explanation.\n12.5e-2\n{}",
+    b"```json\n```json\n{}\n```\n```",
+    b"Explanation.\n```json\n```json\n{}\n```\n```",
+])
+def test_complete_model_object_ignores_presentation_text_without_logging(raw, caplog):
+    assert parse_model_json_response(raw).document.value == {}
+    assert not caplog.records
 
 
 @pytest.mark.parametrize("body", [

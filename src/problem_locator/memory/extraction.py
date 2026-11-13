@@ -15,6 +15,7 @@ from problem_locator.contracts import JOB_STDOUT_STDERR_BYTES, CancellationReaso
 from problem_locator.diagnostics import log_event
 from problem_locator.dispatch.cancellation import CancellationController
 from problem_locator.runtime.agent_backend import AgentBackend
+from problem_locator.runtime.model_json import parse_model_json_response
 from problem_locator.storage.atomic import require_real_directory
 from problem_locator.storage.paths import ensure_no_symlink_ancestors
 
@@ -23,8 +24,7 @@ MAX_CARD_BYTES = 4096
 MAX_SOURCE_BYTES = 65536
 EXTRACTION_LIMITS = ResourceLimits(context_bytes=262144, wall_time_seconds=180,
     stdout_stderr_bytes=65536, workspace_bytes=65536)
-_FIELDS = {"problem_features": (8, 96), "applicability": (6, 256),
-    "steps": (8, 256), "limitations": (6, 256)}
+_FIELDS = ("problem_features", "applicability", "steps", "limitations")
 # Fail closed for recognizable instance data. This is deliberately conservative;
 # arbitrary names and natural-language secrets still require model abstraction.
 _PRIVATE = re.compile(
@@ -76,29 +76,36 @@ def _unique_object(pairs):
     return result
 
 
-def parse_card_json(raw: str | None, *, sources: tuple[str, ...] = ()) -> str:
-    """Validate untrusted JSON and reject recognizable identifiers/instructions.
+def parse_card_json(raw: str | None, *, sources: tuple[str, ...] = (), allow_none: bool = False) -> str | None:
+    """Read reusable content while excluding recognizable identifiers/instructions.
 
-    No repair, fence extraction, or raw response is persisted. Deliberately does
-    not claim that pattern matching can recognize arbitrary names or secrets.
+    Display wrappers and unused metadata do not change the card. Raw model
+    responses are not persisted; the sharing boundary still excludes secrets.
     """
     if not isinstance(raw, str) or len(raw.encode("utf-8")) > 16384:
         raise ValueError("经验卡输出无效。")
-    value = json.loads(raw, object_pairs_hook=_unique_object)
-    if not isinstance(value, dict) or set(value) != set(_FIELDS):
+    value = parse_model_json_response(raw.encode("utf-8")).document.value
+    if value is None and allow_none:
+        return None
+    if not isinstance(value, dict):
         raise ValueError("经验卡字段无效。")
-    for name, (count, length) in _FIELDS.items():
-        items = value[name]
-        if not isinstance(items, list) or not 1 <= len(items) <= count:
-            raise ValueError("经验卡条目数量无效。")
+    card = {}
+    for name in _FIELDS:
+        items = value.get(name, [])
+        items = [items] if isinstance(items, str) else items
+        card[name] = [item for item in items if isinstance(item, str) and item.strip()] if isinstance(items, list) else []
+        items = card[name]
         for item in items:
-            if (not isinstance(item, str) or not item.strip() or len(item) > length
-                    or any(unicodedata.category(char).startswith("C") for char in item)
+            if (any(unicodedata.category(char).startswith("C") for char in item)
                     or _PRIVATE.search(unicodedata.normalize("NFKC", item))
                     or _INSTRUCTIONS.search(unicodedata.normalize("NFKC", item))
                     or (len(item) >= 40 and any(item in source for source in sources))):
                 raise ValueError("经验卡包含无效内容或未脱敏信息。")
-    result = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    if not card["problem_features"] or not card["steps"]:
+        if allow_none:
+            return None
+        raise ValueError("经验卡缺少可复用的问题特征或排查步骤。")
+    result = json.dumps(card, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     if len(result.encode("utf-8")) > MAX_CARD_BYTES:
         raise ValueError("经验卡超出大小限制。")
     return result
@@ -237,10 +244,14 @@ class MemoryExtractionWorker:
             if task.get("source_kind") == "CORRECTION":
                 if self._correction_handler is None:
                     raise ValueError("纠正经验校验尚未配置。")
-                card, evidence = self._correction_handler.extract(task, cancellation=signal)
+                extracted = self._correction_handler.extract(task, cancellation=signal)
                 if signal.is_cancelled():
                     raise ValueError("经验提炼已停止。")
-                self._store.finish_task(task["task_id"], parse_card_json(card), evidence_json=evidence)
+                if extracted is None:
+                    self._store.fail_task(task["task_id"])
+                    return False
+                card, evidence = extracted
+                self._store.finish_task(task["task_id"], card, evidence_json=evidence)
                 return True
             prompt = build_extraction_prompt(task)
             require_real_directory(self._workspace_root.parent)
@@ -258,8 +269,12 @@ class MemoryExtractionWorker:
                 diagnosis_mode="GENERIC", file_access="none", backend_phase="MEMORY_EXTRACT")
             if signal.is_cancelled():
                 raise ValueError("经验提炼已停止。")
-            self._store.finish_task(task["task_id"], parse_card_json(result.final_result,
-                sources=(task["problem_text"], task["report_markdown"], task.get("context_json") or "")))
+            card = parse_card_json(result.final_result, allow_none=True,
+                sources=(task["problem_text"], task["report_markdown"], task.get("context_json") or ""))
+            if card is None:
+                self._store.fail_task(task["task_id"])
+                return False
+            self._store.finish_task(task["task_id"], card)
             return True
         except Exception as exc:
             self._log_failure("extract" if task is not None else "claim", exc)

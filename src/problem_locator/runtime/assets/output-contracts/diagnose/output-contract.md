@@ -8,7 +8,7 @@
 
 未提供完整索引时，扫描全部冻结目标日志，查找各方法声明的 `evidence_markers`，并按下文的引用规则核对命中位置。
 
-The top-level object has exactly these fields:
+请按下面的结构返回诊断：
 
 ```json
 {
@@ -62,5 +62,6 @@ Wiki confirmation conditions must also be satisfied.
 `CONFIRMED` requires a confirmed method. `INSUFFICIENT` requires empty
 `confirmed_methods` and `evidence`. Never infer an absent marker, invent a line,
 widen a target, or use narrative text as evidence. Return only the diagnosis JSON.
-The Server rechecks every method, marker, line,
-source, identity, and hash before it creates Candidate, Outcome, JSON, or ZIP.
+服务端按当前任务配置处理证据：strict 模式核对原文引用，advisory 模式保留模型判断。输入文件的归属和哈希始终由服务端检查。
+
+以上是建议的输出格式。服务端忽略额外字段，可选数组未提供时按空数组读取，重复的字符串条目会合并。状态标签与实际内容不一致时保留可识别的发现；无法使用的子项不会使整份结果失败。确认方法由保留证据推导；身份词可以省略，此时以实际引用位置区分发现，不生成替代身份词。没有可用发现时返回证据不足，不因这些格式差异记录异常或重试模型。显式 strict 模式仍核对证据原文；advisory 模式保留模型判断。文件归属、固定输入和发布边界保持不变。

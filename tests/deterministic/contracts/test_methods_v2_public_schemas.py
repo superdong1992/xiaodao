@@ -394,7 +394,7 @@ def test_production_scan_keeps_shared_marker_hits_method_qualified(
 
 
 @pytest.mark.parametrize("mutation", ["coverage", "order", "ref"])
-def test_evaluation_response_requires_exact_plan_coverage_order_and_refs(
+def test_evaluation_response_projects_into_exact_persisted_plan_order_and_refs(
     production_chain: _ProductionChain,
     mutation: str,
 ) -> None:
@@ -411,11 +411,13 @@ def test_evaluation_response_requires_exact_plan_coverage_order_and_refs(
         changed = copy.deepcopy(baseline)
         changed[0]["evaluation_ref"] = baseline[1]["evaluation_ref"]
 
-    with pytest.raises(MethodEvaluationResponseError, match="cover|order"):
-        parse_method_evaluation_response_v2(
-            plan=production_chain.plan,
-            response=changed,
-        )
+    parsed = parse_method_evaluation_response_v2(plan=production_chain.plan, response=changed)
+    assert tuple(item.evaluation_ref for item in parsed) == tuple(
+        item.evaluation_ref for item in production_chain.plan.evaluations)
+    if mutation == "coverage":
+        assert parsed[-1].verdict == "UNKNOWN"
+    elif mutation == "ref":
+        assert parsed[0].verdict == "UNKNOWN"
 
     state_payload = production_chain.terminal_state.model_dump(mode="json")
     assert state_payload["specialist_evaluation"] is not None

@@ -8,8 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from problem_locator.contracts.enums import MethodsValidationReasonCode
-from problem_locator.runtime.diagnosis_runtime import _method_validation_reason_code
 from problem_locator.runtime.methods_grounding import (
     FrozenTargetLogV1,
     scan_method_markers,
@@ -437,20 +435,44 @@ def test_rpc_citation_requires_its_own_lines_contiguous_marker(
         "limitations": [],
         "safety_notes": [],
     }
-    with pytest.raises(
-        ValueError, match="evidence marker is absent from the cited line"
-    ) as captured:
-        verify_method_diagnosis(
-            skill=skill,
-            draft=draft,
-            target_logs=targets,
-            logparse_receipt_sha256="a" * 64,
-            skill_load=receipt,
-        )
-    assert (
-        _method_validation_reason_code(captured.value)
-        is MethodsValidationReasonCode.VALIDATION_FAILED
+    rejected = verify_method_diagnosis(
+        skill=skill,
+        draft=draft,
+        target_logs=targets,
+        logparse_receipt_sha256="a" * 64,
+        skill_load=receipt,
     )
+    assert rejected.draft.status == "INSUFFICIENT"
+    assert rejected.draft.evidence == ()
+    assert rejected.audit.confirmed_methods == ()
+    assert rejected.selection["rejected"][0] == {
+        "section": "evidence", "index": 0, "reason_code": "EVIDENCE_GROUNDING_INVALID",
+    }
+
+    client_finding = {
+        "method_id": method.id,
+        "summary": "客户端日志独立记录了 SNO 42 超时。",
+        "identity_tokens": ["Rpc call SNO 42"],
+        "sources": [dict(draft["evidence"][0]["sources"][0])],
+    }
+    selected = verify_method_diagnosis(
+        skill=skill,
+        draft={**draft, "evidence": [draft["evidence"][0], client_finding]},
+        target_logs=targets,
+        logparse_receipt_sha256="a" * 64,
+        skill_load=receipt,
+    )
+    assert selected.draft.status == "PARTIAL"
+    assert selected.audit.confirmed_methods == (method.id,)
+    assert len(selected.draft.evidence) == 1
+    assert selected.draft.evidence[0].summary == client_finding["summary"]
+    assert [
+        (source.source_id, source.line_number, source.marker, source.line)
+        for source in selected.draft.evidence[0].sources
+    ] == [("client", 1, "Rpc call SNO", lines["client"])]
+    assert selected.selection["rejected"] == [{
+        "section": "evidence", "index": 0, "reason_code": "EVIDENCE_GROUNDING_INVALID",
+    }]
 
     draft["evidence"][0]["sources"][1]["marker"] = "Rpc call"
     verified = verify_method_diagnosis(
@@ -460,6 +482,7 @@ def test_rpc_citation_requires_its_own_lines_contiguous_marker(
         logparse_receipt_sha256="a" * 64,
         skill_load=receipt,
     )
+    assert verified.draft.status == "CONFIRMED"
     assert verified.audit.confirmed_methods == (method.id,)
     assert verified.audit.skill_load == receipt
     assert [

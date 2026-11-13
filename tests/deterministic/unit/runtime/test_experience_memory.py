@@ -149,10 +149,9 @@ def test_cards_reject_recognizable_private_data_logs_and_instructions(private):
 
 
 @pytest.mark.parametrize("updates", [
-    {"steps": []}, {"steps": ["步骤"] * 9}, {"problem_features": ["字" * 97]},
-    {"steps": ["字" * 256] * 8}, {"steps": [7]}, {"steps": [" "]}, {"extra": []},
+    {"steps": []}, {"steps": ["字" * 256] * 8}, {"steps": [7]}, {"steps": [" "]},
 ])
-def test_cards_enforce_strict_fields_counts_and_utf8_budget(updates):
+def test_cards_need_usable_steps_and_fit_the_shared_context_budget(updates):
     with pytest.raises(ValueError):
         card_json(**updates)
 

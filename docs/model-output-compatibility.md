@@ -1,6 +1,6 @@
 # 模型输出的转义处理与格式修复
 
-网站后端调用 Agent HTTP API，诊断运行时从 CLI 的 `stream-json` 事件中读取最终响应。传统 `result` 文本包含两层 JSON：外层是 CLI 事件，内层是模型返回的业务对象。解析外层后，应保留内层原文，不要额外反转义。使用结构化输出时，直接采用成功终态的 `structured_output` 对象；两种入口最终都要通过相同的业务合同检查。
+网站后端调用 Agent HTTP API，诊断运行时从 CLI 的 `stream-json` 事件中读取最终响应。传统 `result` 文本包含两层 JSON：外层是 CLI 事件，内层是模型返回的业务对象。解析外层后，应保留内层原文，不要额外反转义。使用结构化输出时，优先采用成功终态中可用的 `structured_output` 对象，否则读取同一终态的 `result` 文本。各入口只读取实际使用的内容，格式差异不应导致整次诊断失败。
 
 例如，业务 JSON 文本是：
 
@@ -22,12 +22,12 @@
 
 | 入口 | 支持的格式 | 非法字符串转义处理 |
 | --- | --- | --- |
-| CLI `stream-json` | LF、CRLF；唯一成功终态中的 `structured_output` 对象，或没有该字段时的 `result` 文本；受本阶段输出总量限制 | 不补引号，不重复解码 |
-| ROUTE 最终响应 | 一个开头 BOM、包住完整 JSON 的一个代码围栏，以及下述说明文字加唯一最终 JSON | 严格拒绝，包括根 `reason`；新审核协议不再修复语法 |
+| CLI `stream-json` | LF、CRLF；唯一成功终态中优先读取可用的 `structured_output` 对象，否则读取 `result` 文本；受本阶段输出总量限制 | 不补引号，不重复解码 |
+| ROUTE 最终响应 | BOM、代码围栏、行内 JSON、前后说明中的唯一完整对象 | 不猜测损坏字符串；没有可用选择时正常转通用 |
 | Intake 最终响应 | 同上 | 严格拒绝；不改用户事实和来源原文 |
 | Specialist 最终响应、Reviewer 草稿文件 | 同上 | 严格拒绝；不改证据、引用、身份或审核判断 |
 | 历史只读报告追问最终响应 | 完整 `xiaodao.followup.v1` 对象，`request_key` 与当前追问任务一致；字符串内允许未转义的 U+0000–U+001F 控制字符 | 保留字面控制字符；仅按下述规则恢复最后一个 `answer_markdown` 字段中的双引号，不提取对象或自动重试 |
-| Generic 报告文件 | 协议头接受 BOM、LF、CRLF | 正文是 Markdown，保留原始字节；不解析或修复正文里的 JSON 示例 |
+| Generic 与专用 Markdown 报告 | 接受纯正文，状态行兼容 BOM、空白、大小写、换行及明确的外层围栏 | 不解析或修复正文里的 JSON 示例；缺少或未知状态按 `UNRESOLVED` 交付 |
 | 公开 HTTP/MCP 输入、Agent 工具 JSON | 遵循各自规定的输入格式 | 不应用模型输出的修复规则；七个公开 MCP 工具的输入继续保持扁平 |
 
 报告追问兼容 codeagent 等 Claude 兼容 CLI 在内层字符串中直接输出换行、回车或制表符的情况，以 `strict=False` 保留原文。这些字符与其合法 JSON 转义得到相同的字符串。解析后仍检查协议、当前任务、动作、字段类型和大小限制；重复字段和非有限数直接拒绝。此规则仅适用于追问最终响应，外层 `stream-json` 事件仍须是合法的逐行 JSON。
@@ -57,7 +57,7 @@ Claude 兼容 CLI 可以使用 `StructuredOutput` 提交结构化结果；codeag
 
 工具声明既可能出现在完整 assistant 消息中，也可能出现在顶层或嵌套的流式分片事件中。两种分片格式按相同规则检查，完整调用必须包含对象类型的 `input`，合法分片与完整消息不会重复计数。正式测试审计还要求完整参数和工具结果配对，不能靠只有分片的轨迹宣称日志已被读取。最后一行没有换行时也执行相同检查，处理异常不会抛出到调用方或恢复先前结果。
 
-唯一一条成功 `result` 事件含 `structured_output` 时，以该对象为最终业务结果，再用标准 JSON 序列化交给原业务校验器。同行的 `result` 可能只是说明文字，即使包含看似可执行的 JSON 也不采用。没有 `structured_output` 字段时才使用原 `result` 文本；该字段存在但不是对象、包含非法数值或无法编码时直接失败，不回退到另一个答案。协议、当前任务 ID、动作、字段、正文大小和诊断材料仍按原规则校验。
+唯一一条成功 `result` 事件中，可用的 `structured_output` 对象优先作为最终业务结果，序列化后交给当前阶段处理。可选的 `structured_output` 缺失、为 null、不是对象或无法编码时，继续读取同一终态已有的 `result` 文本，不因这个可选字段丢掉正文，也不记录异常或警告。结构化对象可用时，仍不采用同行的说明文字；两个字段都不可用时没有可交付结果。
 
 不会把工具参数、工具返回值或 assistant 中间文本当成最终答案。错误终态、多个终态、损坏的事件、重复字段、异常退出或超限输出仍失败，不新增模型调用或自动重试。官方终态字段说明见 [Claude Agent SDK 结构化输出文档](https://code.claude.com/docs/en/agent-sdk/structured-outputs)。本仓库以确定性事件及子进程回放验证兼容路径，不代表局域网 codeagent 的真实模型验收。
 
@@ -67,26 +67,23 @@ Claude 兼容 CLI 可以使用 `StructuredOutput` 提交结构化结果；codeag
 
 提示词仍要求模型只输出本阶段的 JSON 对象。`stream-json` 只规定 CLI 事件的外层格式，不能保证 `result` 字符串也符合业务 JSON 的格式要求。最终响应之前的 assistant 文本块仅用于遥测；框架不会拼接这些片段，只使用唯一成功终态，按前述规则选择结构化对象或结果文本。
 
-先严格解析原响应；仅解析失败时，尝试以下两种明确格式：
+先解析原响应；仅解析失败时，从展示文本中读取唯一完整的 JSON 对象。对象可以放在说明文字同行或代码围栏中，前后都可以有普通说明。围栏的大小写、语言标签、重复展示围栏或缺少末尾围栏不影响完整 JSON 的读取。JSON 本身仍须可解析，不补写截断内容或改动引用原文。
 
-- Markdown 说明后，给出唯一完整的 `json` 或无语言标签代码围栏。
-- Markdown 说明后，在独立一行开始给出唯一完整 JSON 对象，一直延续到响应末尾。
-
-JSON 或代码围栏结束后只能有空白。如果前文含有其他 JSON 候选、多个围栏，或损坏的外层对象、数组，框架不会随意选择最后一个结果，也不会从嵌套结构中摘取对象。提取时会正确处理字符串、转义和嵌套层级，不修补字段、被截断的内容或引用原文。提取结果仍须通过对应阶段的 JSON、schema 和业务检查。
+多个完整对象没有唯一可用结果；损坏外层对象或另一 JSON 容器中的嵌套对象也不能冒充响应。各阶段对无法使用的内容采用自己的正常结果：路由转通用，Methods 保留可用发现或返回信息不足。公开 HTTP/MCP 输入与存储 JSON 不采用这些展示格式规则。
 
 解析失败后，提取扫描最多处理 1 MiB 原文，同时仍受本阶段输出总量上限的约束。纯 JSON 不受这个提取上限影响，不扫描候选，也不产生提取审计记录；ROUTE 仍保存原文和准入审核记录。文字与 JSON 混合的输出只扫描一次，不会遇到每个左花括号就重新解析，也不会增加模型调用或重新启动任务。
 
-## ROUTE 的严格审核协议
+## ROUTE 的正常回退
 
-四字段审核协议要求完整的 `skill_id`、`reason`、`confidence`、`assessments`。合法展示包装可按前述规则提取，非法 JSON 直接报 `OUTCOME_INVALID`，不修复根 reason、不增加模型调用，也不转通用定位。
+2026-11-13 起，本地召回最多 5 个候选，提示词只要求 `skill_id`、`reason`、`confidence`。服务端读取实际可用字段，`reason` 仅用于展示，置信度接受数字字符串；缺省或无法使用的置信度按 0 处理。空响应、无法解析的 JSON、候选外 Skill 或低于 0.95 时正常转通用，不记录格式异常、不重试路由模型。完全没有召回候选时不调用路由模型。
 
-解析后还须核对冻结 Skill 身份、字段类型、数值范围、reason 长度和[语义审核准入](route-admission.md)。审核内容完整但低置信、依据不足或存在歧义时，才正常转入通用定位。
+取消逐条件审核及引文回写；历史 `assessments` 与其他额外字段都忽略。模型仍阅读候选的完整适用与排除条件，再给出选择。召回与选择规则见[路由说明](route-admission.md)，冻结目录、任务身份和发布记录仍由服务端核对。
 
 旧版三字段协议曾允许仅修复根 reason 的未转义引号，限制为 64 KiB 原文、128 个候选引号和 1024 字符理由。历史帮助器及审计格式保留，但不用于新 ROUTE。Intake、Specialist、Reviewer 和公开输入同样不修补 JSON 字符串；诊断交付策略见[说明](diagnosis-advisory.md)。
 
 ## 审计与排查
 
-ROUTE 无论是否需要格式恢复，都保存模型最终响应原文；审核成功解析后保存 `route-admission.json`，区分模型提名与实际路由。通用回退的原始模型理由保留在 `model_reason`，最终 Outcome 的理由说明服务端为何回退。协议错误保留原文和失败 Outcome，不产生成功路由。
+ROUTE 保存可编码为 UTF-8 的模型响应原文和正常 `route-admission.json`，区分模型提名与实际路由；没有可用专用选择时保存正常通用回退结果。不可编码的文本按无可用响应处理，不用替换字符伪造原文字节。可用模型理由保留在 `model_reason`，最终 Outcome 说明实际采用的路由。上述格式差异不产生失败 Outcome、异常或警告日志。
 
 说明文字提取成功时，Intake 在本次私有工作区保存 `runtime/intake-response-original.txt`、`intake-response-effective.json` 和 `intake-response-extraction.json`。运行时其他入口复用对应的 `route-response.raw.txt`、`method-diagnosis.raw.txt` 或 `method-review.raw.txt`，另保存 `model-response.extracted.txt` 和 `model-json-extraction.json`。原文和选定片段分别保留，记录包含规则、UTF-8 字节区间、长度、哈希及 `diagnostic_id`；最终采用的对象继续保存于原有草稿/Outcome 记录。Intake 的既有参数处理记录仍区分原始输出和筛选后的决定。
 
@@ -108,8 +105,28 @@ ROUTE 无论是否需要格式恢复，都保存模型最终响应原文；审�
 
 `tests/deterministic/unit/agent/test_followup_result_protocol.py` 覆盖追问字符串内全部 32 个控制字符与合法转义的等值性、继续诊断的文字字段，以及分片 `stream-json` 到 worker 的单次执行和正文保存。`test_followup_quote_recovery.py` 覆盖普通引号、引号与控制字符混合、反斜杠奇偶、UTF-8 插入位置、重复字段、结构歧义与截断拒绝、解析次数，以及实际 worker 保存记录和写入失败不交付。
 
-`test_structured_output.py` 覆盖完整及分片工具事件、唯一成功结构化终态、错误容器不回退、输出上限、异常退出与真实 backend 子进程回放。`test_report_followup_policy.py` 覆盖服务端执行前检查和两种 CLI schema 参数写法；`test_followup_structured_output.py` 与 `test_followup_handoff.py` 覆盖回答、索取材料、正式交接及反馈审核，继续拒绝错误身份和超限正文。正式测试审计器的同类边界由 `report-followup-gate.test.mjs` 覆盖。
+`test_structured_output.py` 覆盖完整及分片工具事件、唯一成功结构化终态、可选结构化字段不可用时采用正文、输出上限、异常退出与真实 backend 子进程回放。`test_report_followup_policy.py` 覆盖服务端执行前检查和两种 CLI schema 参数写法；`test_followup_structured_output.py` 与 `test_followup_handoff.py` 覆盖回答、索取材料、正式交接及反馈审核，继续拒绝错误身份和超限正文。正式测试审计器的同类边界由 `report-followup-gate.test.mjs` 覆盖。
 
-反例把未转义引号放入 ROUTE reason、Intake 用户事实、Specialist 引用原文和 Reviewer 判断，确认各入口均严格拒绝。共享模型解析器与 Agent 工具解析器也保持严格拒绝。多个终态由 `test_final_response.py::test_stream_result_is_unique_successful_and_not_in_telemetry` 覆盖；异常退出及输出预算由 `test_agent_backend.py::test_nonzero_exit_is_typed_and_does_not_read_business_output` 和 `test_large_terminal_obeys_process_exit_and_stage_output_budget` 覆盖；非法 ROUTE 字段由 `test_final_response.py::test_invalid_route_response_is_rejected_without_repair` 覆盖。
+未转义字符串不会被猜测成合法 JSON，ROUTE 对这类响应正常转通用，其余需要结构化内容的入口仍不能凭空构造事实或证据。多个终态由 `test_final_response.py::test_stream_result_is_unique_successful_and_not_in_telemetry` 覆盖；异常退出及输出预算由 `test_agent_backend.py::test_nonzero_exit_is_typed_and_does_not_read_business_output` 和 `test_large_terminal_obeys_process_exit_and_stage_output_budget` 覆盖。`test_final_response.py::test_unusable_route_response_uses_generic_without_repair` 验证不可用路由响应正常回退且无异常日志。
+
+## 专项排查范围（2026-11-12）
+
+本轮基于 `8.2.0 / b3e7132` 的当前工作树逐项检查调用点，先以固定输入复现，再调整实际入口。下表覆盖模型最终文本、结构化对象、模型草稿文件及其后续消费链；没有全局放宽公共 DTO 或存储合同。
+
+| 路径 | 本轮处理 |
+| --- | --- |
+| `agent_telemetry` → Backend | 可选 `structured_output` 不可用时读取同一成功终态的正文，可用结构化对象仍优先；不丢弃已有结果 |
+| `model_json` → 各 JSON 消费者 | 删除行首、末尾说明、语言标签和围栏完整性的机械限制；只读取完整对象，不增加异常日志 |
+| ROUTE → 专用或通用 | 缺字段、无效选择和无法解析的输出正常转通用；保留冻结目录及专用适用性规则 |
+| `skill_direct` / `document_runtime` | 共用报告正文读取；缺状态不拒绝正文，普通代码块保留 |
+| `generic_locator` | V2 与专用报告共用读取；双版本结果优先 V2，V1 不再禁止普通代码块和标记示例 |
+| Methods V1 / advisory / selection | 删除额外字段、可选缺项、重复字符串和顶层状态机械一致性的拒绝；逐项采用可用发现 |
+| Methods Reviewer / V2 evaluation | 按已知证据或计划 ID 对齐，恢复服务端顺序；重复引用去重，无法使用的条目按证据不足或 `UNKNOWN` 处理 |
+| Intake / 旧 continuation 草稿 | 只读取当前意图使用的字段，可选项使用默认值；删除类型化决策的重复解析 |
+| Memory 提炼、纠正、归因、审核 | 忽略无关字段、去除重复索引和重复卡片解析；`null`、空卡、没有可用步骤或拒绝采纳均正常结束，不记录失败事件、不入库 |
+| 当前报告追问 | 直接派发 Generic，复用报告读取；历史只读响应协议保留兼容，不当作当前主链 |
+| Logparse 请求与输出、封印及发布 | 当前主要是服务端生成的工具请求、外部程序清单和资源绑定；文件路径、归属、哈希、发布原子性不是冗余模型内容校验，保留 |
+
+可用事实和证据仍须属于本次输入；本轮不会补造用户事实、放行目录外 Skill、跳过工具授权或放松文件访问边界。结果内容差异直接按正常流程处理，不为这些差异新增异常或警告记录，不增加模型重试。日常专项与完整 Test Flow 的结论分别记录在 `TODO.md`、`FIXED_ISSUES.md`。
 
 正式验证须运行 Test Flow Dev 的受影响测试和完整确定性测试（affected + full deterministic），结果以当前源码对应的 `verdict.json` 为准，记录见 `FIXED_ISSUES.md`。模拟测试不能证明公司内网实测完成率，也不能说明调用真实模型的 Release 已通过。

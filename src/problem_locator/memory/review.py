@@ -17,7 +17,7 @@ def validate_memory_review(value, usage, evidence, card_json):
     # Import lazily so recall can share these rules without a module cycle.
     from .retrieval import _ERROR_CODE, keywords
 
-    if not isinstance(value, dict) or set(value) != _FIELDS or not isinstance(usage, dict):
+    if not isinstance(value, dict) or not _FIELDS - {"scope_terms"} <= value.keys() or not isinstance(usage, dict):
         raise ValueError("经验纠正关联字段无效。")
     card_id, old_raw, old_hash = usage.get("card_id"), usage.get("card_json"), usage.get("card_sha256")
     if (not isinstance(card_id, str) or str(uuid.UUID(card_id)) != card_id
@@ -27,14 +27,15 @@ def validate_memory_review(value, usage, evidence, card_json):
     old_card = parse_card_json(old_raw)
     if old_card != old_raw or hashlib.sha256(old_card.encode("utf-8")).hexdigest() != old_hash:
         raise ValueError("实际采用的经验内容与记录不一致。")
-    relation, indexes, terms = value["relation"], value["evidence_indexes"], value["scope_terms"]
+    relation, indexes, terms = value["relation"], value["evidence_indexes"], value.get("scope_terms", [])
     if not isinstance(relation, str) or relation not in RELATIONS:
         raise ValueError("经验纠正关系无效。")
     if (not isinstance(evidence, list) or not 1 <= len(evidence) <= 4
-            or not isinstance(indexes, list) or len(indexes) > len(evidence)
+            or not isinstance(indexes, list)
             or any(type(index) is not int or not 0 <= index < len(evidence) for index in indexes)
-            or len(set(indexes)) != len(indexes) or (relation != "UNRELATED" and not indexes)):
+            or (relation != "UNRELATED" and not indexes)):
         raise ValueError("经验纠正缺少对应的已核验证据。")
+    indexes = list(dict.fromkeys(indexes))
     if not isinstance(terms, list) or any(not isinstance(term, str) for term in terms):
         raise ValueError("经验纠正的适用范围无效。")
     canonical = parse_card_json(card_json)

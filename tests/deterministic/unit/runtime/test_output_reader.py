@@ -159,7 +159,6 @@ def test_methods_model_file_normalization_preserves_exact_raw_audit_bytes(tmp_pa
 
 @pytest.mark.parametrize("raw", [
     b'```json\n{"schema_version":1,"schema_version":1}\n```',
-    b'```json\n{}\n```\nextra explanation',
 ])
 def test_rejected_model_file_preserves_original_bytes_without_schema_repair(tmp_path, raw):
     job, manifest, _ = _diagnosis_inputs()
@@ -168,6 +167,27 @@ def test_rejected_model_file_preserves_original_bytes_without_schema_repair(tmp_
         read_agent_output(tmp_path, job, manifest)
     assert caught.value.raw_outcome_bytes == raw
     assert path.read_bytes() == raw
+
+
+def test_model_file_with_trailing_prose_preserves_raw_bytes_and_uses_the_object(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger="problem_locator.dfx")
+    job, manifest, _ = _diagnosis_inputs()
+    raw = b'```json\n{}\n```\nextra explanation'
+    path = _write_method_diagnosis(tmp_path, raw)
+
+    result = read_agent_output(tmp_path, job, manifest)
+
+    assert isinstance(result, ValidatedMethodDiagnosisDraft)
+    assert result.draft.status == "INSUFFICIENT"
+    assert result.draft.confirmed_methods == result.draft.candidate_methods == result.draft.evidence == ()
+    assert result.raw_bytes == raw
+    assert result.canonical_bytes == canonical_json_bytes({})
+    assert result.model_json_extraction is not None
+    assert result.model_json_extraction.raw_bytes == raw
+    assert result.model_json_extraction.effective_bytes == b"{}"
+    assert path.read_bytes() == raw
+    assert not any(getattr(record, "dfx_event", "") == "runtime.agent_output.rejected"
+                   or record.levelno >= logging.WARNING or record.exc_info for record in caplog.records)
 
 
 def _diagnostic_draft(
@@ -231,11 +251,16 @@ def test_methods_reader_uses_only_final_canonical_draft_without_result_artifacts
 
 
 @pytest.mark.parametrize("artifact_kind", ["USER_RESULT", "USER_RESULT_ARCHIVE"])
-def test_methods_draft_forbids_server_generated_result_artifacts(
+def test_methods_draft_ignores_forged_result_proposals_without_reading_or_adopting_them(
     tmp_path: Path,
     artifact_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.INFO, logger="problem_locator.dfx")
     job, manifest, payload = _diagnosis_inputs()
+    _write_method_diagnosis(tmp_path, payload)
+    expected = read_agent_output(tmp_path, job, manifest)
     is_archive = artifact_kind == "USER_RESULT_ARCHIVE"
     payload["proposed_artifact_drafts"] = [
         {
@@ -264,18 +289,33 @@ def test_methods_draft_forbids_server_generated_result_artifacts(
             ),
         }
     ]
-    _write_method_diagnosis(tmp_path, payload)
-    _write_file_proposal(
+    raw = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    draft_path = _write_method_diagnosis(tmp_path, raw)
+    proposal_path = _write_file_proposal(
         tmp_path,
         "output/proposals/forged-result/payload",
         b"{}",
     )
 
-    with pytest.raises(RejectedAgentOutputError) as captured:
-        read_agent_output(tmp_path, job, manifest)
+    read_paths = []
+    original_read = output_reader_module._read_frozen_relative_file
 
-    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
-    assert captured.value.failure_category == "method_draft_schema"
+    def record_read(root, relative_path, **kwargs):
+        read_paths.append(relative_path)
+        return original_read(root, relative_path, **kwargs)
+
+    monkeypatch.setattr(output_reader_module, "_read_frozen_relative_file", record_read)
+
+    result = read_agent_output(tmp_path, job, manifest)
+
+    assert isinstance(result, ValidatedMethodDiagnosisDraft)
+    assert result.draft == expected.draft
+    assert read_paths == ["output/method-diagnosis.draft.json"]
+    assert result.raw_bytes == draft_path.read_bytes() == raw
+    assert result.canonical_bytes == canonical_json_bytes(payload)
+    assert proposal_path.read_bytes() == b"{}"
+    assert not any(getattr(record, "dfx_event", "") == "runtime.agent_output.rejected"
+                   or record.levelno >= logging.WARNING or record.exc_info for record in caplog.records)
 
 
 def test_frozen_binary_read_does_not_stop_at_ctrl_z(tmp_path: Path) -> None:

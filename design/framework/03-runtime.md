@@ -25,7 +25,7 @@ Runtime 接收应用层已认领、状态为 `RUNNING` 的不可变 `Job`，解�
 | --- | --- | --- | --- |
 | `off` | 状态首行与完整 Markdown 报告 | 校验包络、非空正文、65,536 UTF-8 字节上限和私有能力泄露，保留正文；不按引用匹配结果重写结论 | 强制 `ReviewPolicy.NONE` |
 | `advisory` | Methods V1 诊断 JSON | 保留可识别的模型判断；核对固定输入身份，生成带限制说明的结构化结果，不把模型引用冒充逐项验证过的证据 | 由配置决定；审核整份结果 |
-| `strict` | Methods V1 诊断 JSON | 核对方法、marker、来源、行号、原文、身份词和输入摘要；无 Reviewer 时可以逐条保留完整且有效的发现 | 由配置决定；开启时要求覆盖原诊断的准确身份集合 |
+| `strict` | Methods V1 诊断 JSON | 核对实际引用和输入摘要，逐条保留可用发现；从保留证据推导确认方法 | 由配置决定；按已知发现对齐审核，缺项或冲突按证据不足处理 |
 
 `off` 关闭的是框架对 Skill 结论的证据一致性后处理。资产身份、输入准备、Logparse 受控执行、进程限制和交付格式仍然有效。
 
@@ -41,14 +41,14 @@ Runtime 接收应用层已认领、状态为 `RUNNING` 的不可变 `Job`，解�
 
 必填参数生成现有 `PendingRequirement`，可选参数不生成待办。`SpecializedInputPolicy` 只在应用层、Intake 和领域补充流程中临时传递，不写入 Job 或 State V11。v3 不使用通用定位专属的 `generic_log_preparation`，也不进入 Methods 的证据核验和 Reviewer。
 
-### 2.1 ROUTE：先检查显式关键词，再按需调用模型
+### 2.1 ROUTE：关键词直达、最多 5 个候选与简短选择
 
 1. `RuntimeAssetResolver` 解析 Job 固定的资产与全部候选 Skill，生成包含 `routing` 的索引。
 2. 无候选，或所有候选都未声明适用范围时，直接发布 `NO_CAPABILITY`；后一种情况保存 `model_called: false` 的准入审计，不调用模型。
-3. 先以真实 `Case.raw_problem_text` 检查作者显式声明的 `routing.direct_match_keywords`。仅首轮、唯一 Skill 字面命中且无阻止条件时跳过模型，保存 `direct_keyword_route_v1`、`model_called=false` 的独立准入审计。没有关键词或无法直达时继续原有模型路由。
-4. 模型路径由 `ContextBuilder` 按固定段落和字节预算构造提示词。Router 不允许文件工具，以最终响应返回四字段 JSON；`parse_route_response()` 提取模型 JSON，`evaluate_route_admission()` 核对所有候选、所有条件和原文引用，再给出有效选择。
-5. 模型路径只有唯一候选明确适用、其他有声明候选均已排除、无不确定项，且置信度不低于 `0.95` 时才能 `MATCHED`。证据引用无效会把对应条件降为 `UNKNOWN`，普通不匹配转入通用定位。
-6. 字段错误、未知 ID 或遗漏审核项属于无效输出，不能伪装成正常回退，也不会因此自动再次调用模型。发布前 `server_outcome_finalizer` 核对准入记录与本次 Job、草稿摘要和有效 Skill；关键词路径还须根据原始问题和冻结索引重新计算命中结果。
+3. 先以真实 `Case.raw_problem_text` 检查作者显式声明的 `routing.direct_match_keywords`。仅首轮、唯一 Skill 字面命中且无阻止条件时跳过模型，保存 `direct_keyword_route_v1`、`model_called=false` 的独立准入审计。
+4. 无法直达时，`recall_route_candidates()` 从本次固定问题与活跃事实召回最多 5 个正分候选；零命中直接发布通用结果。`ContextBuilder` 仅收到精简候选索引，候选的适用和排除条件完整保留，完整目录仍在服务端。
+5. Router 不允许文件工具，最终只返回 `skill_id`、`reason`、`confidence`。模型负责适用性判断，服务端不再逐条件核对引文；选择属于本次候选、固定版本有效且置信度不低于 `0.95` 时才能 `MATCHED`。
+6. 额外字段包括历史 `assessments` 均忽略。根字段缺省、候选外 Skill、空响应或无法解析的 JSON 正常转通用；理由仅用于展示，置信度接受数字字符串，无法使用时按 0 处理。这些情况不记录异常或警告、不重试模型。发布前 `server_outcome_finalizer` 核对准入记录与本次 Job、候选范围、完整目录和草稿摘要；关键词路径继续根据原始问题和冻结索引重新计算命中结果。
 
 两条路径都保留 ROUTE Job，并由正常 Outcome 接收流程推进到 DIAGNOSE。关键词直达只省去路由模型调用，不绕过专用流程的参数和材料收集。`previous_outcome_refs` 非空时不使用直达，避免把首轮原文误当成后续路由的新依据。
 
@@ -246,7 +246,7 @@ V2 与文档型 V3 共用 `RoutingScopeV1`，可额外声明 `direct_match_keywo
 
 源码：[model_json.py](../../src/problem_locator/runtime/model_json.py)
 
-只对模型输出提供呈现层兼容。`normalize_model_json_bytes()` 识别开头 BOM、外围空白和完整 JSON 围栏；`extract_model_json_bytes()` 在不超过 `1 MiB` 的混合文本中寻找唯一可接受对象范围，不接受歧义对象或把其他 JSON 值随意忽略。`parse_model_json_response()` 最终仍交给严格 Agent JSON 解析，返回规范字节和可选 `ModelJsonExtraction`。
+只对模型输出提供格式兼容。`normalize_model_json_bytes()` 识别开头 BOM、外围空白和完整 JSON 围栏，语言标签不区分大小写。`extract_model_json_bytes()` 在不超过 `1 MiB` 的混合文本中读取唯一完整对象，接受行内 JSON、前后说明及围栏展示差异；多个对象或损坏的外层仍不能当作一个结果。`parse_model_json_response()` 解析实际 JSON 字节，返回规范字节和可选 `ModelJsonExtraction`，不增加格式异常日志。
 
 提取回执记录原始/有效字节摘要、长度、范围和规则名，不把原始文本塞入遥测。此机制不修复用户 MCP 参数，也不修改 JSON 字段含义。
 
@@ -256,19 +256,25 @@ V2 与文档型 V3 共用 `RoutingScopeV1`，可额外声明 `direct_match_keywo
 
 保留旧三字段 ROUTE 响应的有界引号恢复工具。`parse_route_json_bytes()` 先严格解析，失败后只尝试对可唯一确定的 `reason` 字符串中的裸引号补反斜杠；恢复候选最多 `128` 个、输入最多 `64 KiB`，不修复控制字段、重复键、截断或分隔符。`RouteQuoteRecovery` 保存精确插入位置和摘要。
 
-当前四字段 ROUTE 主入口直接走 `parse_model_json_response()` 和 `route_admission.py`，没有调用该恢复函数；`output_reader.py` 仅保留其回执类型。因此不能把这段旧兼容代码描述成当前 Router 会自动纠正无效 JSON。
+当前 ROUTE 主入口直接走 `parse_model_json_response()` 和 `route_admission.py`，没有调用该恢复函数；`output_reader.py` 仅保留其回执类型。因此不能把这段旧兼容代码描述成当前 Router 会自动纠正无效 JSON。
 
 ### `route_admission.py`
 
 源码：[route_admission.py](../../src/problem_locator/runtime/route_admission.py)
 
-`evaluate_route_admission()` 接收模型四字段对象、固定 ROUTE Job 和 Skill 索引，返回 `RouteAdmissionResult(decision, audit)`。`_routing_candidates()` 要求索引版本为 3，准确覆盖 Job 的版本引用；仅 `routing` 非空的候选可进入审核集合。`_quoted_sources()` 只开放 ProblemSpec 字符串及字符串数组项、ACTIVE 用户事实与已确认事实的 statement。
+`evaluate_route_admission()` 接收模型三字段对象、固定 ROUTE Job、完整 Skill 索引及本次召回结果，返回 `RouteAdmissionResult(decision, audit)`。服务端完整索引仍为版本 3，准确覆盖 Job 的版本引用；模型候选投影为版本 1，仅包括本次召回的有范围声明的 Skill。
 
-每个候选必须恰好审核其全部 applicability/exclusions 条件。`_assess_conditions()` 检查 condition ID、verdict、理由和引用；无引用、空引用或引用不属于对应原文时，将模型 verdict 转为 UNKNOWN。候选存在反对适用的事实或成立的排除项时为 ruled_out，全部适用成立且全部排除不成立才是 match，其余为 uncertain。
+`read_route_catalog()` 核对完整服务端索引与 Job 固定引用。模型响应只读取 `skill_id`、`reason`、`confidence`；`evaluate_route_admission()` 复用提示词采用的 `RouteCandidates`，不再读取 `assessments` 或逐条件引用。零候选、无选择、候选外选择和低置信度均为正常通用结果，否则为 ADMITTED。数字字符串置信度可用，缺失或无效时按 0 处理；不增加异常、警告或模型重试。
 
-准入按固定优先级生成 reason code：模型不选、无路由声明、低置信度、有不确定候选、多匹配、所选项未匹配，最后才是 ADMITTED。审计保存模型选择与实际选择、每条条件的 model/effective verdict、冻结上下文与目录摘要，使调用方可以区别模型判断、服务器校验和最终业务路由。
+模型路由策略为 `shortlisted_route_v1`。审计保存模型与实际选择、正常回退原因、`retrieval` 及固定上下文、完整目录和草稿摘要。完整目录仍核对身份，但未入选项不再参与适用性判断，也不标记为语义上的 REFUTED。
 
-索引可包含经过校验的 `direct_match_keywords`，但此字段不改变上述模型准入规则。模型没有确认适用，或存在排除、不确定条件时，不能用关键词覆盖它的审核结果。
+### `route_recall.py`
+
+源码：[route_recall.py](../../src/problem_locator/runtime/route_recall.py)
+
+`recall_route_candidates()` 以当前问题字段、活跃用户事实和已确认事实为检索输入；不读取假设或历史结论。英文完整标识符及分段、中文连续二字片段用于确定性匹配，过滤故障泛词，保留 IO/DB 等短组件名。名称和能力权重 3、适用条件权重 2、简介权重 1，同词取最高权重、不重复累计；稀有词按 `1 + ln((N + 1) / (df + 1))` 加权。明确关键词命中数优先，其次词语得分，最后按 Skill ID 排序。
+
+返回 `RouteCandidates(skill_ids, model_index, audit)`：最多 5 个有命中的候选、不凑数，模型索引只含 ID、名称、能力、简介及完整条件；审计保留 `lexical_top5_v1`、全量排名、实际候选和输入摘要。排除条件、材料需求、版本哈希不参与打分。词法召回不能保证同义表达不漏选；未入选表示未召回，不代表已排除。
 
 ### `routing_keywords.py`
 
@@ -282,7 +288,7 @@ V2 与文档型 V3 共用 `RoutingScopeV1`，可额外声明 `direct_match_keywo
 
 源码：[keyword_route.py](../../src/problem_locator/runtime/keyword_route.py)
 
-`try_direct_keyword_route()` 核对 ROUTE Job、全部冻结候选和真实 `Case.raw_problem_text`，仅在唯一 Skill 命中时返回 `RouteAdmissionResult`，否则返回 `None`，继续原有模型路由。匹配区分大小写，不做正则、模糊或语义扩展；关键词首尾为 ASCII 字母、数字或下划线时，检查相邻字符，避免命中更长标识符内部。
+`try_direct_keyword_route()` 核对 ROUTE Job、全部冻结候选和真实 `Case.raw_problem_text`，仅在唯一 Skill 命中时返回 `RouteAdmissionResult`，否则返回 `None`，继续本地召回与模型选择。匹配区分大小写，不做正则、模糊或语义扩展；关键词首尾为 ASCII 字母、数字或下划线时，检查相邻字符，避免命中更长标识符内部。
 
 首轮以 `previous_outcome_refs` 为空为条件。后续轮次、多个 Skill 命中、命中 Skill 有 `exclusions`，以及常见否定、疑似、历史、引用、示例和假设等词法信号，均交回模型；引用范围和代码块也保守处理。这些有限规则不能保证理解任意自然语言，关键词本身的充分性仍须由作者确认。
 
@@ -292,7 +298,7 @@ V2 与文档型 V3 共用 `RoutingScopeV1`，可额外声明 `direct_match_keywo
 
 源码：[skill_direct.py](../../src/problem_locator/runtime/skill_direct.py)
 
-`parse_skill_direct_response()` 识别首行 `<<<SKILL_DIAGNOSIS_RESULT_V1:RESOLVED>>>` 或 `UNRESOLVED`，首行后的字节构成完整 Markdown 正文。它检查正文非空、UTF-8 长度上限、私有能力 token，计算 report SHA-256，并返回 `GenericDiagnosisOutcomeV2`。这里复用的是 Markdown 结果载体，不代表专用 Job 变成 GENERIC Job；Skill 名由服务端固定。正文不 trim、不改换行、不增加证据不足结语。
+`parse_skill_direct_response()` 使用 `report_text.read_report_text()` 读取状态行和 Markdown，兼容 BOM、外围空白、大小写和明确包住状态行的代码围栏；缺少或未知状态时保留正文，按 `UNRESOLVED` 交付。普通 Markdown 代码块不剥离。正文仍要求非空、UTF-8 字节数在预算内且不包含私有能力 token；服务端计算 report SHA-256，返回 `GenericDiagnosisOutcomeV2` 并固定 Skill 名。它不会增加证据不足结语，也不会把专用 Job 改成 GENERIC Job。
 
 ## 5. Logparse 与通用定位文件
 
@@ -328,7 +334,7 @@ V2 与文档型 V3 共用 `RoutingScopeV1`，可额外声明 `direct_match_keywo
 
 `build_prompt()` 保持 `generic_problem_text` 原文，用字节长度与边界标记区分补充文本、可选经验和框架指令。日志只能来自服务端提供的清单。`execute()` 对提示词预算先做硬检查，历史经验失败只记安全事件；结果文件解析前校验通用日志未变化。
 
-`parse_generic_result()` 只接受一个版本的结果文件。V2 状态首行后为原样 Markdown，报告体最多 `65,536` 字节；允许规范范围内的首部 BOM/CRLF 兼容，但报告正文自身不能以 BOM 开始。V1 使用固定文本区段和结束标记。读取时检查普通文件、工作区身份、大小及前后稳定性，`.part` 或两个并存版本都不是可接受结果。
+`parse_generic_result()` 优先读取 V2；同时存在 V1 时不再拒绝或重复检查另一版本。V2 与专用报告共用正文读取，接受纯 Markdown，缺少或未知状态按 `UNRESOLVED` 交付，报告体最多 `65,536` 字节。V1 保留区段读取，但普通代码块和标记示例不再导致拒绝。读取时仍检查普通文件、工作区身份、大小及前后稳定性，未发布的 `.part` 不能作为报告。
 
 ## 6. Methods 证据处理文件
 
@@ -336,27 +342,29 @@ V2 与文档型 V3 共用 `RoutingScopeV1`，可额外声明 `direct_match_keywo
 
 源码：[methods_grounding.py](../../src/problem_locator/runtime/methods_grounding.py)
 
-Methods V1 的严格协议与字节核验。`FrozenTargetLogV1` 保存 source ID、相对路径、摘要和不可变 UTF-8 字节；构造时即验证摘要。`MethodDiagnosisDraftV1.from_mapping()` 限定七字段诊断结构，解析确认/候选方法、证据、限制和安全说明；Evidence 必须有来源、身份词及有界数组。
+Methods V1 的模型结果读取与证据核验。`FrozenTargetLogV1` 保存 source ID、相对路径、摘要和不可变 UTF-8 字节；构造时即验证摘要。`MethodDiagnosisDraftV1.from_mapping()` 读取确认/候选方法、证据、限制和安全说明，忽略额外字段，可选数组缺省为空，字符串条目去重；可识别发现不会因为缺少说明字段或状态标签与内容不一致而丢失。不能读取的子项直接跳过，不抛异常，也不新增异常记录。
 
 `scan_method_markers()` 扫描全部目标日志，按 `casefold()` 后的连续子串匹配生成 `SkillLoadReceiptV1`。`verify_method_evidence()` 独立核对每条发现：方法已注册、来源存在、行号有效、完整原文相同、marker 属于当前方法并出现在该行、每个身份词出现在本条证据引用行中。不能从另一条发现借身份词。
 
-`verify_method_diagnosis()` 重新扫描并核对最初选卡回执，拒绝无 marker 命中的确认方法、重复身份、无证据确认以及未知方法，产出 `VerifiedMethodDiagnosisV1` 和 `MethodGroundingAuditV1`。这验证引用一致性，并不把 marker 命中本身升级为因果证明。
+`verify_method_diagnosis()` 复用 `select_method_diagnosis()`，先核对固定输入，再逐条保留引用成立的发现。未知方法、缺引用或引用无法核对的条目成为普通证据缺口，不使整份响应失败。确认方法由保留证据推导，身份词可省略；此时按实际引用位置区分发现，不生成替代身份词。产出 `VerifiedMethodDiagnosisV1`、`MethodGroundingAuditV1` 和选择回执。这验证引用一致性，并不把 marker 命中本身升级为因果证明。
 
-`MethodReviewV1` 与 `verify_method_review()` 校验 reviewer 的全量身份覆盖及顶层 verdict 一致性；历史审计没有 `validation_mode` 时按 strict 解释。advisory 的 prior audit 则转到 advisory review 解析。
+`MethodReviewV1` 接受同样的可选字段和额外字段差异，无法识别的 verdict 按 `NEED_MORE_EVIDENCE` 处理。`verify_method_review()` 在 strict 模式按保留发现对齐审核，忽略额外条目，缺项或判断冲突按 `NEED_MORE_EVIDENCE` 处理，并据逐项结果调整整份结果的 verdict，不抛出格式或机械一致性异常。历史审计没有 `validation_mode` 时按 strict 解释。advisory 的 prior audit 则转到 advisory review 解析。
 
 ### `methods_selection.py`
 
 源码：[methods_selection.py](../../src/problem_locator/runtime/methods_selection.py)
 
-`select_method_diagnosis()` 用于 strict 且不安排 Reviewer 的诊断。先验证共享 Skill/日志/回执，再逐条解析和核验 Evidence。相同身份且内容完全相同的发现合并；同身份但有冲突或畸形项目时整组不保留，不能挑一个看起来合理的。
+`select_method_diagnosis()` 用于 strict 诊断，包括安排 Reviewer 的路径。先验证共享 Skill/日志/回执，再逐条解析和核验 Evidence。相同身份且内容完全相同的发现合并；同身份但有冲突或畸形项目时整组不保留。没有身份词时按引用来源和行号分组，不把不同位置的发现混在一起。
 
 最终只留下独立成立的完整发现；未成立的确认方法不会被偷偷转成候选。未知候选、缺失目标和拒绝项目记录原因，结果可能成为 `PARTIAL` 或 `INSUFFICIENT`。`selection` 审计包含源/有效草稿摘要、输入摘要、保留/合并/拒绝索引和缺口，不把被拒绝的摘要继续带进有效报告。
+
+不再重复拒绝缺省数组、标签与内容不一致或没有可识别发现的模型响应；没有可保留发现时正常返回 `INSUFFICIENT`，不把格式差异记录为执行异常。
 
 ### `methods_advisory.py`
 
 源码：[methods_advisory.py](../../src/problem_locator/runtime/methods_advisory.py)
 
-`accept_method_diagnosis_advisory()` 核对固定 Skill、日志集合和扫描回执身份，但不重复逐行 marker 核验。解析器保留可识别的模型判断，合并完全相同的发现；缺引用、缺身份词、未知方法或同身份不同判断成为明确限制，不直接删除全部结果。
+`accept_method_diagnosis_advisory()` 核对固定 Skill、日志集合和扫描回执身份，但不重复逐行 marker 核验。直接复用 Methods 的结果读取，删除独立的字段集合、数组数量、理由和状态交叉校验。解析器保留可识别的模型判断，合并完全相同的发现；缺引用、缺身份词、未知方法或同身份不同判断成为明确限制，不直接删除全部结果。
 
 有保留发现时有效状态设为 `PARTIAL`，否则为 `INSUFFICIENT`；审计标注 `validation_mode="advisory"` 和 `checked_source_count=0`。`parse_advisory_diagnosis()` 读取已经固定的有效草稿，`parse_advisory_review()` 保留 reviewer 的整份结果 verdict，不要求严格身份拼写或覆盖。报告展示层只在实际日志可定位时展示行引用。
 
@@ -366,9 +374,9 @@ Methods V1 的严格协议与字节核验。`FrozenTargetLogV1` 保存 source ID
 
 `map_verified_methods_draft()` 把已接受的 Methods V1 诊断/审核映射为现有业务 DTO，返回 `MappedMethodsDraft`。输入包括本次 Job、manifest、真实模型协议字节、核验结果及预处理或 prior audit；DIAGNOSE 与 REVIEW 的参数组合互斥。
 
-`_diagnosis_projection()` 建立目标日志 Evidence proposal、Logparse Artifact、发现、候选结论、因果因素、完成条件映射以及 `DecisionAuditV2`。规则 ID 绑定方法与身份；advisory 使用发现内容摘要，避免相同身份的不同模型判断冲突。能定位的物理原文写入独立 `decision_evidence.jsonl`，超出 Job 上下文预算会失败。
+`_diagnosis_projection()` 建立目标日志 Evidence proposal、Logparse Artifact、发现、候选结论、因果因素、完成条件映射以及 `DecisionAuditV2`。规则 ID 绑定方法与身份，未提供身份词时使用实际引用摘要；advisory 使用发现内容摘要，避免相同身份的不同模型判断冲突。逐项选择适用于有无 Reviewer 的两条路径，缺口保留在报告限制中；安排 Reviewer 时只审核真实发现和候选，不为选择缺口创建额外审核规则。能定位的物理原文写入独立 `decision_evidence.jsonl`，超出 Job 上下文预算会失败。
 
-`_review_projection()` 将独立审核绑定到此前已固定诊断和审计。`draft_bytes` 始终保留真实 Methods 协议规范字节，而非内部桥接 DTO 的重新序列化结果，使最终审计能够指回模型实际输出。advisory 报告中的 `0.5` 只是合同所需占位值，源码同时加入不可将其视为统计概率的说明。
+`_review_projection()` 将独立审核绑定到此前已固定诊断和审计。整份审核为非 PASS、但没有逐项问题说明时，采用普通整份审核说明，保留 Reviewer 判断，不因理由缺省触发 DTO 校验失败。`draft_bytes` 始终保留真实 Methods 协议规范字节，而非内部桥接 DTO 的重新序列化结果，使最终审计能够指回模型实际输出。advisory 报告中的 `0.5` 只是合同所需占位值，源码同时加入不可将其视为统计概率的说明。
 
 ### `methods_evidence_v2.py`
 
@@ -390,7 +398,7 @@ Methods V1 的严格协议与字节核验。`FrozenTargetLogV1` 保存 source ID
 
 源码：[methods_evaluation_v2.py](../../src/problem_locator/runtime/methods_evaluation_v2.py)
 
-`parse_method_evaluation_response_v2()` 只接受与计划数量和顺序一致的根数组；每项只有 `evaluation_ref`、`verdict`、`supporting_event_refs`、`reason`。引用必须属于本项计划并保持其顺序。重复键、非有限 JSON 常量、缺项或跨方法事件都会失败。
+`parse_method_evaluation_response_v2()` 接受 BOM 和整份 JSON 代码围栏，从根数组按 `evaluation_ref` 读取判断，再恢复服务端计划顺序。额外字段忽略，重复判断合并，引用按本项计划去重和排序；计划外引用不进入结果。缺项、判断冲突、无法识别的 verdict 或确认项没有可用支持时按 `UNKNOWN` 处理，可选理由缺省为普通说明，不记录格式异常或触发修复调用。非法 JSON 仍无法读取；持久化角色结果的计划归属和公共 DTO 约束保持不变。
 
 `evaluate_method_role_v2()` 为 PRIMARY 或 REPAIR 生成固定角色结果。`resolve_method_consensus_v2()` 比较两个盲评角色的 evaluation、verdict 和支持事件集合，不比较理由文字；两者一致、没有 UNKNOWN 且至少一个 CONFIRMED 才能 RESOLVED。
 
@@ -444,7 +452,7 @@ Methods V1 的严格协议与字节核验。`FrozenTargetLogV1` 保存 source ID
 
 ROUTE 非失败草稿必须带本次准入证明；DIAGNOSE/REVIEW 非失败草稿必须带 verification。COMPLETED 未通过正向 gate，或目标缺失且当前策略不允许部分结果时，改为 INCONCLUSIVE，并清除不应进入结论的内容。随后替换服务端 provenance、构造 Result v3，校验 Outcome/Result 与 Job 一致。
 
-关键词直达使用独立的 `direct_keyword_route_v1` 分支。最终化接收本次真实问题原文和冻结 Skill 索引，重新执行匹配，核对决策、审计和草稿摘要；只改 `model_called`、Skill ID、匹配位置或摘要不能构造有效的直达结果。原 `strict_route_admission_v1` 模型审核分支保持原有检查。
+关键词直达使用独立的 `direct_keyword_route_v1` 分支。最终化接收本次真实问题原文和冻结 Skill 索引，重新执行匹配，核对决策、审计和草稿摘要；只改 `model_called`、Skill ID、匹配位置或摘要不能构造有效的直达结果。模型路径使用 `shortlisted_route_v1`，绑定当前 Job、上下文、完整索引、草稿和候选范围，核对固定 Skill 引用与置信度，不重新召回或审核语义。
 
 最终 `output/job_outcome.json` 必须原先不存在；服务端独占创建 `runtime/server-state/`，原子写入结果和 `server-job-outcome.finalized`，marker 绑定源草稿、Outcome、DecisionAudit 与决策原文字节摘要。`off` 的 Markdown 直接交付路径在 Runtime 中构造并发布 Outcome，不经过这里的证据 gate。
 
@@ -535,7 +543,7 @@ Logparse 运行的 claim、parse 参数和资源 metadata 需要相互一致，�
 | 文件 | 职责与调用关系 |
 | --- | --- |
 | [context-policies/route/asset.json](../../src/problem_locator/runtime/assets/context-policies/route/asset.json) | 注册 `context-policy/route` `1.0.0`，入口 `policy.md`。 |
-| [context-policies/route/policy.md](../../src/problem_locator/runtime/assets/context-policies/route/policy.md) | `131072` 字节预算，完整保留所有必需段及 Skill 索引，可选证据按冻结顺序整段加入。 |
+| [context-policies/route/policy.md](../../src/problem_locator/runtime/assets/context-policies/route/policy.md) | `131072` 字节预算，完整保留必需段及最多 5 个候选的条件；完整目录留在服务端，可选证据按冻结顺序整段加入。 |
 | [context-policies/diagnose/asset.json](../../src/problem_locator/runtime/assets/context-policies/diagnose/asset.json) | 注册 `context-policy/diagnose` `1.0.0`。 |
 | [context-policies/diagnose/policy.md](../../src/problem_locator/runtime/assets/context-policies/diagnose/policy.md) | `262144` 字节预算，保留完整选中 Skill、必需证据与 manifest，再决定可选证据。 |
 | [context-policies/review/asset.json](../../src/problem_locator/runtime/assets/context-policies/review/asset.json) | 注册 `context-policy/review` `3.0.0`。 |
@@ -550,13 +558,13 @@ Logparse 运行的 claim、parse 参数和资源 metadata 需要相互一致，�
 | 文件 | 职责与调用关系 |
 | --- | --- |
 | [output-contracts/route/asset.json](../../src/problem_locator/runtime/assets/output-contracts/route/asset.json) | 注册 `output-contract/route` `6.0.0`。 |
-| [output-contracts/route/output-contract.md](../../src/problem_locator/runtime/assets/output-contracts/route/output-contract.md) | 固定四字段 JSON、全候选条件审核、冻结 snapshot 原文引用与 `0.95` 准入阈值；与 `route_admission.py` 对应。 |
+| [output-contracts/route/output-contract.md](../../src/problem_locator/runtime/assets/output-contracts/route/output-contract.md) | 三字段简短结果、本次最多 5 个候选及 `0.95` 置信度阈值，不要求回写逐条件审核或引文。 |
 | [output-contracts/diagnose/asset.json](../../src/problem_locator/runtime/assets/output-contracts/diagnose/asset.json) | 注册 `output-contract/diagnose` `11.0.0`。 |
 | [output-contracts/diagnose/output-contract.md](../../src/problem_locator/runtime/assets/output-contracts/diagnose/output-contract.md) | 固定 Methods V1 七字段诊断 JSON、来源/行号/完整原文/marker/身份词约束；在最终响应交付，由服务端核验或按所选 advisory 策略处理。 |
 | [output-contracts/skill-direct/asset.json](../../src/problem_locator/runtime/assets/output-contracts/skill-direct/asset.json) | 注册 `output-contract/skill-direct` `1.0.0`。 |
 | [output-contracts/skill-direct/output-contract.md](../../src/problem_locator/runtime/assets/output-contracts/skill-direct/output-contract.md) | 固定 `SKILL_DIAGNOSIS_RESULT_V1` 状态首行与最长 `65536` UTF-8 字节正文；不要求证据核验 JSON，保留 Skill 报告。 |
 | [output-contracts/review/asset.json](../../src/problem_locator/runtime/assets/output-contracts/review/asset.json) | 注册 `output-contract/review` `10.0.0`。 |
-| [output-contracts/review/output-contract.md](../../src/problem_locator/runtime/assets/output-contracts/review/output-contract.md) | 输出四字段 REVIEW 草稿；顶层与逐发现 verdict 为 PASS/NEED_MORE_EVIDENCE/REJECT，严格路径要求精确身份集合与一致 verdict。 |
+| [output-contracts/review/output-contract.md](../../src/problem_locator/runtime/assets/output-contracts/review/output-contract.md) | 输出 REVIEW 草稿；顶层与逐发现 verdict 为 PASS/NEED_MORE_EVIDENCE/REJECT。strict 路径按已知发现对齐，缺项或冲突按证据不足处理。 |
 | [output-contracts/generic-locator/asset.json](../../src/problem_locator/runtime/assets/output-contracts/generic-locator/asset.json) | 注册 `output-contract/generic-locator` `2.0.0`。 |
 | [output-contracts/generic-locator/output-contract.md](../../src/problem_locator/runtime/assets/output-contracts/generic-locator/output-contract.md) | 只写 V2 `.md` 结果文件，状态首行后为完整 Markdown；正文保留原字节，不得同时生成旧 `.txt`，未确认报告说明假设与缺口。 |
 

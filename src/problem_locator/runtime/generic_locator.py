@@ -47,20 +47,14 @@ from .continuation_context import build_report_continuation_context
 from .failures import RuntimeExecutionError, runtime_failure
 from .workspace import PreparedWorkspace, WorkspaceManager
 from .generic_logs import verify_generic_logs, _ordinary_path, _stream_verified
+from .report_text import read_report_text
 
 
 GENERIC_RESULT_FILENAME = "generic_diagnosis_result.txt"
 GENERIC_RESULT_V2_FILENAME = "generic_diagnosis_result.md"
 MAX_GENERIC_RESULT_BYTES = 65_536
 MAX_GENERIC_REPORT_BYTES = 65_536
-_GENERIC_V2_STATUS_HEADERS = {
-    b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n": GenericResultStatus.RESOLVED,
-    b"<<<GENERIC_DIAGNOSIS_RESULT_V2:UNRESOLVED>>>\n": GenericResultStatus.UNRESOLVED,
-}
-MAX_GENERIC_RESULT_V2_BYTES = MAX_GENERIC_REPORT_BYTES + max(
-    len(header) for header in _GENERIC_V2_STATUS_HEADERS
-) + 4  # One leading UTF-8 BOM and one extra CR in the protocol header.
-_UTF8_BOM = b"\xef\xbb\xbf"
+MAX_GENERIC_RESULT_V2_BYTES = MAX_GENERIC_REPORT_BYTES + 1024  # Status and presentation framing.
 GENERIC_RESULT_PATTERN = re.compile(
     r"\A<<<GENERIC_DIAGNOSIS_RESULT_V1>>>\r?\n"
     r"STATUS: (?P<status>RESOLVED|UNRESOLVED)\r?\n"
@@ -174,19 +168,11 @@ def _parse_v1_result(raw: bytes, *, skill_name: str) -> GenericDiagnosisOutcome:
         text = raw.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
         raise _invalid_result() from None
-    if "```" in text:
-        raise _invalid_result() from None
     match = GENERIC_RESULT_PATTERN.fullmatch(text)
     if match is None:
         raise _invalid_result() from None
     conclusion = match.group("conclusion")
     root_cause_analysis = match.group("root_cause_analysis")
-    reserved = (
-        "<<<GENERIC_DIAGNOSIS_RESULT_V1>>>",
-        "<<<END_GENERIC_DIAGNOSIS_RESULT_V1>>>",
-    )
-    if any(marker in conclusion or marker in root_cause_analysis for marker in reserved):
-        raise _invalid_result() from None
     return GenericDiagnosisOutcome(
         status=GenericResultStatus(match.group("status")),
         conclusion=conclusion,
@@ -197,27 +183,11 @@ def _parse_v1_result(raw: bytes, *, skill_name: str) -> GenericDiagnosisOutcome:
 
 
 def _parse_v2_result(raw: bytes, *, skill_name: str) -> GenericDiagnosisOutcomeV2:
-    if raw.startswith(_UTF8_BOM):
-        raw = raw[len(_UTF8_BOM):]
-    status: GenericResultStatus | None = None
-    body = b""
-    for header, candidate_status in _GENERIC_V2_STATUS_HEADERS.items():
-        lf_header = header
-        crlf_header = header[:-1] + b"\r\n"
-        matched_header = next((prefix for prefix in (lf_header, crlf_header) if raw.startswith(prefix)), None)
-        if matched_header is not None:
-            status = candidate_status
-            body = raw[len(matched_header) :]
-            break
-    if (
-        status is None
-        or not body
-        or len(body) > MAX_GENERIC_REPORT_BYTES
-        or body.startswith(_UTF8_BOM)
-    ):
-        raise _invalid_result() from None
     try:
-        report_markdown = body.decode("utf-8", errors="strict")
+        status, report_markdown, body = read_report_text(
+            raw.decode("utf-8", errors="strict"), marker="GENERIC_DIAGNOSIS_RESULT_V2",
+            max_bytes=MAX_GENERIC_REPORT_BYTES,
+        )
         return GenericDiagnosisOutcomeV2(
             format_version=2,
             status=status,
@@ -237,29 +207,20 @@ def parse_generic_result(
     skill_name: str,
 ) -> GenericDiagnosisOutcome | GenericDiagnosisOutcomeV2:
     v2_exists = _result_node_exists(workspace, GENERIC_RESULT_V2_FILENAME)
-    v1_exists = _result_node_exists(workspace, GENERIC_RESULT_FILENAME)
-    if v2_exists and v1_exists:
-        raise _invalid_result() from None
     if v2_exists:
         raw = _read_result_bytes(
             workspace,
             filename=GENERIC_RESULT_V2_FILENAME,
             max_bytes=MAX_GENERIC_RESULT_V2_BYTES,
         )
-        # A late legacy file is still an ambiguous result, never a fallback.
-        if _result_node_exists(workspace, GENERIC_RESULT_FILENAME):
-            raise _invalid_result() from None
         return _parse_v2_result(raw, skill_name=skill_name)
-    if not v1_exists:
+    if not _result_node_exists(workspace, GENERIC_RESULT_FILENAME):
         raise _invalid_result() from None
     raw = _read_result_bytes(
         workspace,
         filename=GENERIC_RESULT_FILENAME,
         max_bytes=MAX_GENERIC_RESULT_BYTES,
     )
-    # A V2 node that appears during the read makes the result ambiguous.
-    if _result_node_exists(workspace, GENERIC_RESULT_V2_FILENAME):
-        raise _invalid_result() from None
     return _parse_v1_result(raw, skill_name=skill_name)
 
 

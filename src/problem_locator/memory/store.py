@@ -252,7 +252,7 @@ class MemoryStore(MemoryUsageMixin, FeedbackCommentStoreMixin):
 
     def finish_task(self, task_id, card_json, *, evidence_json=None):
         from .extraction import parse_card_json
-        content, now = parse_card_json(card_json), self._now()
+        now = self._now()
         with self.repository.database_transaction() as db:
             self._lock_task_owner(db, task_id)
             task = _one(db, "SELECT * FROM memory_tasks WHERE task_id=? AND status='RUNNING'", (task_id,))
@@ -270,7 +270,7 @@ class MemoryStore(MemoryUsageMixin, FeedbackCommentStoreMixin):
                     raise ValueError("纠正经验缺少明确的替代目标。")
             elif evidence_json is not None:
                 raise ValueError("普通经验不能提交纠正证据。")
-            content = parse_card_json(content, sources=(task["problem_text"] or "", task["report_markdown"] or "", task["context_json"] or ""))
+            content = parse_card_json(card_json, sources=(task["problem_text"] or "", task["report_markdown"] or "", task["context_json"] or ""))
             alive = db.execute("SELECT 1 FROM agent_conversations c JOIN agent_conversation_runs r USING(conversation_id) WHERE c.conversation_id=? AND r.run_id=? AND c.deleted_at IS NULL", (task["conversation_id"], task["run_id"])).fetchone()
             rating = db.execute("SELECT rating FROM memory_feedback WHERE run_id=? AND answer_key=?", (task["run_id"], task["answer_key"])).fetchone()
             if alive is None or (rating is None and not correction) or parse_timestamp(task["created_at"]) <= parse_timestamp(_before(now, SOURCE_RETENTION_DAYS)):

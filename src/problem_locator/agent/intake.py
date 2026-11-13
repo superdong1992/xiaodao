@@ -50,8 +50,6 @@ _ASSETS = Path(__file__).resolve().parents[1] / "runtime" / "assets" / "intake"
 _Name = Annotated[str, StringConstraints(strict=True, pattern=r"^[a-z][a-z0-9_]{0,63}$")]
 _Text = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=65_536)]
 _Id = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=128)]
-_FACT_FIELDS = ("statement", "expected_behavior", "actual_behavior", "scope")
-_LIST_FIELDS = ("goals", "non_goals", "constraints", "completion_criteria")
 _DEFAULTS: dict[str, str | list[str]] = {
     "expected_behavior": "用户未单独说明；以 raw_problem_text 为准。",
     "scope": "仅定位 raw_problem_text 所述问题。",
@@ -365,7 +363,6 @@ def validate_intake_decision(decision: IntakeDecision, request: IntakeInput) -> 
     try:
         source = decision
         issues = []
-        decision = _parse_decision_items(decision.model_dump(mode="python"), issues)
         if request.frozen_problem_spec is None:
             raise ValueError("尚未创建定位任务。")
         requirements = {item.name: item for item in request.requirements + request.optional_inputs if item.kind == "INPUT"}
@@ -406,18 +403,22 @@ def validate_intake_decision(decision: IntakeDecision, request: IntakeInput) -> 
 
 
 def _parse_decision_items(value, issues) -> IntakeDecision:
-    if not isinstance(value, dict) or set(value) != {
-        "schema_version", "action", "message", "problem_fields", "user_facts"
-    } or type(value["schema_version"]) is not int:
-        raise ValueError("最终响应字段不完整。")
-    cleaned = dict(value)
+    if not isinstance(value, dict):
+        raise ValueError("最终响应必须是 JSON 对象。")
+    action = value.get("action")
+    message = value.get("message")
+    cleaned = {
+        "schema_version": 1,
+        "action": action if action in ("NEED_CLARIFICATION", "SUBMIT_SUPPLEMENT", "NEW_CASE_REQUIRED") else "NEED_CLARIFICATION",
+        "message": message[:2048] if isinstance(message, str) and message.strip() else "已整理本次补充信息。",
+    }
     for name, limit in (("problem_fields", 128), ("user_facts", 64)):
-        if not isinstance(value[name], list) or len(value[name]) > limit:
-            raise ValueError("最终响应列表无效或超出限制。")
+        items = value.get(name, [])
         cleaned[name] = []
-        for index, item in enumerate(value[name]):
+        for index, item in enumerate(items[:limit] if isinstance(items, list) else []):
             try:
-                cleaned[name].append(IntakeValue.model_validate(item))
+                fields = {key: item[key] for key in IntakeValue.model_fields if key in item} if isinstance(item, dict) else item
+                cleaned[name].append(IntakeValue.model_validate(fields))
             except (ValueError, TypeError):
                 _issue(issues, f"{name}[{index}]", "INVALID_ITEM_STRUCTURE")
     return IntakeDecision.model_validate(cleaned)
@@ -595,17 +596,16 @@ class ClaudeIntakeEngine:
             except (ValueError, TypeError, RecursionError):
                 raise IntakeError("INTAKE_OUTPUT_INVALID", "问题草稿无效，请直接编辑本轮问题。") from None
             result = parsed.document.value
-            if (not isinstance(result, dict) or set(result) != {"intent", "effective_problem_text", "change_note"}
-                    or not isinstance(result["intent"], str) or result["intent"] not in {"FOLLOWUP", "CONTINUE"}
-                    or not isinstance(result["change_note"], str) or not result["change_note"].strip()):
+            if not isinstance(result, dict) or result.get("intent") not in ("FOLLOWUP", "CONTINUE"):
                 raise IntakeError("INTAKE_OUTPUT_INVALID", "问题草稿无效，请直接编辑本轮问题。")
-            effective = result["effective_problem_text"]
+            effective = result.get("effective_problem_text")
             if result["intent"] == "FOLLOWUP":
-                if effective is not None and (not isinstance(effective, str) or effective != source_problem_text):
-                    raise IntakeError("INTAKE_OUTPUT_INVALID", "问题草稿无效，请直接编辑本轮问题。")
-                result["effective_problem_text"] = source_problem_text
+                effective = source_problem_text
             elif not isinstance(effective, str) or not effective.strip():
                 raise IntakeError("INTAKE_OUTPUT_INVALID", "问题草稿无效，请直接编辑本轮问题。")
+            note = result.get("change_note")
+            result = {"intent": result["intent"], "effective_problem_text": effective,
+                "change_note": note if isinstance(note, str) and note.strip() else "已整理本轮输入。"}
             (workspace / "runtime" / "continuation-result.json").write_text(
                 json.dumps(result, ensure_ascii=False), encoding="utf-8")
             return result

@@ -1,3 +1,7 @@
-# Route context policy
+# 路由上下文策略
 
-The final framed UTF-8 body is limited to 131072 bytes. Preserve every mandatory section and the complete skill index. Include optional evidence only as whole sections in frozen job order after reserving all mandatory bytes and the resource manifest.
+最终带分隔标记的 UTF-8 正文不超过 131072 字节。完整保留所有必需段落，以及本次召回的最多 5 个候选；不得截断候选的适用条件和排除条件。
+
+`SKILL_INDEX` 使用 schema_version 1，每项只提供 `skill_id`、`name`、`capability`、`summary`、`routing`。完整目录和版本引用由服务端保存，不放入模型上下文。召回顺序只用于组织候选，适用结论仍需结合完整条件和本次事实判断。
+
+预留必需段落和资源清单的空间后，按 Job 固定顺序加入可选证据；每段要么完整加入，要么整体省略。

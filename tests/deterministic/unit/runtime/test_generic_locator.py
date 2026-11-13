@@ -12,6 +12,8 @@ from problem_locator.runtime.generic_locator import (
     GenericLocatorExecutor,
     MAX_GENERIC_REPORT_BYTES,
     parse_generic_result,
+    _parse_v1_result,
+    _parse_v2_result,
 )
 from tests.deterministic.unit.domain.test_coordinator_routing import _generic_diagnose_job
 
@@ -69,12 +71,41 @@ def test_generic_protocol_header_accepts_bom_and_crlf_without_touching_full_size
 
 
 @pytest.mark.parametrize("raw", [
-    b"\xef\xbb\xbf\xef\xbb\xbf<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\nreport",
-    b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n\xef\xbb\xbfreport",
-    b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\rreport",
-    b"```markdown\n<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\nreport\n```",
     b"\xef\xbb\xbf<<<GENERIC_DIAGNOSIS_RESULT_V2:UNRESOLVED>>>\r\n" + b"x" * (MAX_GENERIC_REPORT_BYTES + 1),
-], ids=["duplicate-bom", "body-bom", "bare-cr", "whole-report-fence", "oversize-body"])
+], ids=["oversize-body"])
 def test_generic_header_compatibility_does_not_relax_body_or_protocol_boundaries(tmp_path, raw):
     with pytest.raises(RuntimeExecutionError):
         parse_generic_result(_workspace(tmp_path, raw), skill_name="generic-diagnosis")
+
+
+@pytest.mark.parametrize("prefix,suffix,status", [
+    ("", "", "UNRESOLVED"),
+    ("\ufeff\ufeff<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n", "", "RESOLVED"),
+    ("<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n\ufeff", "", "RESOLVED"),
+    ("<<<GENERIC_DIAGNOSIS_RESULT_V2: resolved >>>\r", "", "RESOLVED"),
+    ("```markdown\n<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n", "```\n", "RESOLVED"),
+    ("<<<GENERIC_DIAGNOSIS_RESULT_V2:PARTIAL>>>\n", "", "UNRESOLVED"),
+])
+def test_generic_report_presentation_variants_keep_content_without_exception(caplog, prefix, suffix, status):
+    body = "# 定位报告\n\n分析与建议。\n```text\n原始日志\n```\n"
+    result = _parse_v2_result((prefix + body + suffix).encode("utf-8"), skill_name="generic-diagnosis")
+    assert result.report_markdown == body
+    assert result.status.value == status
+    assert not caplog.records
+
+
+def test_legacy_generic_report_allows_code_blocks_and_literal_markers():
+    analysis = "日志如下：\n```text\n<<<GENERIC_DIAGNOSIS_RESULT_V1>>>\nerror\n```"
+    raw = ("<<<GENERIC_DIAGNOSIS_RESULT_V1>>>\nSTATUS: RESOLVED\nCONCLUSION:\n已有结论。\n"
+           f"ROOT_CAUSE_ANALYSIS:\n{analysis}\n<<<END_GENERIC_DIAGNOSIS_RESULT_V1>>>\n")
+    result = _parse_v1_result(raw.encode("utf-8"), skill_name="generic-diagnosis")
+    assert result.root_cause_analysis == analysis
+
+
+def test_generic_prefers_current_report_when_legacy_file_also_exists(tmp_path):
+    body = b"# Current report\nA useful finding.\n"
+    workspace = _workspace(tmp_path, b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n" + body)
+    (tmp_path / "output/generic_diagnosis_result.txt").write_bytes(
+        b"<<<GENERIC_DIAGNOSIS_RESULT_V1>>>\nSTATUS: RESOLVED\nCONCLUSION:\nLegacy finding.\n"
+        b"ROOT_CAUSE_ANALYSIS:\nLegacy analysis.\n<<<END_GENERIC_DIAGNOSIS_RESULT_V1>>>\n")
+    assert parse_generic_result(workspace, skill_name="generic-diagnosis").report_markdown.encode() == body

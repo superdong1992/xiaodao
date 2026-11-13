@@ -345,11 +345,9 @@ def test_model_cannot_create_cases_or_choose_unknown_actions(action):
     payload["action"] = action
     with pytest.raises(ValidationError):
         IntakeDecision.model_validate(payload)
-    with pytest.raises(IntakeError):
-        parse_intake_response(json.dumps(payload), _request())
-    # Injected engines must not bypass the same action contract.
-    with pytest.raises(IntakeError):
-        validate_intake_decision(_decision().model_copy(update={"action": action}), _request())
+    assert parse_intake_response(json.dumps(payload), _request()).action == "NEED_CLARIFICATION"
+    # The service computes the next action; unsupported model verbs cannot create a Case.
+    assert validate_intake_decision(_decision().model_copy(update={"action": action}), _request()).action == "NEED_CLARIFICATION"
 
 
 @pytest.mark.parametrize("action", ["NEED_CLARIFICATION", "SUBMIT_SUPPLEMENT", "NEW_CASE_REQUIRED"])
@@ -358,15 +356,16 @@ def test_every_intake_action_requires_existing_case(action):
         validate_intake_decision(_decision(action=action, problem_fields=[]), _request(frozen_problem_spec=None))
 
 
-def test_strict_final_json_accepts_only_exact_contract():
+def test_intake_ignores_metadata_and_owns_the_schema_version():
     request = _request()
     raw = _decision().model_dump_json()
     assert parse_intake_response(raw, request) == _decision()
     payload = json.loads(raw)
     payload["candidate"] = {"root_cause": "guess"}
-    with pytest.raises(IntakeError):
-        parse_intake_response(json.dumps(payload), request)
-    for bad in [None, raw.replace('"schema_version":1', '"schema_version":true'), raw.replace('"schema_version":1,', ""), raw.replace('"schema_version":1', '"schema_version":1,"schema_version":1')]:
+    assert parse_intake_response(json.dumps(payload), request) == _decision()
+    for supported in [raw.replace('"schema_version":1', '"schema_version":true'), raw.replace('"schema_version":1,', "")]:
+        assert parse_intake_response(supported, request) == _decision()
+    for bad in [None, raw.replace('"schema_version":1', '"schema_version":1,"schema_version":1')]:
         with pytest.raises(IntakeError):
             parse_intake_response(bad, request)
 
@@ -494,11 +493,11 @@ def test_engine_reuses_backend_with_no_tools_broker_or_job(tmp_path: Path, prefi
     assert call["log_sinks"].stdout._stream.closed
 
 
-def test_engine_bad_output_has_no_implicit_retry_or_repair(tmp_path: Path):
+def test_engine_without_usable_facts_keeps_waiting_without_retry(tmp_path: Path):
     backend = _Backend('{"root_cause":"猜测"}')
     engine = ClaudeIntakeEngine("not-launched", workspace_root=tmp_path, backend=backend)
-    with pytest.raises(IntakeError):
-        engine.intake(_request())
+    result = engine.intake(_request())
+    assert result.action == "NEED_CLARIFICATION" and result.user_facts == []
     assert len(backend.calls) == 1
 
 
@@ -524,6 +523,12 @@ def test_intake_model_output_keeps_strict_json_rejections_after_normalization(tm
         "duplicate-key": "```json\n" + raw.replace('"schema_version":1', '"schema_version":1,"schema_version":1') + "\n```",
         "nan": "\ufeff" + raw.replace('"schema_version":1', '"schema_version":NaN'),
     }[shape]
+    if shape == "double-fence":
+        assert parse_intake_response(malformed, _request()) == _decision()
+        backend = _Backend(malformed)
+        assert ClaudeIntakeEngine("not-launched", workspace_root=tmp_path, backend=backend).intake(_request()) == _decision()
+        assert len(backend.calls) == 1
+        return
     with pytest.raises(IntakeError) as parsed:
         parse_intake_response(malformed, _request())
     assert parsed.value.code == "INTAKE_OUTPUT_INVALID"

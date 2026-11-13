@@ -190,8 +190,12 @@ def test_correction_memory_requires_verified_log_citations_and_keeps_private_rec
 def test_unsupported_or_fabricated_correction_never_publishes(system, output):
     task = prepare_logged_task(system)
     backend = Backend(output)
-    with pytest.raises(ValueError):
-        CorrectionMemoryHandler(system.service, "claude", backend=backend).extract(task, cancellation=CancellationController())
+    handler = CorrectionMemoryHandler(system.service, "claude", backend=backend)
+    if json.loads(output).get("adopt") is False:
+        assert handler.extract(task, cancellation=CancellationController()) is None
+    else:
+        with pytest.raises(ValueError):
+            handler.extract(task, cancellation=CancellationController())
     system.memory.fail_task(task["task_id"])
     assert system.memory.claim_task() is None and len(backend.calls) == 1
     assert system.memory.active_cards("generic-test") == []

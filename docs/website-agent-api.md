@@ -922,7 +922,7 @@ node --test examples/website-agent/server.test.mjs
 
 手动设置 `advisory` 可恢复原建议模式及 `PARTIAL` / `INCONCLUSIVE` 结构化交付，设置 `strict` 可恢复原核验方式；这两种策略下，`SPECIALIZED_REVIEWER_ENABLED` 继续控制独立审核。单项输入无效只影响该项；非法输入、模型执行协议错误、共享输入变化，以及权限、路径和文件完整性异常仍会使任务失败。不增加模型重试或任务续接。详见[诊断交付策略](diagnosis-advisory.md)。
 
-要求输出 JSON 的诊断阶段按[受限提取规则](model-output-compatibility.md#说明文字与最终-json)处理合法展示包装，出现多个候选、截断或无法识别的结果仍失败。新版报告追问采用正式 Generic V2 报告合同，不再使用旧 xiaodao.followup.v1 控制包。默认 Skill 直接输出首行 SKILL_DIAGNOSIS_RESULT_V1 终态标记和 Markdown 正文，不做 JSON 提取。stream-json 只规定 CLI 事件外层格式，不改变业务输出要求；兼容处理不增加模型调用。
+要求输出 JSON 的诊断阶段按[模型输出读取规则](model-output-compatibility.md#说明文字与最终-json)处理代码围栏、行内对象和前后说明；路由没有可用选择时正常转通用，Methods 逐项保留可用发现。新版报告追问采用正式 Generic V2 报告合同，不再使用旧 xiaodao.followup.v1 控制包。默认 Skill 推荐输出首行 SKILL_DIAGNOSIS_RESULT_V1 状态标记和 Markdown 正文，也接受纯正文；缺少或无法识别的状态按 UNRESOLVED 交付。stream-json 只规定 CLI 事件外层格式；兼容处理不增加模型调用或格式异常日志。
 
 新部署使用全新空 `DATA_ROOT`；升级 `8.0.0` 时，需手动生成并核验 r2 副本，原目录保持原样。其他旧数据按升级说明支持的范围处理，不自动迁移，也不从旧 `methods_result` 反推报告。MCP 仍为原来的七个工具，输入参数继续平铺在根层；网站直接使用 REST Agent 接口。
 

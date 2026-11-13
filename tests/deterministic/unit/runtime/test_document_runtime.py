@@ -6,6 +6,7 @@ import io
 import json
 from pathlib import Path
 import zipfile
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -144,6 +145,27 @@ def test_empty_or_optional_materials_do_not_require_logparse(tmp_path, mode):
     assert backend.manifests[0]["files"] == []
     assert broker.sessions == [] and "LOGPARSE" not in progress
     assert job.review_policy.value == "NONE" and job.logparse_tool_ref is None
+
+
+@pytest.mark.parametrize("prefix,suffix,status", [
+    ("", "", "UNRESOLVED"),
+    ("<<<SKILL_DIAGNOSIS_RESULT_V1:PARTIAL>>>\n", "", "UNRESOLVED"),
+    ("\ufeff```markdown\n<<<SKILL_DIAGNOSIS_RESULT_V1:RESOLVED>>>\n", "```\n", "RESOLVED"),
+])
+def test_document_report_format_variants_deliver_without_failure(tmp_path, caplog, prefix, suffix, status):
+    body = "# 业务报告\n\n保留业务 Skill 的结论和限制。\n"
+
+    class PresentationBackend(ReadingBackend):
+        def execute(self, **kwargs):
+            return replace(super().execute(**kwargs), final_result=prefix + body + suffix)
+
+    runtime, job, backend, _, _, _ = make_runtime(tmp_path, backend=PresentationBackend())
+    outcome = runtime.execute(job, InMemoryCancellationSignal()).job_outcome
+    assert outcome.result_type is OutcomeResultType.COMPLETED and outcome.error is None
+    assert outcome.payload.report_markdown == body
+    assert outcome.payload.status.value == status
+    assert len(backend.calls) == 1
+    assert not any(record.levelno >= 30 or record.exc_info for record in caplog.records)
 
 
 @pytest.mark.parametrize("kind", ["text", "json", "zip", "mixed", "large"])

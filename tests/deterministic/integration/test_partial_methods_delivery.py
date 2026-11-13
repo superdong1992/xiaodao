@@ -1,4 +1,4 @@
-"""Reviewer-off evidence selection crosses the real HTTP/runtime/storage seams."""
+"""Selected evidence reaches Reviewer, HTTP reports and persistent Case state."""
 from __future__ import annotations
 
 import copy
@@ -8,7 +8,7 @@ from dataclasses import replace
 
 import pytest
 
-from problem_locator.contracts import ReviewPolicy, canonical_json_bytes
+from problem_locator.contracts import JobType, ReviewPolicy, canonical_json_bytes
 from tests.deterministic.integration.test_website_agent import (
     PARAMETER_GROUP_A, _converse_to_waiting, _post, website,
 )
@@ -22,13 +22,18 @@ def test_selected_findings_reach_http_report_and_persisted_case(website, monkeyp
     execute = backend.execute
     calls = []
     original = None
+    retained_evidence = None
+    reviewer_input = None
 
     def mixed(**kwargs):
-        nonlocal original
+        nonlocal original, retained_evidence, reviewer_input
+        if kwargs.get("backend_phase") == "METHODS_REVIEWER":
+            reviewer_input = (kwargs["workspace_root"] / "inputs/method-diagnosis.json").read_bytes()
         result = execute(**kwargs)
         calls.append(kwargs.get("backend_phase"))
         if kwargs.get("backend_phase") == "METHODS_SPECIALIST":
             value = json.loads(result.final_result)
+            retained_evidence = copy.deepcopy(value["evidence"])
             bad = copy.deepcopy(value["evidence"][0])
             bad["summary"] = "UNVERIFIED SUMMARY MUST NOT BE PUBLISHED"
             bad["identity_tokens"] = ["synthetic-absent-identity"]
@@ -46,16 +51,19 @@ def test_selected_findings_reach_http_report_and_persisted_case(website, monkeyp
     assert stack.scheduler.wait_until_idle(20)
     view = service.get_conversation(conversation)
     assert calls.count("METHODS_SPECIALIST") == 1
-    assert "METHODS_REVIEWER" not in calls
-    if review:
-        assert view.case_status == "FAILED", view
-        assert not any(event.type == "result.available" for event in store.list_events(conversation))
-        return
+    assert calls.count("METHODS_REVIEWER") == int(review)
+    assert view.failure is None
 
     expected = "UNRESOLVED" if all_invalid else "PARTIALLY_RESOLVED"
     assert view.case_status == expected, stack.application.get_case(view.case_id).case_view.failure
     state = stack.repository.read_case(view.case_id)
     assert state.case.status.value == expected
+    assert state.case.failure is None
+    persisted = canonical_json_bytes(state.case) + canonical_json_bytes([
+        item.model_dump(mode="json") for item in state.evidence.values()
+    ])
+    for rejected_text in (b"UNVERIFIED SUMMARY", b"synthetic-absent-identity", b"fabricated evidence line"):
+        assert rejected_text not in persisted
     artifacts = client.get(f"/api/v1/cases/{view.case_id}/artifacts").json()["data"]["artifacts"]
     report_ref = next(item for item in artifacts if item["kind"] == "USER_RESULT")
     downloaded = client.get(report_ref["download_url"])
@@ -65,20 +73,35 @@ def test_selected_findings_reach_http_report_and_persisted_case(website, monkeyp
     assert report["status"] == ("INCONCLUSIVE" if all_invalid else "PARTIAL")
     assert report["root_cause"] is None
     assert report["evidence_gaps"]
-    assert b"UNVERIFIED SUMMARY" not in downloaded.content
+    for rejected_text in (b"UNVERIFIED SUMMARY", b"synthetic-absent-identity", b"fabricated evidence line"):
+        assert rejected_text not in downloaded.content
     assert all(item["status"] == "UNKNOWN" for item in report["completion_criteria_mapping"])
     if all_invalid:
         assert not report["findings"] and not report["causal_factors"]
     else:
         assert report["findings"] and report["causal_factors"]
         assert all(item["citations"] for item in report["findings"])
-    diagnose = next(job for job in state.jobs.values() if job.review_policy is ReviewPolicy.NONE
-                    and job.status.value == "SUCCEEDED")
+        assert state.case.final_result is not None
+        assert state.case.final_result.status.value == "ACCEPTED"
+        assert state.case.final_result.causal_factors
     records = stack.runtime._execution_records
+    diagnose = next(job for job in state.jobs.values()
+                    if records.read_audit_bytes(job.job_id, "method-evidence-selection.json") is not None)
+    assert diagnose.job_type is JobType.DIAGNOSE and diagnose.status.value == "SUCCEEDED"
     assert records.read_audit_bytes(diagnose.job_id, "method-diagnosis.raw.txt") == original
     receipt = json.loads(records.read_audit_bytes(diagnose.job_id, "method-evidence-selection.json"))
     assert receipt["raw_response_sha256"] == hashlib.sha256(original).hexdigest()
     assert receipt["rejected"] and receipt["diagnostic_id"]
+    effective = records.read_audit_bytes(diagnose.job_id, "method-diagnosis.effective.json")
+    assert json.loads(effective)["evidence"] == ([] if all_invalid else retained_evidence)
+    assert receipt["effective_draft_sha256"] == hashlib.sha256(effective).hexdigest()
+    if review:
+        assert reviewer_input == effective
+        assert reviewer_input != original
+        reviewer = next(job for job in state.jobs.values() if job.job_type is JobType.REVIEW)
+        assert reviewer.status.value == "SUCCEEDED"
+    else:
+        assert reviewer_input is None
     assert len(engine.calls) == 1
     if not all_invalid:
         assert view.archive_status == "PENDING"

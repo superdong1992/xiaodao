@@ -1,8 +1,51 @@
 # TODO
 
-更新时间：2026-11-10
+更新时间：2026-11-13
 
 本文件是仓库活跃待办的唯一清单。已完成事项由代码、当前设计与 Git 历史证明，不在这里保留关闭项。
+
+## 路由 Top5 召回与简短结果（2026-11-13）
+
+- 已按确认方案实现：精准关键词未直达后，本地召回最多 5 个有命中的候选；模型完整阅读条件，只返回 `skill_id/reason/confidence`。零命中直接通用，额外审核字段忽略，无格式异常或新增重试。完整目录和版本保留在服务端。修复历史沿 PL-FIX-073 追加，使用和升级说明见 `docs/route-admission.md`。
+- **专项通过，待推送前完整验证**。以下 Python 范围使用 `python -m pytest -q -p no:cacheprovider --basetemp <独立目录> --junitxml <证据文件> <用例范围>`；证据均在本机 `.tmp/route-top5-20261113/`，各组有交集，不累计。表内路径相对 `tests/deterministic/`。
+
+| 范围 | 用例 | 结果与证据 |
+| --- | --- | --- |
+| 词法召回 | `unit/runtime/test_route_recall.py` | 48 passed；`route-recall-unit-final.xml` |
+| 三字段、候选边界、关键词 | `unit/runtime/test_route_admission.py`、`test_keyword_route.py`、`test_final_response.py` | 265 passed；`route-admission-keyword-final-response.xml` |
+| 发布与输出合同 | `unit/runtime/test_server_outcome_finalizer.py`、`test_keyword_route_finalizer.py`；`test_p0_semantic_assets.py` 的两个 Router 用例 | 62 passed；`finalizer-assets-regression.xml` |
+| 内置版本 | `unit/runtime/test_p0_semantic_assets.py::test_methods_v1_asset_versions_match_the_builtin_catalog` | 1 passed；`asset-versions.xml` |
+| 路由 Runtime | `unit/runtime/test_diagnosis_runtime.py`、`test_keyword_route_runtime.py`、`test_route_legacy_catalog.py -k "route or asset"` | Linux 26 passed、92 deselected；`runtime-01.xml` |
+| 实际交付链 | `integration/test_route_admission_delivery.py`、`test_route_top5_delivery.py`、`test_route_quote_delivery.py`、`test_mixed_model_json_delivery.py`、`test_keyword_route_delivery.py` | Linux 26 passed；`integration-02.xml` |
+| 真实测试场景的本地检查 | `unit/runtime/test_real_route_scenarios.py`，禁止模型执行 | 5 passed；`real-route-scenarios.xml` |
+
+- 先红证据为 `short-result-red.xml`（1 failed）和 `finalizer-assets-red2.xml`（4 failed）。首轮集成与资产并发编辑冲突、版本尚未同步，记录在 `integration-01.xml`；源码稳定后同范围通过，不删除失败证据。现有 Runtime 模拟目录补充明确的 RPC 适用描述，使基础 RPC 输入可被词法召回；未放宽生产匹配规则。
+- 文档与升级检查命令 `node --test tools/test-flow/tests/production-upgrade.test.mjs tools/test-flow/tests/docs-drift.test.mjs` 为 12 passed（`docs-final.log`）；旧升级检查仍要求格式错误，先红保留在 `docs-red.log`，已同步为正常回退。目录身份用例的最终断言补跑 1 passed（`route-index-final.xml`）。`git diff --check` 通过。真实 `real.route` 的五场景和五次调用预算保持，入口已改用相同候选的精简索引；本轮只用确定性替身验证，没有真实模型调用。
+- 2026-11-13 推送准备：Top5 路由与前一轮 LLM 输出容错一起交付，修复正文和专项记录已整理。先审阅 `dev.default --plan-only`，再验证同一源码快照；准备时尚待完整验证，最终状态以 PL-FIX-073、PL-FIX-042 本轮的 verdict 元数据为准。证据保存在 `.tmp/route-top5-push-20261113/`，使用既有 D 盘 Ubuntu 22.04、锁定依赖和持久盘 PostgreSQL，保留全部用例与 300 秒门槛，零真实模型调用。通过后只回填 verdict 引用元数据，再提交推送。
+- 首轮 `run-20261113T035633Z-4fbf9c2e` 为 `FAIL`：7 项单元测试仍要求格式差异抛错，1 项集成测试仍禁止 Reviewer 接收有效部分结果，1 项测试夹具摘要未更新，另有 MCP/REST 各 2 项专用旅程未在问题中声明 RPC，正常零召回后误用专用替身而失败。101 份证据已完整保存并校验。已按当前合同同步测试与夹具；公开旅程保留客户端中性 `scope` 和问题原文复制规则，只把测试原文明示为 RPC 调用。生产代码、召回规则、文件完整性和审核内容检查均未放宽，仍须对修正后的最终源码重新完整验证。
+- 修正后的 Linux 专项全部通过：空路由响应 1 项（`empty-route-regression.xml`）；报告与输出读取 62 项（`reader-memory-regression.xml`）；Methods 引用 80 项（`lan-meta-marker-final.xml`）；部分结果交付 3 项（`partial-delivery-regression.xml`）；RPC 夹具摘要 1 项（`fixture-manifest-regression.xml`）；公开 MCP/REST 旅程 4 项（`public-diagnosis-regression.xml`）。命令仍为上文的 pytest 入口，各 XML 位于本次推送证据目录。第二轮将以新源码快照重新审阅计划并执行 `dev.default --resume fresh`，不复用首轮失败结果，完整结论只看最新 verdict 元数据。
+- 上线前结束活跃任务再重启，并使用原公司故障问题观察循环生成、输出 token、耗时和路由结果；当前不能宣称公司模型故障已消除。
+
+## LLM 输出与冗余校验专项（2026-11-12）
+
+- 在 `8.2.0 / b3e7132` 及本轮工作树的实际入口复现后修复：路由条件 `id`、缺证据、额外字段等格式差异；JSON 展示包装；Intake 和经验的可选元数据；报告状态行；可选结构化终态；Methods 整批拒绝与重复解析。路由没有可用选择时正常转通用；Methods 保留可用发现；没有可复用内容的经验正常不入库。这些差异不记录异常、不增加模型重试。入口清单见 `docs/model-output-compatibility.md`，修复历史沿 PL-FIX-042、PL-FIX-073 及其关联条目追加。
+- **专项通过，待推送前完整验证**。Python 命令均为 `python -m pytest -q -p no:cacheprovider --basetemp <独立目录> --junitxml <证据文件> <下列用例范围>`；部分组加 `--tb=short`。下表路径相对 `tests/deterministic/`；未写筛选条件的范围均完整执行。证据位于本机 `.tmp/llm-output-audit-20261112/`，各组有重叠，不累计总数。
+
+| 范围 | 用例与筛选条件 | 结果及证据 |
+| --- | --- | --- |
+| 共享 JSON 与路由 | `unit/runtime/` 下的 `test_model_json.py`、`test_route_json.py`、`test_route_admission.py` | 274 passed；`json-route-final.xml` |
+| 原文与实际路由交付 | `unit/runtime/` 下的 `test_final_response.py`、`test_model_output_escaping.py`、`test_server_outcome_finalizer.py`；`integration/` 下的 `test_route_admission_delivery.py`、`test_route_quote_delivery.py` | Linux 113 passed；`shared-final-linux.xml` |
+| 网站到审核、报告、归档 | `integration/test_mixed_model_json_delivery.py`，含 strict + Reviewer 部分证据 | Linux 6 passed；`mixed-final-linux.xml` |
+| Intake 与记忆 | `unit/agent/` 下的 `test_llm_output_tolerance.py`、`test_intake.py`、`test_intake_tolerance.py`、`test_continuation_intent.py`、`test_memory_correction_attribution_review.py`、`test_feedback_comment_review.py`、`test_followup_corrections.py`、`test_generic_feedback.py`、`test_answer_feedback_memory.py`、`test_memory_revision_store.py`；`unit/runtime/` 下的 `test_experience_memory.py`、`test_memory_correction_review.py`、`test_answer_memory.py` | Linux 456 passed；`intake-memory-final-linux.xml` |
+| Methods 首轮联合 | `unit/runtime/` 下的 `test_methods_response_tolerance.py`、`test_methods_advisory.py`、`test_methods_selection.py`、`test_methods_evaluation_v2.py`、`test_methods_output_pipeline.py`、`test_p0_semantic_assets.py` | 124 passed；`methods-complete.xml`。命令另列两个 `__test__ = False` 的历史帮助文件，未收集用例，不计通过 |
+| Methods 最终追加 | `unit/runtime/` 下的 `test_methods_selection.py`、`test_methods_advisory.py`、`test_methods_output_pipeline.py`、`test_methods_response_tolerance.py` | 91 passed；`methods-review-final.xml`，覆盖完整/部分证据交接及整份审核意见 |
+| Methods 既有证据用例 | `unit/runtime/test_methods_skill.py -k "grounding or grounded_methods"` | 10 passed、83 deselected；`methods-skill-grounding.xml` |
+| CLI 结果读取 | `unit/runtime/` 下的 `test_structured_output.py`、`test_agent_telemetry.py`、`test_agent_telemetry_boundaries.py` | 225 passed；`telemetry-regression.xml` |
+| 报告最终交付 | `unit/runtime/test_skill_direct.py`、`test_generic_locator.py`，以及 `test_document_runtime.py::test_document_report_format_variants_deliver_without_failure` | 38 passed；`reports-delivery.xml` |
+
+- 报告首轮运行上述两个解析文件及 `unit/runtime/test_diagnosis_runtime.py`，使用 `-k "generic or direct_report or delivery_protocol or private_capability or report_presentation"`，73 passed、67 deselected，证据 `reports-regression.xml`；其后的正文保留调整由表内最终 38 项覆盖。先红记录包括 JSON 16 项、报告 12 项、telemetry 11 项、Intake/记忆 18 项，以及捕获 INFO 日志后复现的空卡 11 项。Methods 的先红、后续映射冲突和解析边界失败轮也完整保留。
+- 前一轮路由条件专项及关键词短路径复核保留在 `.tmp/route-condition-tolerance-20261112/`。Windows 临时目录权限、长路径及 `DirEntry.stat().st_nlink` 差异导致的失败记录均保留；涉及 Linux Server 文件行为的用例已在既有 WSL Python 3.12.13、同一当前工作树下复核，没有放宽文件检查。
+- `node --test tools/test-flow/tests/docs-drift.test.mjs` 为 4 passed；`git diff --check` 通过。本轮零真实模型调用。2026-11-13 与 Top5 路由一起准备推送，准备时仍待完整 Test Flow；本次最终结论以 PL-FIX-042 的最新 verdict 元数据为准，不沿用历史 PASS。
 
 ## 专用定位优化的推送验证与后续观测（2026-11-10）
 

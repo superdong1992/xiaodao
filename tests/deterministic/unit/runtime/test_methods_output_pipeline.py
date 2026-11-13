@@ -115,19 +115,15 @@ def _verified_input(
 def test_verify_method_diagnosis_classifies_marker_not_indexed() -> None:
     skill, target, skill_load, draft = _verified_input(marker="rpc deadline")
 
-    with pytest.raises(MethodsValidationError) as captured:
-        verify_method_diagnosis(
+    result = verify_method_diagnosis(
             skill=skill,
             draft=draft,
             target_logs=(target,),
             logparse_receipt_sha256="a" * 64,
             skill_load=skill_load,
         )
-
-    assert (
-        captured.value.reason_code
-        is MethodsValidationReasonCode.EVIDENCE_MARKER_NOT_INDEXED
-    )
+    assert result.draft.status == "INSUFFICIENT"
+    assert result.selection["rejected"][0]["reason_code"] == MethodsValidationReasonCode.EVIDENCE_MARKER_NOT_INDEXED.value
 
 
 def test_verify_method_diagnosis_classifies_confirmed_evidence_missing() -> None:
@@ -141,19 +137,15 @@ def test_verify_method_diagnosis_classifies_confirmed_evidence_missing() -> None
         safety_notes=draft.safety_notes,
     )
 
-    with pytest.raises(MethodsValidationError) as captured:
-        verify_method_diagnosis(
+    result = verify_method_diagnosis(
             skill=skill,
             draft=missing,
             target_logs=(target,),
             logparse_receipt_sha256="a" * 64,
             skill_load=skill_load,
         )
-
-    assert (
-        captured.value.reason_code
-        is MethodsValidationReasonCode.CONFIRMED_EVIDENCE_MISSING
-    )
+    assert result.draft.status == "INSUFFICIENT"
+    assert result.selection["rejected"][0]["reason_code"] == "CONFIRMED_EVIDENCE_MISSING"
 
 
 def test_verify_method_diagnosis_classifies_full_scan_miss() -> None:
@@ -186,19 +178,15 @@ def test_verify_method_diagnosis_classifies_full_scan_miss() -> None:
         }
     )
 
-    with pytest.raises(MethodsValidationError) as captured:
-        verify_method_diagnosis(
+    result = verify_method_diagnosis(
             skill=skill,
             draft=draft,
             target_logs=(target,),
             logparse_receipt_sha256="a" * 64,
             skill_load=skill_load,
         )
-
-    assert (
-        captured.value.reason_code
-        is MethodsValidationReasonCode.CONFIRMED_MARKER_SCAN_MISS
-    )
+    assert result.draft.status == "INSUFFICIENT"
+    assert result.selection["rejected"][0]["reason_code"] == MethodsValidationReasonCode.CONFIRMED_MARKER_SCAN_MISS.value
 
 
 def test_verify_method_diagnosis_decodes_each_cited_source_once(
@@ -403,7 +391,6 @@ def test_review_normalizes_pretty_methods_draft_without_sealer(tmp_path: Path) -
 @pytest.mark.parametrize(
     "invalid_payload",
     [
-        b'\xef\xbb\xbf{"schema_version":1}',
         b'{"schema_version":1,"schema_version":1}',
         b'{"schema_version":NaN}',
         b'{"schema_version":1}\xff',
@@ -426,6 +413,21 @@ def test_methods_draft_still_rejects_ambiguous_or_invalid_json(
     assert captured.value.failure_category == "method_draft_schema"
     assert captured.value.raw_outcome_bytes == invalid_payload
     assert draft_path.read_bytes() == invalid_payload
+
+
+def test_methods_draft_with_optional_fields_omitted_is_insufficient_without_rejection(tmp_path, caplog):
+    job = _contract("job-diagnose.json", Job)
+    manifest = _contract("workspace-input-manifest.json", WorkspaceInputManifest)
+    _empty_workspace(tmp_path)
+    payload = b'\xef\xbb\xbf{"schema_version":1,"explanation":"No findings."}'
+    draft_path = tmp_path / "output/method-diagnosis.draft.json"
+    draft_path.write_bytes(payload)
+    result = read_agent_output(tmp_path, job, manifest)
+    assert result.draft.status == "INSUFFICIENT"
+    assert result.draft.evidence == ()
+    assert result.raw_bytes == payload
+    assert not any(getattr(record, "dfx_event", "") == "runtime.output.rejected"
+                   or record.exc_info for record in caplog.records)
 
 
 def test_workspace_freezes_methods_v1_audit_and_target_bytes_read_only(

@@ -145,6 +145,10 @@ def test_feedback_identity_cannot_point_at_another_comment_or_target(system):
 ])
 def test_unsupported_or_fabricated_analysis_cannot_be_adopted(system, result):
     backend = Backend(result)
+    if json.loads(result).get("adopt") is False:
+        assert review(system, feedback_task(system), backend) is None
+        assert len(backend.calls) == 1
+        return
     with pytest.raises(ValueError):
         review(system, feedback_task(system), backend)
     assert len(backend.calls) == 1

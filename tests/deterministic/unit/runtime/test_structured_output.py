@@ -83,18 +83,31 @@ def test_structured_terminal_keeps_read_and_grep_policy_boundaries(name, allowed
 
 @pytest.mark.parametrize("value", [None, [], "{}", True, 1, {"bad": float("nan")},
     {"bad": float("inf")}, {"bad": float("-inf")}], ids=["null", "array", "string", "bool", "int", "nan", "inf", "negative-inf"])
-def test_invalid_structured_container_cannot_fall_back_to_valid_legacy_result(value):
-    telemetry = stream([terminal(structured_output=value, result=json.dumps(ANSWER))])
-    assert telemetry.final_result is None
+def test_unusable_optional_structured_output_keeps_same_terminal_result(caplog, value):
+    text = json.dumps(ANSWER)
+    telemetry = stream([terminal(structured_output=value, result=text)])
+    assert telemetry.final_result == text
+    assert telemetry.permits_file_access("none")
+    assert not caplog.records
 
 
 @pytest.mark.parametrize("value", [{"bad": "\ud800"}, {"bad": "\udfff"},
     {"nested": ["valid", {"bad": "\ud800"}]}], ids=["high-surrogate", "low-surrogate", "nested-surrogate"])
-def test_invalid_unicode_structured_object_cannot_fall_back_to_legacy_result(value):
+def test_unencodable_structured_object_keeps_same_terminal_result(value):
     telemetry = AgentStreamTelemetry()
     telemetry.write(json.dumps(terminal(structured_output=value, result=json.dumps(ANSWER)),
         ensure_ascii=True).encode("ascii") + b"\n")
-    assert telemetry.final_result is None
+    assert telemetry.final_result == json.dumps(ANSWER)
+
+
+@pytest.mark.parametrize("value", [None, [], "{}", {"bad": float("nan")}])
+def test_unusable_optional_structured_output_without_text_has_no_result(value):
+    assert stream([terminal(structured_output=value)]).final_result is None
+
+
+@pytest.mark.parametrize("changes", [{"subtype": "error"}, {"is_error": True}])
+def test_optional_structured_output_fallback_does_not_rescue_error_terminal(changes):
+    assert stream([terminal(structured_output=None, result="正文", **changes)]).final_result is None
 
 
 @pytest.mark.parametrize("ensure_ascii", [False, True])
@@ -172,6 +185,12 @@ def test_real_backend_returns_structured_terminal_instead_of_tool_input_or_descr
     tool["message"]["content"][0]["input"] = {"untrusted_partial": "must not be returned"}
     result = replay_backend(tmp_path, [tool, terminal(result="结构化结果已生成。")])
     assert json.loads(result.final_result) == ANSWER
+
+
+def test_real_backend_keeps_text_when_optional_structured_output_is_null(tmp_path):
+    text = json.dumps(ANSWER)
+    result = replay_backend(tmp_path, [terminal(structured_output=None, result=text)])
+    assert result.final_result == text
 
 
 @pytest.mark.parametrize("case,code", [

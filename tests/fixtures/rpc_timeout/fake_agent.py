@@ -3,7 +3,7 @@
 
 The fixture deliberately implements the production protocol split:
 
-* ROUTE returns one structured semantic assessment for every eligible Skill.
+* ROUTE returns one three-field choice from the server's shortlist.
 * Pass A requires one installed ``logparse-diagnose`` Helper load before one
   product-owned Logparse broker command.
 * Pass B receives the frozen Methods package/target logs and writes only the
@@ -33,11 +33,7 @@ sys.path.insert(0, os.fspath(REPOSITORY_ROOT))
 from tests.route_helpers import route_response_for_prompt
 
 from problem_locator.contracts import (  # noqa: E402
-    AgentJobOutcomeDraftV2,
     JobType,
-    OutcomeResultType,
-    RouteDecision,
-    RouteKind,
     WorkspaceInputManifest,
     canonical_json_bytes,
     parse_canonical_json_bytes,
@@ -168,38 +164,17 @@ def _route(instruction: dict[str, Any], context: str) -> None:
         item
         for item in skills
         if isinstance(item, dict)
-        and item.get("requires_logparse") is True
         and "rpc" in " ".join(
             str(item.get(field, "")).lower()
-            for field in ("registration_id", "capability", "summary")
+            for field in ("name", "capability", "summary")
         )
     ]
-    if len(matches) != 1 or not isinstance(matches[0].get("ref"), dict):
+    if len(matches) != 1 or not isinstance(matches[0].get("skill_id"), str):
         raise RuntimeError("the RPC Methods registration is not uniquely routable")
-    manifest = _manifest()
-    draft = AgentJobOutcomeDraftV2(
-        schema_version=2,
-        job_id=str(instruction["job_id"]),
-        case_id=manifest.case_id,
-        job_type=JobType.ROUTE,
-        base_state_revision=int(instruction["base_state_revision"]),
-        result_type=OutcomeResultType.COMPLETED,
-        payload=RouteDecision(
-            kind=RouteKind.MATCHED,
-            skill_ref=matches[0]["ref"],
-            reason="The product catalog contains one RPC Logparse Methods registration.",
-            confidence=1.0,
-        ),
-        consumed_evidence_refs=[],
-        proposed_evidence_drafts=[],
-        proposed_artifact_drafts=[],
-        error=None,
-        rule_claims=[],
-    )
-    _emit_result(route_response_for_prompt(context, draft.payload.skill_ref.id,
-        reason=draft.payload.reason, confidence=draft.payload.confidence))
+    _emit_result(route_response_for_prompt(context, matches[0]["skill_id"],
+        reason="The shortlist contains one RPC Logparse Methods registration.", confidence=1.0))
     _record_invocation(
-        job_id=draft.job_id,
+        job_id=str(instruction["job_id"]),
         job_type=JobType.ROUTE,
         phase="ROUTE",
     )

@@ -933,14 +933,16 @@ def test_grounding_matches_declared_marker_without_case_sensitivity(
 
     changed_identity = _diagnosis(line=cited)
     changed_identity["evidence"][0]["identity_tokens"] = ["REQUEST_ID=42"]
-    with pytest.raises(ValueError, match="same evidence"):
-        verify_method_diagnosis(
-            skill=skill,
-            draft=changed_identity,
-            target_logs=logs,
-            logparse_receipt_sha256=RECEIPT_SHA256,
-            skill_load=receipt,
-        )
+    rejected = verify_method_diagnosis(
+        skill=skill,
+        draft=changed_identity,
+        target_logs=logs,
+        logparse_receipt_sha256=RECEIPT_SHA256,
+        skill_load=receipt,
+    )
+    assert rejected.draft.status == "INSUFFICIENT"
+    assert rejected.draft.evidence == ()
+    assert rejected.selection["rejected"][0]["reason_code"] == "EVIDENCE_GROUNDING_INVALID"
 
 
 def test_grounding_rejects_marker_owned_only_by_another_method(
@@ -954,14 +956,16 @@ def test_grounding_rejects_marker_owned_only_by_another_method(
     receipt = scan_method_markers(skill=skill, target_logs=logs)
 
     assert receipt.loaded_method_ids == ("slow-execution", "unrelated-method")
-    with pytest.raises(ValueError, match="not indexed by its method"):
-        verify_method_diagnosis(
-            skill=skill,
-            draft=draft,
-            target_logs=logs,
-            logparse_receipt_sha256=RECEIPT_SHA256,
-            skill_load=receipt,
-        )
+    rejected = verify_method_diagnosis(
+        skill=skill,
+        draft=draft,
+        target_logs=logs,
+        logparse_receipt_sha256=RECEIPT_SHA256,
+        skill_load=receipt,
+    )
+    assert rejected.draft.status == "INSUFFICIENT"
+    assert rejected.draft.evidence == ()
+    assert rejected.selection["rejected"][0]["reason_code"] == "METHOD_EVIDENCE_MARKER_NOT_INDEXED"
 
 
 def test_grounding_allows_a_literal_shared_by_multiple_methods(
@@ -1133,34 +1137,36 @@ def test_grounded_methods_are_mapped_by_the_server_into_candidate_domain(
 
 
 @pytest.mark.parametrize(
-    ("mutation", "message"),
+    ("mutation", "status"),
     [
-        (lambda value: value["evidence"][0]["sources"][0].update({"line_number": 1}), "differs"),
-        (lambda value: value["evidence"][0]["sources"][0].update({"marker": "UNKNOWN"}), "not indexed"),
-        (lambda value: value["evidence"][0].update({"identity_tokens": ["request_id=99"]}), "same evidence"),
-        (lambda value: value.update({"confirmed_methods": ["unknown-method"]}), "unknown methods"),
+        (lambda value: value["evidence"][0]["sources"][0].update({"line_number": 1}), "INSUFFICIENT"),
+        (lambda value: value["evidence"][0]["sources"][0].update({"marker": "UNKNOWN"}), "INSUFFICIENT"),
+        (lambda value: value["evidence"][0].update({"identity_tokens": ["request_id=99"]}), "INSUFFICIENT"),
+        (lambda value: value.update({"confirmed_methods": ["unknown-method"]}), "PARTIAL"),
     ],
 )
-def test_grounding_rejects_ungrounded_claims(
+def test_grounding_selects_usable_findings_and_records_ordinary_gaps(
     tmp_path: Path,
     mutation: Any,
-    message: str,
+    status: str,
 ) -> None:
     skill = load_specialized_skill_registration(_write_registration(tmp_path / "skills"))
     cited = "2026-08-23T10:00:05Z API_COMPLETE request_id=42 cost_us=6500000"
     draft = _diagnosis(line=cited)
     mutation(draft)
-    with pytest.raises(ValueError, match=message):
-        verify_method_diagnosis(
+    selected = verify_method_diagnosis(
+        skill=skill,
+        draft=draft,
+        target_logs=(_target("server", f"noise\n{cited}\n"),),
+        logparse_receipt_sha256=RECEIPT_SHA256,
+        skill_load=scan_method_markers(
             skill=skill,
-            draft=draft,
             target_logs=(_target("server", f"noise\n{cited}\n"),),
-            logparse_receipt_sha256=RECEIPT_SHA256,
-            skill_load=scan_method_markers(
-                skill=skill,
-                target_logs=(_target("server", f"noise\n{cited}\n"),),
-            ),
-        )
+        ),
+    )
+    assert selected.draft.status == status
+    assert len(selected.draft.evidence) == (1 if status == "PARTIAL" else 0)
+    assert selected.selection["gap_messages"]
 
 
 def test_registration_hash_drift_changes_combined_identity(tmp_path: Path) -> None:

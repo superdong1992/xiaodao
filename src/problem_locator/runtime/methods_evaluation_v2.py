@@ -1,12 +1,11 @@
-"""Strict model-response validation, one repair, and blind Methods consensus."""
+"""Project model judgments onto a fixed plan before blind Methods consensus."""
 
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from typing import Any, Literal
-
-from pydantic import ValidationError
 
 from problem_locator.contracts import (
     MethodConsensusV2,
@@ -17,13 +16,10 @@ from problem_locator.contracts import (
 )
 
 
-_OUTPUT_FIELDS = frozenset(
-    {"evaluation_ref", "verdict", "supporting_event_refs", "reason"}
-)
 
 
 class MethodEvaluationResponseError(ValueError):
-    """Raised when a model response violates the exact evaluation plan shape."""
+    """Raised when a model response cannot be read as a JSON array."""
 
     def __init__(
         self,
@@ -57,6 +53,10 @@ def _decoded_response(response: object) -> object:
                 "model evaluation response must be UTF-8 JSON"
             ) from exc
     if isinstance(response, str):
+        response = response.strip().removeprefix("\ufeff").strip()
+        fenced = re.fullmatch(r"```(?:json)?[^\S\r\n]*\r?\n([\s\S]*?)\r?\n```", response, re.IGNORECASE)
+        if fenced is not None:
+            response = fenced.group(1)
         try:
             return json.loads(
                 response,
@@ -75,56 +75,38 @@ def parse_method_evaluation_response_v2(
     plan: MethodEvaluationPlanV2,
     response: object,
 ) -> tuple[MethodEvaluationOutputItemV2, ...]:
-    """Parse the exact root-array response and bind it to plan order."""
-
-    if not isinstance(plan, MethodEvaluationPlanV2):
-        raise TypeError("plan must be MethodEvaluationPlanV2")
+    """Read recognizable judgments and restore the server-owned plan order."""
     decoded = _decoded_response(response)
     if not isinstance(decoded, list):
         raise MethodEvaluationResponseError("model evaluation response root must be an array")
-    if len(decoded) != len(plan.evaluations):
-        raise MethodEvaluationResponseError(
-            "model evaluation response must exactly cover every planned evaluation"
-        )
-
+    reviews = [item.model_dump() if isinstance(item, MethodEvaluationOutputItemV2) else item
+               for item in decoded if isinstance(item, (Mapping, MethodEvaluationOutputItemV2))]
     parsed: list[MethodEvaluationOutputItemV2] = []
-    for index, (raw_item, planned) in enumerate(
-        zip(decoded, plan.evaluations, strict=True)
-    ):
-        if isinstance(raw_item, MethodEvaluationOutputItemV2):
-            item = raw_item
+    for planned in plan.evaluations:
+        matches = [item for item in reviews if item.get("evaluation_ref") == planned.evaluation_ref]
+        choices: list[MethodEvaluationOutputItemV2] = []
+        for raw in matches:
+            verdict = raw.get("verdict")
+            verdict = verdict.strip().upper() if isinstance(verdict, str) else "UNKNOWN"
+            if verdict not in {"CONFIRMED", "REJECTED", "UNKNOWN"}:
+                verdict = "UNKNOWN"
+            refs = raw.get("supporting_event_refs", ())
+            refs = refs if isinstance(refs, (list, tuple)) else ()
+            supporting = tuple(ref for ref in planned.evidence_event_refs if ref in refs)
+            if verdict == "CONFIRMED" and not supporting:
+                verdict = "UNKNOWN"
+            reason = raw.get("reason")
+            reason = reason if isinstance(reason, str) and reason.strip() else "模型未提供逐项说明。"
+            choices.append(MethodEvaluationOutputItemV2(
+                evaluation_ref=planned.evaluation_ref, verdict=verdict,
+                supporting_event_refs=supporting if verdict == "CONFIRMED" else (), reason=reason))
+        signatures = {(item.verdict, item.supporting_event_refs) for item in choices}
+        if len(signatures) == 1:
+            parsed.append(choices[0])
         else:
-            if not isinstance(raw_item, Mapping) or set(raw_item) != _OUTPUT_FIELDS:
-                raise MethodEvaluationResponseError(
-                    f"model evaluation item {index} must contain only "
-                    "evaluation_ref, verdict, supporting_event_refs, and reason"
-                )
-            try:
-                item = MethodEvaluationOutputItemV2.model_validate(dict(raw_item))
-            except ValidationError as exc:
-                raise MethodEvaluationResponseError(
-                    f"model evaluation item {index} is invalid"
-                ) from exc
-        if item.evaluation_ref != planned.evaluation_ref:
-            raise MethodEvaluationResponseError(
-                "model evaluation response must use exact plan order and coverage"
-            )
-        planned_event_refs = planned.evidence_event_refs
-        if any(ref not in planned_event_refs for ref in item.supporting_event_refs):
-            raise MethodEvaluationResponseError(
-                f"model evaluation item {index} supporting_event_refs must belong "
-                "to its planned evaluation"
-            )
-        supporting_ref_set = set(item.supporting_event_refs)
-        expected_supporting_order = tuple(
-            ref for ref in planned_event_refs if ref in supporting_ref_set
-        )
-        if item.supporting_event_refs != expected_supporting_order:
-            raise MethodEvaluationResponseError(
-                f"model evaluation item {index} supporting_event_refs must retain "
-                "the planned event order"
-            )
-        parsed.append(item)
+            parsed.append(MethodEvaluationOutputItemV2(
+                evaluation_ref=planned.evaluation_ref, verdict="UNKNOWN",
+                supporting_event_refs=(), reason="模型未对该项给出明确判断。"))
     return tuple(parsed)
 
 

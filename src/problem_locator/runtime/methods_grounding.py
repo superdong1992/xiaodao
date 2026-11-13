@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 from typing import Any, Mapping, Sequence
 
@@ -17,21 +17,6 @@ _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _SOURCE_ID = re.compile(r"[a-z][a-z0-9]*(?:[_-][a-z0-9]+)*\Z")
 _DIAGNOSIS_STATUSES = frozenset({"CONFIRMED", "PARTIAL", "INSUFFICIENT"})
 _REVIEW_VERDICTS = frozenset({"PASS", "NEED_MORE_EVIDENCE", "REJECT"})
-_DRAFT_FIELDS = frozenset(
-    {
-        "schema_version",
-        "status",
-        "confirmed_methods",
-        "candidate_methods",
-        "evidence",
-        "limitations",
-        "safety_notes",
-    }
-)
-_EVIDENCE_FIELDS = frozenset({"method_id", "summary", "identity_tokens", "sources"})
-_SOURCE_FIELDS = frozenset({"source_id", "line_number", "marker", "line"})
-_REVIEW_FIELDS = frozenset({"schema_version", "verdict", "findings", "limitations"})
-_REVIEW_FINDING_FIELDS = frozenset({"method_id", "identity_tokens", "verdict", "reason"})
 
 
 class MethodsValidationError(ValueError):
@@ -46,38 +31,24 @@ class MethodsValidationError(ValueError):
         super().__init__(message)
 
 
-def _exact(value: Mapping[str, Any], expected: frozenset[str], label: str) -> None:
-    if set(value) != expected:
-        raise ValueError(f"{label} fields are invalid")
+def _text(value: Any) -> str:
+    return value if isinstance(value, str) else ""
 
 
-def _nonblank(value: Any, *, label: str, maximum_bytes: int = 65_536) -> str:
-    if (
-        not isinstance(value, str)
-        or not value
-        or value.isspace()
-        or len(value.encode("utf-8")) > maximum_bytes
-    ):
-        raise ValueError(f"{label} must be bounded non-blank UTF-8 text")
-    return value
+def _strings(value: Any) -> tuple[str, ...]:
+    items = [value] if isinstance(value, str) else value
+    if not isinstance(items, (list, tuple)):
+        return ()
+    return tuple(dict.fromkeys(item for item in items if isinstance(item, str) and item.strip()))
 
 
-def _string_array(
-    value: Any,
-    *,
-    label: str,
-    allow_empty: bool = True,
-    maximum: int = 200,
-) -> tuple[str, ...]:
-    if (
-        not isinstance(value, list)
-        or (not allow_empty and not value)
-        or len(value) > maximum
-        or any(not isinstance(item, str) or not item or item.isspace() for item in value)
-        or len(value) != len(set(value))
-    ):
-        raise ValueError(f"{label} must contain unique non-blank strings")
-    return tuple(value)
+def _objects(value: Any) -> tuple[dict[str, Any], ...]:
+    return tuple(item for item in value if isinstance(item, dict)) if isinstance(value, (list, tuple)) else ()
+
+
+def _verdict(value: Any, choices: frozenset[str], default: str) -> str:
+    text = _text(value).strip().upper()
+    return text if text in choices else default
 
 
 def _safe_relative_path(value: str) -> str:
@@ -150,57 +121,35 @@ class MethodDiagnosisDraftV1:
     def from_mapping(cls, value: Mapping[str, Any]) -> "MethodDiagnosisDraftV1":
         if not isinstance(value, dict):
             raise ValueError("method diagnosis draft must be an object")
-        _exact(value, _DRAFT_FIELDS, "method diagnosis draft")
-        if type(value["schema_version"]) is not int or value["schema_version"] != 1:
-            raise ValueError("method diagnosis draft schema_version must equal integer 1")
-        status = value["status"]
-        if status not in _DIAGNOSIS_STATUSES:
-            raise ValueError("method diagnosis status is invalid")
-        confirmed = _string_array(value["confirmed_methods"], label="confirmed_methods")
-        candidates = _string_array(value["candidate_methods"], label="candidate_methods")
-        if set(confirmed) & set(candidates):
-            raise ValueError("confirmed_methods and candidate_methods must be disjoint")
-        evidence_raw = value["evidence"]
-        if not isinstance(evidence_raw, list) or len(evidence_raw) > 500:
-            raise ValueError("evidence must be a bounded array")
+        confirmed = _strings(value.get("confirmed_methods"))
+        candidates = tuple(item for item in _strings(value.get("candidate_methods")) if item not in confirmed)
         evidence: list[MethodEvidenceV1] = []
-        for evidence_index, raw_item in enumerate(evidence_raw):
-            if not isinstance(raw_item, dict):
-                raise ValueError(f"evidence[{evidence_index}] must be an object")
-            _exact(raw_item, _EVIDENCE_FIELDS, f"evidence[{evidence_index}]")
-            method_id = _nonblank(raw_item["method_id"], label="evidence method_id", maximum_bytes=256)
-            summary = _nonblank(raw_item["summary"], label="evidence summary")
-            tokens = _string_array(
-                raw_item["identity_tokens"],
-                label="evidence identity_tokens",
-                allow_empty=False,
-                maximum=100,
-            )
-            sources_raw = raw_item["sources"]
-            if not isinstance(sources_raw, list) or not sources_raw or len(sources_raw) > 100:
-                raise ValueError("evidence sources must be a non-empty bounded array")
+        for raw_item in _objects(value.get("evidence")):
+            method_id = _text(raw_item.get("method_id"))
+            summary = _text(raw_item.get("summary"))
+            if not method_id.strip() or not summary.strip():
+                continue
             sources: list[GroundedEvidenceSourceV1] = []
-            for source_index, raw_source in enumerate(sources_raw):
-                if not isinstance(raw_source, dict):
-                    raise ValueError("evidence source must be an object")
-                _exact(raw_source, _SOURCE_FIELDS, f"evidence source {source_index}")
-                source_id = _nonblank(raw_source["source_id"], label="source_id", maximum_bytes=128)
-                line_number = raw_source["line_number"]
-                if type(line_number) is not int or line_number < 1:
-                    raise ValueError("evidence source line_number must be positive")
-                marker = _nonblank(raw_source["marker"], label="source marker", maximum_bytes=1024)
-                line = _nonblank(raw_source["line"], label="source line")
-                if "\n" in marker or "\r" in marker or "\n" in line or "\r" in line:
-                    raise ValueError("evidence source marker and line must be single-line")
-                sources.append(GroundedEvidenceSourceV1(source_id, line_number, marker, line))
-            evidence.append(MethodEvidenceV1(method_id, summary, tokens, tuple(sources)))
-        limitations = _string_array(value["limitations"], label="limitations")
-        safety_notes = _string_array(value["safety_notes"], label="safety_notes")
-        if status == "CONFIRMED" and not confirmed:
-            raise ValueError("CONFIRMED requires at least one confirmed method")
+            for raw_source in _objects(raw_item.get("sources")):
+                source_id = _text(raw_source.get("source_id"))
+                line_number = raw_source.get("line_number")
+                if not source_id.strip() or type(line_number) is not int or line_number < 1:
+                    continue
+                source = GroundedEvidenceSourceV1(source_id, line_number,
+                    _text(raw_source.get("marker")), _text(raw_source.get("line")))
+                if source not in sources:
+                    sources.append(source)
+            evidence.append(MethodEvidenceV1(method_id, summary,
+                _strings(raw_item.get("identity_tokens")), tuple(sources)))
+        status = _verdict(value.get("status"), _DIAGNOSIS_STATUSES,
+                          "PARTIAL" if confirmed or evidence or candidates else "INSUFFICIENT")
         if status == "INSUFFICIENT" and (confirmed or evidence):
-            raise ValueError("INSUFFICIENT forbids confirmed methods and evidence")
-        return cls(status, confirmed, candidates, tuple(evidence), limitations, safety_notes)
+            status = "PARTIAL"
+        elif status == "CONFIRMED" and not confirmed and not evidence:
+            status = "PARTIAL" if candidates else "INSUFFICIENT"
+        return cls(status, confirmed, candidates, tuple(evidence),
+                   _strings(value.get("limitations")), _strings(value.get("safety_notes")))
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,7 +185,7 @@ class MethodGroundingAuditV1:
 class VerifiedMethodDiagnosisV1:
     draft: MethodDiagnosisDraftV1
     audit: MethodGroundingAuditV1
-    # Present only on the server-owned, Reviewer-off selection path.
+    # Present after server-owned selection of independently grounded findings.
     selection: Mapping[str, Any] | None = None
     advisory: Mapping[str, Any] | None = None
 
@@ -305,16 +254,15 @@ def verify_method_evidence(
     item: MethodEvidenceV1,
     *,
     skill: ResolvedSpecializedSkillV1,
-    confirmed_methods: Sequence[str],
     by_source: Mapping[str, FrozenTargetLogV1],
     source_lines: dict[str, tuple[str, ...]],
 ) -> None:
     """Verify one complete finding without borrowing another finding's sources."""
+    if not item.sources:
+        raise ValueError("evidence has no cited target log")
     method = skill.methods.method_by_id.get(item.method_id)
     if method is None:
         raise ValueError("evidence names an unknown method")
-    if item.method_id not in confirmed_methods:
-        raise ValueError("evidence may only support a confirmed method")
     seen_sources: set[tuple[str, int]] = set()
     cited_lines: list[str] = []
     for source in item.sources:
@@ -346,87 +294,39 @@ def verify_method_evidence(
         raise ValueError("identity_tokens must occur in the same evidence sources")
 
 
-def verify_method_diagnosis(
-    *,
-    skill: ResolvedSpecializedSkillV1,
-    draft: Mapping[str, Any] | MethodDiagnosisDraftV1,
-    target_logs: Sequence[FrozenTargetLogV1],
-    logparse_receipt_sha256: str,
-    skill_load: SkillLoadReceiptV1,
-) -> VerifiedMethodDiagnosisV1:
-    """Ground every claimed source against immutable target-log bytes."""
-
+def _verify_method_inputs(
+    *, skill: ResolvedSpecializedSkillV1, target_logs: Sequence[FrozenTargetLogV1],
+    logparse_receipt_sha256: str, skill_load: SkillLoadReceiptV1,
+) -> MethodGroundingAuditV1:
+    """Check server-owned inputs once, independently of model judgments."""
     if not isinstance(skill, ResolvedSpecializedSkillV1):
         raise TypeError("skill must be a resolved specialized Skill")
-    diagnosis = (
-        draft
-        if isinstance(draft, MethodDiagnosisDraftV1)
-        else MethodDiagnosisDraftV1.from_mapping(draft)
-    )
     if not isinstance(logparse_receipt_sha256, str) or _SHA256.fullmatch(logparse_receipt_sha256) is None:
         raise ValueError("logparse receipt digest is invalid")
     logs = tuple(target_logs)
-    if not logs:
-        raise ValueError("grounding requires at least one frozen target log")
-    by_source: dict[str, FrozenTargetLogV1] = {}
-    for item in logs:
-        if not isinstance(item, FrozenTargetLogV1):
-            raise TypeError("target_logs must contain FrozenTargetLogV1")
-        if item.source_id in by_source:
-            raise ValueError("target log source ids must be unique")
-        by_source[item.source_id] = item
-
-    methods = skill.methods.method_by_id
-    named_methods = {*diagnosis.confirmed_methods, *diagnosis.candidate_methods}
-    unknown_methods = named_methods - set(methods)
-    if unknown_methods:
-        raise ValueError(f"diagnosis names unknown methods: {sorted(unknown_methods)!r}")
-
     expected_skill_load = scan_method_markers(skill=skill, target_logs=logs)
-    if not isinstance(skill_load, SkillLoadReceiptV1):
-        raise TypeError("skill_load must be the pre-context marker scan receipt")
     if skill_load != expected_skill_load:
         raise ValueError("injected Methods cards differ from the frozen marker scan")
-    hit_method_ids = set(skill_load.loaded_method_ids)
-    if any(method_id not in hit_method_ids for method_id in diagnosis.confirmed_methods):
-        raise MethodsValidationError(
-            MethodsValidationReasonCode.CONFIRMED_MARKER_SCAN_MISS,
-            "confirmed method has no positive marker in the full target-log scan",
-        )
-
-    evidence_method_ids: set[str] = set()
-    evidence_identities: set[tuple[str, tuple[str, ...]]] = set()
-    source_lines: dict[str, tuple[str, ...]] = {}
-    for item in diagnosis.evidence:
-        verify_method_evidence(
-            item, skill=skill, confirmed_methods=diagnosis.confirmed_methods,
-            by_source=by_source, source_lines=source_lines,
-        )
-        evidence_method_ids.add(item.method_id)
-        identity = (item.method_id, tuple(sorted(item.identity_tokens)))
-        if identity in evidence_identities:
-            raise ValueError("method evidence identities must be unique")
-        evidence_identities.add(identity)
-    if evidence_method_ids != set(diagnosis.confirmed_methods):
-        raise MethodsValidationError(
-            MethodsValidationReasonCode.CONFIRMED_EVIDENCE_MISSING,
-            "every confirmed method must have grounded evidence",
-        )
-
-    audit = MethodGroundingAuditV1(
-        schema_version=1,
-        registration_id=skill.registration_id,
+    return MethodGroundingAuditV1(
+        schema_version=1, registration_id=skill.registration_id,
         registration_sha256=skill.registration_sha256,
-        package_tree_sha256=skill.package_tree_sha256,
-        combined_sha256=skill.combined_sha256,
-        logparse_receipt_sha256=logparse_receipt_sha256,
-        status=diagnosis.status,
-        confirmed_methods=diagnosis.confirmed_methods,
-        evidence_count=len(diagnosis.evidence),
-        checked_source_count=len(logs),
-        skill_load=skill_load,
-    )
-    return VerifiedMethodDiagnosisV1(draft=diagnosis, audit=audit)
+        package_tree_sha256=skill.package_tree_sha256, combined_sha256=skill.combined_sha256,
+        logparse_receipt_sha256=logparse_receipt_sha256, status="INSUFFICIENT",
+        confirmed_methods=(), evidence_count=0, checked_source_count=len(logs), skill_load=skill_load)
+
+
+def verify_method_diagnosis(
+    *, skill: ResolvedSpecializedSkillV1, draft: Mapping[str, Any] | MethodDiagnosisDraftV1,
+    target_logs: Sequence[FrozenTargetLogV1], logparse_receipt_sha256: str,
+    skill_load: SkillLoadReceiptV1,
+) -> VerifiedMethodDiagnosisV1:
+    """Keep independently grounded findings without rejecting the whole response."""
+    from .methods_selection import diagnosis_mapping, select_method_diagnosis
+
+    value = diagnosis_mapping(draft) if isinstance(draft, MethodDiagnosisDraftV1) else draft
+    return select_method_diagnosis(skill=skill, draft=value, target_logs=target_logs,
+        logparse_receipt_sha256=logparse_receipt_sha256, skill_load=skill_load)
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -447,37 +347,19 @@ class MethodReviewV1:
     def from_mapping(cls, value: Mapping[str, Any]) -> "MethodReviewV1":
         if not isinstance(value, dict):
             raise ValueError("method review must be an object")
-        _exact(value, _REVIEW_FIELDS, "method review")
-        if type(value["schema_version"]) is not int or value["schema_version"] != 1:
-            raise ValueError("method review schema_version must equal integer 1")
-        verdict = value["verdict"]
-        if verdict not in _REVIEW_VERDICTS:
-            raise ValueError("method review verdict is invalid")
-        findings_raw = value["findings"]
-        if not isinstance(findings_raw, list) or len(findings_raw) > 500:
-            raise ValueError("method review findings must be a bounded array")
+        verdict = _verdict(value.get("verdict"), _REVIEW_VERDICTS, "NEED_MORE_EVIDENCE")
         findings: list[MethodReviewFindingV1] = []
-        keys: set[tuple[str, tuple[str, ...]]] = set()
-        for raw in findings_raw:
-            if not isinstance(raw, dict):
-                raise ValueError("method review finding must be an object")
-            _exact(raw, _REVIEW_FINDING_FIELDS, "method review finding")
-            method_id = _nonblank(raw["method_id"], label="review method_id", maximum_bytes=256)
-            tokens = _string_array(raw["identity_tokens"], label="review identity_tokens", allow_empty=False)
-            finding_verdict = raw["verdict"]
-            if finding_verdict not in _REVIEW_VERDICTS:
-                raise ValueError("method review finding verdict is invalid")
-            reason = _nonblank(raw["reason"], label="review reason")
-            key = (method_id, tuple(sorted(tokens)))
-            if key in keys:
-                raise ValueError("method review findings must be unique")
-            keys.add(key)
-            findings.append(MethodReviewFindingV1(method_id, tokens, finding_verdict, reason))
-        return cls(
-            verdict=verdict,
-            findings=tuple(findings),
-            limitations=_string_array(value["limitations"], label="review limitations"),
-        )
+        for raw in _objects(value.get("findings")):
+            method_id = _text(raw.get("method_id"))
+            if not method_id.strip():
+                continue
+            finding = MethodReviewFindingV1(method_id, _strings(raw.get("identity_tokens")),
+                _verdict(raw.get("verdict"), _REVIEW_VERDICTS, "NEED_MORE_EVIDENCE"),
+                _text(raw.get("reason")) or "模型未提供逐项说明。")
+            if finding not in findings:
+                findings.append(finding)
+        return cls(verdict, tuple(findings), _strings(value.get("limitations")))
+
 
 
 def verify_method_review(
@@ -495,24 +377,24 @@ def verify_method_review(
         # spelling and coverage are explanatory metadata in advisory mode.
         return review if isinstance(review, MethodReviewV1) else parse_advisory_review(review)
     parsed = review if isinstance(review, MethodReviewV1) else MethodReviewV1.from_mapping(review)
-    expected = {
-        (item.method_id, tuple(sorted(item.identity_tokens)))
-        for item in diagnosis.draft.evidence
-    }
-    actual = {
-        (item.method_id, tuple(sorted(item.identity_tokens))) for item in parsed.findings
-    }
-    if actual != expected:
-        raise ValueError("review findings must cover the exact grounded evidence identities")
-    if parsed.verdict == "PASS" and any(item.verdict != "PASS" for item in parsed.findings):
-        raise ValueError("PASS review requires every finding to PASS")
-    if parsed.verdict == "REJECT" and not any(item.verdict == "REJECT" for item in parsed.findings):
-        raise ValueError("REJECT review requires at least one rejected finding")
-    if parsed.verdict == "NEED_MORE_EVIDENCE" and not any(
-        item.verdict == "NEED_MORE_EVIDENCE" for item in parsed.findings
-    ):
-        raise ValueError("NEED_MORE_EVIDENCE review requires one matching finding")
-    return parsed
+    aligned: list[MethodReviewFindingV1] = []
+    for evidence in diagnosis.draft.evidence:
+        identity = (evidence.method_id, tuple(sorted(evidence.identity_tokens)))
+        matches = [item for item in parsed.findings
+                   if (item.method_id, tuple(sorted(item.identity_tokens))) == identity]
+        if matches and len({item.verdict for item in matches}) == 1:
+            aligned.append(matches[0])
+        else:
+            aligned.append(MethodReviewFindingV1(identity[0], identity[1], "NEED_MORE_EVIDENCE",
+                "模型未对该项给出明确审核判断。"))
+    verdicts = {item.verdict for item in aligned}
+    verdict = parsed.verdict
+    if "REJECT" in verdicts:
+        verdict = "REJECT"
+    elif "NEED_MORE_EVIDENCE" in verdicts and verdict == "PASS":
+        verdict = "NEED_MORE_EVIDENCE"
+    return replace(parsed, verdict=verdict, findings=tuple(aligned))
+
 
 
 __all__ = [

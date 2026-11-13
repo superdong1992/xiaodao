@@ -74,7 +74,7 @@ def test_legacy_candidates_remain_visible_and_fall_back_without_model(
     assert receipt.job_outcome.result_type is OutcomeResultType.NO_CAPABILITY
     assert receipt.job_outcome.payload.kind is RouteKind.NO_CAPABILITY
     assert receipt.job_outcome.payload.skill_ref is None
-    assert state.calls == []
+    assert state.calls == [job.case_id]
     assert records.log_sinks == {}
     assert len(records.publish_outcome_calls) == 1
     audit = json.loads(records.read_audit_bytes(job.job_id, "route-admission.json"))

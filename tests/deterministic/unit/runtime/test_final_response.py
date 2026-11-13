@@ -55,25 +55,23 @@ def test_route_uses_four_fields_and_server_pinned_identity():
 
 
 @pytest.mark.parametrize("matched", [False, True])
-def test_route_rejects_unescaped_root_reason_quotes(matched):
+def test_route_uses_generic_for_unescaped_root_reason_quotes(matched):
     job = route_job()
     ref = job.available_skill_refs[0] if matched else None
     raw = ('{"skill_id":' + json.dumps(ref.id if ref else None)
            + ',"reason":"选择 "foo" 方法","confidence":0.99,"assessments":' + json.dumps(_assessments(job)) + '}')
-    with pytest.raises(RuntimeExecutionError):
-        parse_route_response(raw, job)
+    assert parse_route_response(raw, job).draft.payload.skill_ref is None
 
 
 @pytest.mark.parametrize("skill,confidence", [
     ("unknown", "0.9"), (None, "true"), (None, "NaN"), (None, "1.1"),
     (123, "0.9"), (None, '"0.9"'), (None, "-0.1"),
 ])
-def test_route_malformed_reason_and_controls_are_rejected(skill, confidence):
+def test_route_malformed_reason_and_controls_use_generic(skill, confidence):
     raw = ('{"skill_id":' + json.dumps(skill)
            + ',"reason":"选择 "foo" 方法","confidence":' + confidence
            + ',"assessments":' + json.dumps(_assessments()) + '}')
-    with pytest.raises(RuntimeExecutionError):
-        parse_route_response(raw, route_job())
+    assert parse_route_response(raw, route_job()).draft.payload.skill_ref is None
 
 
 def test_route_valid_quotes_do_not_create_recovery_or_bypass_reason_limit():
@@ -84,14 +82,16 @@ def test_route_valid_quotes_do_not_create_recovery_or_bypass_reason_limit():
     assert parsed.route_admission["model_reason"] == value["reason"]
     raw = ('{"skill_id":null,"reason":"' + 'x' * 1024 + '"foo"' + '","confidence":0.9,"assessments":'
            + json.dumps(_assessments()) + '}')
-    with pytest.raises(RuntimeExecutionError):
-        parse_route_response(raw, route_job())
+    assert parse_route_response(raw, route_job()).draft.payload.skill_ref is None
 
 
 @pytest.mark.parametrize('value', [None, '{}', '```json\n{}\n```', '{"skill_id":"unknown","reason":"x","confidence":1}', '{"skill_id":null,"reason":"x","confidence":true}', '{"skill_id":null,"reason":"x","confidence":NaN}', '{"skill_id":null,"reason":"x","confidence":0,"reason":"y"}'])
-def test_invalid_route_response_is_rejected_without_repair(value):
-    with pytest.raises(RuntimeExecutionError):
-        parse_route_response(value, route_job())
+def test_unusable_route_response_uses_generic_without_repair(value, caplog):
+    result = parse_route_response(value, route_job())
+    assert result.draft.payload.skill_ref is None
+    assert result.draft.error is None
+    assert result.route_recovery is None
+    assert not caplog.records
 
 
 def test_stream_result_is_unique_successful_and_not_in_telemetry():
@@ -103,6 +103,16 @@ def test_stream_result_is_unique_successful_and_not_in_telemetry():
     assert 'secret_text' not in json.dumps(stream.snapshot(diagnosis_mode='SPECIALIZED', backend_status='SUCCESS'))
     stream.write(event)
     assert stream.final_result is None
+
+
+def test_route_unencodable_text_uses_generic_without_exception(caplog):
+    stream = AgentStreamTelemetry()
+    stream.write(json.dumps({'type': 'result', 'subtype': 'success',
+        'is_error': False, 'result': '\ud800'}).encode() + b'\n')
+    result = parse_route_response(stream.final_result, route_job())
+    assert result.draft.payload.skill_ref is None
+    assert result.draft.error is None
+    assert not caplog.records
 
 
 def test_specialist_json_normalizes_without_a_draft_file():
@@ -136,13 +146,13 @@ def test_specialist_preserves_all_items_before_independent_evidence_validation()
     assert result.draft == value
     assert json.loads(result.canonical_bytes) == value
     assert result.raw_bytes == text.encode('utf-8')
-    with pytest.raises(RuntimeExecutionError):
-        parse_specialist_response(text)
+    assert not parse_specialist_response(text).draft.evidence
 
 
 @pytest.mark.parametrize('prefix,suffix', [
     ('## 分析\n最终结果如下：\n```json\r\n', '\r\n```'),
     ('## 分析\n最终结果如下：\n', ''),
+    ('结果：```JSON\n', '\n```\n以上为本次分析。'),
 ])
 def test_route_and_specialist_extract_final_json_with_raw_receipts(prefix, suffix):
     route = _no_match_response()
@@ -166,7 +176,7 @@ def test_markdown_prefix_cannot_hide_private_capability_from_specialist():
         parse_specialist_response(text, secrets=('private-token',), preserve_evidence_items=True)
 
 
-@pytest.mark.parametrize('text', ['[]', 'null', '```json\n{}\n``` trailing'])
+@pytest.mark.parametrize('text', ['[]', 'null'])
 def test_specialist_preserving_items_still_rejects_non_object_and_invalid_json(text):
     with pytest.raises(RuntimeExecutionError):
         parse_specialist_response(text, preserve_evidence_items=True)
