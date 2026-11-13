@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 
 import pytest
@@ -17,11 +18,13 @@ from tests.deterministic.contracts.fakes import InMemoryCancellationSignal, InMe
 from tests.deterministic.unit.runtime.test_diagnosis_runtime import (
     CATALOG_FIXTURES, _Clock, _Ids, _RuntimeBackend, _StateView, _UnusedResourceStore,
     _job_from_catalog, _route_aggregate,
+    journey_stream,
 )
+from tests.deterministic.unit.runtime.test_keyword_route import with_current_fact
 
 
 def _runtime(tmp_path, *, text="服务报错 ACME_RPC_DEADLINE，请定位。", declared=True,
-             candidates=1, exclusions=False):
+             candidates=1, exclusions=False, current_fact=None):
     skills = tmp_path / "skills"
     for index in range(candidates):
         root = skills / f"manual-triage-{index}"
@@ -40,6 +43,8 @@ def _runtime(tmp_path, *, text="服务报错 ACME_RPC_DEADLINE，请定位。", 
     payload.update(status="RUNNING", started_at="2026-07-31T00:00:01.000Z",
         runtime_epoch="00000000-0000-4000-8000-000000000499")
     job = Job.model_validate(payload)
+    if current_fact is not None:
+        job = with_current_fact(job, statement=current_fact)
     data = _route_aggregate(job).model_dump(mode="json")
     data["case"]["raw_problem_text"] = text
     aggregate = CaseAggregate.model_validate(data)
@@ -54,6 +59,25 @@ def _runtime(tmp_path, *, text="服务报错 ACME_RPC_DEADLINE，请定位。", 
     return runtime, job, backend, records
 
 
+def test_current_fact_reaches_one_semantic_route_instead_of_the_old_raw_keyword(tmp_path, caplog, journey_stream):
+    caplog.set_level(logging.INFO, logger="problem_locator.dfx")
+    fact = "已确认不是 ACME_RPC_DEADLINE，实际是 DB_LOCK_BUSY。"
+    runtime, job, backend, records = _runtime(tmp_path, current_fact=fact)
+    assert not job.previous_outcome_refs
+    result = runtime.execute(job, InMemoryCancellationSignal()).job_outcome
+    assert result.result_type is OutcomeResultType.NO_CAPABILITY, result.error
+    assert result.payload.kind is RouteKind.NO_CAPABILITY and result.payload.skill_ref is None
+    assert [call["backend_phase"] for call in backend.calls] == ["ROUTE"]
+    assert fact in backend.calls[0]["prompt"]
+    audit = json.loads(records.read_audit_bytes(job.job_id, "route-admission.json"))
+    assert audit["model_skill_id"] is None and audit["effective_skill_id"] is None
+    assert audit["reason_code"] == "MODEL_NO_MATCH"
+    assert records.read_audit_bytes(job.job_id, "route-response.raw.txt")
+    assert records.read_audit_bytes(job.job_id, "finalization_manifest.json")
+    assert not any(json.loads(line)["event"] == "job.stage.failed" for line in journey_stream.getvalue().splitlines())
+    assert not any(record.levelno >= logging.WARNING or record.exc_info for record in caplog.records)
+
+
 def test_explicit_keyword_skips_route_backend_and_keeps_normal_outcome(tmp_path):
     runtime, job, backend, records = _runtime(tmp_path)
     assert "ACME_RPC_DEADLINE" not in job.context_snapshot.problem_spec.statement
@@ -63,7 +87,7 @@ def test_explicit_keyword_skips_route_backend_and_keeps_normal_outcome(tmp_path)
     assert receipt.job_outcome.payload.skill_ref == job.available_skill_refs[0]
     assert backend.calls == [] and records.log_sinks == {}
     audit = json.loads(records.read_audit_bytes(job.job_id, "route-admission.json"))
-    assert audit["policy"] == "direct_keyword_route_v1"
+    assert audit["policy"] == "direct_keyword_route_v2"
     assert audit["model_called"] is False and audit["model_skill_id"] is None
     assert "raw_response_sha256" not in audit
     assert records.read_audit_bytes(job.job_id, "route-response.raw.txt") is None
@@ -81,7 +105,7 @@ def test_non_unique_or_unclear_keyword_keeps_existing_llm_route(tmp_path, option
     assert result.result_type is OutcomeResultType.NO_CAPABILITY, result.error
     assert [call["backend_phase"] for call in backend.calls] == ["ROUTE"]
     audit = json.loads(records.read_audit_bytes(job.job_id, "route-admission.json"))
-    assert audit["policy"] == "shortlisted_route_v1"
+    assert audit["policy"] == "shortlisted_route_v2"
 
 
 @pytest.mark.parametrize("when", ["before", "after-audit"])

@@ -17,12 +17,10 @@ if TYPE_CHECKING:
     from .route_recall import RouteCandidates
 
 
-MIN_ROUTE_CONFIDENCE = 0.95
-ROUTE_ADMISSION_POLICY = "shortlisted_route_v1"
+ROUTE_ADMISSION_POLICY = "shortlisted_route_v2"
 _FALLBACK_REASONS = {
     "MODEL_NO_MATCH": "路由未选择专用 Skill，转入通用定位。",
     "OUTSIDE_CANDIDATES": "所选 Skill 不在本次候选中，转入通用定位。",
-    "LOW_CONFIDENCE": "路由置信度低于 0.95，转入通用定位。",
     "NO_RECALL_MATCH": "未找到与本次问题相关的专用 Skill，转入通用定位。",
     "NO_ELIGIBLE_SKILL": "没有声明适用和排除条件的专用 Skill，转入通用定位。",
 }
@@ -132,8 +130,6 @@ def evaluate_route_admission(
         reason_code = "MODEL_NO_MATCH"
     elif skill_id not in candidates.skill_ids:
         reason_code = "OUTSIDE_CANDIDATES"
-    elif confidence < MIN_ROUTE_CONFIDENCE:
-        reason_code = "LOW_CONFIDENCE"
     else:
         reason_code = "ADMITTED"
     admitted = reason_code == "ADMITTED"

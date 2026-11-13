@@ -13,7 +13,7 @@ from problem_locator.contracts import Job, JobType, bytes_sha256, canonical_json
 from .route_admission import read_route_catalog
 
 
-ROUTE_RECALL_POLICY = "lexical_top5_v1"
+ROUTE_RECALL_POLICY = "lexical_top5_v2"
 MAX_ROUTE_CANDIDATES = 5
 _IDENTIFIER = re.compile(r"[a-z0-9]+(?:[_.:/-][a-z0-9]+)*")
 _CHINESE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
@@ -64,7 +64,9 @@ def _query_texts(job: Job) -> tuple[str, ...]:
         raise ValueError("候选召回需要 ROUTE Job 的固定上下文。")
     snapshot = job.context_snapshot
     texts = []
-    for value in snapshot.problem_spec.model_dump(mode="json").values():
+    for name, value in snapshot.problem_spec.model_dump(mode="json").items():
+        if name == "non_goals":
+            continue
         if isinstance(value, str):
             texts.append(value)
         elif isinstance(value, list):
@@ -82,6 +84,7 @@ def _weighted_tokens(entry: dict[str, Any]) -> dict[str, int]:
     fields = [(_name(entry["ref"]["id"]), 3), (entry.get("capability", ""), 3),
               (entry.get("summary", ""), 1)]
     fields.extend((condition["description"], 2) for condition in entry["routing"]["applicability"])
+    fields.extend((keyword, 2) for keyword in entry["routing"].get("direct_match_keywords", []))
     weights: dict[str, int] = {}
     for text, weight in fields:
         for token in _tokens(text):

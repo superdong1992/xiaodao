@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from problem_locator.contracts import Job, bytes_sha256, canonical_json_bytes
+from problem_locator.runtime.keyword_route import try_direct_keyword_route
 from problem_locator.runtime.route_recall import recall_route_candidates
 
 
@@ -73,16 +74,18 @@ def test_no_overlap_or_only_generic_words_returns_no_candidates(text):
 
 def test_field_weights_use_the_highest_weight_once_per_token():
     entries = [
-        _entry("diagnosis-skill/quartz", capability="quartz", applicability="quartz", summary="quartz quartz"),
+        _entry("diagnosis-skill/quartz", capability="quartz", applicability="quartz", summary="quartz quartz",
+               keywords=["QUARTZ_SIGNATURE"]),
         _entry("skill-capability", capability="quartz"),
         _entry("skill-applicability", applicability="quartz"),
+        _entry("skill-keyword", keywords=["QUARTZ_SIGNATURE"]),
         _entry("skill-summary", summary="quartz"),
     ]
     job, index = _inputs("quartz quartz quartz", *entries)
     ranked = _ranked(_recall(job, index))
     assert {skill_id: item["score"] for skill_id, item in ranked.items()} == {
         "diagnosis-skill/quartz": 3, "skill-capability": 3,
-        "skill-applicability": 2, "skill-summary": 1,
+        "skill-applicability": 2, "skill-keyword": 2, "skill-summary": 1,
     }
 
 
@@ -144,7 +147,8 @@ def test_explicit_keyword_count_precedes_lexical_score_and_keywords_count_once()
     result = _recall(job, index)
     assert result.skill_ids == ("c-two", "b-one", "a-lexical")
     assert _ranked(result)["b-one"]["keyword_matches"] == ["ROUTE_SIGNATURE"]
-    assert _ranked(result)["c-two"]["score"] == 0
+    assert _ranked(result)["c-two"]["keyword_matches"] == ["ROUTE_SIGNATURE", "SECOND_SIGNATURE"]
+    assert _ranked(result)["a-lexical"]["score"] > _ranked(result)["c-two"]["score"] > 0
 
 
 @pytest.mark.parametrize("text,matched", [
@@ -155,13 +159,43 @@ def test_explicit_keyword_count_precedes_lexical_score_and_keywords_count_once()
 def test_explicit_keywords_normalize_case_and_width_but_keep_ascii_boundaries(text, matched):
     job, index = _inputs(text, _entry("alpha", keywords=["ROUTE_SIGNATURE"]))
     result = _recall(job, index)
-    assert result.skill_ids == (("alpha",) if matched else ())
+    assert result.skill_ids == ("alpha",)
     assert _ranked(result)["alpha"]["keyword_matches"] == (["ROUTE_SIGNATURE"] if matched else [])
+    if not matched:
+        assert try_direct_keyword_route(job, skill_index=canonical_json_bytes(index).decode(),
+                                        raw_problem_text=text) is None
 
 
 def test_normalized_keyword_duplicates_do_not_increase_priority():
-    job, index = _inputs("route_signature", _entry("alpha", keywords=["ROUTE_SIGNATURE", "route_signature"]))
-    assert len(_ranked(_recall(job, index))["alpha"]["keyword_matches"]) == 1
+    job, index = _inputs("route_signature", _entry("alpha", keywords=["ROUTE_SIGNATURE"]))
+    first = _recall(job, index)
+    index["skills"][0]["routing"]["direct_match_keywords"].append("route_signature")
+    index["skills"][0]["routing"]["applicability"][0]["description"] = "route_signature " * 20
+    value = job.model_dump(mode="json")
+    value["context_snapshot"]["problem_spec"]["statement"] = "route_signature " * 20
+    second = _recall(Job.model_validate(value), index)
+    assert first.audit["ranked_candidates"] == second.audit["ranked_candidates"]
+    assert len(_ranked(second)["alpha"]["keyword_matches"]) == 1
+
+
+@pytest.mark.parametrize("text,keyword", [
+    ("RPC queue stalled", "RPC_QUEUE_STALLED"),
+    ("RPC-QUEUE-STALLED", "RPC_QUEUE_STALLED"),
+    ("RpcQueueStalled", "RPC_QUEUE_STALLED"),
+    ("ｒｐｃ ｑｕｅｕｅ ｓｔａｌｌｅｄ", "RPC_QUEUE_STALLED"),
+    ("连接池已耗尽", "连接池耗尽"),
+    ("IO", "IO_QUEUE_STALLED"), ("DB", "DB_LOCK_BUSY"),
+    ("E123", "ERR_E123"),
+])
+def test_keyword_terms_recall_variants_without_promoting_them_to_direct_matches(text, keyword, caplog):
+    job, index = _inputs(text, _entry("component-locator", keywords=[keyword]))
+    result = _recall(job, index)
+    assert result.skill_ids == ("component-locator",)
+    assert _ranked(result)["component-locator"]["score"] > 0
+    assert _ranked(result)["component-locator"]["keyword_matches"] == []
+    assert try_direct_keyword_route(job, skill_index=canonical_json_bytes(index).decode(),
+                                    raw_problem_text=text) is None
+    assert not caplog.records
 
 
 def test_exclusions_and_diagnostic_material_metadata_do_not_add_recall_score():
@@ -171,13 +205,44 @@ def test_exclusions_and_diagnostic_material_metadata_do_not_add_recall_score():
 
 @pytest.mark.parametrize("field,is_list", [
     ("statement", False), ("scope", False), ("actual_behavior", False), ("expected_behavior", False),
-    ("goals", True), ("non_goals", True), ("constraints", True), ("completion_criteria", True),
+    ("goals", True), ("constraints", True), ("completion_criteria", True),
 ])
 def test_current_problem_fields_are_all_searchable(field, is_list):
     job, index = _inputs("问题", _entry("alpha", summary="quartz"))
     value = job.model_dump(mode="json")
     value["context_snapshot"]["problem_spec"][field] = ["quartz"] if is_list else "quartz"
     assert _recall(Job.model_validate(value), index).skill_ids == ("alpha",)
+
+
+def test_non_goals_do_not_supply_positive_keyword_or_term_matches():
+    job, index = _inputs("问题", _entry("alpha", keywords=["QUARTZ_SIGNATURE"]),
+                         _entry("beta", summary="basalt"))
+    value = job.model_dump(mode="json")
+    value["context_snapshot"]["problem_spec"]["non_goals"] = ["QUARTZ_SIGNATURE", "basalt"]
+    job = Job.model_validate(value)
+    original = canonical_json_bytes(job.context_snapshot)
+    result = _recall(job, index)
+    assert result.skill_ids == ()
+    assert all(item["score"] == 0 and item["keyword_matches"] == []
+               for item in result.audit["ranked_candidates"])
+    assert canonical_json_bytes(job.context_snapshot) == original
+    assert result.audit["context_snapshot_sha256"] == bytes_sha256(original)
+
+
+def test_five_explicit_non_goals_cannot_displace_the_current_incident():
+    keywords = ["DB_LOCK_BUSY", "STORAGE_IO_STALL", "NETWORK_LINK_DOWN",
+                "AUTH_TOKEN_REJECTED", "CACHE_POOL_EMPTY"]
+    job, index = _inputs("RPC call timeout", _entry("rpc-timeout", capability="RPC"),
+                         *(_entry(f"unrelated-{number}", keywords=[keyword])
+                           for number, keyword in enumerate(keywords)))
+    baseline = _recall(job, index)
+    value = job.model_dump(mode="json")
+    value["context_snapshot"]["problem_spec"]["non_goals"] = keywords
+    job = Job.model_validate(value)
+    result = _recall(job, index)
+    assert result.skill_ids == baseline.skill_ids == ("rpc-timeout",)
+    assert result.audit["ranked_candidates"] == baseline.audit["ranked_candidates"]
+    assert job.context_snapshot.problem_spec.non_goals == keywords
 
 
 @pytest.mark.parametrize("collection", ["user_facts", "confirmed_facts"])
@@ -247,7 +312,7 @@ def test_model_index_is_compact_but_preserves_selected_routing_descriptions_and_
         "skill_id": "diagnosis-skill/alpha", "name": "alpha", "capability": "quartz", "summary": "完整能力说明",
         "routing": {"applicability": selected["routing"]["applicability"], "exclusions": selected["routing"]["exclusions"]},
     }]}
-    assert result.audit["policy"] == "lexical_top5_v1"
+    assert result.audit["policy"] == "lexical_top5_v2"
     assert result.audit["candidate_ids"] == ["diagnosis-skill/alpha"]
     assert result.audit["context_snapshot_sha256"] == bytes_sha256(canonical_json_bytes(job.context_snapshot))
     assert result.audit["skill_index_sha256"] == bytes_sha256(canonical_json_bytes(index))

@@ -470,7 +470,7 @@ def test_route_skill_index_v3_exposes_only_the_complete_namespaced_ref(
     ).read_text(encoding="utf-8")
     assert "`skill_id`" in route_contract
     assert "`assessments`" not in route_contract
-    assert catalog.route_bindings().output_contract_ref.version == "7.0.0"
+    assert catalog.route_bindings().output_contract_ref.version == "8.0.0"
 
 
 def test_route_reuses_one_validated_skill_snapshot_for_the_index(

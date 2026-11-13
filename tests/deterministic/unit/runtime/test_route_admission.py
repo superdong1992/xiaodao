@@ -40,7 +40,8 @@ def _parse(job, index, response):
 
 def test_short_route_result_does_not_require_condition_assessments(caplog):
     job, index, response = _inputs(2)
-    assert set(response) == {"skill_id", "reason", "confidence"}
+    del response["confidence"]
+    assert set(response) == {"skill_id", "reason"}
     result = _parse(job, index, response)
     assert result.draft.payload.kind is RouteKind.MATCHED
     assert not caplog.records
@@ -52,7 +53,7 @@ def test_explicit_unique_match_admits_even_when_diagnostic_inputs_and_logs_are_m
     result = _parse(job, index, response)
     assert result.draft.payload.kind is RouteKind.MATCHED
     assert result.draft.payload.skill_ref == job.available_skill_refs[0]
-    assert result.route_admission["policy"] == "shortlisted_route_v1"
+    assert result.route_admission["policy"] == "shortlisted_route_v2"
     assert result.route_admission["reason_code"] == "ADMITTED"
     assert result.route_admission["draft_sha256"] == bytes_sha256(result.canonical_bytes)
     assert result.route_admission["input_hashes"] == {
@@ -87,42 +88,42 @@ def test_legacy_assessments_and_evidence_are_ignored_without_exception(caplog, a
     assert not caplog.records
 
 
-@pytest.mark.parametrize("confidence,matched", [
-    (0, False), (0.94, False), (0.949999, False), (0.95, True), (1, True),
-    ("0.94", False), ("0.95", True), ("1", True),
-])
-def test_confidence_threshold_accepts_json_numbers_and_numeric_strings(confidence, matched):
+@pytest.mark.parametrize("confidence", [0, 0.8, 0.94, 0.949999, 0.95, 1, "0.8", "0.94", "0.95", "1"])
+def test_confidence_is_preserved_metadata_not_an_admission_requirement(confidence, caplog):
     job, index, response = _inputs()
     response["confidence"] = confidence
     result = _parse(job, index, response)
-    assert (result.draft.payload.kind is RouteKind.MATCHED) is matched
+    assert result.draft.payload.kind is RouteKind.MATCHED
     assert result.draft.payload.confidence == float(confidence)
-    assert result.route_admission["reason_code"] == ("ADMITTED" if matched else "LOW_CONFIDENCE")
-
-
-@pytest.mark.parametrize("confidence", [None, True, False, "", "invalid", "NaN", "Infinity", -1, 1.1, 10 ** 500, [], {}])
-def test_unusable_confidence_uses_generic_without_exception(caplog, confidence):
-    job, index, response = _inputs()
-    response["confidence"] = confidence
-    result = _parse(job, index, response)
-    assert result.draft.payload.kind is RouteKind.NO_CAPABILITY
-    assert result.draft.payload.confidence == 0
-    assert result.route_admission["reason_code"] == "LOW_CONFIDENCE"
+    assert result.route_admission["reason_code"] == "ADMITTED"
     assert result.draft.error is None and not caplog.records
 
 
-def test_missing_confidence_does_not_admit_the_selected_skill():
+@pytest.mark.parametrize("confidence", [None, True, False, "", "invalid", "NaN", "Infinity", -1, 1.1, 10 ** 500, [], {}])
+def test_unusable_confidence_keeps_the_selected_candidate_without_exception(caplog, confidence):
+    job, index, response = _inputs()
+    response["confidence"] = confidence
+    result = _parse(job, index, response)
+    assert result.draft.payload.kind is RouteKind.MATCHED
+    assert result.draft.payload.confidence == 0
+    assert result.route_admission["reason_code"] == "ADMITTED"
+    assert result.draft.error is None and not caplog.records
+
+
+def test_missing_confidence_keeps_the_selected_candidate_without_exception(caplog):
     job, index, response = _inputs()
     del response["confidence"]
     result = _parse(job, index, response)
-    assert result.draft.payload.kind is RouteKind.NO_CAPABILITY
+    assert result.draft.payload.kind is RouteKind.MATCHED
     assert result.draft.payload.confidence == 0
+    assert result.draft.error is None and not caplog.records
 
 
 @pytest.mark.parametrize("skill_id", [None, "unknown", "", True, 42, [], {}])
 def test_absent_or_unknown_choice_is_not_promoted_to_a_recalled_skill(skill_id):
     job, index, response = _inputs()
     response["skill_id"] = skill_id
+    response["confidence"] = 1
     result = _parse(job, index, response)
     assert result.route_admission["retrieval"]["candidate_ids"] == [job.available_skill_refs[0].id]
     assert result.draft.payload.kind is RouteKind.NO_CAPABILITY
@@ -133,6 +134,7 @@ def test_absent_or_unknown_choice_is_not_promoted_to_a_recalled_skill(skill_id):
 def test_known_sixth_candidate_is_not_admitted_but_a_recalled_candidate_is():
     job, index, response = _inputs(6)
     response["skill_id"] = job.available_skill_refs[-1].id
+    response["confidence"] = 1
     outside = _parse(job, index, response)
     candidates = outside.route_admission["retrieval"]["candidate_ids"]
     assert len(candidates) == 5 and response["skill_id"] not in candidates

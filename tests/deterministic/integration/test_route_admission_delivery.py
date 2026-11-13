@@ -50,9 +50,11 @@ def _inject(stack, monkeypatch, scenario):
         if kwargs["backend_phase"] != "ROUTE":
             return result
         value = json.loads(result.final_result)
-        assert set(value) == {"skill_id", "reason", "confidence"}
+        assert {"skill_id", "reason"} <= set(value)
         if scenario == "low_confidence":
             value["confidence"] = 0.94
+        elif scenario == "missing_confidence":
+            value.pop("confidence", None)
         elif scenario == "no_match":
             value["skill_id"] = None
         elif scenario == "missing_selection":
@@ -68,7 +70,7 @@ def _inject(stack, monkeypatch, scenario):
                 "id": "not-rpc", "verdict": "REFUTED",
             }]}]
         elif scenario == "unusable_extra_assessments":
-            value["assessments"] = "not used by the three-field protocol"
+            value["assessments"] = "not used by the short route protocol"
         elif scenario == "extra_fields":
             value["description"] = "补充说明不参与路由。"
         return replace(result, final_result=json.dumps(value, ensure_ascii=False))
@@ -87,10 +89,9 @@ def _start(client, service, stack, *, text="RPC timeout"):
     return view, stack.repository.read_case(view.case_id)
 
 
-@pytest.mark.parametrize("scenario", ["low_confidence", "no_match"])
-def test_simple_no_match_delivers_generic_without_specialized_material_requests(website, monkeypatch, scenario):
+def test_simple_no_match_delivers_generic_without_specialized_material_requests(website, monkeypatch):
     stack, store, engine, service, client = website
-    calls = _inject(stack, monkeypatch, scenario)
+    calls = _inject(stack, monkeypatch, "no_match")
     generic = _GenericRuntimeBackend(_generic_result_bytes(conclusion="已转入通用定位。"))
     monkeypatch.setattr(stack.runtime._generic_locator_executor, "_backend", generic)
     view, aggregate = _start(client, service, stack)
@@ -126,9 +127,9 @@ def test_unusable_route_output_delivers_generic_without_exception(website, monke
 
 
 @pytest.mark.parametrize("scenario", [
-    "clear", "legacy_assessments", "unusable_extra_assessments", "extra_fields",
+    "clear", "low_confidence", "missing_confidence", "legacy_assessments", "unusable_extra_assessments", "extra_fields",
 ])
-def test_three_field_route_and_ignored_extra_fields_keep_specialized_route_without_exception(
+def test_short_route_and_optional_metadata_keep_specialized_route_without_exception(
     website, monkeypatch, route_observability, scenario,
 ):
     stack, store, engine, service, client = website

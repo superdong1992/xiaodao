@@ -38,7 +38,8 @@ from .authoritative_targets import AuthoritativeTargetSet
 from .keyword_route import DIRECT_KEYWORD_ROUTE_POLICY, try_direct_keyword_route
 from .outcome_finalizer import SERVER_OUTCOME_RELATIVE_PATH
 from .result_types import CapturedTargetLog, ServerGeneratedResultFile
-from .route_admission import MIN_ROUTE_CONFIDENCE, ROUTE_ADMISSION_POLICY
+from .route_admission import ROUTE_ADMISSION_POLICY
+from .route_recall import ROUTE_RECALL_POLICY
 from .verification_result import VerificationResult
 from .user_results import build_server_result_bundle
 
@@ -215,7 +216,7 @@ def _validate_route_admission(
         or index_hash is None
         or hashes.get("skill_index_sha256") != index_hash
         or not isinstance(retrieval, dict)
-        or retrieval.get("policy") != "lexical_top5_v1"
+        or retrieval.get("policy") != ROUTE_RECALL_POLICY
         or retrieval.get("context_snapshot_sha256") != context_hash
         or retrieval.get("skill_index_sha256") != index_hash
         or not isinstance(retrieval.get("candidate_ids"), list)
@@ -224,7 +225,6 @@ def _validate_route_admission(
         raise ValueError("ROUTE 准入记录与当前 Job、输入或最终草稿不一致。")
     if payload.kind is RouteKind.MATCHED and (
         admission.get("model_skill_id") != expected_skill_id
-        or payload.confidence < MIN_ROUTE_CONFIDENCE
         or payload.skill_ref not in job.available_skill_refs
         or expected_skill_id not in retrieval["candidate_ids"]
     ):

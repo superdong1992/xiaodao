@@ -26,6 +26,34 @@ def route(job, index, text=f"当前服务报错 {KEYWORD}，请求无法完成�
     return try_direct_keyword_route(job, skill_index=json.dumps(index, ensure_ascii=False), raw_problem_text=text)
 
 
+def with_current_fact(job, *, collection="user_facts", status="ACTIVE", statement=None):
+    value = job.model_dump(mode="json")
+    fact = {
+        "item_id": "00000000-0000-4000-8000-000000000498",
+        "statement": statement or f"已确认不是 {KEYWORD}，实际是 DB_LOCK_BUSY。",
+        "status": status,
+        "provenance": {"source_type": "USER_INPUT", "source_ref": "00000000-0000-4000-8000-000000000497", "input_name": "scope"},
+        "evidence_refs": [], "created_revision": 1, "supersedes": [],
+    }
+    if collection == "confirmed_facts":
+        fact["provenance"].update(source_type="AGENT_OUTCOME", input_name=None)
+        fact["evidence_refs"] = ["00000000-0000-4000-8000-000000000499"]
+        value["evidence_refs"] = list(fact["evidence_refs"])
+        value["context_snapshot"]["evidence_refs"] = list(fact["evidence_refs"])
+    value["context_snapshot"][collection] = [fact]
+    return Job.model_validate(value)
+
+
+@pytest.mark.parametrize("collection", ["user_facts", "confirmed_facts"])
+@pytest.mark.parametrize("status", ["ACTIVE", "SUPERSEDED"])
+def test_current_facts_require_semantic_routing_instead_of_reusing_the_original_keyword(collection, status, caplog):
+    job, index = keyword_inputs()
+    job = with_current_fact(job, collection=collection, status=status)
+    result = route(job, index)
+    assert (result is None) is (status == "ACTIVE")
+    assert not caplog.records
+
+
 @pytest.mark.parametrize("value", [[], ["队列阻塞码"], ["Token", "token"], [f"fault-{i}" for i in range(16)]])
 def test_keyword_parser_preserves_valid_literal_order(value):
     assert parse_direct_match_keywords(value) == tuple(value)
@@ -52,7 +80,7 @@ def test_unique_literal_match_uses_raw_text_and_exact_frozen_ref_without_diagnos
     assert not job.attachment_refs and not job.context_snapshot.user_facts
     assert KEYWORD not in job.context_snapshot.problem_spec.statement
     audit = result.audit
-    assert audit["policy"] == "direct_keyword_route_v1"
+    assert audit["policy"] == "direct_keyword_route_v2"
     assert audit["reason_code"] == "DIRECT_KEYWORD_MATCH"
     assert audit["model_called"] is False and audit["model_skill_id"] is None
     assert audit["input_hashes"] == {

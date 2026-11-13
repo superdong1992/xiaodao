@@ -17,7 +17,7 @@ from .route_admission import RouteAdmissionResult, _routing_candidates
 from .routing_keywords import parse_direct_match_keywords
 
 
-DIRECT_KEYWORD_ROUTE_POLICY = "direct_keyword_route_v1"
+DIRECT_KEYWORD_ROUTE_POLICY = "direct_keyword_route_v2"
 _ASCII_WORD = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
 _UNCLEAR_CHINESE = (
     "不是", "并非", "没有", "不存在", "未出现", "未发生", "未见", "未报", "未触发",
@@ -80,6 +80,13 @@ def try_direct_keyword_route(
         raise ValueError("直接关键词路由需要 Case 的原始问题描述。")
     # This verifies every ref and condition, including candidates without a hit.
     eligible = _routing_candidates(job, skill_index)
+    # A literal hit in the original text cannot resolve newer facts or corrections.
+    if job.previous_outcome_refs or any(
+        fact.status.value == "ACTIVE"
+        for facts in (job.context_snapshot.user_facts, job.context_snapshot.confirmed_facts)
+        for fact in facts
+    ):
+        return None
     index = parse_agent_json_bytes(skill_index.encode("utf-8")).value
     matched = []
     for item in index["skills"]:
@@ -90,7 +97,7 @@ def try_direct_keyword_route(
         matches = _literal_matches(raw_problem_text, keywords)
         if matches:
             matched.append((item["ref"]["id"], matches))
-    if job.previous_outcome_refs or len(matched) != 1:
+    if len(matched) != 1:
         return None
     skill_id, matches = matched[0]
     if eligible[skill_id]["exclusions"] or _has_unclear_context(raw_problem_text, matches):

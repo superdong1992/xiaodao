@@ -4,6 +4,26 @@
 
 本文件是仓库活跃待办的唯一清单。已完成事项由代码、当前设计与 Git 历史证明，不在这里保留关闭项。
 
+## 路由选择、召回与当前事实（2026-11-13）
+
+- 基线为 `8.2.0 / 05da86a`，已在当前入口确认后修正：取消准入和发布两处 `0.95` 门槛；已有直接关键词的词元参与召回；`non_goals` 不加分；存在活跃用户事实或已确认事实时交给语义路由，避免原文盖过纠正。保持最多 5 个候选、一次语义判断，无法明确选择返回 null。模型只需返回 `skill_id/reason`，可选分数不影响选择，不新增异常记录或重试。
+- **专项通过，待推送前完整验证**。修复历史沿 PL-FIX-073 追加；Router、输出合同、上下文策略升至 `4.0.0/8.0.0/3.0.0`，三种路由策略升至 v2。公开 MCP、REST、Job、`RouteDecision` 及数据库格式不变。升级前结束活跃任务，重启后新建任务。本次已进入推送准备，完整验证状态以 PL-FIX-073 的“2026-11-13 路由准确度”verdict 元数据为准，不沿用 `05da86a` 的 PASS。
+- Python 专项入口为 `python -m pytest -q -p no:cacheprovider --junitxml <证据文件> <下列范围>`；需要文件工作区的 Linux 专项另指定 `--basetemp <新的独立目录>`，只读场景检查禁止真实模型。以下 XML 均位于 `.tmp/route-accuracy-20261113/`。
+
+| 范围 | 文件或筛选条件 | 结果及证据 |
+| --- | --- | --- |
+| 召回 | `tests/deterministic/unit/runtime/test_route_recall.py` | 57 passed；`recall-green.xml` |
+| 选择与发布 | `tests/deterministic/unit/runtime/` 下的 `test_route_admission.py`、`test_server_outcome_finalizer.py`；`tests/deterministic/integration/` 下的 `test_route_admission_delivery.py`、`test_route_top5_delivery.py` | Linux 132 passed；`admission-green.xml` |
+| 关键词与事实 | `tests/deterministic/unit/runtime/` 下的 `test_keyword_route.py`、`test_keyword_route_runtime.py`、`test_keyword_route_finalizer.py`；`tests/deterministic/integration/test_keyword_route_delivery.py` | Linux 189 passed；`keyword-final.xml` |
+| 相邻读取与交付 | `tests/deterministic/unit/runtime/` 下的 `test_final_response.py`、`test_route_legacy_catalog.py`、`test_real_route_scenarios.py`；`tests/deterministic/integration/` 下的 `test_route_quote_delivery.py`、`test_mixed_model_json_delivery.py` | Linux 72 passed；`adjacent-green.xml` |
+| Runtime | `tests/deterministic/unit/runtime/test_diagnosis_runtime.py -k "route or asset"` | Linux 15 passed、93 deselected；`runtime-final.xml` |
+| 路由资源 | `tests/deterministic/unit/runtime/test_p0_semantic_assets.py -k "router or methods_v1_asset_versions"` | 3 passed、9 deselected；`assets-green.xml` |
+| 文档与升级 | `node --test tools/test-flow/tests/docs-drift.test.mjs tools/test-flow/tests/production-upgrade.test.mjs`；`git diff --check` | 12 passed；`docs-final.tap`；差异检查通过 |
+
+- Python 最终范围共 468 passed，详见 `targeted-summary.json`。修复前证据为 `admission-baseline.json`、`recall-readonly-probe.json`、`non-goals-readonly-probe.json`。先红、并行编辑时的策略版本不一致及所有临时目录均保留：召回 17 failed；关键词直接回归 4 failed；准入首轮 37 failed、交付补测 2 failed，其中部分为新召回策略与尚未同步的发布器暂时不一致，不能全算原问题。`runtime-green.xml` 实为首轮 1 failed、14 passed，失败是测试仍要求旧 `7.0.0` 合同；已同步为 `8.0.0` 后同范围通过，未改生产行为。
+- 真实准确率验收仍待带预期路由的公司问题集：区分漏召回、误选和正常通用，比较输出 token 与耗时。现有 `real.route` 只有 5 个 RPC 场景、每个目录最多 2 项，不代表多 Skill 验收；本轮保持其预算与入口不变，零真实模型调用。词法召回仍可能漏掉同义表达或召回普通词相似的候选，语义判断仍由模型完成。
+- 推送前使用既有 D 盘 Ubuntu 22.04、锁定依赖和持久盘 PostgreSQL，先审阅 `dev.default --plan-only`，再对同一源码快照执行完整确定性测试。证据保存在 `.tmp/route-accuracy-push-20261113/`，保留全部用例与 300 秒门槛，零真实模型调用；通过后只回填 verdict 引用元数据，再提交推送。
+
 ## 模型非必要字段缺省补查（2026-11-13）
 
 - 基线为 `8.2.0 / 46f9f96`。已沿实际输出读取链复核，修复 Generic 旧 V1 报告省略 `STATUS` 时的 `OUTCOME_INVALID`，以及经验纠错缺少可选字段、重复回显或无可用内容时的失败记录。修复历史沿 PL-FIX-042 追加；Generic 输出合同资源升至 `2.1.0`，公开接口与存储格式不变。

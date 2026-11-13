@@ -8,8 +8,12 @@ import pytest
 
 from problem_locator.contracts import DiagnosisMode, JobType, canonical_json_bytes
 from tests.document_skill_helpers import document_input, document_registration, write_document_registration
+from tests.deterministic.integration.test_route_admission_delivery import _assert_no_route_exception, route_observability
 from tests.deterministic.integration.test_website_agent import _post, website
 from tests.deterministic.journey import test_rpc_timeout as rpc
+from tests.deterministic.unit.runtime.test_diagnosis_runtime import (
+    _GenericRuntimeBackend, _RuntimeBackend, _generic_result_bytes,
+)
 
 
 @pytest.fixture(params=["methods", "document"])
@@ -56,3 +60,38 @@ def test_keyword_route_creates_specialized_diagnose_and_requests_missing_inputs(
     audit = json.loads(stack.records.read_audit_bytes(route.job_id, "route-admission.json"))
     assert audit["model_called"] is False
     assert audit["effective_skill_id"] == diagnoses[0].skill_ref.id
+
+
+def test_initial_correction_reaches_semantic_route_and_generic_delivery(
+    keyword_website, monkeypatch, route_observability,
+):
+    stack, store, engine, service, client = keyword_website
+    backend = _RuntimeBackend(b'{"payload":{"skill_ref":null,"reason":"The current fact rules out the old keyword."}}')
+    generic = _GenericRuntimeBackend(_generic_result_bytes())
+    monkeypatch.setattr(stack.runtime, "_route_backend", backend)
+    monkeypatch.setattr(stack.runtime._generic_locator_executor, "_backend", generic)
+    text = "服务报错 ACME_RPC_DEADLINE，请定位。"
+    fact = "已确认不是 ACME_RPC_DEADLINE，实际是 DB_LOCK_BUSY。"
+    created = _post(client, "/api/v1/cases", {
+        "request_id": "create:keyword-correction", "raw_problem_text": text,
+        "problem_spec": {
+            "statement": text, "actual_behavior": text, "expected_behavior": "恢复正常。",
+            "scope": "当前故障", "goals": ["定位原因"], "non_goals": [],
+            "constraints": [], "completion_criteria": ["给出定位结论"],
+        },
+        "initial_user_facts": [{"name": "scope", "value": fact}], "wait_seconds": 0,
+    })
+    assert stack.scheduler.wait_until_idle(20)
+    aggregate = stack.repository.read_case(created["business_receipt"]["case_id"])
+    route = next(job for job in aggregate.jobs.values() if job.job_type is JobType.ROUTE)
+    assert not route.previous_outcome_refs and route.context_snapshot.user_facts
+    assert aggregate.case.status.value == "RESOLVED" and aggregate.case.failure is None
+    assert aggregate.case.selected_skill_ref is None
+    diagnoses = [job for job in aggregate.jobs.values() if job.job_type is JobType.DIAGNOSE]
+    assert len(diagnoses) == 1 and diagnoses[0].diagnosis_mode is DiagnosisMode.GENERIC
+    assert [call["backend_phase"] for call in backend.calls] == ["ROUTE"]
+    assert fact in backend.calls[0]["prompt"]
+    assert len(generic.calls) == 1 and engine.calls == []
+    audit = json.loads(stack.records.read_audit_bytes(route.job_id, "route-admission.json"))
+    assert audit["reason_code"] == "MODEL_NO_MATCH" and audit["effective_skill_id"] is None
+    _assert_no_route_exception(route, route_observability)

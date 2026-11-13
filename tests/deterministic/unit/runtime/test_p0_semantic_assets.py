@@ -101,10 +101,10 @@ def _production_plan() -> MethodEvaluationPlanV2:
 def test_methods_v1_asset_versions_match_the_builtin_catalog() -> None:
     expected = {
         "tool-bundle/router": "3.0.0",
-        "agent-profile/router": "3.0.0",
-        "context-policy/route": "2.0.0",
+        "agent-profile/router": "4.0.0",
+        "context-policy/route": "3.0.0",
         "tool-bundle/diagnose": "5.0.0",
-        "output-contract/route": "7.0.0",
+        "output-contract/route": "8.0.0",
         "agent-profile/specialist": "8.0.0",
         "agent-profile/reviewer": "7.0.0",
         "context-policy/review": "3.0.0",
@@ -121,29 +121,37 @@ def test_router_returns_minimal_json_without_file_tools() -> None:
     tool_meta, tool_bundle_text = _asset("tool-bundles/router")
     tool_bundle = json.loads(tool_bundle_text)
 
-    assert contract_meta["version"] == "7.0.0"
+    assert contract_meta["version"] == "8.0.0"
     assert tool_meta["version"] == "3.0.0"
     assert tool_bundle == {"schema_version": 1, "tools": []}
     assert "不要调用文件工具" in contract
     assert "problem-locator-seal-outcome-draft" not in contract
     example = json.loads(contract.split("```json\n", 1)[1].split("```", 1)[0])
-    assert set(example) == {"skill_id", "reason", "confidence"}
+    assert set(example) == {"skill_id", "reason"}
     assert "逐项审核结果" in contract
+    assert "可选 `confidence`" in contract
+    assert "不参与准入" in contract
+    assert "0.95" not in contract
 
 
 def test_router_profile_reads_complete_conditions_for_at_most_five_candidates() -> None:
     profile_meta, profile = _asset("profiles/router")
     policy_meta, policy = _asset("context-policies/route")
 
-    assert profile_meta["version"] == "3.0.0"
-    assert policy_meta["version"] == "2.0.0"
+    assert profile_meta["version"] == "4.0.0"
+    assert policy_meta["version"] == "3.0.0"
     assert "最多 5 个候选" in profile
     assert "完整阅读" in profile
     assert "适用条件和排除条件" in profile
     assert "召回顺序不代表" in profile
     assert "保留 `input_name` 的准确含义" in profile
+    assert "没有提及排除情形不等于已经命中" in profile
+    assert "按修正后的事实判断" in profile
+    assert "不要求先查明根因" in profile
+    assert "0.95" not in profile
     assert "最多 5 个候选" in policy
     assert "完整保留" in policy
+    assert "`non_goals` 不参与候选召回加分" in policy
 
 
 def test_specialist_assets_require_grounded_methods_v1_output() -> None:

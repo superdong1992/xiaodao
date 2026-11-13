@@ -11,11 +11,13 @@ from problem_locator.contracts import (
     WorkspaceInputManifest, bytes_sha256, canonical_json_bytes,
 )
 from problem_locator.runtime.server_outcome_finalizer import finalize_server_outcome
+from problem_locator.runtime.route_admission import ROUTE_ADMISSION_POLICY
+from problem_locator.runtime.route_recall import ROUTE_RECALL_POLICY
 
-from test_route_admission import _inputs as _route_inputs
+from test_route_admission import _inputs as _route_inputs, _parse as _parse_route
 
 
-def _inputs(*, selected=True, count=1):
+def _inputs(*, selected=True, count=1, confidence=0.99):
     job, index, _response = _route_inputs(count)
     index_text = json.dumps(index, ensure_ascii=False)
     skill_id = job.available_skill_refs[0].id if selected else None
@@ -27,7 +29,7 @@ def _inputs(*, selected=True, count=1):
             kind=RouteKind.MATCHED if selected else RouteKind.NO_CAPABILITY,
             skill_ref=job.available_skill_refs[0] if selected else None,
             reason="问题属于候选 Skill 的适用范围。" if selected else "无法确定专用 Skill，转入通用定位。",
-            confidence=0.99,
+            confidence=confidence,
         ),
         consumed_evidence_refs=[], proposed_evidence_drafts=[], proposed_artifact_drafts=[],
         rule_claims=[], error=None,
@@ -38,13 +40,13 @@ def _inputs(*, selected=True, count=1):
         "skill_index_sha256": bytes_sha256(index_text.encode("utf-8")),
     }
     audit = {
-        "schema_version": 1, "policy": "shortlisted_route_v1", "job_id": job.job_id,
+        "schema_version": 1, "policy": ROUTE_ADMISSION_POLICY, "job_id": job.job_id,
         "case_id": job.case_id, "base_state_revision": job.base_state_revision,
         "input_hashes": hashes, "draft_sha256": bytes_sha256(draft_bytes),
-        "model_skill_id": skill_id, "effective_skill_id": skill_id, "confidence": 0.99,
+        "model_skill_id": skill_id, "effective_skill_id": skill_id, "confidence": confidence,
         "reason_code": "ADMITTED" if selected else "MODEL_NO_MATCH",
         "retrieval": {
-            "policy": "lexical_top5_v1", "candidate_ids": [job.available_skill_refs[0].id],
+            "policy": ROUTE_RECALL_POLICY, "candidate_ids": [job.available_skill_refs[0].id],
             "ranked_candidates": [{"skill_id": job.available_skill_refs[0].id, "score": 1.0}],
             **hashes, "model_index_sha256": "a" * 64,
         },
@@ -84,6 +86,7 @@ def test_route_cannot_publish_without_this_executions_admission(tmp_path, select
     "model_id", "reason_code", "confidence", "snapshot_hash", "missing_hashes", "index_hash",
     "missing_retrieval", "retrieval_policy", "retrieval_snapshot", "retrieval_index",
     "candidate_not_recalled", "candidate_ids_not_list", "missing_index", "changed_index", "old_policy",
+    "old_threshold_policy",
 ])
 def test_route_cannot_publish_with_mismatched_admission(tmp_path, mutation):
     job, index, result = _inputs()
@@ -114,6 +117,7 @@ def test_route_cannot_publish_with_mismatched_admission(tmp_path, mutation):
             "revision": ("base_state_revision", job.base_state_revision + 1),
             "policy": ("policy", "unchecked"), "schema": ("schema_version", 2),
             "old_policy": ("policy", "strict_route_admission_v1"),
+            "old_threshold_policy": ("policy", "shortlisted_route_v1"),
             "schema_bool": ("schema_version", True), "draft_hash": ("draft_sha256", "0" * 64),
             "effective_id": ("effective_skill_id", None), "model_id": ("model_skill_id", None),
             "reason_code": ("reason_code", "UNCERTAIN_CANDIDATE"), "confidence": ("confidence", 0.5),
@@ -148,6 +152,28 @@ def test_admitted_route_publishes_without_expanding_persisted_outcome_schema(tmp
     assert set(finalized.outcome.payload.model_dump()) == {"kind", "skill_ref", "reason", "confidence"}
     assert b"route_admission" not in canonical_json_bytes(finalized.outcome)
     assert (tmp_path / "output/job_outcome.json").read_bytes() == finalized.canonical_bytes
+
+
+@pytest.mark.parametrize("confidence", [0, 0.8, 0.94])
+def test_selected_candidate_publishes_without_a_second_confidence_gate(tmp_path, caplog, confidence):
+    job, index, result = _inputs(confidence=confidence)
+    finalized = _finalize(tmp_path, job, index, result, admission=result.route_admission)
+    assert finalized.outcome.payload.kind is RouteKind.MATCHED
+    assert finalized.outcome.payload.confidence == confidence
+    assert not caplog.records
+
+
+@pytest.mark.parametrize("metadata", [{}, {"confidence": 0.8}, {"confidence": None}, {"confidence": "invalid"}])
+def test_minimal_model_choice_survives_parsing_and_publication(tmp_path, caplog, metadata):
+    job, index, response = _route_inputs()
+    response = {"skill_id": response["skill_id"], **metadata}
+    result = _parse_route(job, index, response)
+    finalized = _finalize(tmp_path, job, json.dumps(index, ensure_ascii=False), result,
+                          admission=result.route_admission)
+    assert finalized.outcome.payload.kind is RouteKind.MATCHED
+    assert finalized.outcome.payload.skill_ref == job.available_skill_refs[0]
+    assert (tmp_path / "output/job_outcome.json").read_bytes() == finalized.canonical_bytes
+    assert not caplog.records
 
 
 @pytest.mark.parametrize("mutation", ["unrecalled_frozen_skill", "same_id_different_version"])

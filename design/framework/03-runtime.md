@@ -45,10 +45,10 @@ Runtime 接收应用层已认领、状态为 `RUNNING` 的不可变 `Job`，解�
 
 1. `RuntimeAssetResolver` 解析 Job 固定的资产与全部候选 Skill，生成包含 `routing` 的索引。
 2. 无候选，或所有候选都未声明适用范围时，直接发布 `NO_CAPABILITY`；后一种情况保存 `model_called: false` 的准入审计，不调用模型。
-3. 先以真实 `Case.raw_problem_text` 检查作者显式声明的 `routing.direct_match_keywords`。仅首轮、唯一 Skill 字面命中且无阻止条件时跳过模型，保存 `direct_keyword_route_v1`、`model_called=false` 的独立准入审计。
+3. 先以真实 `Case.raw_problem_text` 检查作者显式声明的 `routing.direct_match_keywords`。仅首轮、无活跃用户事实或已确认事实、唯一 Skill 字面命中且无阻止条件时跳过模型，保存 `direct_keyword_route_v2`、`model_called=false` 的独立准入审计。
 4. 无法直达时，`recall_route_candidates()` 从本次固定问题与活跃事实召回最多 5 个正分候选；零命中直接发布通用结果。`ContextBuilder` 仅收到精简候选索引，候选的适用和排除条件完整保留，完整目录仍在服务端。
-5. Router 不允许文件工具，最终只返回 `skill_id`、`reason`、`confidence`。模型负责适用性判断，服务端不再逐条件核对引文；选择属于本次候选、固定版本有效且置信度不低于 `0.95` 时才能 `MATCHED`。
-6. 额外字段包括历史 `assessments` 均忽略。根字段缺省、候选外 Skill、空响应或无法解析的 JSON 正常转通用；理由仅用于展示，置信度接受数字字符串，无法使用时按 0 处理。这些情况不记录异常或警告、不重试模型。发布前 `server_outcome_finalizer` 核对准入记录与本次 Job、候选范围、完整目录和草稿摘要；关键词路径继续根据原始问题和冻结索引重新计算命中结果。
+5. Router 不允许文件工具，最终只需返回 `skill_id` 和简短 `reason`，可选 `confidence` 不参与准入。模型负责适用性判断，服务端不再逐条件核对引文；选择属于本次候选且固定版本有效时进入 `MATCHED`。
+6. 额外字段包括历史 `assessments` 均忽略。没有有效选择、候选外 Skill、空响应或无法解析的 JSON 正常转通用；理由缺省提供普通说明，置信度接受数字字符串，缺省或无法使用时按 0 保存，均不影响有效选择。这些情况不记录异常或警告、不重试模型。发布前 `server_outcome_finalizer` 核对准入记录与本次 Job、候选范围、完整目录和草稿摘要；关键词路径继续根据原始问题、当前事实和冻结索引重新计算结果。
 
 两条路径都保留 ROUTE Job，并由正常 Outcome 接收流程推进到 DIAGNOSE。关键词直达只省去路由模型调用，不绕过专用流程的参数和材料收集。`previous_outcome_refs` 非空时不使用直达，避免把首轮原文误当成后续路由的新依据。
 
@@ -262,19 +262,19 @@ V2 与文档型 V3 共用 `RoutingScopeV1`，可额外声明 `direct_match_keywo
 
 源码：[route_admission.py](../../src/problem_locator/runtime/route_admission.py)
 
-`evaluate_route_admission()` 接收模型三字段对象、固定 ROUTE Job、完整 Skill 索引及本次召回结果，返回 `RouteAdmissionResult(decision, audit)`。服务端完整索引仍为版本 3，准确覆盖 Job 的版本引用；模型候选投影为版本 1，仅包括本次召回的有范围声明的 Skill。
+`evaluate_route_admission()` 接收模型简短选择、固定 ROUTE Job、完整 Skill 索引及本次召回结果，返回 `RouteAdmissionResult(decision, audit)`。服务端完整索引仍为版本 3，准确覆盖 Job 的版本引用；模型候选投影为版本 1，仅包括本次召回的有范围声明的 Skill。
 
-`read_route_catalog()` 核对完整服务端索引与 Job 固定引用。模型响应只读取 `skill_id`、`reason`、`confidence`；`evaluate_route_admission()` 复用提示词采用的 `RouteCandidates`，不再读取 `assessments` 或逐条件引用。零候选、无选择、候选外选择和低置信度均为正常通用结果，否则为 ADMITTED。数字字符串置信度可用，缺失或无效时按 0 处理；不增加异常、警告或模型重试。
+`read_route_catalog()` 核对完整服务端索引与 Job 固定引用。模型响应读取 `skill_id`、展示理由和可选置信度；`evaluate_route_admission()` 复用提示词采用的 `RouteCandidates`，不再读取 `assessments` 或逐条件引用。零候选、无选择和候选外选择均为正常通用结果，否则为 ADMITTED。数字字符串置信度可用，缺失或无效时按 0 保存，不参与准入；不增加异常、警告或模型重试。
 
-模型路由策略为 `shortlisted_route_v1`。审计保存模型与实际选择、正常回退原因、`retrieval` 及固定上下文、完整目录和草稿摘要。完整目录仍核对身份，但未入选项不再参与适用性判断，也不标记为语义上的 REFUTED。
+模型路由策略为 `shortlisted_route_v2`。审计保存模型与实际选择、正常回退原因、`retrieval` 及固定上下文、完整目录和草稿摘要。完整目录仍核对身份，但未入选项不再参与适用性判断，也不标记为语义上的 REFUTED。
 
 ### `route_recall.py`
 
 源码：[route_recall.py](../../src/problem_locator/runtime/route_recall.py)
 
-`recall_route_candidates()` 以当前问题字段、活跃用户事实和已确认事实为检索输入；不读取假设或历史结论。英文完整标识符及分段、中文连续二字片段用于确定性匹配，过滤故障泛词，保留 IO/DB 等短组件名。名称和能力权重 3、适用条件权重 2、简介权重 1，同词取最高权重、不重复累计；稀有词按 `1 + ln((N + 1) / (df + 1))` 加权。明确关键词命中数优先，其次词语得分，最后按 Skill ID 排序。
+`recall_route_candidates()` 以当前问题字段、活跃用户事实和已确认事实为检索输入；`non_goals` 不加分，但完整保留在模型快照中。不读取假设或历史结论。英文完整标识符及分段、中文连续二字片段用于确定性匹配，过滤故障泛词，保留 IO/DB 等短组件名。名称和能力权重 3、适用条件及直接关键词词元权重 2、简介权重 1，同词取最高权重、不重复累计；稀有词按 `1 + ln((N + 1) / (df + 1))` 加权。完整关键词命中数优先，其次词语得分，最后按 Skill ID 排序。关键词分词只用于召回，不能触发直达。
 
-返回 `RouteCandidates(skill_ids, model_index, audit)`：最多 5 个有命中的候选、不凑数，模型索引只含 ID、名称、能力、简介及完整条件；审计保留 `lexical_top5_v1`、全量排名、实际候选和输入摘要。排除条件、材料需求、版本哈希不参与打分。词法召回不能保证同义表达不漏选；未入选表示未召回，不代表已排除。
+返回 `RouteCandidates(skill_ids, model_index, audit)`：最多 5 个有命中的候选、不凑数，模型索引只含 ID、名称、能力、简介及完整条件；审计保留 `lexical_top5_v2`、全量排名、实际候选和输入摘要。排除条件、材料需求、版本哈希不参与打分。词法召回不能保证同义表达不漏选；未入选表示未召回，不代表已排除。
 
 ### `routing_keywords.py`
 
@@ -290,9 +290,9 @@ V2 与文档型 V3 共用 `RoutingScopeV1`，可额外声明 `direct_match_keywo
 
 `try_direct_keyword_route()` 核对 ROUTE Job、全部冻结候选和真实 `Case.raw_problem_text`，仅在唯一 Skill 命中时返回 `RouteAdmissionResult`，否则返回 `None`，继续本地召回与模型选择。匹配区分大小写，不做正则、模糊或语义扩展；关键词首尾为 ASCII 字母、数字或下划线时，检查相邻字符，避免命中更长标识符内部。
 
-首轮以 `previous_outcome_refs` 为空为条件。后续轮次、多个 Skill 命中、命中 Skill 有 `exclusions`，以及常见否定、疑似、历史、引用、示例和假设等词法信号，均交回模型；引用范围和代码块也保守处理。这些有限规则不能保证理解任意自然语言，关键词本身的充分性仍须由作者确认。
+首轮以 `previous_outcome_refs` 为空为条件。已有 ACTIVE 用户事实或已确认事实时也交回语义路由，避免原文盖过事实修正；SUPERSEDED 事实不阻断直达。后续轮次、多个 Skill 命中、命中 Skill 有 `exclusions`，以及常见否定、疑似、历史、引用、示例和假设等词法信号，均交回模型；引用范围和代码块也保守处理。这些有限规则不能保证理解任意自然语言，关键词本身的充分性仍须由作者确认。
 
-独立审计策略为 `direct_keyword_route_v1`，记录 `model_called=false`、原始问题/冻结上下文/索引的摘要、所选 Skill ID 和匹配位置。位置以 Unicode 码点计数；`confidence=1.0` 表示确定性的字面命中，不是模型置信度。发布时重新计算结果，不把这份记录伪装成模型逐项审核。
+独立审计策略为 `direct_keyword_route_v2`，记录 `model_called=false`、原始问题/冻结上下文/索引的摘要、所选 Skill ID 和匹配位置。位置以 Unicode 码点计数；`confidence=1.0` 表示确定性的字面命中，不是模型置信度。发布时重新计算结果，不把这份记录伪装成模型逐项审核。
 
 ### `skill_direct.py`
 
@@ -452,7 +452,7 @@ Methods V1 的模型结果读取与证据核验。`FrozenTargetLogV1` 保存 sou
 
 ROUTE 非失败草稿必须带本次准入证明；DIAGNOSE/REVIEW 非失败草稿必须带 verification。COMPLETED 未通过正向 gate，或目标缺失且当前策略不允许部分结果时，改为 INCONCLUSIVE，并清除不应进入结论的内容。随后替换服务端 provenance、构造 Result v3，校验 Outcome/Result 与 Job 一致。
 
-关键词直达使用独立的 `direct_keyword_route_v1` 分支。最终化接收本次真实问题原文和冻结 Skill 索引，重新执行匹配，核对决策、审计和草稿摘要；只改 `model_called`、Skill ID、匹配位置或摘要不能构造有效的直达结果。模型路径使用 `shortlisted_route_v1`，绑定当前 Job、上下文、完整索引、草稿和候选范围，核对固定 Skill 引用与置信度，不重新召回或审核语义。
+关键词直达使用独立的 `direct_keyword_route_v2` 分支。最终化接收本次真实问题原文和冻结 Skill 索引，结合活跃事实重新执行匹配，核对决策、审计和草稿摘要；只改 `model_called`、Skill ID、匹配位置或摘要不能构造有效的直达结果。模型路径使用 `shortlisted_route_v2`，绑定当前 Job、上下文、完整索引、草稿和候选范围，核对固定 Skill 引用及审计一致性，不按置信度拦截，也不重新召回或审核语义。
 
 最终 `output/job_outcome.json` 必须原先不存在；服务端独占创建 `runtime/server-state/`，原子写入结果和 `server-job-outcome.finalized`，marker 绑定源草稿、Outcome、DecisionAudit 与决策原文字节摘要。`off` 的 Markdown 直接交付路径在 Runtime 中构造并发布 Outcome，不经过这里的证据 gate。
 
@@ -514,8 +514,8 @@ Logparse 运行的 claim、parse 参数和资源 metadata 需要相互一致，�
 
 | 文件 | 职责与调用关系 |
 | --- | --- |
-| [profiles/router/asset.json](../../src/problem_locator/runtime/assets/profiles/router/asset.json) | 注册 `agent-profile/router` `2.0.0`，入口 `profile.md`；供 `route_bindings()` 固定。 |
-| [profiles/router/profile.md](../../src/problem_locator/runtime/assets/profiles/router/profile.md) | 要求逐项审核适用/排除条件；目录中无 routing 的 Skill 不可自动选择；一次响应完成，不追问、不调用工具。 |
+| [profiles/router/asset.json](../../src/problem_locator/runtime/assets/profiles/router/asset.json) | 注册 `agent-profile/router` `4.0.0`，入口 `profile.md`；供 `route_bindings()` 固定。 |
+| [profiles/router/profile.md](../../src/problem_locator/runtime/assets/profiles/router/profile.md) | 阅读完整适用/排除条件和当前事实，返回唯一选择或 null；不要求回写逐项判断或分数，一次响应完成，不追问、不调用工具。 |
 | [profiles/specialist/asset.json](../../src/problem_locator/runtime/assets/profiles/specialist/asset.json) | 注册 `agent-profile/specialist` `8.0.0`；用于非 off 的专用诊断。 |
 | [profiles/specialist/profile.md](../../src/problem_locator/runtime/assets/profiles/specialist/profile.md) | 要求阅读完整冻结日志与方法卡，区分 marker 命中与完整确认条件，返回 Methods V1 JSON；允许完整内联或受限读取，不允许 Write。 |
 | [profiles/skill-direct/asset.json](../../src/problem_locator/runtime/assets/profiles/skill-direct/asset.json) | 注册 `agent-profile/skill-direct` `1.0.0`；`off` 模式显式选择。 |
@@ -542,7 +542,7 @@ Logparse 运行的 claim、parse 参数和资源 metadata 需要相互一致，�
 
 | 文件 | 职责与调用关系 |
 | --- | --- |
-| [context-policies/route/asset.json](../../src/problem_locator/runtime/assets/context-policies/route/asset.json) | 注册 `context-policy/route` `1.0.0`，入口 `policy.md`。 |
+| [context-policies/route/asset.json](../../src/problem_locator/runtime/assets/context-policies/route/asset.json) | 注册 `context-policy/route` `3.0.0`，入口 `policy.md`；完整保留当前事实及非目标。 |
 | [context-policies/route/policy.md](../../src/problem_locator/runtime/assets/context-policies/route/policy.md) | `131072` 字节预算，完整保留必需段及最多 5 个候选的条件；完整目录留在服务端，可选证据按冻结顺序整段加入。 |
 | [context-policies/diagnose/asset.json](../../src/problem_locator/runtime/assets/context-policies/diagnose/asset.json) | 注册 `context-policy/diagnose` `1.0.0`。 |
 | [context-policies/diagnose/policy.md](../../src/problem_locator/runtime/assets/context-policies/diagnose/policy.md) | `262144` 字节预算，保留完整选中 Skill、必需证据与 manifest，再决定可选证据。 |
@@ -557,8 +557,8 @@ Logparse 运行的 claim、parse 参数和资源 metadata 需要相互一致，�
 
 | 文件 | 职责与调用关系 |
 | --- | --- |
-| [output-contracts/route/asset.json](../../src/problem_locator/runtime/assets/output-contracts/route/asset.json) | 注册 `output-contract/route` `6.0.0`。 |
-| [output-contracts/route/output-contract.md](../../src/problem_locator/runtime/assets/output-contracts/route/output-contract.md) | 三字段简短结果、本次最多 5 个候选及 `0.95` 置信度阈值，不要求回写逐条件审核或引文。 |
+| [output-contracts/route/asset.json](../../src/problem_locator/runtime/assets/output-contracts/route/asset.json) | 注册 `output-contract/route` `8.0.0`。 |
+| [output-contracts/route/output-contract.md](../../src/problem_locator/runtime/assets/output-contracts/route/output-contract.md) | Skill ID 和简短理由，可选置信度不参与准入；本次最多 5 个候选，不要求回写逐条件审核或引文。 |
 | [output-contracts/diagnose/asset.json](../../src/problem_locator/runtime/assets/output-contracts/diagnose/asset.json) | 注册 `output-contract/diagnose` `11.0.0`。 |
 | [output-contracts/diagnose/output-contract.md](../../src/problem_locator/runtime/assets/output-contracts/diagnose/output-contract.md) | 固定 Methods V1 七字段诊断 JSON、来源/行号/完整原文/marker/身份词约束；在最终响应交付，由服务端核验或按所选 advisory 策略处理。 |
 | [output-contracts/skill-direct/asset.json](../../src/problem_locator/runtime/assets/output-contracts/skill-direct/asset.json) | 注册 `output-contract/skill-direct` `1.0.0`。 |

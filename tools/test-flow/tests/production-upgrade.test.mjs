@@ -114,11 +114,13 @@ test("累计生产升级指南覆盖数据库、Redis 登录、专用路由和�
   assert.match(guide, /registration-template\.json@2/);
   assert.match(guide, /routing\.applicability/);
   assert.match(guide, /routing\.exclusions/);
-  assert.ok(hasParagraph(guide, /ROUTE/, /最多 5 个/u, /skill_id/, /confidence/, /0\.95/), "专用路由必须说明候选上限、简短响应和准入门槛");
+  assert.ok(hasParagraph(guide, /ROUTE/, /最多 5 个/u, /skill_id/, /confidence/, /可选且不参与准入/u), "专用路由必须说明候选上限、简短响应和可选分数");
   assert.match(guide, /不再回写 `assessments`/u);
   assert.match(guide, /不记录格式异常/u);
   assert.match(guide, /零召回时不调用模型/u);
-  assert.match(guide, /0\.95/);
+  assert.doesNotMatch(guide, /0\.95/);
+  assert.match(guide, /非目标不参与正向召回/u);
+  assert.match(guide, /已有活跃事实/u);
   assert.match(guide, /Linux/);
   assert.ok(hasParagraph(guide, /单实例|单进程|一个.*(?:Server|服务实例)/u), "数据库并发不代表当前服务支持多实例部署");
 });

@@ -10,7 +10,7 @@ from problem_locator.contracts import (
 )
 from problem_locator.runtime.keyword_route import try_direct_keyword_route
 from problem_locator.runtime.server_outcome_finalizer import finalize_server_outcome
-from tests.deterministic.unit.runtime.test_keyword_route import KEYWORD, keyword_inputs
+from tests.deterministic.unit.runtime.test_keyword_route import KEYWORD, keyword_inputs, with_current_fact
 
 
 def _case():
@@ -50,6 +50,15 @@ def test_keyword_route_finalizer_recomputes_the_decision_from_the_original_input
     assert result.outcome.decision_audit is None
     assert b"direct_keyword_route" not in result.canonical_bytes
     assert (tmp_path / "output/job_outcome.json").read_bytes() == result.canonical_bytes
+
+
+def test_original_keyword_admission_cannot_publish_over_current_facts(tmp_path):
+    job, index, text, draft, draft_bytes, audit = _case()
+    job = with_current_fact(job)
+    audit["input_hashes"]["context_snapshot_sha256"] = bytes_sha256(canonical_json_bytes(job.context_snapshot))
+    with pytest.raises(ValueError, match="准入"):
+        _finalize(tmp_path, job, index, text, draft, draft_bytes, audit)
+    assert not (tmp_path / "output/job_outcome.json").exists()
 
 
 @pytest.mark.parametrize("mutation", [
